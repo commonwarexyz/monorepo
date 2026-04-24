@@ -1320,6 +1320,55 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
+    fn test_compact_full_source_rejects_stale_target() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-stale-full-{}", context.next_u64());
+            let mut source = SourceDb::init(
+                context.with_label("source"),
+                source_config(&suffix, &context),
+            )
+            .await
+            .unwrap();
+            let batch1 = source.new_batch().append(vec![1, 2, 3]).merkleize(
+                &source,
+                Some(vec![1]),
+                Location::new(1),
+            );
+            source.apply_batch(batch1).await.unwrap();
+            source.commit().await.unwrap();
+            let stale_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().await.end,
+            };
+
+            let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
+                &source,
+                Some(vec![2]),
+                Location::new(2),
+            );
+            source.apply_batch(batch2).await.unwrap();
+            source.commit().await.unwrap();
+            let current_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().await.end,
+            };
+            assert_ne!(stale_target, current_target);
+
+            let source = Arc::new(source);
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == stale_target && current == current_target
+            ));
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-unj-source-{}", context.next_u64());

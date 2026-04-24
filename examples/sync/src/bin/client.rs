@@ -16,7 +16,7 @@ use commonware_sync::{
     any, crate_version, current,
     databases::{DatabaseType, SyncMode},
     immutable, immutable_compact, keyless, keyless_compact,
-    net::Resolver,
+    net::{ErrorCode, Resolver},
     Error, Key,
 };
 use commonware_utils::{
@@ -358,8 +358,20 @@ where
             target,
             db_config: make_db_config(&context),
         };
-
-        let database: DB = compact::sync(sync_config).await?;
+        let database: DB = match compact::sync(sync_config).await {
+            Ok(database) => database,
+            Err(sync::Error::Resolver(Error::Server {
+                code: ErrorCode::StaleTarget,
+                message,
+            })) => {
+                warn!(
+                    sync_iteration = iteration,
+                    "{label} target went stale before state fetch: {message}; retrying"
+                );
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
         info!(
             sync_iteration = iteration,
             root = %database.root(),

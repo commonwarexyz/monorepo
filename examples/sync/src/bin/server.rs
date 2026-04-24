@@ -368,9 +368,10 @@ where
             warn!(?err, "failed to serve compact state");
             match err {
                 compact::ServeError::Database(err) => Error::Database(err),
-                compact::ServeError::InvalidTarget(_)
-                | compact::ServeError::MissingSource
-                | compact::ServeError::StaleTarget { .. } => Error::InvalidRequest(err.to_string()),
+                compact::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
+                compact::ServeError::InvalidTarget(_) | compact::ServeError::MissingSource => {
+                    Error::InvalidRequest(err.to_string())
+                }
             }
         })?;
 

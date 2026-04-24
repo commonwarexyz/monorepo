@@ -22,6 +22,10 @@ pub enum Error {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    /// Compact target changed between target discovery and state fetch.
+    #[error("stale compact target: {0}")]
+    StaleTarget(String),
+
     /// Database operation failed
     #[error("database operation failed")]
     Database(#[from] commonware_storage::qmdb::Error<commonware_storage::mmr::Family>),
@@ -52,6 +56,7 @@ impl Error {
     pub const fn to_error_code(&self) -> ErrorCode {
         match self {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
+            Self::StaleTarget(_) => ErrorCode::StaleTarget,
             Self::Database(_) => ErrorCode::DatabaseError,
             Self::Network(_) => ErrorCode::NetworkError,
             _ => ErrorCode::InternalError,

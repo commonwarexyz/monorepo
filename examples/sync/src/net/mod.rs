@@ -26,6 +26,8 @@ pub enum ErrorCode {
     DatabaseError,
     /// Network error occurred.
     NetworkError,
+    /// Compact target went stale and should be retried.
+    StaleTarget,
     /// Request timeout.
     Timeout,
     /// Internal server error.
@@ -38,8 +40,9 @@ impl Write for ErrorCode {
             Self::InvalidRequest => 0u8,
             Self::DatabaseError => 1u8,
             Self::NetworkError => 2u8,
-            Self::Timeout => 3u8,
-            Self::InternalError => 4u8,
+            Self::StaleTarget => 3u8,
+            Self::Timeout => 4u8,
+            Self::InternalError => 5u8,
         };
         discriminant.write(buf);
     }
@@ -60,8 +63,9 @@ impl Read for ErrorCode {
             0 => Ok(Self::InvalidRequest),
             1 => Ok(Self::DatabaseError),
             2 => Ok(Self::NetworkError),
-            3 => Ok(Self::Timeout),
-            4 => Ok(Self::InternalError),
+            3 => Ok(Self::StaleTarget),
+            4 => Ok(Self::Timeout),
+            5 => Ok(Self::InternalError),
             _ => Err(Error::InvalidEnum(discriminant)),
         }
     }
@@ -127,6 +131,7 @@ mod tests {
     #[case(ErrorCode::InvalidRequest)]
     #[case(ErrorCode::DatabaseError)]
     #[case(ErrorCode::NetworkError)]
+    #[case(ErrorCode::StaleTarget)]
     #[case(ErrorCode::Timeout)]
     #[case(ErrorCode::InternalError)]
     fn test_error_code_roundtrip_serialization(#[case] error_code: ErrorCode) {
@@ -141,6 +146,7 @@ mod tests {
             (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
             (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
             (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
+            (ErrorCode::StaleTarget, ErrorCode::StaleTarget) => {}
             (ErrorCode::Timeout, ErrorCode::Timeout) => {}
             (ErrorCode::InternalError, ErrorCode::InternalError) => {}
             _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
