@@ -1709,6 +1709,23 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
+    fn test_compact_full_source_missing_reports_missing_source() {
+        deterministic::Runner::default().start(|_context| async move {
+            let resolver: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
+                Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
+            let target = sync::compact::Target {
+                root: sha256::Digest::from([0; 32]),
+                leaf_count: Location::new(1),
+            };
+
+            assert!(matches!(
+                sync::compact::Resolver::get_compact_state(&resolver, target).await,
+                Err(sync::compact::ServeError::MissingSource)
+            ));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-{}", context.next_u64());
@@ -1759,6 +1776,51 @@ mod compact_variable_mmb {
             assert_eq!(reopened.inactivity_floor_loc(), floor);
 
             reopened.destroy().await.unwrap();
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_compact_sync_rejects_invalid_proof() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-mmb-bad-proof-{}", context.next_u64());
+            let mut source = SourceDb::init(
+                context.with_label("source"),
+                source_config(&suffix, &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1));
+            source.apply_batch(batch).await.unwrap();
+            source.commit().await.unwrap();
+
+            let bounds = source.bounds().await;
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: bounds.end,
+            };
+            let source = Arc::new(source);
+            let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap();
+            state.last_commit_proof = crate::merkle::Proof::default();
+
+            let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
+                context: context.with_label("client"),
+                resolver: StaticResolver { state },
+                target,
+                db_config: client_config(&suffix),
+            })
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidProof))
+            ));
+
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
         });
@@ -1865,6 +1927,53 @@ mod compact_variable_mmb {
                     expected,
                     actual
                 })) if expected == target.leaf_count && actual == Location::new(*target.leaf_count - 1)
+            ));
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_compact_full_source_rejects_stale_target() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-mmb-stale-full-{}", context.next_u64());
+            let mut source = SourceDb::init(
+                context.with_label("source"),
+                source_config(&suffix, &context),
+            )
+            .await
+            .unwrap();
+            let batch1 = source
+                .new_batch()
+                .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
+                .merkleize(&source, Some(vec![1]), Location::new(1));
+            source.apply_batch(batch1).await.unwrap();
+            source.commit().await.unwrap();
+            let stale_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().await.end,
+            };
+
+            let batch2 = source
+                .new_batch()
+                .set(sha256::Digest::from([2; 32]), vec![4, 5, 6])
+                .merkleize(&source, Some(vec![2]), Location::new(2));
+            source.apply_batch(batch2).await.unwrap();
+            source.commit().await.unwrap();
+            let current_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().await.end,
+            };
+            assert_ne!(stale_target, current_target);
+
+            let source = Arc::new(source);
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == stale_target && current == current_target
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
