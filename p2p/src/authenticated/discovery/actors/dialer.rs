@@ -153,7 +153,7 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, supervisor).await)
+        spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     async fn run(
@@ -340,12 +340,14 @@ mod tests {
             let deadline = context.current() + Duration::from_millis(350);
             loop {
                 select! {
-                    msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
-                        refresh_count += 1;
-                        let _ = responder.send(Dialable {
-                            peers: Vec::new(),
-                            next_query_at: Some(context.current() + Duration::from_millis(100)),
-                        });
+                    msg = tracker_rx.recv() => {
+                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                            refresh_count += 1;
+                            let _ = responder.send(Dialable {
+                                peers: Vec::new(),
+                                next_query_at: Some(context.current() + Duration::from_millis(100)),
+                            });
+                        }
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
@@ -462,12 +464,14 @@ mod tests {
             let deadline = context.current() + Duration::from_millis(350);
             loop {
                 select! {
-                    msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
-                        refresh_count += 1;
-                        let _ = responder.send(Dialable {
-                            peers: Vec::new(),
-                            next_query_at: None,
-                        });
+                    msg = tracker_rx.recv() => {
+                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                            refresh_count += 1;
+                            let _ = responder.send(Dialable {
+                                peers: Vec::new(),
+                                next_query_at: None,
+                            });
+                        }
                     },
                     _ = context.sleep_until(deadline) => break,
                 }

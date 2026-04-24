@@ -113,7 +113,7 @@ where
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(requests, responses).await)
+        spawn_cell!(self.context, self.run(requests, responses))
     }
 
     async fn run(

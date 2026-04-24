@@ -12,3 +12,4 @@ pub mod relay;
 pub mod reporter;
 pub mod scheme;
 pub mod twins;
+pub mod wrapped;

@@ -13,6 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -172,26 +173,30 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
+        // Generate peer identities before building the network so the initial
+        // peer set can be seeded through the constructor.
+        let peers = input
+            .peer_seeds
+            .iter()
+            .map(|&seed| PrivateKey::from_seed(seed).public_key())
+            .collect::<Vec<_>>();
+
         // Create network
-        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
+        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
-        );
+            peers.clone(),
+        )
+        .await;
         network.start();
 
         // Create peers
-        let mut peers = Vec::new();
         let mut mailboxes: BTreeMap<PublicKey, Mailbox<PublicKey, FuzzMessage>> = BTreeMap::new();
-        for (i, &seed) in input.peer_seeds.iter().enumerate() {
-            // Create peer
-            let crypto = PrivateKey::from_seed(seed);
-            let public_key = crypto.public_key();
-            peers.push(public_key.clone());
-
+        for (i, public_key) in peers.iter().cloned().enumerate() {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())

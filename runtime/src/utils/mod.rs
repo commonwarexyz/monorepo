@@ -14,6 +14,8 @@ use std::{
 
 commonware_macros::stability_mod!(BETA, pub mod buffer);
 pub mod signal;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod thread;
 
 mod handle;
 pub use handle::Handle;
@@ -162,16 +164,17 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
     let encoded = metrics.encode();
     encoded
         .lines()
-        .filter(|line| {
-            line.starts_with("runtime_tasks_running{")
-                && line.contains("kind=\"Task\"")
-                && line.trim_end().ends_with(" 1")
-                && line
-                    .split("name=\"")
-                    .nth(1)
-                    .is_some_and(|s| s.split('"').next().unwrap_or("").starts_with(prefix))
+        .filter_map(|line| {
+            if !line.starts_with("runtime_tasks_running{") || !line.contains("kind=\"Task\"") {
+                return None;
+            }
+            let name = line.split("name=\"").nth(1)?.split('"').next()?;
+            if !name.starts_with(prefix) {
+                return None;
+            }
+            line.trim_end().rsplit(' ').next()?.parse::<usize>().ok()
         })
-        .count()
+        .sum()
 }
 
 /// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.

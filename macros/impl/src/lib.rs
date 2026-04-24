@@ -266,22 +266,15 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(item as ItemFn);
 
-    // Parse the attribute argument for log level
-    let log_level = if attr.is_empty() {
-        // Default log level is DEBUG
-        quote! { tracing::Level::DEBUG }
+    // Parse the attribute argument for default log level
+    let default_level = if attr.is_empty() {
+        "debug".to_string()
     } else {
-        // Parse the attribute as a string literal
         let level_str = parse_macro_input!(attr as LitStr);
-        let level_ident = level_str.value().to_uppercase();
+        let level_ident = level_str.value().to_lowercase();
         match level_ident.as_str() {
-            "TRACE" => quote! { tracing::Level::TRACE },
-            "DEBUG" => quote! { tracing::Level::DEBUG },
-            "INFO" => quote! { tracing::Level::INFO },
-            "WARN" => quote! { tracing::Level::WARN },
-            "ERROR" => quote! { tracing::Level::ERROR },
+            "trace" | "debug" | "info" | "warn" | "error" => level_ident,
             _ => {
-                // Return a compile error for invalid log levels
                 return Error::new_spanned(
                     level_str,
                     "Invalid log level. Expected one of: TRACE, DEBUG, INFO, WARN, ERROR.",
@@ -303,13 +296,19 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[test]
         #(#attrs)*
         #vis #sig {
-            // Create a subscriber and dispatcher with the specified log level
-            let subscriber = tracing_subscriber::fmt()
-                .with_test_writer()
-                .with_max_level(#log_level)
-                .with_line_number(true)
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-                .finish();
+            use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+            // Use RUST_LOG if set, otherwise fall back to the macro's default level
+            let filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(#default_level));
+            let subscriber = tracing_subscriber::Registry::default()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_test_writer()
+                        .with_line_number(true)
+                        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                )
+                .with(filter);
             let dispatcher = tracing::Dispatch::new(subscriber);
 
             // Set the subscriber for the scope of the test

@@ -54,6 +54,11 @@ opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
 
+[dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+rand = { workspace = true, features = ["small_rng"] }
+serde_json.workspace = true
+
 [features]
 default = []
 arbitrary = [
@@ -74,6 +79,16 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 bench = false
 
 [[bench]]
+name = "storage"
+harness = false
+path = "src/storage/benches/main.rs"
+
+[[bench]]
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"
+
+[[bench]]
+name = "buffer_pool"
+harness = false
+path = "src/iobuf/benches/bench.rs"

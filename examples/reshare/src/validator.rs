@@ -606,7 +606,7 @@ mod test {
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: NZUsize!(3),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1478,7 +1478,7 @@ mod test {
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: NZUsize!(3),
                     max_size: 1024 * 1024,
                 },
             );

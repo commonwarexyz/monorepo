@@ -1,37 +1,36 @@
-use super::{location::Location, Error};
+use super::{location::Location, Family};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, ReadExt};
 use core::{
     fmt,
+    marker::PhantomData,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
-/// Maximum valid [Position] value: the largest node count (size) an MMR can hold.
+/// A [Position] is a node index or node count in a Merkle structure.
+/// This is in contrast to a [Location], which is a leaf index or leaf count.
 ///
-/// An MMR with `2^62` leaves has `2^63 - 1` nodes, so `MAX_POSITION = 2^63 - 1`.
+/// # Limits
 ///
-/// Node indices are 0-based, so valid indices satisfy `pos < MAX_POSITION`. Node counts
-/// and MMR sizes satisfy `pos <= MAX_POSITION`.
-pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
-
-/// A [Position] is an index into an MMR's nodes.
-/// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
-pub struct Position(u64);
+/// Values up to the family's maximum are valid (see [Position::is_valid]). As a 0-based node
+/// index, valid indices are `0..MAX - 1`. As a node count or total size, the maximum is `MAX`
+/// itself. Use [Position::is_valid_size] to ask whether a count is a structurally valid size for
+/// the specific Merkle family.
+pub struct Position<F: Family>(u64, PhantomData<F>);
 
 #[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Position {
+impl<F: Family> arbitrary::Arbitrary<'_> for Position<F> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let value = u.int_in_range(0..=MAX_POSITION.0)?;
-        Ok(Self(value))
+        let value = u.int_in_range(0..=F::MAX_NODES.as_u64())?;
+        Ok(Self::new(value))
     }
 }
 
-impl Position {
+impl<F: Family> Position<F> {
     /// Return a new [Position] from a raw `u64`.
     #[inline]
     pub const fn new(pos: u64) -> Self {
-        Self(pos)
+        Self(pos, PhantomData)
     }
 
     /// Return the underlying `u64` value.
@@ -40,20 +39,25 @@ impl Position {
         self.0
     }
 
-    /// Returns `true` iff this value is within the valid range (`<= MAX_POSITION`).
-    /// This covers both node indices (`< MAX_POSITION`) and node counts (`<= MAX_POSITION`).
+    /// Returns `true` iff this value is a valid node count or size (`<= MAX_NODES`).
     #[inline]
     pub const fn is_valid(self) -> bool {
-        self.0 <= MAX_POSITION.0
+        self.0 <= F::MAX_NODES.as_u64()
     }
 
-    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_POSITION].
+    /// Returns `true` iff this value is a valid 0-based node index (`< MAX_NODES`).
+    #[inline]
+    pub const fn is_valid_index(self) -> bool {
+        self.0 < F::MAX_NODES.as_u64()
+    }
+
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds the maximum.
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
             Some(value) => {
-                if value <= MAX_POSITION.0 {
-                    Some(Self(value))
+                if value <= F::MAX_NODES.as_u64() {
+                    Some(Self::new(value))
                 } else {
                     None
                 }
@@ -66,157 +70,159 @@ impl Position {
     #[inline]
     pub const fn checked_sub(self, rhs: u64) -> Option<Self> {
         match self.0.checked_sub(rhs) {
-            Some(value) => Some(Self(value)),
+            Some(value) => Some(Self::new(value)),
             None => None,
         }
     }
 
-    /// Return `self + rhs` saturating at [MAX_POSITION].
+    /// Return `self + rhs` saturating at the maximum.
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);
-        if result > MAX_POSITION.0 {
-            MAX_POSITION
+        if result > F::MAX_NODES.as_u64() {
+            F::MAX_NODES
         } else {
-            Self(result)
+            Self::new(result)
         }
     }
 
     /// Return `self - rhs` saturating at zero.
     #[inline]
     pub const fn saturating_sub(self, rhs: u64) -> Self {
-        Self(self.0.saturating_sub(rhs))
+        Self::new(self.0.saturating_sub(rhs))
     }
 
-    /// Returns whether this is a valid MMR size.
-    ///
-    /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
-    /// MMR of the given size have strictly decreasing height, which is a necessary condition for
-    /// MMR validity.
+    /// Returns whether this is a valid size for this Merkle structure.
     #[inline]
-    pub const fn is_mmr_size(self) -> bool {
-        if self.0 == 0 {
-            return true;
-        }
-        let leading_zeros = self.0.leading_zeros();
-        if leading_zeros == 0 {
-            // size overflow
-            return false;
-        }
-        let start = u64::MAX >> leading_zeros;
-        let mut two_h = 1 << start.trailing_ones();
-        let mut node_pos = start.checked_sub(1).expect("start > 0 because size != 0");
-        while two_h > 1 {
-            if node_pos < self.0 {
-                if two_h == 2 {
-                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
-                    // invalid.
-                    return node_pos == self.0 - 1;
-                }
-                // move to the right sibling
-                node_pos += two_h - 1;
-                if node_pos < self.0 {
-                    // If the right sibling is in the MMR, then it is invalid.
-                    return false;
-                }
-                continue;
-            }
-            // descend to the left child
-            two_h >>= 1;
-            node_pos -= two_h;
-        }
-        true
+    pub fn is_valid_size(self) -> bool {
+        F::is_valid_size(self)
     }
 }
 
-impl fmt::Display for Position {
+// --- Manual trait implementations (to avoid unnecessary bounds on F) ---
+
+impl<F: Family> Copy for Position<F> {}
+
+impl<F: Family> Clone for Position<F> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: Family> PartialEq for Position<F> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<F: Family> Eq for Position<F> {}
+
+impl<F: Family> PartialOrd for Position<F> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: Family> Ord for Position<F> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl<F: Family> core::hash::Hash for Position<F> {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<F: Family> Default for Position<F> {
+    #[inline]
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl<F: Family> fmt::Debug for Position<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Position").field(&self.0).finish()
+    }
+}
+
+impl<F: Family> fmt::Display for Position<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Position({})", self.0)
     }
 }
 
-impl Deref for Position {
+impl<F: Family> Deref for Position<F> {
     type Target = u64;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl AsRef<u64> for Position {
+impl<F: Family> AsRef<u64> for Position<F> {
     fn as_ref(&self) -> &u64 {
         &self.0
     }
 }
 
-impl From<u64> for Position {
+impl<F: Family> From<u64> for Position<F> {
     #[inline]
     fn from(value: u64) -> Self {
         Self::new(value)
     }
 }
 
-impl From<usize> for Position {
+impl<F: Family> From<usize> for Position<F> {
     #[inline]
     fn from(value: usize) -> Self {
         Self::new(value as u64)
     }
 }
 
-impl From<Position> for u64 {
+impl<F: Family> From<Position<F>> for u64 {
     #[inline]
-    fn from(position: Position) -> Self {
+    fn from(position: Position<F>) -> Self {
         *position
     }
 }
 
-/// Try to convert a leaf [Location] to its node [Position].
+/// Convert a leaf [Location] to its corresponding node [Position].
 ///
-/// Returns [Error::LocationOverflow] if `!loc.is_valid()`.
+/// Equivalently, convert a leaf count to the corresponding total node count (size).
 ///
-/// # Examples
-///
-/// ```
-/// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
-/// use core::convert::TryFrom;
-///
-/// let loc = Location::new(5);
-/// let pos = Position::try_from(loc).unwrap();
-/// assert_eq!(pos, Position::new(8));
-///
-/// // MAX_LOCATION converts successfully (it is the leaf count for 2^62 leaves)
-/// let pos = Position::try_from(MAX_LOCATION).unwrap();
-/// assert!(pos.is_valid());
-/// ```
-impl TryFrom<Location> for Position {
-    type Error = Error;
+/// Returns [`super::Error::LocationOverflow`] if `!loc.is_valid()`.
+impl<F: Family> TryFrom<Location<F>> for Position<F> {
+    type Error = super::Error<F>;
 
     #[inline]
-    fn try_from(loc: Location) -> Result<Self, Self::Error> {
+    fn try_from(loc: Location<F>) -> Result<Self, Self::Error> {
         if !loc.is_valid() {
-            return Err(Error::LocationOverflow(loc));
+            return Err(super::Error::LocationOverflow(loc));
         }
-        // This will never underflow since 2*n >= count_ones(n).
-        let loc_val = *loc;
-        Ok(Self(
-            loc_val
-                .checked_mul(2)
-                .expect("should not overflow for valid leaf index")
-                - loc_val.count_ones() as u64,
-        ))
+        Ok(F::location_to_position(loc))
     }
 }
+
+// --- Arithmetic operators ---
 
 /// Add two positions together.
 ///
 /// # Panics
 ///
 /// Panics if the result overflows.
-impl Add for Position {
+impl<F: Family> Add for Position<F> {
     type Output = Self;
 
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
+        Self::new(self.0 + rhs.0)
     }
 }
 
@@ -225,12 +231,12 @@ impl Add for Position {
 /// # Panics
 ///
 /// Panics if the result overflows.
-impl Add<u64> for Position {
+impl<F: Family> Add<u64> for Position<F> {
     type Output = Self;
 
     #[inline]
     fn add(self, rhs: u64) -> Self::Output {
-        Self(self.0 + rhs)
+        Self::new(self.0 + rhs)
     }
 }
 
@@ -239,12 +245,12 @@ impl Add<u64> for Position {
 /// # Panics
 ///
 /// Panics if the result underflows.
-impl Sub for Position {
+impl<F: Family> Sub for Position<F> {
     type Output = Self;
 
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0 - rhs.0)
+        Self::new(self.0 - rhs.0)
     }
 }
 
@@ -253,40 +259,39 @@ impl Sub for Position {
 /// # Panics
 ///
 /// Panics if the result underflows.
-impl Sub<u64> for Position {
+impl<F: Family> Sub<u64> for Position<F> {
     type Output = Self;
 
     #[inline]
     fn sub(self, rhs: u64) -> Self::Output {
-        Self(self.0 - rhs)
+        Self::new(*self - rhs)
     }
 }
 
-impl PartialEq<u64> for Position {
+impl<F: Family> PartialEq<u64> for Position<F> {
     #[inline]
     fn eq(&self, other: &u64) -> bool {
         self.0 == *other
     }
 }
 
-impl PartialOrd<u64> for Position {
+impl<F: Family> PartialOrd<u64> for Position<F> {
     #[inline]
     fn partial_cmp(&self, other: &u64) -> Option<core::cmp::Ordering> {
         self.0.partial_cmp(other)
     }
 }
 
-// Allow u64 to be compared with Position too
-impl PartialEq<Position> for u64 {
+impl<F: Family> PartialEq<Position<F>> for u64 {
     #[inline]
-    fn eq(&self, other: &Position) -> bool {
+    fn eq(&self, other: &Position<F>) -> bool {
         *self == other.0
     }
 }
 
-impl PartialOrd<Position> for u64 {
+impl<F: Family> PartialOrd<Position<F>> for u64 {
     #[inline]
-    fn partial_cmp(&self, other: &Position) -> Option<core::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Position<F>) -> Option<core::cmp::Ordering> {
         self.partial_cmp(&other.0)
     }
 }
@@ -296,7 +301,7 @@ impl PartialOrd<Position> for u64 {
 /// # Panics
 ///
 /// Panics if the result overflows.
-impl AddAssign<u64> for Position {
+impl<F: Family> AddAssign<u64> for Position<F> {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
         self.0 += rhs;
@@ -308,50 +313,56 @@ impl AddAssign<u64> for Position {
 /// # Panics
 ///
 /// Panics if the result underflows.
-impl SubAssign<u64> for Position {
+impl<F: Family> SubAssign<u64> for Position<F> {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {
         self.0 -= rhs;
     }
 }
 
-// Codec implementations using varint encoding for efficient storage
-impl commonware_codec::Write for Position {
+// --- Codec implementations using varint encoding ---
+
+impl<F: Family> commonware_codec::Write for Position<F> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.0).write(buf);
     }
 }
 
-impl commonware_codec::EncodeSize for Position {
+impl<F: Family> commonware_codec::EncodeSize for Position<F> {
     #[inline]
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
     }
 }
 
-impl commonware_codec::Read for Position {
+impl<F: Family> commonware_codec::Read for Position<F> {
     type Cfg = ();
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let pos = Self(UInt::read(buf)?.into());
+        let pos = Self::new(UInt::read(buf)?.into());
         if pos.is_valid() {
             Ok(pos)
         } else {
             Err(commonware_codec::Error::Invalid(
                 "Position",
-                "value exceeds MAX_POSITION",
+                "value exceeds MAX_NODES",
             ))
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use super::{Location, Position};
-    use crate::mmr::{mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
+    use super::{Location as GenericLocation, Position as GenericPosition};
+    use crate::{
+        merkle::Family as _,
+        mmr::{self, mem::Mmr, StandardHasher as Standard},
+    };
     use commonware_cryptography::Sha256;
+
+    type Location = GenericLocation<mmr::Family>;
+    type Position = GenericPosition<mmr::Family>;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -388,14 +399,25 @@ mod tests {
         // Overflow returns None
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
 
-        // Exceeding MAX_POSITION returns None
-        assert!(MAX_POSITION.checked_add(1).is_none());
-        assert!(Position::new(*MAX_POSITION - 5).checked_add(10).is_none());
-
-        // At MAX_POSITION is OK
+        // Exceeding MAX_NODES returns None, but MAX_NODES itself IS valid (inclusive bound)
+        assert!(mmr::Family::MAX_NODES.checked_add(1).is_none());
+        assert!(Position::new(*mmr::Family::MAX_NODES - 5)
+            .checked_add(10)
+            .is_none());
+        // MAX_NODES - 10 + 10 = MAX_NODES, which IS valid (inclusive bound)
         assert_eq!(
-            Position::new(*MAX_POSITION - 10).checked_add(10).unwrap(),
-            MAX_POSITION
+            Position::new(*mmr::Family::MAX_NODES - 10)
+                .checked_add(10)
+                .unwrap(),
+            *mmr::Family::MAX_NODES
+        );
+
+        // MAX_NODES - 11 + 10 = MAX_NODES - 1, also valid
+        assert_eq!(
+            Position::new(*mmr::Family::MAX_NODES - 11)
+                .checked_add(10)
+                .unwrap(),
+            *mmr::Family::MAX_NODES - 1
         );
     }
 
@@ -411,13 +433,22 @@ mod tests {
         let pos = Position::new(10);
         assert_eq!(pos.saturating_add(5), 15);
 
-        // Saturates at MAX_POSITION, not u64::MAX
-        assert_eq!(Position::new(u64::MAX).saturating_add(1), MAX_POSITION);
-        assert_eq!(MAX_POSITION.saturating_add(1), MAX_POSITION);
-        assert_eq!(MAX_POSITION.saturating_add(1000), MAX_POSITION);
+        // Saturates AT MAX_NODES (inclusive bound)
         assert_eq!(
-            Position::new(*MAX_POSITION - 5).saturating_add(10),
-            MAX_POSITION
+            Position::new(u64::MAX).saturating_add(1),
+            *mmr::Family::MAX_NODES
+        );
+        assert_eq!(
+            mmr::Family::MAX_NODES.saturating_add(1),
+            *mmr::Family::MAX_NODES
+        );
+        assert_eq!(
+            mmr::Family::MAX_NODES.saturating_add(1000),
+            *mmr::Family::MAX_NODES
+        );
+        assert_eq!(
+            Position::new(*mmr::Family::MAX_NODES - 5).saturating_add(10),
+            *mmr::Family::MAX_NODES
         );
     }
 
@@ -482,25 +513,24 @@ mod tests {
 
     #[test]
     fn test_max_position() {
-        // MAX_POSITION = max MMR size = 2^63 - 1 (for 2^62 leaves).
+        // MAX_NODES = max MMR size = 2^63 - 1 (for 2^62 leaves).
         let max_leaves = 1u64 << 62;
         let max_size = 2 * max_leaves - 1; // 2^63 - 1
-        assert_eq!(*MAX_POSITION, max_size);
-        assert_eq!(*MAX_POSITION, (1u64 << 63) - 1);
+        assert_eq!(*mmr::Family::MAX_NODES, max_size);
+        assert_eq!(*mmr::Family::MAX_NODES, (1u64 << 63) - 1);
         assert_eq!(max_size.leading_zeros(), 1); // top bit clear
 
         // One more leaf would overflow: size = 2^63, top bit set.
         let overflow_size = 2 * (max_leaves + 1) - 1;
         assert_eq!(overflow_size.leading_zeros(), 0);
 
-        // MAX_LOCATION converts to MAX_POSITION.
-        let pos = Position::try_from(MAX_LOCATION).unwrap();
-        assert_eq!(pos, MAX_POSITION);
-        assert!(pos.is_valid());
+        // MAX_LEAVES is a valid location (inclusive bound) and converts to MAX_NODES.
+        let pos = Position::try_from(mmr::Family::MAX_LEAVES).unwrap();
+        assert_eq!(pos, mmr::Family::MAX_NODES);
     }
 
     #[test]
-    fn test_is_mmr_size() {
+    fn test_is_valid_size() {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
@@ -510,28 +540,27 @@ mod tests {
         for _i in 0..10000 {
             while size_to_check != mmr.size() {
                 assert!(
-                    !size_to_check.is_mmr_size(),
+                    !size_to_check.is_valid_size(),
                     "size_to_check: {} {}",
                     size_to_check,
                     mmr.size()
                 );
                 size_to_check += 1;
             }
-            assert!(size_to_check.is_mmr_size());
-            let changeset = mmr
+            assert!(size_to_check.is_valid_size());
+            let batch = mmr
                 .new_batch()
                 .add(&hasher, &digest)
-                .merkleize(&hasher)
-                .finalize();
-            mmr.apply(changeset).unwrap();
+                .merkleize(&mmr, &hasher);
+            mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;
         }
 
         // Test overflow boundaries.
-        assert!(!Position::new(u64::MAX).is_mmr_size());
-        assert!(Position::new(u64::MAX >> 1).is_mmr_size()); // 2^63 - 1 = MAX_POSITION
-        assert!(!Position::new((u64::MAX >> 1) + 1).is_mmr_size());
-        assert!(MAX_POSITION.is_mmr_size()); // MAX_POSITION is the largest valid MMR size
+        assert!(!Position::new(u64::MAX).is_valid_size());
+        assert!(Position::new(u64::MAX >> 1).is_valid_size()); // 2^63 - 1 = MAX_NODES
+        assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
+        assert!(mmr::Family::MAX_NODES.is_valid_size()); // MAX_NODES is the largest valid MMR size
     }
 
     #[test]
@@ -550,8 +579,14 @@ mod tests {
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
 
-        // Test MAX_POSITION (boundary)
-        let pos = MAX_POSITION;
+        // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
+        let pos = mmr::Family::MAX_NODES;
+        let encoded = pos.encode();
+        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, pos);
+
+        // MAX_NODES - 1 is also valid
+        let pos = mmr::Family::MAX_NODES - 1;
         let encoded = pos.encode();
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
@@ -561,8 +596,8 @@ mod tests {
     fn test_read_cfg_invalid_values() {
         use commonware_codec::{varint::UInt, Encode, ReadExt};
 
-        // Encode MAX_POSITION + 1 as a raw varint, then try to decode as Position
-        let invalid_value = *MAX_POSITION + 1;
+        // Encode MAX_NODES + 1 as a raw varint, then try to decode as Position
+        let invalid_value = *mmr::Family::MAX_NODES + 1;
         let encoded = UInt(invalid_value).encode();
         let result = Position::read(&mut encoded.as_ref());
         assert!(result.is_err());

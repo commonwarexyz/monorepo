@@ -311,10 +311,13 @@ pub use commonware_macros_impl::test_collect_traces;
 /// This renames `test_some_behavior` into `test_some_behavior_<group>_`, making
 /// it easy to filter tests by group postfixes in nextest.
 pub use commonware_macros_impl::test_group;
-/// Capture logs (based on the provided log level) from a test run using
+/// Capture logs from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
 ///
-/// This macro defaults to a log level of `DEBUG` if no level is provided.
+/// The default log level is `DEBUG`, but can be overridden with the macro argument or
+/// the `RUST_LOG` environment variable. When `RUST_LOG` is set, it takes precedence
+/// over the macro argument, enabling per-module filtering (e.g.,
+/// `RUST_LOG=commonware_consensus=trace,warn`).
 ///
 /// This macro is powered by the [tracing](https://docs.rs/tracing) and
 /// [tracing-subscriber](https://docs.rs/tracing-subscriber) crates.
@@ -327,7 +330,7 @@ pub use commonware_macros_impl::test_group;
 /// #[commonware_macros::test_traced("INFO")]
 /// fn test_info_level() {
 ///     info!("This is an info log");
-///     debug!("This is a debug log (won't be shown)");
+///     debug!("This is a debug log (won't be shown unless RUST_LOG overrides)");
 ///     assert_eq!(2 + 2, 4);
 /// }
 /// ```

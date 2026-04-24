@@ -5,7 +5,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{mem::Mmr, Location, StandardHasher as Standard},
+    merkle::{hasher::Standard, mem::Mem, mmb, mmr, Family as MerkleFamily, Location},
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
@@ -23,8 +23,8 @@ enum Mutation {
 
 #[derive(Arbitrary, Debug)]
 enum ProofType {
-    Mmr,
-    MmrMulti,
+    Merkle,
+    MerkleMulti,
     Bmt,
     BmtMulti,
 }
@@ -118,88 +118,90 @@ where
     }
 }
 
-fn fuzz(input: FuzzInput) {
-    let digests: Vec<Digest> = input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
+fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
+    let hasher = Standard::<Sha256>::new();
+    let mut merkle = Mem::<F, Digest>::new(&hasher);
+    let batch = {
+        let mut batch = merkle.new_batch();
+        for digest in digests {
+            batch = batch.add(&hasher, digest);
+        }
+        batch.merkleize(&merkle, &hasher)
+    };
+    merkle.apply_batch(&batch).unwrap();
+    let root = merkle.root();
 
-    match input.proof {
-        ProofType::Mmr => {
-            let hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&hasher);
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                for digest in &digests {
-                    batch = batch.add(&hasher, digest);
-                }
-                batch.merkleize(&hasher).finalize()
-            };
-            mmr.apply(changeset).unwrap();
-            let root = mmr.root();
+    for (leaf, element) in digests.iter().enumerate() {
+        let loc = Location::<F>::new(leaf as u64);
+        let original_proof = merkle.proof(&hasher, loc).unwrap();
+        assert!(original_proof.verify_element_inclusion(&hasher, element, loc, root));
 
-            for (leaf, element) in digests.iter().enumerate() {
-                let loc = Location::new(leaf as u64);
-                let original_proof = mmr.proof(&hasher, loc).unwrap();
-                assert!(original_proof.verify_element_inclusion(&hasher, element, loc, root));
-
-                for mutation in &input.mutations {
-                    let mut mutated_proof = original_proof.clone();
-                    mutate_proof_bytes(&mut mutated_proof, mutation, &256);
-                    if mutated_proof != original_proof {
-                        assert!(
-                            !mutated_proof.verify_element_inclusion(&hasher, element, loc, root)
-                        );
-                    }
-                }
+        for mutation in &input.mutations {
+            let mut mutated_proof = original_proof.clone();
+            mutate_proof_bytes(&mut mutated_proof, mutation, &256);
+            if mutated_proof != original_proof {
+                assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, root));
             }
         }
-        ProofType::MmrMulti => {
-            let hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&hasher);
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                for digest in &digests {
-                    batch = batch.add(&hasher, digest);
-                }
-                batch.merkleize(&hasher).finalize()
-            };
-            mmr.apply(changeset).unwrap();
-            let root = mmr.root();
+    }
+}
 
-            let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
-                (0, 0)
-            } else if input.positions.len() == 1 {
-                let i = (input.positions[0] as usize) % digests.len();
-                (i, 1)
-            } else {
-                let i1 = (input.positions[0] as usize) % digests.len();
-                let i2 = (input.positions[1] as usize) % digests.len();
-                (i1.min(i2), i1.abs_diff(i2) + 1)
-            };
-            let start_loc = Location::new(start_idx as u64);
-            let Ok(original_proof) =
-                mmr.range_proof(&hasher, start_loc..start_loc + range_len as u64)
-            else {
-                return;
-            };
-            let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
-            assert!(original_proof.verify_range_inclusion(
+fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
+    let hasher = Standard::<Sha256>::new();
+    let mut merkle = Mem::<F, Digest>::new(&hasher);
+    let batch = {
+        let mut batch = merkle.new_batch();
+        for digest in digests {
+            batch = batch.add(&hasher, digest);
+        }
+        batch.merkleize(&merkle, &hasher)
+    };
+    merkle.apply_batch(&batch).unwrap();
+    let root = merkle.root();
+
+    let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
+        (0, 0)
+    } else if input.positions.len() == 1 {
+        let i = (input.positions[0] as usize) % digests.len();
+        (i, 1)
+    } else {
+        let i1 = (input.positions[0] as usize) % digests.len();
+        let i2 = (input.positions[1] as usize) % digests.len();
+        (i1.min(i2), i1.abs_diff(i2) + 1)
+    };
+    let start_loc = Location::<F>::new(start_idx as u64);
+    let Ok(original_proof) = merkle.range_proof(&hasher, start_loc..start_loc + range_len as u64)
+    else {
+        return;
+    };
+    let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
+    assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, root));
+
+    for mutation in &input.mutations {
+        let mut mutated_proof = original_proof.clone();
+        mutate_proof_bytes(&mut mutated_proof, mutation, &256);
+        if mutated_proof != original_proof {
+            assert!(!mutated_proof.verify_range_inclusion(
                 &hasher,
                 &range_elements,
                 start_loc,
                 root
             ));
+        }
+    }
+}
 
-            for mutation in &input.mutations {
-                let mut mutated_proof = original_proof.clone();
-                mutate_proof_bytes(&mut mutated_proof, mutation, &256);
-                if mutated_proof != original_proof {
-                    assert!(!mutated_proof.verify_range_inclusion(
-                        &hasher,
-                        &range_elements,
-                        start_loc,
-                        root
-                    ));
-                }
-            }
+fn fuzz(input: FuzzInput) {
+    let digests: Vec<Digest> = input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
+
+    match input.proof {
+        ProofType::Merkle => {
+            fuzz_element_proof::<mmr::Family>(&input, &digests);
+            fuzz_element_proof::<mmb::Family>(&input, &digests);
+        }
+        ProofType::MerkleMulti => {
+            fuzz_range_proof::<mmr::Family>(&input, &digests);
+            fuzz_range_proof::<mmb::Family>(&input, &digests);
         }
         ProofType::Bmt => {
             let mut builder = BmtBuilder::<Sha256>::new(digests.len());

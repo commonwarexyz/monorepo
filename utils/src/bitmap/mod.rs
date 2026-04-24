@@ -202,6 +202,21 @@ impl<const N: usize> BitMap<N> {
 
     /* Setters */
 
+    /// Extend the bitmap to `new_len` bits, filling new positions with zero.
+    /// No-op if `new_len <= self.len`.
+    pub fn extend_to(&mut self, new_len: u64) {
+        if new_len <= self.len {
+            return;
+        }
+        // Allocate any needed new chunks (all zeroed).
+        let new_chunks_needed = new_len.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        let current_chunks = self.chunks.len();
+        for _ in current_chunks..new_chunks_needed {
+            self.chunks.push_back(Self::EMPTY_CHUNK);
+        }
+        self.len = new_len;
+    }
+
     /// Add a single bit to the bitmap.
     pub fn push(&mut self, bit: bool) {
         // Check if we need a new chunk
@@ -247,6 +262,30 @@ impl<const N: usize> BitMap<N> {
         }
 
         bit
+    }
+
+    /// Shrink the bitmap to `new_len` bits, discarding trailing bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_len > self.len()`.
+    pub fn truncate(&mut self, new_len: u64) {
+        assert!(new_len <= self.len(), "cannot truncate to a larger size");
+
+        // Pop single bits until we can remove full chunks.
+        while self.len > new_len && !self.is_chunk_aligned() {
+            self.pop();
+        }
+
+        // Pop full chunks from the back.
+        while self.len - new_len >= Self::CHUNK_SIZE_BITS {
+            self.pop_chunk();
+        }
+
+        // Pop remaining individual bits.
+        while self.len > new_len {
+            self.pop();
+        }
     }
 
     /// Remove and return the last complete chunk from the bitmap.
@@ -519,6 +558,11 @@ impl<const N: usize> BitMap<N> {
             bitmap: self,
             pos: 0,
         }
+    }
+
+    /// Returns an iterator over the indices of set bits.
+    pub fn ones_iter(&self) -> OnesIter<'_, Self, N> {
+        Readable::ones_iter_from(self, 0)
     }
 
     /* Bitwise Operations */
@@ -882,6 +926,128 @@ impl<const N: usize> iter::Iterator for Iterator<'_, N> {
 
 impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 
+/// Read-only access to a bitmap's chunks and metadata.
+pub trait Readable<const N: usize> {
+    /// Return the number of complete (fully filled) chunks.
+    fn complete_chunks(&self) -> usize;
+
+    /// Return the chunk data at the given absolute chunk index.
+    fn get_chunk(&self, chunk: usize) -> [u8; N];
+
+    /// Return the last chunk and its size in bits.
+    fn last_chunk(&self) -> ([u8; N], u64);
+
+    /// Return the number of pruned chunks.
+    fn pruned_chunks(&self) -> usize;
+
+    /// Return the total number of bits.
+    fn len(&self) -> u64;
+
+    /// Returns true if the bitmap is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Return the number of pruned bits (i.e. pruned chunks * bits per chunk).
+    fn pruned_bits(&self) -> u64 {
+        (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS
+    }
+
+    /// Return the value of a single bit.
+    fn get_bit(&self, bit: u64) -> bool {
+        let chunk = self.get_chunk(BitMap::<N>::to_chunk_index(bit));
+        BitMap::<N>::get_bit_from_chunk(&chunk, bit % BitMap::<N>::CHUNK_SIZE_BITS)
+    }
+
+    /// Returns an iterator over the indices of set bits starting from `pos`.
+    ///
+    /// If `pos` falls within a pruned region, iteration starts at the first
+    /// unpruned bit instead.
+    fn ones_iter_from(&self, pos: u64) -> OnesIter<'_, Self, N>
+    where
+        Self: Sized,
+    {
+        let len = self.len();
+        let pruned_start = (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS;
+        OnesIter {
+            bitmap: self,
+            pos: pos.max(pruned_start),
+            len,
+        }
+    }
+}
+
+impl<const N: usize> Readable<N> for BitMap<N> {
+    fn complete_chunks(&self) -> usize {
+        self.chunks_len()
+            .saturating_sub(if self.is_chunk_aligned() { 0 } else { 1 })
+    }
+
+    fn get_chunk(&self, chunk: usize) -> [u8; N] {
+        *Self::get_chunk(self, chunk)
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        let (c, n) = Self::last_chunk(self);
+        (*c, n)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        0
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+/// Iterator over the indices of set (1) bits in a bitmap.
+///
+/// If the starting position falls within a pruned region, iteration
+/// begins at the first unpruned bit.
+pub struct OnesIter<'a, B, const N: usize> {
+    bitmap: &'a B,
+    pos: u64,
+    /// Cached `bitmap.len()` at iterator construction. The underlying bitmap is borrowed
+    /// immutably for the iterator's lifetime, so this can never change mid-iteration.
+    /// For layered bitmaps (e.g. `BitmapBatch`), `len()` walks the layer chain, so caching
+    /// this avoids that walk on every `next`.
+    len: u64,
+}
+
+impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<u64> {
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        while self.pos < self.len {
+            let chunk_idx = BitMap::<N>::to_chunk_index(self.pos);
+            let chunk = self.bitmap.get_chunk(chunk_idx);
+            let chunk_start = chunk_idx as u64 * chunk_bits;
+            let rel = (self.pos - chunk_start) as usize;
+            let mut byte_idx = rel / 8;
+            let mut bit_in_byte = rel % 8;
+            while byte_idx < N {
+                let masked = chunk[byte_idx] >> bit_in_byte;
+                if masked != 0 {
+                    let found = chunk_start
+                        + (byte_idx * 8 + bit_in_byte) as u64
+                        + masked.trailing_zeros() as u64;
+                    if found >= self.len {
+                        return None;
+                    }
+                    self.pos = found + 1;
+                    return Some(found);
+                }
+                byte_idx += 1;
+                bit_in_byte = 0;
+            }
+            self.pos = chunk_start + chunk_bits;
+        }
+        None
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -1144,6 +1310,39 @@ mod tests {
         }
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
+    }
+
+    #[test]
+    fn test_truncate() {
+        let mut bv: BitMap<4> = BitMap::new();
+        let expected: Vec<bool> = (0..70).map(|i| i % 3 == 0).collect();
+        for &bit in &expected {
+            bv.push(bit);
+        }
+
+        bv.truncate(65);
+        assert_eq!(bv.len(), 65);
+        for i in 0..65 {
+            assert_eq!(bv.get(i), expected[i as usize]);
+        }
+
+        bv.truncate(32);
+        assert_eq!(bv.len(), 32);
+        for i in 0..32 {
+            assert_eq!(bv.get(i), expected[i as usize]);
+        }
+
+        bv.truncate(0);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot truncate to a larger size")]
+    fn test_truncate_larger_size_panics() {
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push(true);
+        bv.truncate(2);
     }
 
     #[test]
@@ -1704,6 +1903,120 @@ mod tests {
         assert!(collected[32]);
         assert!(!collected[33]);
         assert!(collected[34]);
+    }
+
+    #[test]
+    fn test_ones_iter_empty() {
+        let bv: BitMap<4> = BitMap::new();
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_all_zeros() {
+        let bv = BitMap::<4>::zeroes(100);
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_all_ones() {
+        let bv = BitMap::<4>::ones(100);
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        let expected: Vec<u64> = (0..100).collect();
+        assert_eq!(ones, expected);
+    }
+
+    #[test]
+    fn test_ones_iter_sparse() {
+        let mut bv = BitMap::<4>::zeroes(64);
+        bv.set(0, true);
+        bv.set(31, true);
+        bv.set(32, true);
+        bv.set(63, true);
+
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert_eq!(ones, vec![0, 31, 32, 63]);
+    }
+
+    #[test]
+    fn test_ones_iter_single_bit() {
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push(true);
+        assert_eq!(bv.ones_iter().collect::<Vec<_>>(), vec![0]);
+
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push(false);
+        assert!(bv.ones_iter().collect::<Vec<_>>().is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_multi_chunk() {
+        // Use small chunks (4 bytes = 32 bits) to ensure multi-chunk coverage.
+        let mut bv = BitMap::<4>::zeroes(96);
+        // Set one bit per chunk.
+        bv.set(7, true); // chunk 0
+        bv.set(40, true); // chunk 1
+        bv.set(95, true); // chunk 2
+
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert_eq!(ones, vec![7, 40, 95]);
+    }
+
+    #[test]
+    fn test_ones_iter_partial_chunk() {
+        // 35 bits = 1 full chunk (32 bits) + 3 bits in a partial chunk.
+        let mut bv = BitMap::<4>::zeroes(35);
+        bv.set(31, true); // last bit of full chunk
+        bv.set(32, true); // first bit of partial chunk
+        bv.set(34, true); // last bit
+
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert_eq!(ones, vec![31, 32, 34]);
+    }
+
+    #[test]
+    fn test_ones_iter_from_midway() {
+        let mut bv = BitMap::<4>::zeroes(64);
+        bv.set(5, true);
+        bv.set(20, true);
+        bv.set(40, true);
+        bv.set(60, true);
+
+        // Start from position 20 -- should skip bit 5.
+        let ones: Vec<u64> = Readable::ones_iter_from(&bv, 20).collect();
+        assert_eq!(ones, vec![20, 40, 60]);
+
+        // Start from position 21 -- should skip bits 5 and 20.
+        let ones: Vec<u64> = Readable::ones_iter_from(&bv, 21).collect();
+        assert_eq!(ones, vec![40, 60]);
+
+        // Start past all set bits.
+        let ones: Vec<u64> = Readable::ones_iter_from(&bv, 61).collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_matches_count_ones() {
+        let mut bv: BitMap<8> = BitMap::new();
+        for i in 0..200 {
+            bv.push(i % 7 == 0);
+        }
+        assert_eq!(bv.ones_iter().count() as u64, bv.count_ones());
+    }
+
+    #[test]
+    fn test_ones_iter_different_chunk_sizes() {
+        let pattern: Vec<bool> = (0..100).map(|i| i % 5 == 0).collect();
+        let expected: Vec<u64> = (0..100).filter(|i| i % 5 == 0).collect();
+
+        let bv4: BitMap<4> = pattern.as_slice().into();
+        let bv8: BitMap<8> = pattern.as_slice().into();
+        let bv16: BitMap<16> = pattern.as_slice().into();
+
+        assert_eq!(bv4.ones_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(bv8.ones_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(bv16.ones_iter().collect::<Vec<_>>(), expected);
     }
 
     #[test]

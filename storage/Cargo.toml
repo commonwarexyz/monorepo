@@ -78,15 +78,9 @@ test-traits = []
 bench = false
 
 [[bench]]
-name = "qmdb_generate"
+name = "qmdb"
 harness = false
-path = "src/qmdb/benches/generate_bench.rs"
-required-features = ["test-traits"]
-
-[[bench]]
-name = "qmdb_init"
-harness = false
-path = "src/qmdb/benches/init_bench.rs"
+path = "src/qmdb/benches/bench.rs"
 required-features = ["test-traits"]
 
 [[bench]]
@@ -115,9 +109,9 @@ harness = false
 path = "src/journal/benches/bench.rs"
 
 [[bench]]
-name="mmr"
+name="merkle"
 harness = false
-path = "src/merkle/mmr/benches/bench.rs"
+path = "src/merkle/benches/bench.rs"
 
 [[bench]]
 name="ordinal"

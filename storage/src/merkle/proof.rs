@@ -1,30 +1,19 @@
-//! Defines the inclusion [Proof] structure, and functions for verifying them against a root digest.
+//! Defines the generic inclusion [Proof] structure for Merkle-family data structures.
 //!
-//! Also provides lower-level functions for building verifiers against new or extended proof types.
-//! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
-//! parent module.
+//! The [Proof] struct is parameterized by a [`Family`] marker and a [`Digest`] type. Each Merkle
+//! family (MMR, MMB, etc.) reuses the shared verification and reconstruction logic in this module,
+//! while retaining any family-specific proof helpers in its submodule.
 
-use crate::mmr::{
-    hasher::Hasher,
-    iterator::{nodes_to_pin, PeakIterator},
-    Error, Location, Position,
-};
+use crate::merkle::{hasher::Hasher, Error, Family, Location, Position};
 use alloc::{
-    collections::{btree_map::BTreeMap, btree_set::BTreeSet},
+    collections::{BTreeMap, BTreeSet},
     vec,
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use core::ops::Range;
-
-/// The maximum number of digests in a proof per element being proven.
-///
-/// This accounts for the worst case proof size, in an MMR with 62 peaks. The
-/// left-most leaf in such a tree requires 122 digests, for 61 path siblings
-/// and 61 peak digests.
-pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(thiserror::Error, Debug)]
@@ -44,7 +33,7 @@ pub enum ReconstructionError {
 }
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
-/// elements, in the MMR from its root digest.
+/// elements, in a Merkle-family data structure from its root digest.
 ///
 /// The `digests` vector uses a fold-based layout:
 ///
@@ -57,62 +46,52 @@ pub enum ReconstructionError {
 /// 3. The sibling digests needed to reconstruct each range-peak digest from the proven elements,
 ///    in depth-first (forward consumption) order for each range peak.
 #[derive(Clone, Debug, Eq)]
-pub struct Proof<D: Digest> {
-    /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
-    /// structures may override the meaning of this field. For example, the authenticated
-    /// [crate::AuthenticatedBitMap] stores the number of bits in the bitmap within this field.
-    pub leaves: Location,
-    /// The digests necessary for proving the inclusion of an element, or range of elements, in the
-    /// MMR.
+pub struct Proof<F: Family, D: Digest> {
+    /// The total number of leaves in the data structure. For MMR proofs, this is the number of
+    /// leaves in the MMR, though other authenticated data structures may override the meaning of
+    /// this field. For example, the authenticated [crate::AuthenticatedBitMap] stores the number
+    /// of bits in the bitmap within this field.
+    pub leaves: Location<F>,
+    /// The digests necessary for proving inclusion.
     pub digests: Vec<D>,
 }
 
-impl<D: Digest> PartialEq for Proof<D> {
+impl<F: Family, D: Digest> PartialEq for Proof<F, D> {
     fn eq(&self, other: &Self) -> bool {
         self.leaves == other.leaves && self.digests == other.digests
     }
 }
 
-impl<D: Digest> EncodeSize for Proof<D> {
+impl<F: Family, D: Digest> EncodeSize for Proof<F, D> {
     fn encode_size(&self) -> usize {
         self.leaves.encode_size() + self.digests.encode_size()
     }
 }
 
-impl<D: Digest> Write for Proof<D> {
+impl<F: Family, D: Digest> Write for Proof<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of leaves in the MMR
         self.leaves.write(buf);
-
-        // Write the digests
         self.digests.write(buf);
     }
 }
 
-impl<D: Digest> Read for Proof<D> {
-    /// The maximum number of items being proven.
-    ///
-    /// The upper bound on digests is derived as `max_items * MAX_PROOF_DIGESTS_PER_ELEMENT`.
+impl<F: Family, D: Digest> commonware_codec::Read for Proof<F, D> {
+    /// The maximum number of digests in the proof.
     type Cfg = usize;
 
     fn read_cfg(
         buf: &mut impl Buf,
-        max_items: &Self::Cfg,
+        max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        // Read the number of nodes in the MMR
-        let leaves = Location::read(buf)?;
-
-        // Read the digests
-        let max_digests = max_items.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
-        let digests = Vec::<D>::read_range(buf, ..=max_digests)?;
-
+        let leaves = Location::<F>::read(buf)?;
+        let digests = Vec::<D>::read_range(buf, ..=*max_digests)?;
         Ok(Self { leaves, digests })
     }
 }
 
-impl<D: Digest> Default for Proof<D> {
+impl<F: Family, D: Digest> Default for Proof<F, D> {
     /// Create an empty proof. The empty proof will verify only against the root digest of an empty
-    /// (`leaves == 0`) MMR.
+    /// (`leaves == 0`) data structure.
     fn default() -> Self {
         Self {
             leaves: Location::new(0),
@@ -121,47 +100,33 @@ impl<D: Digest> Default for Proof<D> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Proof<D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            leaves: u.arbitrary()?,
-            digests: u.arbitrary()?,
-        })
-    }
-}
-
-impl<D: Digest> Proof<D> {
-    /// Return true if this proof proves that `element` appears at location `loc` within the MMR
-    /// with root digest `root`.
+impl<F: Family, D: Digest> Proof<F, D> {
+    /// Return true if this proof proves that `element` appears at location `loc` within the
+    /// structure with root digest `root`.
     pub fn verify_element_inclusion<H>(
         &self,
         hasher: &H,
         element: &[u8],
-        loc: Location,
+        loc: Location<F>,
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<F, Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
 
     /// Return true if this proof proves that the `elements` appear consecutively starting at
-    /// position `start_loc` within the MMR with root digest `root`. A malformed proof will return
-    /// false.
+    /// `start_loc` within the structure with root digest `root`.
     pub fn verify_range_inclusion<H, E>(
         &self,
         hasher: &H,
         elements: &[E],
-        start_loc: Location,
+        start_loc: Location<F>,
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
         match self.reconstruct_root(hasher, elements, start_loc) {
@@ -175,22 +140,23 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the elements at the specified locations are included
-    /// in the MMR with the root digest `root`. A malformed proof will return false.
+    /// in the structure with root digest `root`. A malformed proof will return false.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<H, E>(
         &self,
         hasher: &H,
-        elements: &[(E, Location)],
+        elements: &[(E, Location<F>)],
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        // Empty proof is valid for an empty MMR
+        // Empty proof is valid only for an empty tree with no extra digest data.
         if elements.is_empty() {
-            return self.leaves == Location::new(0)
+            return self.digests.is_empty()
+                && self.leaves == Location::new(0)
                 && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
@@ -199,19 +165,15 @@ impl<D: Digest> Proof<D> {
         let mut blueprints = BTreeMap::new();
 
         for (_, loc) in elements {
-            if !loc.is_valid() {
+            if !loc.is_valid_index() {
                 return false;
             }
             // `loc` is valid so it won't overflow from +1
-            let Ok(bp) = blueprint(self.leaves, *loc..*loc + 1) else {
+            let Ok(bp) = Blueprint::new(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
-            for &pos in &bp.fold_prefix {
-                node_positions.insert(pos);
-            }
-            for &pos in &bp.fetch_nodes {
-                node_positions.insert(pos);
-            }
+            node_positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
+            node_positions.extend(&bp.fetch_nodes);
             blueprints.insert(*loc, bp);
         }
 
@@ -221,7 +183,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Build position to digest mapping once
-        let node_digests: BTreeMap<Position, D> = node_positions
+        let node_digests: BTreeMap<Position<F>, D> = node_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, digest)| (pos, *digest))
@@ -231,19 +193,19 @@ impl<D: Digest> Proof<D> {
         for (element, loc) in elements {
             let bp = &blueprints[loc];
 
-            // Build the sub-proof: [fold_acc? | fetch_nodes...]
             let mut digests = Vec::with_capacity(
                 if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len(),
             );
-            if !bp.fold_prefix.is_empty() {
-                // Fold prefix peaks into accumulator (without the leaf count).
-                let mut acc = *node_digests
-                    .get(&bp.fold_prefix[0])
+            if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
+                let first = *node_digests
+                    .get(&first_sub.pos)
                     .expect("must exist by construction");
-                for &pos in &bp.fold_prefix[1..] {
-                    let d = node_digests.get(&pos).expect("must exist by construction");
-                    acc = hasher.fold(&acc, d);
-                }
+                let acc = rest.iter().fold(first, |acc, sub| {
+                    let d = node_digests
+                        .get(&sub.pos)
+                        .expect("must exist by construction");
+                    hasher.fold(&acc, d)
+                });
                 digests.push(acc);
             }
             for &pos in &bp.fetch_nodes {
@@ -263,26 +225,44 @@ impl<D: Digest> Proof<D> {
         true
     }
 
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
+    /// Reconstruct the root digest from this proof and the given consecutive elements,
+    /// or return a `ReconstructionError` if the input data is invalid.
+    pub fn reconstruct_root<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+    ) -> Result<D, ReconstructionError>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        self.reconstruct_root_collecting(hasher, elements, start_loc, None)
+    }
+
+    /// Reconstructs the root digest from the digests in the proof and the provided range
     /// of elements, returning the (position,digest) of every node whose digest was required by the
-    /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
+    /// process (including those from the proof itself). Returns [Error::InvalidProof] if the
     /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
     /// root.
     pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
         hasher: &H,
         elements: &[E],
-        start_loc: Location,
+        start_loc: Location<F>,
         root: &D,
-    ) -> Result<Vec<(Position, D)>, Error>
+    ) -> Result<Vec<(Position<F>, D)>, Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
-        let Ok(reconstructed_root) =
-            self.reconstruct_root_impl(hasher, elements, start_loc, Some(&mut collected_digests))
-        else {
+        let Ok(reconstructed_root) = self.reconstruct_root_collecting(
+            hasher,
+            elements,
+            start_loc,
+            Some(&mut collected_digests),
+        ) else {
             return Err(Error::InvalidProof);
         };
 
@@ -295,13 +275,33 @@ impl<D: Digest> Proof<D> {
 
     /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
     ///
-    /// The `pinned_nodes` are the peak digests of the sub-MMR at `start_loc`, in the order returned
-    /// by `nodes_to_pin`. Each pinned node is either:
+    /// The `pinned_nodes` are the peak digests of the sub-structure at `start_loc`, in the order
+    /// returned by `Family::nodes_to_pin`. The proof authenticates the prefix `[0, start_loc)` via:
     ///
-    /// - A peak of the full MMR that precedes the proven range (fold-prefix peak). These are
-    ///   verified by refolding them and comparing against the proof's fold-prefix accumulator.
-    /// - A sibling node within a range peak's reconstruction. These are verified against the
-    ///   digests extracted during proof verification.
+    /// - fold-prefix peaks of the larger tree, and
+    /// - sibling subtrees inside the first range peak that lie wholly before `start_loc`.
+    ///
+    /// When the larger tree has merged smaller subtrees into a bigger parent, the pins sit below
+    /// these authenticated subtrees. The verifier hashes pairs of pins up to each authenticated
+    /// subtree's root and compares against the proof.
+    ///
+    /// For example, in MMB at `leaves=5, start_loc=4`, the proof describes `[0, 4)` as one
+    /// height-2 subtree `p7`, while the pins cover the same leaves as two height-1 subtrees
+    /// `p2`, `p5`:
+    ///
+    /// ```text
+    ///     proof authenticates:         pins contain:
+    ///
+    ///             p7
+    ///           /    \
+    ///          p2    p5                p2         p5
+    ///         / \    / \              / \        / \
+    ///        L0 L1  L2 L3            L0 L1      L2 L3
+    /// ```
+    ///
+    /// The verifier walks down from `p7` via `F::children`, pulls the pins for `p2` and `p5`, and
+    /// hashes them back up (`node_digest(p7, pin[p2], pin[p5])`) to compare against the `p7`
+    /// digest the proof authenticates.
     ///
     /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
     /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
@@ -309,110 +309,102 @@ impl<D: Digest> Proof<D> {
         &self,
         hasher: &H,
         elements: &[E],
-        start_loc: Location,
+        start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        // Verify the proof and extract all node digests used in the reconstruction.
-        let collected = match self
+        self.try_verify_proof_and_pinned_nodes(hasher, elements, start_loc, pinned_nodes, root)
+            .is_some()
+    }
+
+    /// Fallible implementation of [`verify_proof_and_pinned_nodes`](Self::verify_proof_and_pinned_nodes).
+    ///
+    /// Returns `Some(())` if the proof and pins are consistent with `root`, `None` otherwise. The
+    /// `Option` return lets the body use `?` on each fallible step; the public wrapper converts to
+    /// `bool` via `.is_some()`.
+    fn try_verify_proof_and_pinned_nodes<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        pinned_nodes: &[D],
+        root: &D,
+    ) -> Option<()>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        let collected = self
             .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
+            .ok()?;
 
         if elements.is_empty() {
-            return pinned_nodes.is_empty();
+            return pinned_nodes.is_empty().then_some(());
         }
 
-        let Ok(start_pos) = Position::try_from(start_loc) else {
-            return false;
-        };
+        if !start_loc.is_valid() || start_loc > self.leaves {
+            return None;
+        }
 
-        let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
+        let pinned_positions: Vec<_> = F::nodes_to_pin(start_loc).collect();
         if pinned_positions.len() != pinned_nodes.len() {
-            return false;
+            return None;
         }
 
-        let Ok(bp) = start_loc
-            .checked_add(elements.len() as u64)
-            .ok_or(Error::LocationOverflow(start_loc))
-            .and_then(|end_loc| blueprint(self.leaves, start_loc..end_loc))
-        else {
-            return false;
-        };
+        let end_loc = start_loc.checked_add(elements.len() as u64)?;
+        let bp = Blueprint::new(self.leaves, start_loc..end_loc).ok()?;
 
-        // Combine pinned positions and digests into a map for fast lookup.
-        let mut pinned_map: BTreeMap<Position, D> = pinned_positions
+        let mut pinned_map: BTreeMap<Position<F>, D> = pinned_positions
             .into_iter()
             .zip(pinned_nodes.iter().copied())
             .collect();
 
-        // Verify fold-prefix pinned nodes by recomputing the accumulator (without the leaf
-        // count, which is hashed into the final root independently).
-        if !bp.fold_prefix.is_empty() {
-            if self.digests.is_empty() {
-                return false;
+        // Fold-prefix peaks of the larger tree may have merged several pins together. Reconstruct
+        // each peak's digest by hashing the pins beneath it up to the peak, then compare the
+        // folded accumulator against the one the proof carries.
+        if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
+            let &expected = self.digests.first()?;
+            let mut acc = first_sub.reconstruct_from_pins(hasher, &mut pinned_map)?;
+            for sub in rest {
+                let d = sub.reconstruct_from_pins(hasher, &mut pinned_map)?;
+                acc = hasher.fold(&acc, &d);
             }
-            let Some(first) = pinned_map.remove(&bp.fold_prefix[0]) else {
-                return false;
-            };
-            let mut acc = first;
-            for pos in &bp.fold_prefix[1..] {
-                let Some(digest) = pinned_map.remove(pos) else {
-                    return false;
-                };
-                acc = hasher.fold(&acc, &digest);
-            }
-            if acc != self.digests[0] {
-                return false;
+            if acc != expected {
+                return None;
             }
         }
 
-        // Verify remaining pinned nodes (siblings) against the extracted digests.
-        let extracted: BTreeMap<Position, D> = collected.into_iter().collect();
-        for (pos, digest) in pinned_map {
-            if extracted.get(&pos) != Some(&digest) {
-                return false;
+        // Sibling subtrees inside the first range peak that lie wholly before `start_loc` are
+        // authenticated directly by the proof (their digests appear in `extracted`). Rebuild each
+        // from the pins and compare.
+        let extracted: BTreeMap<Position<F>, D> = collected.into_iter().collect();
+        for sibling in bp.prefix_siblings() {
+            let &expected = extracted.get(&sibling.pos)?;
+            let d = sibling.reconstruct_from_pins(hasher, &mut pinned_map)?;
+            if d != expected {
+                return None;
             }
         }
 
-        true
+        // Every pin must have been consumed by one of the two reconstructions above.
+        pinned_map.is_empty().then_some(())
     }
 
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
-    pub fn reconstruct_root<H, E>(
+    /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`, every
+    /// `(position, digest)` pair encountered during reconstruction is appended.
+    pub(crate) fn reconstruct_root_collecting<H, E>(
         &self,
         hasher: &H,
         elements: &[E],
-        start_loc: Location,
+        start_loc: Location<F>,
+        mut collected: Option<&mut Vec<(Position<F>, D)>>,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        self.reconstruct_root_impl(hasher, elements, start_loc, None)
-    }
-
-    /// Core implementation for reconstructing the MMR root from a proof. Uses the fold-based proof
-    /// layout: `[folded_prefix? | after_peaks... | siblings_dfs...]`.
-    ///
-    /// If `collected_digests` is Some, all node digests encountered during reconstruction are
-    /// appended to the wrapped vector.
-    fn reconstruct_root_impl<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location,
-        mut collected_digests: Option<&mut Vec<(Position, D)>>,
-    ) -> Result<D, ReconstructionError>
-    where
-        H: Hasher<Digest = D>,
+        H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -425,87 +417,63 @@ impl<D: Digest> Proof<D> {
             }
             return Err(ReconstructionError::MissingElements);
         }
-        let size = Position::try_from(self.leaves).map_err(|_| ReconstructionError::InvalidSize)?;
-        let start_element_pos =
-            Position::try_from(start_loc).map_err(|_| ReconstructionError::InvalidStartLoc)?;
-        let end_element_pos = if elements.len() == 1 {
-            start_element_pos
-        } else {
-            let end_loc = start_loc
-                .checked_add(elements.len() as u64 - 1)
-                .ok_or(ReconstructionError::InvalidEndLoc)?;
-            Position::try_from(end_loc).map_err(|_| ReconstructionError::InvalidEndLoc)?
-        };
-        if end_element_pos >= size {
+        if !start_loc.is_valid_index() {
+            return Err(ReconstructionError::InvalidStartLoc);
+        }
+        let end_loc = start_loc
+            .checked_add(elements.len() as u64)
+            .ok_or(ReconstructionError::InvalidEndLoc)?;
+        if end_loc > self.leaves {
             return Err(ReconstructionError::InvalidEndLoc);
         }
+        let range = start_loc..end_loc;
 
-        // Classify peaks.
-        let mut before_count = 0usize;
-        let mut after_peaks: Vec<Position> = Vec::new();
-        let mut range_peaks: Vec<(Position, u32)> = Vec::new();
-
-        for (peak_pos, height) in PeakIterator::new(size) {
-            let leftmost_pos = peak_pos + 2 - (1u64 << (height + 1));
-            if peak_pos < start_element_pos {
-                before_count += 1;
-            } else if leftmost_pos > end_element_pos {
-                after_peaks.push(peak_pos);
-            } else {
-                range_peaks.push((peak_pos, height));
-            }
-        }
+        let bp =
+            Blueprint::new(self.leaves, range).map_err(|_| ReconstructionError::InvalidSize)?;
 
         // Slice self.digests into [folded_prefix? | after_peaks... | siblings...]
-        let has_prefix = before_count > 0;
-        let prefix_digests = if has_prefix { 1 } else { 0 };
-        let expected_min = prefix_digests + after_peaks.len();
+        let prefix_digests = usize::from(!bp.fold_prefix.is_empty());
+        let expected_min = prefix_digests + bp.fetch_nodes.len();
         if self.digests.len() < expected_min {
             return Err(ReconstructionError::MissingDigests);
         }
 
+        // Blueprint's fetch_nodes contains after_peaks then the DFS sibling digests. We need to
+        // know how many after_peaks there are to skip over them.
         let after_start = prefix_digests;
-        let after_end = after_start + after_peaks.len();
+        let after_peaks_count = bp.after_peaks.len();
+        let after_end = after_start + after_peaks_count;
         let siblings = &self.digests[after_end..];
 
-        // Fold all peaks into an accumulator (without the leaf count, which is hashed in at the
-        // end to prevent malleability via the `leaves` field).
-        let mut acc: Option<D> = if has_prefix {
-            Some(self.digests[0])
-        } else {
-            None
-        };
+        // Collect all peak digests to provide to hasher.root().
+        let mut peak_digests = Vec::new();
+        if !bp.fold_prefix.is_empty() {
+            peak_digests.push(self.digests[0]);
+        }
 
-        // Reconstruct each range peak and fold into acc.
         let mut sibling_cursor = 0usize;
         let mut elements_iter = elements.iter();
-        for &(peak_pos, height) in &range_peaks {
-            let peak_digest = peak_digest_from_range(
+        for peak in &bp.range_peaks {
+            let peak_digest = peak.reconstruct_digest(
                 hasher,
-                RangeInfo {
-                    pos: peak_pos,
-                    two_h: 1 << height,
-                    leftmost_pos: start_element_pos,
-                    rightmost_pos: end_element_pos,
-                },
+                &bp.range,
                 &mut elements_iter,
                 siblings,
                 &mut sibling_cursor,
-                collected_digests.as_deref_mut(),
+                collected.as_deref_mut(),
             )?;
-            if let Some(ref mut cd) = collected_digests {
-                cd.push((peak_pos, peak_digest));
+            if let Some(ref mut cd) = collected {
+                cd.push((peak.pos, peak_digest));
             }
-            acc = Some(acc.map_or(peak_digest, |a| hasher.fold(&a, &peak_digest)));
+            peak_digests.push(peak_digest);
         }
 
-        // Fold after-peak digests.
-        for (i, &after_peak_pos) in after_peaks.iter().enumerate() {
+        for (i, &after_peak_pos) in bp.after_peaks.iter().enumerate() {
             let digest = self.digests[after_start + i];
-            if let Some(ref mut cd) = collected_digests {
+            if let Some(ref mut cd) = collected {
                 cd.push((after_peak_pos, digest));
             }
-            acc = Some(acc.map_or(digest, |a| hasher.fold(&a, &digest)));
+            peak_digests.push(digest);
         }
 
         // Verify all elements were consumed.
@@ -518,340 +486,488 @@ impl<D: Digest> Proof<D> {
             return Err(ReconstructionError::ExtraDigests);
         }
 
-        // Hash the leaf count into the final result.
-        Ok(acc.map_or_else(
-            || hasher.digest(&self.leaves.to_be_bytes()),
-            |peaks_acc| hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()]),
-        ))
+        Ok(hasher.root(self.leaves, peak_digests.iter()))
+    }
+}
+
+/// A perfect binary subtree within a peak, identified by its root position, height,
+/// and the first leaf location it covers.
+#[derive(Copy, Clone)]
+pub(crate) struct Subtree<F: Family> {
+    /// Position of the subtree root node.
+    pub pos: Position<F>,
+    pub height: u32,
+    pub leaf_start: Location<F>,
+}
+
+impl<F: Family> Subtree<F> {
+    fn leaf_end(&self) -> Location<F> {
+        self.leaf_start + (1u64 << self.height)
+    }
+
+    /// True if this subtree's leaves lie wholly before `range.start`.
+    fn is_before(&self, range: &Range<Location<F>>) -> bool {
+        self.leaf_end() <= range.start
+    }
+
+    /// True if this subtree's leaves lie wholly outside `range` (either before it or after it).
+    fn is_outside(&self, range: &Range<Location<F>>) -> bool {
+        self.is_before(range) || self.leaf_start >= range.end
+    }
+
+    fn children(&self) -> (Self, Self) {
+        let (left_pos, right_pos) = F::children(self.pos, self.height);
+        let child_height = self.height - 1;
+        let mid = self.leaf_start + (1u64 << child_height);
+        (
+            Self {
+                pos: left_pos,
+                height: child_height,
+                leaf_start: self.leaf_start,
+            },
+            Self {
+                pos: right_pos,
+                height: child_height,
+                leaf_start: mid,
+            },
+        )
+    }
+
+    /// Collect sibling positions needed to reconstruct this subtree digest from a range of
+    /// elements, in left-first DFS order.
+    ///
+    /// At each node: if the subtree is entirely outside the range, its root position is emitted. If
+    /// it's a leaf in the range, nothing is emitted. Otherwise, recurse into children.
+    fn collect_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Position<F>>) {
+        if self.is_outside(range) {
+            out.push(self.pos);
+            return;
+        }
+
+        if self.height > 0 {
+            let (left, right) = self.children();
+            left.collect_siblings(range, out);
+            right.collect_siblings(range, out);
+        }
+    }
+
+    /// Collect sibling subtrees that lie wholly before the proven range, in the same
+    /// left-first DFS order as [`collect_siblings`](Self::collect_siblings).
+    ///
+    /// Only `range.start` is consulted: the `range.end` side doesn't matter for prefix
+    /// siblings. Pruning on `range.start` also keeps the traversal O(height) per peak —
+    /// pruning only by `range.end` would recurse into both children whenever a subtree
+    /// sits entirely inside the proven range, costing O(2^height) per such peak.
+    fn collect_prefix_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Self>) {
+        if self.is_before(range) {
+            out.push(*self);
+            return;
+        }
+
+        if self.leaf_start >= range.start {
+            return;
+        }
+
+        if self.height > 0 {
+            let (left, right) = self.children();
+            left.collect_prefix_siblings(range, out);
+            right.collect_prefix_siblings(range, out);
+        }
+    }
+
+    /// Reconstruct this subtree's digest from a set of finer-grained pinned positions, consuming
+    /// each pin as it is used.
+    ///
+    /// Walks down via [`Self::children`] until each recursion hits a pin, then hashes back up with
+    /// [`Hasher::node_digest`] for position-keyed domain separation. Returns `None` if any required
+    /// pin is missing.
+    ///
+    /// On failure, `pinned_map` may have been partially consumed. Callers are expected to return
+    /// immediately without inspecting it further.
+    fn reconstruct_from_pins<D, H>(
+        &self,
+        hasher: &H,
+        pinned_map: &mut BTreeMap<Position<F>, D>,
+    ) -> Option<D>
+    where
+        D: Digest,
+        H: Hasher<F, Digest = D>,
+    {
+        if let Some(d) = pinned_map.remove(&self.pos) {
+            return Some(d);
+        }
+        if self.height == 0 {
+            return None;
+        }
+        let (left, right) = self.children();
+        let left_d = left.reconstruct_from_pins(hasher, pinned_map)?;
+        let right_d = right.reconstruct_from_pins(hasher, pinned_map)?;
+        Some(hasher.node_digest(self.pos, &left_d, &right_d))
+    }
+
+    /// Reconstruct the digest of this subtree from a range of elements and sibling digests,
+    /// consuming both in left-first DFS order.
+    ///
+    /// At each node:
+    /// - If the subtree is entirely outside the range: consume a sibling digest.
+    /// - If it's a leaf in the range: hash the next element.
+    /// - Otherwise: recurse into children via [`Family::children`] and compute the node digest.
+    ///
+    /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
+    /// reconstruction is appended to the vector.
+    fn reconstruct_digest<D, H, E>(
+        &self,
+        hasher: &H,
+        range: &Range<Location<F>>,
+        elements: &mut E,
+        siblings: &[D],
+        cursor: &mut usize,
+        mut collected: Option<&mut Vec<(Position<F>, D)>>,
+    ) -> Result<D, ReconstructionError>
+    where
+        D: Digest,
+        H: Hasher<F, Digest = D>,
+        E: Iterator<Item: AsRef<[u8]>>,
+    {
+        // Entirely outside the range: consume a sibling digest.
+        if self.is_outside(range) {
+            let Some(digest) = siblings.get(*cursor).copied() else {
+                return Err(ReconstructionError::MissingDigests);
+            };
+            *cursor += 1;
+            return Ok(digest);
+        }
+
+        // Leaf in range: hash the next element.
+        if self.height == 0 {
+            let elem = elements
+                .next()
+                .ok_or(ReconstructionError::MissingElements)?;
+            return Ok(hasher.leaf_digest(self.pos, elem.as_ref()));
+        }
+
+        // Recurse into children.
+        let (left, right) = self.children();
+        let left_d = left.reconstruct_digest(
+            hasher,
+            range,
+            elements,
+            siblings,
+            cursor,
+            collected.as_deref_mut(),
+        )?;
+        let right_d = right.reconstruct_digest(
+            hasher,
+            range,
+            elements,
+            siblings,
+            cursor,
+            collected.as_deref_mut(),
+        )?;
+
+        if let Some(ref mut cd) = collected {
+            cd.push((left.pos, left_d));
+            cd.push((right.pos, right_d));
+        }
+
+        Ok(hasher.node_digest(self.pos, &left_d, &right_d))
     }
 }
 
 /// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
-pub(crate) struct Blueprint {
-    /// Peak positions that precede the proven range (to be folded into a single accumulator).
-    pub fold_prefix: Vec<Position>,
+pub(crate) struct Blueprint<F: Family> {
+    /// Total number of leaves in the structure this blueprint was built for.
+    leaves: Location<F>,
+    /// The location range this blueprint was built for.
+    pub range: Range<Location<F>>,
+    /// Peaks that precede the proven range (to be folded into a single accumulator).
+    pub fold_prefix: Vec<Subtree<F>>,
+    /// Peak positions entirely after the proven range.
+    pub after_peaks: Vec<Position<F>>,
+    /// The peaks that overlap the proven range.
+    pub range_peaks: Vec<Subtree<F>>,
     /// Node positions to include in the proof: after-peaks followed by DFS siblings.
-    pub fetch_nodes: Vec<Position>,
+    pub fetch_nodes: Vec<Position<F>>,
 }
 
-/// Collect sibling positions needed to reconstruct a peak digest from a range of elements, in DFS
-/// (forward consumption) order. This mirrors the traversal of `peak_digest_from_range`.
-fn collect_siblings_dfs(
-    pos: Position,
-    two_h: u64,
-    leftmost_pos: Position,
-    rightmost_pos: Position,
-    out: &mut Vec<Position>,
-) {
-    if two_h == 1 {
-        return;
-    }
+impl<F: Family> Blueprint<F> {
+    /// Efficiently compute just the fold prefix for a given starting location.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn fold_prefix(
+        leaves: Location<F>,
+        start_loc: Location<F>,
+    ) -> Result<Vec<Position<F>>, super::Error<F>> {
+        let size = Position::<F>::try_from(leaves)?;
+        let mut fold_prefix = Vec::new();
+        let mut leaf_cursor = Location::new(0);
 
-    let left_pos = pos - two_h;
-    let right_pos = left_pos + two_h - 1;
-    let descend_left = left_pos >= leftmost_pos;
-    let descend_right = left_pos < rightmost_pos;
-
-    if !descend_left {
-        out.push(left_pos);
-    } else {
-        collect_siblings_dfs(left_pos, two_h >> 1, leftmost_pos, rightmost_pos, out);
-    }
-
-    if !descend_right {
-        out.push(right_pos);
-    } else {
-        collect_siblings_dfs(right_pos, two_h >> 1, leftmost_pos, rightmost_pos, out);
-    }
-}
-
-/// Return a blueprint containing the digests required to generate a proof over the specified range
-/// of elements.
-///
-/// # Errors
-///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if the range is empty.
-/// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
-/// (>= `size`).
-pub(crate) fn blueprint(leaves: Location, range: Range<Location>) -> Result<Blueprint, Error> {
-    if range.is_empty() {
-        return Err(Error::Empty);
-    }
-    let end_minus_one = range
-        .end
-        .checked_sub(1)
-        .expect("can't underflow because range is non-empty");
-    if end_minus_one >= leaves {
-        return Err(Error::RangeOutOfBounds(range.end));
-    }
-
-    let size = Position::try_from(leaves)?;
-    let start_element_pos = Position::try_from(range.start)?;
-    let end_element_pos = Position::try_from(end_minus_one)?;
-
-    let mut fold_prefix = Vec::new();
-    let mut after_peaks = Vec::new();
-    let mut range_peaks: Vec<(Position, u32)> = Vec::new();
-
-    for (peak_pos, height) in PeakIterator::new(size) {
-        let leftmost_pos = peak_pos + 2 - (1u64 << (height + 1));
-        if peak_pos < start_element_pos {
-            fold_prefix.push(peak_pos);
-        } else if leftmost_pos > end_element_pos {
-            after_peaks.push(peak_pos);
-        } else {
-            range_peaks.push((peak_pos, height));
+        for (peak_pos, height) in F::peaks(size) {
+            let leaf_end = leaf_cursor + (1u64 << height);
+            if leaf_end <= start_loc {
+                fold_prefix.push(peak_pos);
+            } else {
+                break;
+            }
+            leaf_cursor = leaf_end;
         }
+
+        Ok(fold_prefix)
     }
 
-    assert!(
-        !range_peaks.is_empty(),
-        "at least one peak must contain range elements"
-    );
+    /// Return a blueprint for building a range proof over the given leaf `range` in a
+    /// structure with `leaves` total leaves.
+    pub(crate) fn new(
+        leaves: Location<F>,
+        range: Range<Location<F>>,
+    ) -> Result<Self, super::Error<F>> {
+        if range.is_empty() {
+            return Err(super::Error::Empty);
+        }
+        let end_minus_one = range
+            .end
+            .checked_sub(1)
+            .expect("can't underflow because range is non-empty");
+        if end_minus_one >= leaves {
+            return Err(super::Error::RangeOutOfBounds(range.end));
+        }
 
-    // Build fetch_nodes: after_peaks first, then DFS siblings for each range peak.
-    let mut fetch_nodes = after_peaks;
-    for &(peak_pos, height) in &range_peaks {
-        collect_siblings_dfs(
-            peak_pos,
-            1 << height,
-            start_element_pos,
-            end_element_pos,
-            &mut fetch_nodes,
+        let size = Position::try_from(leaves)?;
+
+        let mut fold_prefix = Vec::new();
+        let mut after_peaks = Vec::new();
+        let mut range_peaks = Vec::new();
+        let mut leaf_cursor = Location::new(0);
+
+        for (peak_pos, height) in F::peaks(size) {
+            let leaf_start = leaf_cursor;
+            let leaf_end = leaf_start + (1u64 << height);
+
+            if leaf_end <= range.start {
+                fold_prefix.push(Subtree {
+                    pos: peak_pos,
+                    height,
+                    leaf_start,
+                });
+            } else if leaf_start >= range.end {
+                after_peaks.push(peak_pos);
+            } else {
+                range_peaks.push(Subtree {
+                    pos: peak_pos,
+                    height,
+                    leaf_start,
+                });
+            }
+            leaf_cursor = leaf_end;
+        }
+
+        assert!(
+            !range_peaks.is_empty(),
+            "at least one peak must contain range elements"
         );
+
+        let mut fetch_nodes = after_peaks.clone();
+        for peak in &range_peaks {
+            peak.collect_siblings(&range, &mut fetch_nodes);
+        }
+
+        Ok(Self {
+            leaves,
+            range,
+            fold_prefix,
+            after_peaks,
+            range_peaks,
+            fetch_nodes,
+        })
     }
 
-    Ok(Blueprint {
-        fold_prefix,
-        fetch_nodes,
-    })
+    /// Sibling subtrees of the first range peak that lie wholly before `self.range.start`.
+    ///
+    /// Only the first range peak can contain such siblings; later range peaks are entirely at or
+    /// after `range.start` by this blueprint's classification.
+    pub(crate) fn prefix_siblings(&self) -> Vec<Subtree<F>> {
+        let mut out = Vec::new();
+        if let Some(peak) = self.range_peaks.first() {
+            peak.collect_prefix_siblings(&self.range, &mut out);
+        }
+        out
+    }
+
+    /// Build a range proof from this blueprint and a node-fetching closure.
+    ///
+    /// The prover folds prefix peak digests into a single accumulator. The resulting proof
+    /// contains: `[fold_acc? | after_peaks... | siblings_dfs...]`.
+    ///
+    /// Returns an error via `element_pruned` if `get_node` returns `None` for any required
+    /// position.
+    pub(crate) fn build_proof<D, H, E>(
+        self,
+        hasher: &H,
+        get_node: impl Fn(Position<F>) -> Option<D>,
+        element_pruned: impl Fn(Position<F>) -> E,
+    ) -> Result<Proof<F, D>, E>
+    where
+        D: Digest,
+        H: Hasher<F, Digest = D>,
+    {
+        let mut digests = Vec::with_capacity(
+            if self.fold_prefix.is_empty() { 0 } else { 1 } + self.fetch_nodes.len(),
+        );
+
+        if let Some((first_sub, rest)) = self.fold_prefix.split_first() {
+            let first = get_node(first_sub.pos).ok_or_else(|| element_pruned(first_sub.pos))?;
+            let acc = rest.iter().try_fold(first, |acc, sub| {
+                let d = get_node(sub.pos).ok_or_else(|| element_pruned(sub.pos))?;
+                Ok(hasher.fold(&acc, &d))
+            })?;
+            digests.push(acc);
+        }
+
+        for &pos in &self.fetch_nodes {
+            digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
+        }
+
+        Ok(Proof {
+            leaves: self.leaves,
+            digests,
+        })
+    }
 }
 
-/// Build a range proof using the fold-based layout.
+/// The maximum number of digests in a proof per element being proven.
 ///
-/// The prover folds prefix peak digests into a single accumulator. The resulting proof contains:
-/// `[fold_acc? | after_peaks... | siblings_dfs...]`
-///
-/// `get_node` returns the digest for a given position, or `None` if pruned.
-pub(crate) fn build_range_proof<D, H>(
+/// This accounts for the worst case proof size, in an MMR/MMB with 62 peaks. The
+/// left-most leaf in such a tree requires 122 digests, for 61 path siblings
+/// and 61 peak digests.
+pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
+
+/// Build a range proof from a node-fetching closure. This is the generic implementation
+/// shared by all Merkle families. The `element_pruned` closure is called when `get_node`
+/// returns `None` for a required position.
+pub(crate) fn build_range_proof<F, D, H, E>(
     hasher: &H,
-    leaves: Location,
-    range: Range<Location>,
-    get_node: impl Fn(Position) -> Option<D>,
-) -> Result<Proof<D>, Error>
+    leaves: Location<F>,
+    range: Range<Location<F>>,
+    get_node: impl Fn(Position<F>) -> Option<D>,
+    element_pruned: impl Fn(Position<F>) -> E,
+) -> Result<Proof<F, D>, E>
 where
+    F: Family,
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: Hasher<F, Digest = D>,
+    E: From<super::Error<F>>,
 {
-    let bp = blueprint(leaves, range)?;
-
-    let mut digests =
-        Vec::with_capacity(if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len());
-
-    // Fold prefix peaks into a single accumulator (without the leaf count, which is always
-    // hashed into the final root independently).
-    if !bp.fold_prefix.is_empty() {
-        let mut acc = get_node(bp.fold_prefix[0]).ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
-        for &pos in &bp.fold_prefix[1..] {
-            let d = get_node(pos).ok_or(Error::ElementPruned(pos))?;
-            acc = hasher.fold(&acc, &d);
-        }
-        digests.push(acc);
-    }
-
-    // Append after-peak and sibling digests.
-    for &pos in &bp.fetch_nodes {
-        digests.push(get_node(pos).ok_or(Error::ElementPruned(pos))?);
-    }
-
-    Ok(Proof { leaves, digests })
+    Blueprint::new(leaves, range)?.build_proof(hasher, get_node, element_pruned)
 }
 
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
-/// inclusion of the elements at the specified `locations`.
-///
-/// The order of positions does not affect the output (sorted internally).
-///
-/// # Errors
-///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if locations is empty.
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
+/// inclusion of the elements at the specified `locations`. This is the generic implementation
+/// shared by all Merkle families.
 #[cfg(any(feature = "std", test))]
-pub(crate) fn nodes_required_for_multi_proof(
-    leaves: Location,
-    locations: &[Location],
-) -> Result<BTreeSet<Position>, Error> {
-    // Collect all required node positions
-    //
-    // TODO(#1472): Optimize this loop
+pub(crate) fn nodes_required_for_multi_proof<F: Family>(
+    leaves: Location<F>,
+    locations: &[Location<F>],
+) -> Result<BTreeSet<Position<F>>, super::Error<F>> {
     if locations.is_empty() {
-        return Err(Error::Empty);
+        return Err(super::Error::Empty);
     }
     locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
-        if !loc.is_valid() {
-            return Err(Error::LocationOverflow(*loc));
+        if !loc.is_valid_index() {
+            return Err(super::Error::LocationOverflow(*loc));
         }
-        // `loc` is valid so it won't overflow from +1
-        let bp = blueprint(leaves, *loc..*loc + 1)?;
-        acc.extend(bp.fold_prefix);
+        let bp = Blueprint::new(leaves, *loc..*loc + 1)?;
+        acc.extend(bp.fold_prefix.into_iter().map(|s| s.pos));
         acc.extend(bp.fetch_nodes);
-
         Ok(acc)
     })
 }
 
-/// Information about the current range of nodes being traversed.
-struct RangeInfo {
-    pos: Position,           // current node position in the tree
-    two_h: u64,              // 2^height of the current node
-    leftmost_pos: Position,  // leftmost leaf in the tree to be traversed
-    rightmost_pos: Position, // rightmost leaf in the tree to be traversed
-}
-
-/// Reconstruct the peak digest from a DFS traversal over the range of elements and siblings.
-/// Siblings are consumed in forward order from `siblings[*cursor..]`.
-fn peak_digest_from_range<D, H, E>(
-    hasher: &H,
-    range_info: RangeInfo,
-    elements: &mut E,
-    siblings: &[D],
-    cursor: &mut usize,
-    mut collected_digests: Option<&mut Vec<(Position, D)>>,
-) -> Result<D, ReconstructionError>
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Proof<F, D>
 where
-    D: Digest,
-    H: Hasher<Digest = D>,
-    E: Iterator<Item: AsRef<[u8]>>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
 {
-    assert_ne!(range_info.two_h, 0);
-    if range_info.two_h == 1 {
-        match elements.next() {
-            Some(element) => return Ok(hasher.leaf_digest(range_info.pos, element.as_ref())),
-            None => return Err(ReconstructionError::MissingDigests),
-        }
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            leaves: u.arbitrary()?,
+            digests: u.arbitrary()?,
+        })
     }
-
-    let left_pos = range_info.pos - range_info.two_h;
-    let right_pos = left_pos + range_info.two_h - 1;
-    let descend_left = left_pos >= range_info.leftmost_pos;
-    let descend_right = left_pos < range_info.rightmost_pos;
-
-    // Read siblings and descend in the same order as collect_siblings_dfs.
-    let left_digest = if descend_left {
-        peak_digest_from_range(
-            hasher,
-            RangeInfo {
-                pos: left_pos,
-                two_h: range_info.two_h >> 1,
-                leftmost_pos: range_info.leftmost_pos,
-                rightmost_pos: range_info.rightmost_pos,
-            },
-            elements,
-            siblings,
-            cursor,
-            collected_digests.as_deref_mut(),
-        )?
-    } else {
-        if *cursor >= siblings.len() {
-            return Err(ReconstructionError::MissingDigests);
-        }
-        let d = siblings[*cursor];
-        *cursor += 1;
-        d
-    };
-
-    let right_digest = if descend_right {
-        peak_digest_from_range(
-            hasher,
-            RangeInfo {
-                pos: right_pos,
-                two_h: range_info.two_h >> 1,
-                leftmost_pos: range_info.leftmost_pos,
-                rightmost_pos: range_info.rightmost_pos,
-            },
-            elements,
-            siblings,
-            cursor,
-            collected_digests.as_deref_mut(),
-        )?
-    } else {
-        if *cursor >= siblings.len() {
-            return Err(ReconstructionError::MissingDigests);
-        }
-        let d = siblings[*cursor];
-        *cursor += 1;
-        d
-    };
-
-    if let Some(ref mut cd) = collected_digests {
-        cd.push((left_pos, left_digest));
-        cd.push((right_pos, right_digest));
-    }
-
-    Ok(hasher.node_digest(range_info.pos, &left_digest, &right_digest))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION};
-    use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use crate::merkle::{
+        hasher::Standard,
+        mem::Mem,
+        mmb, mmr,
+        proof::{nodes_required_for_multi_proof, Blueprint, Proof},
+        Family, Location, LocationRangeExt as _,
+    };
+    use alloc::vec;
+    use commonware_codec::{Decode, Encode, EncodeSize};
+    use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
 
-    fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+    type D = sha256::Digest;
+    type H = Standard<Sha256>;
+
+    fn test_digest(v: u8) -> D {
+        <Sha256 as commonware_cryptography::Hasher>::hash(&[v])
     }
 
-    #[test]
-    fn test_proving_proof() {
-        // Test that an empty proof authenticates an empty MMR.
-        let hasher: Standard<Sha256> = Standard::new();
-        let mmr = Mmr::new(&hasher);
-        let root = mmr.root();
-        let proof = Proof::default();
-        assert!(proof.verify_range_inclusion(&hasher, &[] as &[Digest], Location::new(0), root));
+    /// Build an in-memory Merkle structure with `n` elements (element i = i.to_be_bytes()).
+    fn build_raw<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
+        let mut mem = Mem::new(hasher);
+        let batch = {
+            let mut batch = mem.new_batch();
+            for i in 0..n {
+                batch = batch.add(hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mem, hasher)
+        };
+        mem.apply_batch(&batch).unwrap();
+        mem
+    }
+
+    fn empty_proof<F: Family>() {
+        // Test that an empty proof authenticates an empty structure.
+        let hasher = H::new();
+        let mem = Mem::<F, D>::new(&hasher);
+        let root = mem.root();
+        let proof: Proof<F, D> = Proof::default();
+        assert!(proof.verify_range_inclusion(&hasher, &[] as &[D], Location::new(0), root));
 
         // Any starting position other than 0 should fail to verify.
-        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[Digest], Location::new(1), root));
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[D], Location::new(1), root));
 
         // Invalid root should fail to verify.
-        let test_digest = test_digest(0);
-        assert!(!proof.verify_range_inclusion(
-            &hasher,
-            &[] as &[Digest],
-            Location::new(0),
-            &test_digest
-        ));
+        let td = test_digest(0);
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[D], Location::new(0), &td));
 
         // Non-empty elements list should fail to verify.
-        assert!(!proof.verify_range_inclusion(&hasher, &[test_digest], Location::new(0), root));
+        assert!(!proof.verify_range_inclusion(&hasher, &[td], Location::new(0), root));
     }
 
-    #[test]
-    fn test_proving_verify_element() {
-        // create an 11 element MMR over which we'll test single-element inclusion proofs
-        let element = Digest::from(*b"01234567012345670123456701234567");
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
-        let changeset = {
-            let mut batch = mmr.new_batch();
+    fn verify_element<F: Family>() {
+        // Create an 11 element structure and test single-element inclusion proofs.
+        let element = D::from(*b"01234567012345670123456701234567");
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
+        let batch = {
+            let mut batch = mem.new_batch();
             for _ in 0..11 {
                 batch = batch.add(&hasher, &element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
-        let root = mmr.root();
+        mem.apply_batch(&batch).unwrap();
+        let root = mem.root();
 
-        // confirm the proof of inclusion for each leaf successfully verifies
+        // Confirm the proof of inclusion for each leaf verifies.
         for leaf in 0u64..11 {
             let leaf = Location::new(leaf);
-            let proof: Proof<Digest> = mmr.proof(&hasher, leaf).unwrap();
+            let proof: Proof<F, D> = mem.proof(&hasher, leaf).unwrap();
             assert!(
                 proof.verify_element_inclusion(&hasher, &element, leaf, root),
                 "valid proof should verify successfully"
@@ -860,52 +976,52 @@ mod tests {
 
         // Create a valid proof, then confirm various mangling of the proof or proof args results in
         // verification failure.
-        const LEAF: Location = Location::new(10);
-        let proof = mmr.proof(&hasher, LEAF).unwrap();
+        let leaf = Location::<F>::new(10);
+        let proof = mem.proof(&hasher, leaf).unwrap();
         assert!(
-            proof.verify_element_inclusion(&hasher, &element, LEAF, root),
+            proof.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should be successful"
         );
         assert!(
-            !proof.verify_element_inclusion(&hasher, &element, LEAF + 1, root),
+            !proof.verify_element_inclusion(&hasher, &element, leaf + 1, root),
             "proof verification should fail with incorrect element position"
         );
         assert!(
-            !proof.verify_element_inclusion(&hasher, &element, LEAF - 1, root),
+            !proof.verify_element_inclusion(&hasher, &element, leaf - 1, root),
             "proof verification should fail with incorrect element position 2"
         );
         assert!(
-            !proof.verify_element_inclusion(&hasher, &test_digest(0), LEAF, root),
+            !proof.verify_element_inclusion(&hasher, &test_digest(0), leaf, root),
             "proof verification should fail with mangled element"
         );
         let root2 = test_digest(0);
         assert!(
-            !proof.verify_element_inclusion(&hasher, &element, LEAF, &root2),
+            !proof.verify_element_inclusion(&hasher, &element, leaf, &root2),
             "proof verification should fail with mangled root"
         );
         let mut proof2 = proof.clone();
         proof2.digests[0] = test_digest(0);
         assert!(
-            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
         proof2.leaves = Location::new(10);
         assert!(
-            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should fail with incorrect leaves"
         );
         proof2 = proof.clone();
         proof2.digests.push(test_digest(0));
         assert!(
-            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should fail with extra hash"
         );
         proof2 = proof.clone();
         while !proof2.digests.is_empty() {
             proof2.digests.pop();
             assert!(
-                !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
+                !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
                 "proof verification should fail with missing digests"
             );
         }
@@ -917,33 +1033,32 @@ mod tests {
             proof2.digests.push(test_digest(0));
             proof2.digests.extend(proof.digests[1..].iter().cloned());
             assert!(
-                !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
+                !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
                 "proof verification should fail with extra hash even if it's unused by the computation"
             );
         }
     }
 
-    #[test]
-    fn test_proving_verify_range() {
-        // create a new MMR and add a non-trivial amount (49) of elements
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+    fn verify_range<F: Family>() {
+        // Create a structure and add 49 elements.
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
-        // test range proofs over all possible ranges of at least 2 elements
-        let root = mmr.root();
+        mem.apply_batch(&batch).unwrap();
+        let root = mem.root();
 
+        // Test range proofs over all possible ranges of at least 2 elements.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+                let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &hasher,
@@ -956,17 +1071,15 @@ mod tests {
             }
         }
 
-        // Create a proof over a range of elements, confirm it verifies successfully, then mangle
-        // the proof & proof input in various ways, confirming verification fails.
+        // Create a proof over a range, confirm it verifies, then mangle it in various ways.
         let range = Location::new(33)..Location::new(40);
-        let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+        let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
         let valid_elements = &elements[range.to_usize_range()];
         assert!(
             range_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root),
             "valid range proof should verify successfully"
         );
-        // Remove digests from the proof until it's empty, confirming proof verification fails for
-        // each.
+        // Remove digests from the proof until it's empty.
         let mut invalid_proof = range_proof.clone();
         for _i in 0..range_proof.digests.len() {
             invalid_proof.digests.remove(0);
@@ -979,8 +1092,7 @@ mod tests {
         // used to generate the proof.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                if Location::from(i) == range.start && Location::from(j) == range.end {
-                    // skip the valid range
+                if Location::<F>::from(i) == range.start && Location::<F>::from(j) == range.end {
                     continue;
                 }
                 assert!(
@@ -1009,7 +1121,6 @@ mod tests {
         for i in 0..range_proof.digests.len() {
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests[i] = test_digest(0);
-
             assert!(
                 !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "mangled range proof should fail verification"
@@ -1037,31 +1148,30 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_proving_retained_nodes_provable_after_pruning() {
-        // create a new MMR and add a non-trivial amount (49) of elements
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+    fn retained_nodes_provable_after_pruning<F: Family>() {
+        // Create a structure and add 49 elements.
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
-        // Confirm we can successfully prove all retained elements in the MMR after pruning.
-        let root = *mmr.root();
-        for prune_leaf in 1..*mmr.leaves() {
+        // Confirm we can successfully prove all retained elements after pruning.
+        let root = *mem.root();
+        for prune_leaf in 1..*mem.leaves() {
             let prune_loc = Location::new(prune_leaf);
-            mmr.prune(prune_loc).unwrap();
-            let pruned_root = mmr.root();
+            mem.prune(prune_loc).unwrap();
+            let pruned_root = mem.root();
             assert_eq!(root, *pruned_root);
             for loc in 0..elements.len() {
                 let loc = Location::new(loc as u64);
-                let proof = mmr.proof(&hasher, loc);
+                let proof = mem.proof(&hasher, loc);
                 if loc < prune_loc {
                     continue;
                 }
@@ -1076,35 +1186,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_proving_ranges_provable_after_pruning() {
-        // create a new MMR and add a non-trivial amount (49) of elements
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+    fn ranges_provable_after_pruning<F: Family>() {
+        // Create a structure and add 49 elements.
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
-        // prune up to the first peak
-        const PRUNE_LOC: Location = Location::new(32);
-        mmr.prune(PRUNE_LOC).unwrap();
-        assert_eq!(mmr.bounds().start, PRUNE_LOC);
+        // Prune up to the first peak.
+        let prune_loc = Location::<F>::new(32);
+        mem.prune(prune_loc).unwrap();
+        assert_eq!(mem.bounds().start, prune_loc);
 
         // Test range proofs over all possible ranges of at least 2 elements
-        let root = mmr.root();
+        let root = mem.root();
         for i in 0..elements.len() - 1 {
-            if Location::new(i as u64) < PRUNE_LOC {
+            if Location::<F>::new(i as u64) < prune_loc {
                 continue;
             }
             for j in (i + 2)..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+                let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &hasher,
@@ -1117,56 +1226,54 @@ mod tests {
             }
         }
 
-        // Add a few more nodes, prune again, and test again to make sure repeated pruning doesn't
-        // break proof verification.
+        // Add more nodes, prune again, and test again.
         let new_elements: Vec<_> = (0..37).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &new_elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         elements.extend(new_elements);
-        mmr.prune(Location::new(66)).unwrap(); // a bit after the new highest peak
-        assert_eq!(mmr.bounds().start, Location::new(66));
+        mem.prune(Location::new(66)).unwrap();
+        assert_eq!(mem.bounds().start, Location::new(66));
 
-        let updated_root = mmr.root();
+        let updated_root = mem.root();
         let range = Location::new(elements.len() as u64 - 10)..Location::new(elements.len() as u64);
-        let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+        let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
         assert!(
-                range_proof.verify_range_inclusion(
-                    &hasher,
-                    &elements[range.to_usize_range()],
-                    range.start,
-                    updated_root,
-                ),
-                "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
-            );
+            range_proof.verify_range_inclusion(
+                &hasher,
+                &elements[range.to_usize_range()],
+                range.start,
+                updated_root,
+            ),
+            "valid range proof over remaining elements after 2 pruning rounds should verify",
+        );
     }
 
-    #[test]
-    fn test_proving_proof_serialization() {
-        // create a new MMR and add a non-trivial amount of elements
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+    fn proof_serialization<F: Family>() {
+        // Create a structure and add 25 elements.
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..25).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Generate proofs over all possible ranges of elements and confirm each
         // serializes=>deserializes correctly.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let proof = mmr.range_proof(&hasher, range).unwrap();
+                let proof = mem.range_proof(&hasher, range).unwrap();
 
                 let expected_size = proof.encode_size();
                 let serialized_proof = proof.encode();
@@ -1175,203 +1282,77 @@ mod tests {
                     expected_size,
                     "serialized proof should have expected size"
                 );
-                // max_items is the number of elements in the range
-                let max_items = j - i;
-                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_items).unwrap();
+                let max_digests = proof.digests.len();
+                let deserialized_proof =
+                    Proof::<F, D>::decode_cfg(serialized_proof, &max_digests).unwrap();
                 assert_eq!(
                     proof, deserialized_proof,
                     "deserialized proof should match source proof"
                 );
 
-                // Remove one byte from the end of the serialized
-                // proof and confirm it fails to deserialize.
+                // Remove one byte from the end and confirm it fails to deserialize.
                 let serialized_proof = proof.encode();
                 let serialized_proof = serialized_proof.slice(0..serialized_proof.len() - 1);
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
+                    Proof::<F, D>::decode_cfg(serialized_proof, &max_digests).is_err(),
                     "proof should not deserialize with truncated data"
                 );
 
-                // Add 1 byte of extra data to the end of the serialized
-                // proof and confirm it fails to deserialize.
+                // Add extra data and confirm it fails to deserialize.
                 let mut serialized_proof = proof.encode_mut();
                 serialized_proof.extend_from_slice(&[0; 10]);
                 let serialized_proof = serialized_proof;
-
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
+                    Proof::<F, D>::decode_cfg(serialized_proof, &max_digests).is_err(),
                     "proof should not deserialize with extra data"
                 );
 
-                // Confirm deserialization fails when max_items is too small.
+                // Confirm deserialization fails when max_digests is too small.
                 let actual_digests = proof.digests.len();
                 if actual_digests > 0 {
-                    // Find the minimum max_items that would allow this many digests
-                    let min_max_items = actual_digests.div_ceil(MAX_PROOF_DIGESTS_PER_ELEMENT);
-                    // Using one less should fail
-                    let too_small = min_max_items - 1;
+                    let too_small = actual_digests - 1;
                     let serialized_proof = proof.encode();
                     assert!(
-                        Proof::<Digest>::decode_cfg(serialized_proof, &too_small).is_err(),
-                        "proof should not deserialize with max_items too small"
+                        Proof::<F, D>::decode_cfg(serialized_proof, &too_small).is_err(),
+                        "proof should not deserialize with max_digests too small"
                     );
                 }
             }
         }
     }
 
-    // TODO: Add tests for extract_pinned_nodes once the method is implemented.
-
-    #[test]
-    fn test_proving_digests_from_range() {
-        // create a new MMR and add a non-trivial amount (49) of elements
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
-        let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for element in &elements {
-                batch = batch.add(&hasher, element);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
-        let root = mmr.root();
-
-        // Test 1: compute_digests over the entire range should contain a digest for every node
-        // in the tree.
-        let proof = mmr
-            .range_proof(&hasher, Location::new(0)..mmr.leaves())
-            .unwrap();
-        let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(&hasher, &elements, Location::new(0), root)
-            .unwrap();
-        assert_eq!(node_digests.len() as u64, mmr.size());
-        node_digests.sort_by_key(|(pos, _)| *pos);
-        for (i, (pos, d)) in node_digests.into_iter().enumerate() {
-            assert_eq!(pos, i as u64);
-            assert_eq!(mmr.get_node(pos).unwrap(), d);
-        }
-        // Make sure the wrong root fails.
-        let wrong_root = elements[0]; // any other digest will do
-        assert!(matches!(
-            proof.verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements,
-                Location::new(0),
-                &wrong_root
-            ),
-            Err(Error::RootMismatch)
-        ));
-
-        // Test 2: Single element range (first element)
-        let range = Location::new(0)..Location::new(1);
-        let single_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
-        let range_start = range.start;
-        let single_digests = single_proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements[range.to_usize_range()],
-                range_start,
-                root,
-            )
-            .unwrap();
-        assert!(single_digests.len() > 1);
-
-        // Test 3: Single element range (middle element)
-        let mid_idx = 24;
-        let range = Location::new(mid_idx)..Location::new(mid_idx + 1);
-        let range_start = range.start;
-        let mid_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
-        let mid_digests = mid_proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements[range.to_usize_range()],
-                range_start,
-                root,
-            )
-            .unwrap();
-        assert!(mid_digests.len() > 1);
-
-        // Test 4: Single element range (last element)
-        let last_idx = elements.len() as u64 - 1;
-        let range = Location::new(last_idx)..Location::new(last_idx + 1);
-        let range_start = range.start;
-        let last_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
-        let last_digests = last_proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements[range.to_usize_range()],
-                range_start,
-                root,
-            )
-            .unwrap();
-        assert!(!last_digests.is_empty());
-
-        // Test 5: Small range at the beginning
-        let range = Location::new(0)..Location::new(5);
-        let range_start = range.start;
-        let small_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
-        let small_digests = small_proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements[range.to_usize_range()],
-                range_start,
-                root,
-            )
-            .unwrap();
-        // Verify that we get digests for the range elements and their ancestors
-        assert!(small_digests.len() > 5);
-
-        // Test 6: Medium range in the middle
-        let range = Location::new(10)..Location::new(31);
-        let range_start = range.start;
-        let mid_range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
-        let mid_range_digests = mid_range_proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements[range.to_usize_range()],
-                range_start,
-                root,
-            )
-            .unwrap();
-        let num_elements = range.end - range.start;
-        assert!(mid_range_digests.len() as u64 > num_elements);
-    }
-
-    #[test]
-    fn test_proving_multi_proof_generation_and_verify() {
-        // Create an MMR with multiple elements
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+    fn multi_proof_generation_and_verify<F: Family>() {
+        // Create a structure with 20 elements.
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..20).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
-        let root = mmr.root();
+        let root = mem.root();
 
-        // Generate proof for non-contiguous single elements
+        // Generate proof for non-contiguous single elements.
         let locations = &[Location::new(0), Location::new(5), Location::new(10)];
         let nodes_for_multi_proof =
-            nodes_required_for_multi_proof(mmr.leaves(), locations).expect("test locations valid");
+            nodes_required_for_multi_proof(mem.leaves(), locations).expect("test locations valid");
         let digests = nodes_for_multi_proof
             .into_iter()
-            .map(|pos| mmr.get_node(pos).unwrap())
+            .map(|pos| mem.get_node(pos).unwrap())
             .collect();
         let multi_proof = Proof {
-            leaves: mmr.leaves(),
+            leaves: mem.leaves(),
             digests,
         };
 
-        assert_eq!(multi_proof.leaves, mmr.leaves());
+        assert_eq!(multi_proof.leaves, mem.leaves());
 
-        // Verify the proof
+        // Verify the proof.
         assert!(multi_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1382,7 +1363,7 @@ mod tests {
             root
         ));
 
-        // Verify in different order
+        // Verify in different order.
         assert!(multi_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1393,7 +1374,7 @@ mod tests {
             root
         ));
 
-        // Verify with duplicate items
+        // Verify with duplicate items.
         assert!(multi_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1407,7 +1388,7 @@ mod tests {
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new(*MAX_LOCATION + 2);
+        wrong_size_proof.leaves = Location::new(*F::MAX_LEAVES + 2);
         assert!(!wrong_size_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1418,7 +1399,7 @@ mod tests {
             root,
         ));
 
-        // Verify with wrong positions
+        // Verify with wrong positions.
         assert!(!multi_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1429,7 +1410,7 @@ mod tests {
             root,
         ));
 
-        // Verify with wrong elements
+        // Verify with wrong elements.
         let wrong_elements = [
             vec![255u8, 254u8, 253u8],
             vec![252u8, 251u8, 250u8],
@@ -1446,7 +1427,7 @@ mod tests {
         );
         assert!(!wrong_verification, "Should fail with wrong elements");
 
-        // Verify with out of range element
+        // Verify with out of range element.
         let wrong_verification = multi_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1461,7 +1442,7 @@ mod tests {
             "Should fail with out of range elements"
         );
 
-        // Verify with wrong root should fail
+        // Verify with wrong root should fail.
         let wrong_root = test_digest(99);
         assert!(!multi_proof.verify_multi_inclusion(
             &hasher,
@@ -1473,56 +1454,65 @@ mod tests {
             &wrong_root
         ));
 
-        // Empty multi-proof
-        let hasher: Standard<Sha256> = Standard::new();
-        let empty_mmr = Mmr::new(&hasher);
-        let empty_root = empty_mmr.root();
-        let empty_proof = Proof::default();
+        // Empty multi-proof.
+        let hasher = H::new();
+        let empty_mem = Mem::<F, D>::new(&hasher);
+        let empty_root = empty_mem.root();
+        let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
             &hasher,
-            &[] as &[(Digest, Location)],
+            &[] as &[(D, Location<F>)],
+            empty_root
+        ));
+
+        // Malformed empty proof with extra digests must be rejected.
+        let malformed_proof: Proof<F, D> = Proof {
+            leaves: Location::new(0),
+            digests: vec![test_digest(0)],
+        };
+        assert!(!malformed_proof.verify_multi_inclusion(
+            &hasher,
+            &[] as &[(D, Location<F>)],
             empty_root
         ));
     }
 
-    #[test]
-    fn test_proving_multi_proof_deduplication() {
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
-        // Create an MMR with enough elements to have shared digests
+    fn multi_proof_deduplication<F: Family>() {
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..30).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        let batch = {
+            let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
-        // Get individual proofs that will share some digests (elements in same subtree)
-        let proof1 = mmr.proof(&hasher, Location::new(0)).unwrap();
-        let proof2 = mmr.proof(&hasher, Location::new(1)).unwrap();
+        // Get individual proofs that will share some digests (elements in same subtree).
+        let proof1 = mem.proof(&hasher, Location::new(0)).unwrap();
+        let proof2 = mem.proof(&hasher, Location::new(1)).unwrap();
         let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
-        // Generate multi-proof for the same positions
+        // Generate multi-proof for the same positions.
         let locations = &[Location::new(0), Location::new(1)];
-        let multi_proof =
-            nodes_required_for_multi_proof(mmr.leaves(), locations).expect("test locations valid");
-        let digests = multi_proof
+        let multi_proof_nodes =
+            nodes_required_for_multi_proof(mem.leaves(), locations).expect("test locations valid");
+        let digests = multi_proof_nodes
             .into_iter()
-            .map(|pos| mmr.get_node(pos).unwrap())
+            .map(|pos| mem.get_node(pos).unwrap())
             .collect();
         let multi_proof = Proof {
-            leaves: mmr.leaves(),
+            leaves: mem.leaves(),
             digests,
         };
 
-        // The combined proof should have fewer digests due to deduplication
+        // The combined proof should have fewer digests due to deduplication.
         assert!(multi_proof.digests.len() < total_digests_separate);
 
-        // Verify it still works
-        let root = mmr.root();
+        // Verify it still works.
+        let root = mem.root();
         assert!(multi_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1533,290 +1523,26 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_max_location_is_provable() {
-        // Test that the validation logic accepts MAX_LOCATION as a valid leaf count.
-        // With MAX_LOCATION leaves, valid locations are 0..MAX_LOCATION-1.
-        // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
-        let max_loc_plus_1 = Location::new(*MAX_LOCATION + 1);
+    fn proof_leaves_malleability<F: Family>() {
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
 
-        let result = blueprint(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
-        assert!(
-            result.is_ok(),
-            "Should be able to prove with MAX_LOCATION leaves"
-        );
-
-        // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
-        let result_overflow = blueprint(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
-        assert!(
-            result_overflow.is_err(),
-            "Should reject location > MAX_LOCATION"
-        );
-        matches!(result_overflow, Err(Error::LocationOverflow(_)));
-    }
-
-    #[test]
-    fn test_max_location_multi_proof() {
-        // Test that multi_proof can handle MAX_LOCATION
-        // Should be able to generate multi-proof for MAX_LOCATION
-        let result = nodes_required_for_multi_proof(MAX_LOCATION, &[MAX_LOCATION - 1]);
-        assert!(
-            result.is_ok(),
-            "Should be able to generate multi-proof for MAX_LOCATION"
-        );
-
-        // Should reject MAX_LOCATION + 1
-        let invalid_loc = MAX_LOCATION + 1;
-        let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[MAX_LOCATION]);
-        assert!(
-            result_overflow.is_err(),
-            "Should reject location > MAX_LOCATION in multi-proof"
-        );
-    }
-
-    #[test]
-    fn test_max_proof_digests_per_element_sufficient() {
-        // Verify that MAX_PROOF_DIGESTS_PER_ELEMENT (122) is sufficient for any single-element
-        // proof in the largest valid MMR.
-        //
-        // MMR sizes follow: mmr_size(N) = 2*N - popcount(N) where N = leaf count.
-        // The number of peaks equals popcount(N).
-        //
-        // To maximize peaks, we want N with maximum popcount. N = 2^62 - 1 has 62 one-bits:
-        //   N = 0x3FFFFFFFFFFFFFFF = 2^0 + 2^1 + ... + 2^61
-        //
-        // This gives us 62 perfect binary trees with leaf counts 2^0, 2^1, ..., 2^61
-        // and corresponding heights 0, 1, ..., 61.
-        //
-        // mmr_size(2^62 - 1) = 2*(2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
-        //
-        // For a single-element proof in a tree of height h:
-        //   - Path siblings from leaf to peak: h digests
-        //   - Other peaks (not containing the element): (62 - 1) = 61 digests
-        //   - Total: h + 61 digests
-        //
-        // Worst case: element in tallest tree (h = 61)
-        //   - Path siblings: 61
-        //   - Other peaks: 61
-        //   - Total: 61 + 61 = 122 digests
-
-        const NUM_PEAKS: usize = 62;
-        const MAX_TREE_HEIGHT: usize = 61;
-        const EXPECTED_WORST_CASE: usize = MAX_TREE_HEIGHT + (NUM_PEAKS - 1);
-
-        let many_peaks_size = Position::new((1u64 << 63) - 64);
-        assert!(
-            many_peaks_size.is_mmr_size(),
-            "Size {many_peaks_size} should be a valid MMR size",
-        );
-
-        let peak_count = PeakIterator::new(many_peaks_size).count();
-        assert_eq!(peak_count, NUM_PEAKS);
-
-        // Verify the peak heights are 61, 60, ..., 1, 0 (from left to right)
-        let peaks: Vec<_> = PeakIterator::new(many_peaks_size).collect();
-        for (i, &(_pos, height)) in peaks.iter().enumerate() {
-            let expected_height = (NUM_PEAKS - 1 - i) as u32;
-            assert_eq!(
-                height, expected_height,
-                "Peak {i} should have height {expected_height}, got {height}",
-            );
-        }
-
-        // Test location 0 (leftmost leaf, in tallest tree of height 61)
-        // Expected: 61 path siblings + 61 other peaks = 122 digests
-        let leaves = Location::try_from(many_peaks_size).unwrap();
-        let loc = Location::new(0);
-        let bp = blueprint(leaves, loc..loc + 1).expect("should compute blueprint for location 0");
-        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
-
-        assert_eq!(
-            total_nodes,
-            EXPECTED_WORST_CASE,
-            "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
-        );
-
-        // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
-        // Expected: 0 path siblings + 61 other peaks = 61 digests
-        let last_leaf_loc = leaves - 1;
-        let bp = blueprint(leaves, last_leaf_loc..last_leaf_loc + 1)
-            .expect("should compute blueprint for last leaf");
-        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
-
-        let expected_last_leaf = NUM_PEAKS - 1;
-        assert_eq!(
-            total_nodes,
-            expected_last_leaf,
-            "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
-        );
-    }
-
-    #[test]
-    fn test_max_proof_digests_per_element_is_maximum() {
-        // For K peaks, the worst-case proof needs: (max_tree_height) + (K - 1) digests
-        // With K peaks of heights K-1, K-2, ..., 0, this is (K-1) + (K-1) = 2*(K-1)
-        //
-        // To get K peaks, leaf count N must have exactly K bits set.
-        // MMR size = 2*N - popcount(N) = 2*N - K
-        //
-        // For 63 peaks: N = 2^63 - 1 (63 bits set), size = 2*(2^63 - 1) - 63 = 2^64 - 65
-        // This exceeds MAX_POSITION, so is_mmr_size() returns false.
-
-        let n_for_63_peaks = (1u128 << 63) - 1;
-        let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
-        assert!(
-            size_for_63_peaks > *crate::mmr::MAX_POSITION as u128,
-            "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
-        );
-
-        let size_truncated = size_for_63_peaks as u64;
-        assert!(
-            !Position::new(size_truncated).is_mmr_size(),
-            "Size for 63 peaks should fail is_mmr_size()"
-        );
-    }
-
-    /// Regression test: pinned nodes that are sibling digests (not fold-prefix peaks) must be
-    /// verified against the extracted proof digests. A 3-leaf MMR with start_loc=1 has a pinned
-    /// node at position 0 (L0) which is a sibling within the range peak, not a fold-prefix peak.
-    #[test]
-    fn test_verify_proof_and_pinned_nodes_sibling_case() {
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
-        let elements: Vec<Digest> = (0..3).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
+        // 252 leaves. Leaf 240 sits in a peak preceded by prefix peaks.
+        let elements: Vec<D> = (0..252u16)
+            .map(|i| <Sha256 as commonware_cryptography::Hasher>::hash(&i.to_be_bytes()))
+            .collect();
+        let batch = {
+            let mut batch = mem.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mmr.apply(changeset).unwrap();
-        let root = mmr.root();
-
-        // Proof for range [1, 3) — fold prefix is empty, pinned node at position 0 is a sibling.
-        let start_loc = Location::new(1);
-        let proof = mmr
-            .range_proof(&hasher, start_loc..Location::new(3))
-            .unwrap();
-
-        let pinned: Vec<Digest> = mmr
-            .nodes_to_pin(Position::try_from(start_loc).unwrap())
-            .into_values()
-            .collect();
-        assert_eq!(pinned.len(), 1, "should have exactly one pinned node");
-
-        // Correct pinned nodes must verify.
-        assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &pinned, root,),
-            "valid pinned nodes should verify"
-        );
-
-        // Wrong pinned digest must fail.
-        let bad_pinned = vec![test_digest(99)];
-        assert!(
-            !proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &elements[1..],
-                start_loc,
-                &bad_pinned,
-                root,
-            ),
-            "wrong pinned digest should fail"
-        );
-
-        // Extra pinned node must fail.
-        let extra_pinned = vec![pinned[0], test_digest(42)];
-        assert!(
-            !proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &elements[1..],
-                start_loc,
-                &extra_pinned,
-                root,
-            ),
-            "extra pinned node should fail"
-        );
-
-        // Empty pinned nodes must fail (start_loc > 0 requires at least one).
-        assert!(
-            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], root,),
-            "missing pinned nodes should fail"
-        );
-    }
-
-    /// Test verify_proof_and_pinned_nodes when pinned nodes ARE fold-prefix peaks.
-    #[test]
-    fn test_verify_proof_and_pinned_nodes_fold_prefix_case() {
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
-        // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
-        // start_loc=8 puts the first peak entirely in the fold prefix.
-        let elements: Vec<Digest> = (0..10).map(test_digest).collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for e in &elements {
-                batch = batch.add(&hasher, e);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
-        let root = mmr.root();
-
-        let start_loc = Location::new(8);
-        let proof = mmr
-            .range_proof(&hasher, start_loc..Location::new(10))
-            .unwrap();
-
-        let pinned: Vec<Digest> = mmr
-            .nodes_to_pin(Position::try_from(start_loc).unwrap())
-            .into_values()
-            .collect();
-        assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
-
-        assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, &elements[8..], start_loc, &pinned, root,),
-            "valid fold-prefix pinned nodes should verify"
-        );
-
-        // Wrong digest must fail.
-        assert!(
-            !proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &elements[8..],
-                start_loc,
-                &[test_digest(99)],
-                root,
-            ),
-            "wrong fold-prefix digest should fail"
-        );
-    }
-
-    /// Regression test: mutating only the `leaves` field in a proof must invalidate it.
-    /// Before the fix, when a fold prefix existed, the leaf count was baked into the
-    /// pre-folded accumulator but not independently checked during verification, so a
-    /// different `leaves` value with a compatible peak structure would still verify.
-    #[test]
-    fn test_proof_leaves_malleability() {
-        let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
-
-        // 252 leaves. Leaf 240 sits in a peak preceded by 4 prefix peaks.
-        let elements: Vec<Digest> = (0..252u16)
-            .map(|i| Sha256::hash(&i.to_be_bytes()))
-            .collect();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for e in &elements {
-                batch = batch.add(&hasher, e);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
-        let root = mmr.root();
+        mem.apply_batch(&batch).unwrap();
+        let root = mem.root();
 
         let loc = Location::new(240);
-        let proof = mmr.proof(&hasher, loc).unwrap();
+        let proof = mem.proof(&hasher, loc).unwrap();
         assert!(proof.verify_element_inclusion(&hasher, &elements[240], loc, root));
 
         // Tamper with the leaves field (249 has the same peak layout for leaf 240).
@@ -1829,14 +1555,539 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-        use commonware_codec::conformance::CodecConformance;
-        use commonware_cryptography::sha256::Digest as Sha256Digest;
+    fn blueprint_errors<F: Family>() {
+        let leaves = Location::<F>::new(10);
 
-        commonware_conformance::conformance_tests! {
-            CodecConformance<Proof<Sha256Digest>>,
+        // Empty range.
+        assert!(matches!(
+            Blueprint::<F>::new(leaves, Location::new(3)..Location::new(3)),
+            Err(crate::merkle::Error::Empty)
+        ));
+
+        // Out of bounds.
+        assert!(matches!(
+            Blueprint::<F>::new(leaves, Location::new(0)..Location::new(11)),
+            Err(crate::merkle::Error::RangeOutOfBounds(_))
+        ));
+
+        // Empty locations for multi-proof.
+        assert!(matches!(
+            nodes_required_for_multi_proof::<F>(leaves, &[]),
+            Err(crate::merkle::Error::Empty)
+        ));
+    }
+
+    fn single_element_proof_reconstruction<F: Family>() {
+        for n in 1u64..=64 {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            for loc_idx in 0..n {
+                let proof = mem
+                    .proof(&hasher, Location::new(loc_idx))
+                    .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: build failed: {e:?}"));
+
+                let elements = [loc_idx.to_be_bytes()];
+                let start_loc = Location::new(loc_idx);
+
+                let reconstructed = proof
+                    .reconstruct_root(&hasher, &elements, start_loc)
+                    .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: reconstruct failed: {e:?}"));
+                assert_eq!(reconstructed, root, "n={n}, loc={loc_idx}: root mismatch");
+            }
         }
+    }
+
+    fn range_proof_reconstruction<F: Family>() {
+        for n in 2u64..=32 {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            let ranges: Vec<(u64, u64)> = vec![
+                (0, n),
+                (0, 1),
+                (n - 1, n),
+                (0, n.min(3)),
+                (n.saturating_sub(3), n),
+            ];
+
+            for (start, end) in ranges {
+                if start >= end || end > n {
+                    continue;
+                }
+                let proof = mem
+                    .range_proof(&hasher, Location::new(start)..Location::new(end))
+                    .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: build failed: {e:?}"));
+                let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
+                let start_loc = Location::new(start);
+
+                let reconstructed = proof
+                    .reconstruct_root(&hasher, &elements, start_loc)
+                    .unwrap_or_else(|e| {
+                        panic!("n={n}, range={start}..{end}: reconstruct failed: {e}")
+                    });
+                assert_eq!(
+                    reconstructed, root,
+                    "n={n}, range={start}..{end}: root mismatch"
+                );
+            }
+        }
+    }
+
+    fn verify_element_inclusion<F: Family>() {
+        for n in 1u64..=32 {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            for loc_idx in 0..n {
+                let proof = mem.proof(&hasher, Location::new(loc_idx)).unwrap();
+                let loc = Location::new(loc_idx);
+
+                assert!(
+                    proof.verify_element_inclusion(&hasher, &loc_idx.to_be_bytes(), loc, &root),
+                    "n={n}, loc={loc_idx}: verification failed"
+                );
+
+                // Wrong element should fail.
+                assert!(
+                    !proof.verify_element_inclusion(
+                        &hasher,
+                        &(loc_idx + 1000).to_be_bytes(),
+                        loc,
+                        &root,
+                    ),
+                    "n={n}, loc={loc_idx}: wrong element should not verify"
+                );
+            }
+        }
+    }
+
+    fn full_range<F: Family>() {
+        for n in 1u64..=32 {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            let proof = mem
+                .range_proof(&hasher, Location::new(0)..Location::new(n))
+                .unwrap();
+            let elements: Vec<_> = (0..n).map(|i| i.to_be_bytes()).collect();
+            let reconstructed = proof
+                .reconstruct_root(&hasher, &elements, Location::new(0))
+                .unwrap();
+            assert_eq!(reconstructed, root, "n={n}: full range failed");
+
+            // Full range should have 0 digests.
+            assert_eq!(
+                proof.digests.len(),
+                0,
+                "n={n}: full range proof should have 0 digests"
+            );
+        }
+    }
+
+    fn empty_proof_verifies_empty_tree<F: Family>() {
+        let hasher = H::new();
+        let mem = Mem::<F, D>::new(&hasher);
+        let root = *mem.root();
+        let proof = Proof::<F, D>::default();
+
+        // Empty proof should verify against the empty root.
+        assert!(proof.verify_range_inclusion(&hasher, &[] as &[&[u8]], Location::new(0), &root,));
+
+        // Non-zero start_loc with empty elements should fail.
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[&[u8]], Location::new(1), &root,));
+    }
+
+    fn every_element_contributes_to_root<F: Family>() {
+        for n in [8u64, 13, 20, 32] {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            let start = 1;
+            let end = n - 1;
+            let proof = mem
+                .range_proof(&hasher, Location::new(start)..Location::new(end))
+                .unwrap();
+            let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
+
+            // Valid elements verify.
+            assert!(
+                proof.verify_range_inclusion(&hasher, &elements, Location::new(start), &root),
+                "n={n}: valid range should verify"
+            );
+
+            // Flipping one byte in each element must cause failure.
+            for flip_idx in 0..elements.len() {
+                let mut tampered = elements.clone();
+                tampered[flip_idx][0] ^= 0xFF;
+                assert!(
+                    !proof.verify_range_inclusion(&hasher, &tampered, Location::new(start), &root,),
+                    "n={n}: tampered element at index {flip_idx} should not verify"
+                );
+            }
+        }
+    }
+
+    fn multi_proof_generation_and_verify_raw<F: Family>() {
+        let hasher = H::new();
+        let mem = build_raw::<F>(&hasher, 20);
+        let root = *mem.root();
+
+        let locations = &[Location::new(0), Location::new(5), Location::new(10)];
+        let nodes =
+            nodes_required_for_multi_proof(mem.leaves(), locations).expect("valid locations");
+        let digests = nodes
+            .into_iter()
+            .map(|pos| mem.get_node(pos).unwrap())
+            .collect();
+        let multi_proof = Proof {
+            leaves: mem.leaves(),
+            digests,
+        };
+
+        // Verify the proof.
+        assert!(multi_proof.verify_multi_inclusion(
+            &hasher,
+            &[
+                (0u64.to_be_bytes(), Location::new(0)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (10u64.to_be_bytes(), Location::new(10)),
+            ],
+            &root
+        ));
+
+        // Different order should also verify.
+        assert!(multi_proof.verify_multi_inclusion(
+            &hasher,
+            &[
+                (10u64.to_be_bytes(), Location::new(10)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (0u64.to_be_bytes(), Location::new(0)),
+            ],
+            &root
+        ));
+
+        // Wrong elements should fail.
+        assert!(!multi_proof.verify_multi_inclusion(
+            &hasher,
+            &[
+                (99u64.to_be_bytes(), Location::new(0)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (10u64.to_be_bytes(), Location::new(10)),
+            ],
+            &root
+        ));
+
+        // Wrong root should fail.
+        let wrong_root = hasher.digest(b"wrong");
+        assert!(!multi_proof.verify_multi_inclusion(
+            &hasher,
+            &[
+                (0u64.to_be_bytes(), Location::new(0)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (10u64.to_be_bytes(), Location::new(10)),
+            ],
+            &wrong_root
+        ));
+
+        // Empty multi-proof on empty tree.
+        let hasher2 = H::new();
+        let empty_mem = Mem::<F, D>::new(&hasher2);
+        let empty_proof: Proof<F, D> = Proof::default();
+        assert!(empty_proof.verify_multi_inclusion(
+            &hasher2,
+            &[] as &[([u8; 8], Location<F>)],
+            empty_mem.root()
+        ));
+
+        // Malformed empty proof with extra digests must be rejected.
+        let malformed_proof: Proof<F, D> = Proof {
+            leaves: Location::new(0),
+            digests: vec![test_digest(0)],
+        };
+        assert!(!malformed_proof.verify_multi_inclusion(
+            &hasher2,
+            &[] as &[([u8; 8], Location<F>)],
+            empty_mem.root()
+        ));
+    }
+
+    fn tampered_proof_digests_rejected<F: Family>() {
+        for n in [8u64, 13, 20, 32] {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            for loc_idx in [0, n / 2, n - 1] {
+                let proof = mem.proof(&hasher, Location::new(loc_idx)).unwrap();
+                let element = loc_idx.to_be_bytes();
+                let loc = Location::new(loc_idx);
+
+                assert!(proof.verify_element_inclusion(&hasher, &element, loc, &root));
+
+                for digest_idx in 0..proof.digests.len() {
+                    let mut tampered = proof.clone();
+                    tampered.digests[digest_idx].0[0] ^= 1;
+                    assert!(
+                        !tampered.verify_element_inclusion(&hasher, &element, loc, &root),
+                        "n={n}, loc={loc_idx}: tampered digest[{digest_idx}] should not verify"
+                    );
+                }
+            }
+        }
+    }
+
+    fn no_duplicate_positions<F: Family>() {
+        use alloc::collections::BTreeSet;
+        for n in 1u64..=64 {
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
+            let leaves = mem.leaves();
+            for loc in 0..n {
+                let loc = Location::new(loc);
+                let bp = Blueprint::<F>::new(leaves, loc..loc + 1).unwrap();
+                let mut positions: Vec<Position<F>> = Vec::new();
+                positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
+                positions.extend(&bp.fetch_nodes);
+                let set: BTreeSet<_> = positions.iter().copied().collect();
+                assert_eq!(
+                    positions.len(),
+                    set.len(),
+                    "n={n}, loc={loc}: duplicate positions"
+                );
+            }
+        }
+    }
+
+    /// `verify_proof_and_pinned_nodes` must accept pinned nodes at
+    /// `F::nodes_to_pin(start_loc)` positions for any `(leaves, start_loc)` pair.
+    ///
+    /// `nodes_to_pin(L)` returns the peaks of the tree at size L (the peaks you'd
+    /// pin if you pruned to L). `fold_prefix(N, L)` returns the peaks of the size-N
+    /// tree that lie entirely before leaf L. These can disagree when the larger tree
+    /// has merged smaller peaks into larger subtrees. The verifier must handle this
+    /// for both families.
+    fn verify_proof_and_pinned_nodes_across_sizes<F: Family>() {
+        // Sweep (leaves, start) pairs. Larger trees with start far from a peak
+        // boundary are more likely to produce pinned positions that don't appear
+        // as siblings in the proof walk.
+        let cases: &[(u64, u64)] = &[
+            // First delayed-merge birth-boundary case: the larger tree exposes a
+            // fold-prefix peak that did not exist yet at `start`.
+            (5, 4),
+            (10, 3),
+            (20, 5),
+            (50, 10),
+            (100, 10),
+            (100, 30),
+            (200, 50),
+            (500, 100),
+            (1000, 100),
+            (1000, 300),
+            (2000, 500),
+        ];
+
+        let hasher = H::new();
+        for &(n, start) in cases {
+            let mem = build_raw::<F>(&hasher, n);
+            let root = *mem.root();
+
+            let pinned: Vec<D> = F::nodes_to_pin(Location::<F>::new(start))
+                .map(|pos| mem.get_node(pos).unwrap())
+                .collect();
+
+            let proof = mem
+                .range_proof(
+                    &hasher,
+                    Location::<F>::new(start)..Location::<F>::new(start + 1),
+                )
+                .unwrap();
+
+            assert!(
+                proof.verify_proof_and_pinned_nodes(
+                    &hasher,
+                    &[start.to_be_bytes()],
+                    Location::<F>::new(start),
+                    &pinned,
+                    &root,
+                ),
+                "verify_proof_and_pinned_nodes failed: leaves={n}, start={start}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // MMR tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mmr_empty_proof() {
+        empty_proof::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_verify_element() {
+        verify_element::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_verify_range() {
+        verify_range::<mmr::Family>();
+    }
+    #[test_traced]
+    fn mmr_retained_nodes_provable_after_pruning() {
+        retained_nodes_provable_after_pruning::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_ranges_provable_after_pruning() {
+        ranges_provable_after_pruning::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_proof_serialization() {
+        proof_serialization::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_multi_proof_generation_and_verify() {
+        multi_proof_generation_and_verify::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_multi_proof_deduplication() {
+        multi_proof_deduplication::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_proof_leaves_malleability() {
+        proof_leaves_malleability::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_blueprint_errors() {
+        blueprint_errors::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_single_element_proof_reconstruction() {
+        single_element_proof_reconstruction::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_range_proof_reconstruction() {
+        range_proof_reconstruction::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_verify_element_inclusion() {
+        verify_element_inclusion::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_full_range() {
+        full_range::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_empty_proof_verifies_empty_tree() {
+        empty_proof_verifies_empty_tree::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_every_element_contributes_to_root() {
+        every_element_contributes_to_root::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_multi_proof_generation_and_verify_raw() {
+        multi_proof_generation_and_verify_raw::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_tampered_proof_digests_rejected() {
+        tampered_proof_digests_rejected::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_no_duplicate_positions() {
+        no_duplicate_positions::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_verify_proof_and_pinned_nodes_across_sizes() {
+        verify_proof_and_pinned_nodes_across_sizes::<mmr::Family>();
+    }
+
+    // ---------------------------------------------------------------------------
+    // MMB tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mmb_empty_proof() {
+        empty_proof::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_verify_element() {
+        verify_element::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_verify_range() {
+        verify_range::<mmb::Family>();
+    }
+    #[test_traced]
+    fn mmb_retained_nodes_provable_after_pruning() {
+        retained_nodes_provable_after_pruning::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_ranges_provable_after_pruning() {
+        ranges_provable_after_pruning::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_proof_serialization() {
+        proof_serialization::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_multi_proof_generation_and_verify() {
+        multi_proof_generation_and_verify::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_multi_proof_deduplication() {
+        multi_proof_deduplication::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_proof_leaves_malleability() {
+        proof_leaves_malleability::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_blueprint_errors() {
+        blueprint_errors::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_single_element_proof_reconstruction() {
+        single_element_proof_reconstruction::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_range_proof_reconstruction() {
+        range_proof_reconstruction::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_verify_element_inclusion() {
+        verify_element_inclusion::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_full_range() {
+        full_range::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_empty_proof_verifies_empty_tree() {
+        empty_proof_verifies_empty_tree::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_every_element_contributes_to_root() {
+        every_element_contributes_to_root::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_multi_proof_generation_and_verify_raw() {
+        multi_proof_generation_and_verify_raw::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_tampered_proof_digests_rejected() {
+        tampered_proof_digests_rejected::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_no_duplicate_positions() {
+        no_duplicate_positions::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_verify_proof_and_pinned_nodes_across_sizes() {
+        verify_proof_and_pinned_nodes_across_sizes::<mmb::Family>();
     }
 }

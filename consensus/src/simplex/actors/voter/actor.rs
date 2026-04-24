@@ -32,7 +32,10 @@ use commonware_utils::{
     futures::AbortablePool,
 };
 use core::{future::Future, panic};
-use futures::{pin_mut, StreamExt};
+use futures::{
+    future::{ready, Either},
+    pin_mut, StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
@@ -323,7 +326,7 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Records a locally verified nullify vote and ensures the round exists.
+    /// Persists our nullify vote to the journal for crash recovery.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         self.append_journal(nullify.view(), Artifact::Nullify(nullify))
             .await;
@@ -362,10 +365,7 @@ impl<
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
         let view = self.state.current_view();
-        let Some(retry) = self
-            .try_broadcast_nullify(batcher, vote_sender, view, true)
-            .await
-        else {
+        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
             return;
         };
 
@@ -535,17 +535,13 @@ impl<
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
-    ///
-    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
-    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
     async fn try_broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-        timeout: bool,
     ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
+        let (was_retry, nullify) = self.state.construct_nullify(view)?;
         self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
             .await;
         Some(was_retry)
@@ -678,8 +674,7 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_nullify(batcher, vote_sender, view, false)
-            .await;
+        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
@@ -699,7 +694,6 @@ impl<
         spawn_cell!(
             self.context,
             self.run(batcher, resolver, vote_sender, certificate_sender)
-                .await
         )
     }
 
@@ -801,6 +795,14 @@ impl<
                             .await;
                     }
                 }
+
+                // We deliberately avoid re-seeding the batcher with our
+                // own votes (or the votes of other peers) on replay. We assume that
+                // whatever view we were in during shutdown is no longer the latest
+                // and we'll quickly jump ahead to a new view.
+                //
+                // If this is not the case (cluster-wide shutdown), we will recover
+                // when timing out.
             }
         }
         self.journal = Some(journal);
@@ -859,12 +861,17 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for proposal in self.state.certify_candidates() {
+                for (proposal, is_local) in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let receiver = self.automaton.certify(round, proposal.payload).await;
-                    let handle = certify_pool.push(async move { (round, receiver.await) });
+                    let result = if is_local {
+                        Either::Left(ready(Ok(true)))
+                    } else {
+                        let receiver = self.automaton.certify(round, proposal.payload).await;
+                        Either::Right(receiver)
+                    };
+                    let handle = certify_pool.push(async move { (round, result.await) });
                     self.state.set_certify_handle(view, handle);
                 }
 
@@ -881,14 +888,6 @@ impl<
             },
             on_stopped => {
                 debug!("context shutdown, stopping voter");
-
-                // Sync and drop journal
-                self.journal
-                    .take()
-                    .unwrap()
-                    .sync_all()
-                    .await
-                    .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
                 // Process the timeout
@@ -927,8 +926,15 @@ impl<
                 }
                 view = self.state.current_view();
 
-                // Notify application of proposal
-                self.relay.broadcast(proposed, Plan::Propose).await;
+                // Notify application of proposal.
+                self.relay
+                    .broadcast(
+                        proposed,
+                        Plan::Propose {
+                            round: context.round,
+                        },
+                    )
+                    .await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter
@@ -1100,5 +1106,13 @@ impl<
                 }
             },
         }
+
+        // Sync and drop the journal
+        self.journal
+            .take()
+            .expect("journal missing on voter exit")
+            .sync_all()
+            .await
+            .expect("unable to sync journal");
     }
 }

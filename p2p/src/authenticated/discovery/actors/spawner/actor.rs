@@ -19,7 +19,7 @@ use commonware_runtime::{
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 pub struct Actor<
@@ -31,6 +31,7 @@ pub struct Actor<
     context: ContextCell<E>,
 
     mailbox_size: usize,
+    send_batch_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
     max_peer_set_size: u64,
     peer_gossip_max_count: usize,
@@ -79,6 +80,7 @@ impl<
             Self {
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
+                send_batch_size: cfg.send_batch_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -98,7 +100,7 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, router).await)
+        spawn_cell!(self.context, self.run(tracker, router))
     }
 
     async fn run(
@@ -150,6 +152,7 @@ impl<
                                         dropped_messages,
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
+                                        send_batch_size: self.send_batch_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                         max_peer_set_size: self.max_peer_set_size,
                                         peer_gossip_max_count: self.peer_gossip_max_count,

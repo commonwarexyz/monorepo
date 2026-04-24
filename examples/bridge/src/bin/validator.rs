@@ -15,7 +15,7 @@ use commonware_cryptography::{
     },
     ed25519, Sha256, Signer as _,
 };
-use commonware_p2p::{authenticated, Manager};
+use commonware_p2p::{authenticated, Manager as _};
 use commonware_runtime::{
     buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
 };
