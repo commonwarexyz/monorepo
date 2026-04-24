@@ -63,7 +63,8 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata, floor) => {
+                Operation::Commit(metadata, _floor) => {
+                    let floor = self.last_commit_loc();
                     let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized)?;
                     self.commit().await?;

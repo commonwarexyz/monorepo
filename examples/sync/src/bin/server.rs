@@ -18,7 +18,10 @@ use commonware_storage::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
-    databases::{CompactSyncable, DatabaseType, ExampleDatabase, SyncMode, Syncable},
+    databases::{
+        parse_legacy_database_type, CompactSyncable, DatabaseType, ExampleDatabase, StorageKind,
+        SyncMode, Syncable,
+    },
     immutable, immutable_compact, keyless, keyless_compact,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
@@ -51,8 +54,10 @@ const RESPONSE_BUFFER_SIZE: usize = 64;
 struct Config {
     /// Sync mode to use.
     sync_mode: SyncMode,
-    /// Database type to use.
-    database_type: DatabaseType,
+    /// Database family to use.
+    family: DatabaseType,
+    /// Backing storage kind used by compact-mode servers.
+    storage: Option<StorageKind>,
     /// Port to listen on.
     port: u16,
     /// Number of initial operations to create.
@@ -823,11 +828,25 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("full"),
         )
         .arg(
+            Arg::new("family")
+                .long("family")
+                .value_name("any|current|immutable|keyless")
+                .help("Database family to use for the selected mode (defaults to 'any')."),
+        )
+        .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|current|immutable|keyless|immutable-compact|keyless-compact")
-                .help("Database type to use for the selected mode.")
-                .default_value("any"),
+                .value_name("LEGACY")
+                .help("Deprecated hidden alias for --family.")
+                .hide(true)
+                .conflicts_with("family"),
+        )
+        .arg(
+            Arg::new("storage")
+                .long("storage")
+                .value_name("full|compact")
+                .help("Backing storage used by compact-mode servers (defaults to 'full').")
+                .required(false),
         )
         .arg(
             Arg::new("port")
@@ -883,22 +902,54 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .get_one::<String>("mode")
         .unwrap()
         .parse::<SyncMode>()?;
-    let database_type = matches
-        .get_one::<String>("db")
-        .unwrap()
-        .parse::<DatabaseType>()?;
-    if !database_type.supports_mode(sync_mode) {
-        return Err(format!(
-            "Database type '{}' is not supported in '{}' mode",
-            database_type.as_str(),
-            sync_mode.as_str()
+    let (family, legacy_storage) = if let Some(legacy_db) = matches.get_one::<String>("db") {
+        parse_legacy_database_type(legacy_db)?
+    } else {
+        (
+            matches
+                .get_one::<String>("family")
+                .map_or(Ok(DatabaseType::Any), |value| value.parse::<DatabaseType>())?,
+            None,
         )
-        .into());
+    };
+    let explicit_storage = matches
+        .get_one::<String>("storage")
+        .map(|value| value.parse::<StorageKind>())
+        .transpose()?;
+    let storage = match (legacy_storage, explicit_storage) {
+        (Some(legacy), Some(explicit)) if legacy != explicit => {
+            return Err(format!(
+                "legacy --db value implies storage '{}' but --storage was '{}'",
+                legacy.as_str(),
+                explicit.as_str()
+            )
+            .into());
+        }
+        (Some(legacy), _) => Some(legacy),
+        (None, Some(explicit)) => Some(explicit),
+        (None, None) => None,
+    };
+    match sync_mode {
+        SyncMode::Full => {
+            if storage.is_some() {
+                return Err("--storage is only valid with --mode compact".into());
+            }
+        }
+        SyncMode::Compact => {
+            if !family.supports_compact_storage() {
+                return Err(format!(
+                    "Database family '{}' is not supported in 'compact' mode",
+                    family.as_str()
+                )
+                .into());
+            }
+        }
     }
 
     Ok(Config {
         sync_mode,
-        database_type,
+        family,
+        storage,
         port: matches
             .get_one::<String>("port")
             .unwrap()
@@ -958,7 +1009,8 @@ fn main() {
         );
         info!(
             sync_mode = %config.sync_mode.as_str(),
-            database_type = %config.database_type.as_str(),
+            family = %config.family.as_str(),
+            storage = %config.storage.map(|kind| kind.as_str()).unwrap_or("n/a"),
             port = config.port,
             initial_ops = config.initial_ops,
             storage_dir = %config.storage_dir,
@@ -968,28 +1020,30 @@ fn main() {
             "configuration"
         );
 
-        // Run the appropriate server based on sync mode and database type.
-        let result = match (config.sync_mode, config.database_type) {
-            (SyncMode::Full, DatabaseType::Any) => run_any(context, config).await,
-            (SyncMode::Full, DatabaseType::Current) => run_current(context, config).await,
-            (SyncMode::Full, DatabaseType::Immutable) => run_immutable(context, config).await,
-            (SyncMode::Full, DatabaseType::Keyless) => run_keyless(context, config).await,
-            (SyncMode::Compact, DatabaseType::Immutable) => {
+        // Run the appropriate server based on sync mode, family, and compact backing storage.
+        let compact_storage = config.storage.unwrap_or(StorageKind::Full);
+        let result = match (config.sync_mode, config.family, compact_storage) {
+            (SyncMode::Full, DatabaseType::Any, _) => run_any(context, config).await,
+            (SyncMode::Full, DatabaseType::Current, _) => run_current(context, config).await,
+            (SyncMode::Full, DatabaseType::Immutable, _) => run_immutable(context, config).await,
+            (SyncMode::Full, DatabaseType::Keyless, _) => run_keyless(context, config).await,
+            (SyncMode::Compact, DatabaseType::Immutable, StorageKind::Full) => {
                 run_immutable_full_source(context, config).await
             }
-            (SyncMode::Compact, DatabaseType::Keyless) => {
+            (SyncMode::Compact, DatabaseType::Keyless, StorageKind::Full) => {
                 run_keyless_full_source(context, config).await
             }
-            (SyncMode::Compact, DatabaseType::ImmutableCompact) => {
+            (SyncMode::Compact, DatabaseType::Immutable, StorageKind::Compact) => {
                 run_immutable_compact(context, config).await
             }
-            (SyncMode::Compact, DatabaseType::KeylessCompact) => {
+            (SyncMode::Compact, DatabaseType::Keyless, StorageKind::Compact) => {
                 run_keyless_compact(context, config).await
             }
             _ => Err(Box::<dyn std::error::Error>::from(format!(
-                "unsupported combination: mode={} db={}",
+                "unsupported combination: mode={} family={} storage={}",
                 config.sync_mode.as_str(),
-                config.database_type.as_str()
+                config.family.as_str(),
+                compact_storage.as_str()
             ))),
         };
 

@@ -6,6 +6,8 @@
 //! [commonware_storage::qmdb::immutable], or [commonware_storage::qmdb::keyless]. Compact sync
 //! demonstrates the compact-storage variants of
 //! [commonware_storage::qmdb::immutable] and [commonware_storage::qmdb::keyless].
+//! The CLI selects the logical database family with `--family`; in compact mode, only the server
+//! chooses backing storage with `--storage`.
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 

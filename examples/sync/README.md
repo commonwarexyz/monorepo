@@ -34,15 +34,16 @@ cargo test
 cargo run --bin server
 
 # Start a compact-sync server backed by a full immutable database
-cargo run --bin server -- --mode compact --db immutable
+cargo run --bin server -- --mode compact --family immutable --storage full
 
 # Start a compact-sync server backed by a compact-storage immutable database
-cargo run --bin server -- --mode compact --db immutable-compact
+cargo run --bin server -- --mode compact --family immutable --storage compact
 ```
 
 Server options:
 - `--mode <full|compact>`: Sync mode to demonstrate (default: `full`)
-- `--db <...>`: Database type to use for the selected mode
+- `--family <any|current|immutable|keyless>`: Database family to use for the selected mode (default: `any`)
+- `--storage <full|compact>`: Backing storage used by compact-mode servers (default: `full` when omitted in compact mode)
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
@@ -57,15 +58,12 @@ Server options:
 cargo run --bin client
 
 # Connect to a compact-sync server for immutable state
-cargo run --bin client -- --mode compact --db immutable
-
-# Connect explicitly to a compact-storage immutable target
-cargo run --bin client -- --mode compact --db immutable-compact
+cargo run --bin client -- --mode compact --family immutable
 ```
 
 Client options:
 - `--mode <full|compact>`: Sync mode to demonstrate (default: `full`)
-- `--db <...>`: Database type to use for the selected mode
+- `--family <any|current|immutable|keyless>`: Database family to use for the selected mode (default: `any`)
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations in `full` mode (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
@@ -76,17 +74,28 @@ Client options:
 
 ### Supported mode/database combinations
 
-- `--mode full --db any`
-- `--mode full --db current`
-- `--mode full --db immutable`
-- `--mode full --db keyless`
-- `--mode compact --db immutable`
-- `--mode compact --db keyless`
-- `--mode compact --db immutable-compact`
-- `--mode compact --db keyless-compact`
+- Client:
+  - `--mode full --family any`
+  - `--mode full --family current`
+  - `--mode full --family immutable`
+  - `--mode full --family keyless`
+  - `--mode compact --family immutable`
+  - `--mode compact --family keyless`
+- Server:
+  - `--mode full --family any`
+  - `--mode full --family current`
+  - `--mode full --family immutable`
+  - `--mode full --family keyless`
+  - `--mode compact --family immutable --storage full`
+  - `--mode compact --family immutable --storage compact`
+  - `--mode compact --family keyless --storage full`
+  - `--mode compact --family keyless --storage compact`
 
-The important distinction is between the database used by the server and the database materialized
-by the client:
+The important distinction is between:
+
+- the sync **mode** (`full` vs `compact`)
+- the database **family** (`any`, `current`, `immutable`, `keyless`)
+- the compact-server backing **storage** (`full` vs `compact`)
 
 - In `full` mode, the client downloads and replays authenticated operations into a full database.
 - In `compact` mode, the client does **not** store historical operations. Instead it downloads the
@@ -94,22 +103,16 @@ by the client:
 
 That means:
 
-- a compact-sync **server** may be backed by either a full `immutable` / `keyless` database or a
-  compact-storage `immutable-compact` / `keyless-compact` database
+- a compact-sync **server** may be backed by either a full or compact `immutable` / `keyless`
+  database, selected via `--storage`
 - a compact-sync **client** always materializes into compact storage:
-  - `--mode compact --db immutable` and `--mode compact --db immutable-compact` both create a
-    compact immutable target
-  - `--mode compact --db keyless` and `--mode compact --db keyless-compact` both create a compact
-    keyless target
-
-So `immutable` vs `immutable-compact` is only a meaningful distinction for the compact **server**
-side. On the compact **client** side, those flag pairs select the same compact target shape.
+  - `--mode compact --family immutable` creates a compact immutable target
+  - `--mode compact --family keyless` creates a compact keyless target
 
 Compact sync can therefore flow:
 
-- from full `immutable` / `keyless` into compact `immutable-compact` / `keyless-compact`
-- from compact `immutable-compact` / `keyless-compact` into compact `immutable-compact` /
-  `keyless-compact`
+- from full `immutable` / `keyless` into compact `immutable` / `keyless`
+- from compact `immutable` / `keyless` into compact `immutable` / `keyless`
 
 But it cannot flow from compact storage back into a full database, because compact storage keeps
 only the current authenticated frontier and witness, not the historical operations required for
@@ -125,7 +128,7 @@ it has reconstructed the same full database state locally.
 
 1. **Start the server:**
    ```bash
-   cargo run --bin server -- --mode full --db any --initial-ops 50 --op-interval 2s --ops-per-interval 3
+   cargo run --bin server -- --mode full --family any --initial-ops 50 --op-interval 2s --ops-per-interval 3
    ```
 
    You should see output like:
@@ -139,7 +142,7 @@ it has reconstructed the same full database state locally.
 
 2. **In another terminal, run the client:**
    ```bash
-   cargo run --bin client -- --mode full --db any --batch-size 25 --target-update-interval 3s --sync-interval 5s
+   cargo run --bin client -- --mode full --family any --batch-size 25 --target-update-interval 3s --sync-interval 5s
    ```
 
    In full mode, the client must use the same database family as the server because it is replaying
@@ -163,16 +166,16 @@ materializes a compact-storage database locally.
 
 1. **Start the compact server:**
    ```bash
-   cargo run --bin server -- --mode compact --db immutable --initial-ops 50 --op-interval 2s --ops-per-interval 3
+   cargo run --bin server -- --mode compact --family immutable --storage full --initial-ops 50 --op-interval 2s --ops-per-interval 3
    ```
 
    Here the server is using a full immutable database as the source for compact sync. A compact
-   sync source may be either full or compact-storage, as long as it can serve the latest compact
-   authenticated state.
+   sync source may use either `--storage full` or `--storage compact`, as long as it can serve the
+   latest compact authenticated state.
 
 2. **Run the compact client:**
    ```bash
-   cargo run --bin client -- --mode compact --db immutable --sync-interval 5s
+   cargo run --bin client -- --mode compact --family immutable --sync-interval 5s
    ```
 
    The compact client fetches the latest compact target, downloads the authenticated frontier and

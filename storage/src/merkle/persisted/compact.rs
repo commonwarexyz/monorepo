@@ -132,7 +132,7 @@ const fn node_prefix(slot: u8) -> u8 {
 }
 
 impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
-    fn validate_persisted_leaves(leaves: Location<F>) -> Result<(), Error<F>> {
+    const fn validate_persisted_leaves(leaves: Location<F>) -> Result<(), Error<F>> {
         if !leaves.is_valid() {
             return Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"));
         }

@@ -45,15 +45,13 @@ impl SyncMode {
     }
 }
 
-/// Database type to sync.
+/// Database family to synchronize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseType {
     Any,
     Current,
     Immutable,
     Keyless,
-    ImmutableCompact,
-    KeylessCompact,
 }
 
 impl std::str::FromStr for DatabaseType {
@@ -65,11 +63,9 @@ impl std::str::FromStr for DatabaseType {
             "current" => Ok(Self::Current),
             "immutable" => Ok(Self::Immutable),
             "keyless" => Ok(Self::Keyless),
-            "immutable-compact" => Ok(Self::ImmutableCompact),
-            "keyless-compact" => Ok(Self::KeylessCompact),
             _ => Err(format!(
-                "Invalid database type: '{s}'. Must be 'any', 'current', 'immutable', 'keyless', \
-                 'immutable-compact', or 'keyless-compact'",
+                "Invalid database family: '{s}'. Must be 'any', 'current', 'immutable', or \
+                 'keyless'",
             )),
         }
     }
@@ -82,40 +78,67 @@ impl DatabaseType {
             Self::Current => "current",
             Self::Immutable => "immutable",
             Self::Keyless => "keyless",
-            Self::ImmutableCompact => "immutable-compact",
-            Self::KeylessCompact => "keyless-compact",
         }
     }
 
-    pub const fn supports_mode(self, mode: SyncMode) -> bool {
+    pub const fn supports_client_mode(self, mode: SyncMode) -> bool {
         match mode {
             SyncMode::Full => matches!(
                 self,
                 Self::Any | Self::Current | Self::Immutable | Self::Keyless
             ),
-            SyncMode::Compact => matches!(
-                self,
-                Self::Immutable | Self::Keyless | Self::ImmutableCompact | Self::KeylessCompact
-            ),
+            SyncMode::Compact => matches!(self, Self::Immutable | Self::Keyless),
         }
     }
 
-    /// Return the client-side compact target type for this database family.
-    ///
-    /// In compact mode, the server and client roles are intentionally a little asymmetric:
-    ///
-    /// - the server may be backed by either a full database (`immutable`, `keyless`) or a
-    ///   compact-storage database (`immutable-compact`, `keyless-compact`)
-    /// - the client always materializes into compact storage
-    ///
-    /// That is why `immutable` and `immutable-compact` both map to `immutable-compact` here, and
-    /// likewise for `keyless`.
-    pub const fn compact_target(self) -> Option<Self> {
-        match self {
-            Self::Immutable | Self::ImmutableCompact => Some(Self::ImmutableCompact),
-            Self::Keyless | Self::KeylessCompact => Some(Self::KeylessCompact),
-            _ => None,
+    pub const fn supports_compact_storage(self) -> bool {
+        matches!(self, Self::Immutable | Self::Keyless)
+    }
+}
+
+/// Backing storage kind used by a compact-mode server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageKind {
+    Full,
+    Compact,
+}
+
+impl std::str::FromStr for StorageKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "full" => Ok(Self::Full),
+            "compact" => Ok(Self::Compact),
+            _ => Err(format!(
+                "Invalid storage kind: '{s}'. Must be 'full' or 'compact'",
+            )),
         }
+    }
+}
+
+impl StorageKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+/// Parse hidden legacy `--db` values for backward compatibility.
+pub fn parse_legacy_database_type(s: &str) -> Result<(DatabaseType, Option<StorageKind>), String> {
+    match s.to_lowercase().as_str() {
+        "any" => Ok((DatabaseType::Any, None)),
+        "current" => Ok((DatabaseType::Current, None)),
+        "immutable" => Ok((DatabaseType::Immutable, None)),
+        "keyless" => Ok((DatabaseType::Keyless, None)),
+        "immutable-compact" => Ok((DatabaseType::Immutable, Some(StorageKind::Compact))),
+        "keyless-compact" => Ok((DatabaseType::Keyless, Some(StorageKind::Compact))),
+        _ => Err(format!(
+            "Invalid legacy database type: '{s}'. Must be 'any', 'current', 'immutable', \
+             'keyless', 'immutable-compact', or 'keyless-compact'",
+        )),
     }
 }
 
@@ -146,7 +169,7 @@ pub trait ExampleDatabase: Sized {
     /// Get the database's root digest.
     fn root(&self) -> Key;
 
-    /// Get the database type name for logging.
+    /// Get the database family name for logging.
     fn name() -> &'static str;
 }
 
@@ -202,48 +225,44 @@ pub trait CompactSyncable: ExampleDatabase {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseType, SyncMode};
+    use super::{parse_legacy_database_type, DatabaseType, StorageKind, SyncMode};
 
     #[test]
-    fn test_supported_mode_matrix() {
-        assert!(DatabaseType::Any.supports_mode(SyncMode::Full));
-        assert!(!DatabaseType::Any.supports_mode(SyncMode::Compact));
+    fn test_supported_client_mode_matrix() {
+        assert!(DatabaseType::Any.supports_client_mode(SyncMode::Full));
+        assert!(!DatabaseType::Any.supports_client_mode(SyncMode::Compact));
 
-        assert!(DatabaseType::Current.supports_mode(SyncMode::Full));
-        assert!(!DatabaseType::Current.supports_mode(SyncMode::Compact));
+        assert!(DatabaseType::Current.supports_client_mode(SyncMode::Full));
+        assert!(!DatabaseType::Current.supports_client_mode(SyncMode::Compact));
 
-        assert!(DatabaseType::Immutable.supports_mode(SyncMode::Full));
-        assert!(DatabaseType::Immutable.supports_mode(SyncMode::Compact));
+        assert!(DatabaseType::Immutable.supports_client_mode(SyncMode::Full));
+        assert!(DatabaseType::Immutable.supports_client_mode(SyncMode::Compact));
 
-        assert!(DatabaseType::Keyless.supports_mode(SyncMode::Full));
-        assert!(DatabaseType::Keyless.supports_mode(SyncMode::Compact));
-
-        assert!(!DatabaseType::ImmutableCompact.supports_mode(SyncMode::Full));
-        assert!(DatabaseType::ImmutableCompact.supports_mode(SyncMode::Compact));
-
-        assert!(!DatabaseType::KeylessCompact.supports_mode(SyncMode::Full));
-        assert!(DatabaseType::KeylessCompact.supports_mode(SyncMode::Compact));
+        assert!(DatabaseType::Keyless.supports_client_mode(SyncMode::Full));
+        assert!(DatabaseType::Keyless.supports_client_mode(SyncMode::Compact));
     }
 
     #[test]
-    fn test_compact_target_mapping() {
+    fn test_compact_storage_support() {
+        assert!(!DatabaseType::Any.supports_compact_storage());
+        assert!(!DatabaseType::Current.supports_compact_storage());
+        assert!(DatabaseType::Immutable.supports_compact_storage());
+        assert!(DatabaseType::Keyless.supports_compact_storage());
+    }
+
+    #[test]
+    fn test_legacy_database_type_mapping() {
         assert_eq!(
-            DatabaseType::Immutable.compact_target(),
-            Some(DatabaseType::ImmutableCompact)
+            parse_legacy_database_type("immutable").unwrap(),
+            (DatabaseType::Immutable, None)
         );
         assert_eq!(
-            DatabaseType::ImmutableCompact.compact_target(),
-            Some(DatabaseType::ImmutableCompact)
+            parse_legacy_database_type("immutable-compact").unwrap(),
+            (DatabaseType::Immutable, Some(StorageKind::Compact))
         );
         assert_eq!(
-            DatabaseType::Keyless.compact_target(),
-            Some(DatabaseType::KeylessCompact)
+            parse_legacy_database_type("keyless-compact").unwrap(),
+            (DatabaseType::Keyless, Some(StorageKind::Compact))
         );
-        assert_eq!(
-            DatabaseType::KeylessCompact.compact_target(),
-            Some(DatabaseType::KeylessCompact)
-        );
-        assert_eq!(DatabaseType::Any.compact_target(), None);
-        assert_eq!(DatabaseType::Current.compact_target(), None);
     }
 }

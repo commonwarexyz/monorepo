@@ -14,7 +14,7 @@ use commonware_storage::{
 };
 use commonware_sync::{
     any, crate_version, current,
-    databases::{DatabaseType, SyncMode},
+    databases::{parse_legacy_database_type, DatabaseType, SyncMode},
     immutable, immutable_compact, keyless, keyless_compact,
     net::{ErrorCode, Resolver},
     Error, Key,
@@ -46,8 +46,8 @@ const UPDATE_CHANNEL_SIZE: usize = 16;
 struct Config {
     /// Sync mode to use.
     sync_mode: SyncMode,
-    /// Database type to use.
-    database_type: DatabaseType,
+    /// Database family to use.
+    family: DatabaseType,
     /// Server address to connect to.
     server: SocketAddr,
     /// Batch size for fetching operations.
@@ -428,11 +428,18 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("full"),
         )
         .arg(
+            Arg::new("family")
+                .long("family")
+                .value_name("any|current|immutable|keyless")
+                .help("Database family to use for the selected mode (defaults to 'any')."),
+        )
+        .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|current|immutable|keyless|immutable-compact|keyless-compact")
-                .help("Database type to use for the selected mode.")
-                .default_value("any"),
+                .value_name("LEGACY")
+                .help("Deprecated hidden alias for --family.")
+                .hide(true)
+                .conflicts_with("family"),
         )
         .arg(
             Arg::new("server")
@@ -497,15 +504,20 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .unwrap()
         .parse::<SyncMode>()
         .map_err(|e| format!("Invalid sync mode: {e}"))?;
-    let database_type = matches
-        .get_one::<String>("db")
-        .unwrap()
-        .parse::<DatabaseType>()
-        .map_err(|e| format!("Invalid database type: {e}"))?;
-    if !database_type.supports_mode(sync_mode) {
+    let family = if let Some(legacy_db) = matches.get_one::<String>("db") {
+        let (family, _legacy_storage) = parse_legacy_database_type(legacy_db)
+            .map_err(|e| format!("Invalid legacy database type: {e}"))?;
+        family
+    } else {
+        matches
+            .get_one::<String>("family")
+            .map_or(Ok(DatabaseType::Any), |value| value.parse::<DatabaseType>())
+            .map_err(|e| format!("Invalid database family: {e}"))?
+    };
+    if !family.supports_client_mode(sync_mode) {
         return Err(format!(
-            "Database type '{}' is not supported in '{}' mode",
-            database_type.as_str(),
+            "Database family '{}' is not supported in '{}' mode",
+            family.as_str(),
             sync_mode.as_str()
         )
         .into());
@@ -558,7 +570,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
 
     Ok(Config {
         sync_mode,
-        database_type,
+        family,
         server,
         batch_size,
         storage_dir,
@@ -574,12 +586,9 @@ fn main() {
         eprintln!("Configuration error: {e}");
         std::process::exit(1);
     });
-    let materialized_database_type = match config.sync_mode {
-        SyncMode::Full => config.database_type,
-        SyncMode::Compact => config
-            .database_type
-            .compact_target()
-            .expect("compact mode should always resolve to a compact-storage target"),
+    let materialized_storage = match config.sync_mode {
+        SyncMode::Full => "full",
+        SyncMode::Compact => "compact",
     };
 
     let executor_config =
@@ -597,8 +606,8 @@ fn main() {
         );
         info!(
             sync_mode = %config.sync_mode.as_str(),
-            database_type = %config.database_type.as_str(),
-            materialized_database_type = %materialized_database_type.as_str(),
+            family = %config.family.as_str(),
+            materialized_storage,
             server = %config.server,
             batch_size = config.batch_size,
             storage_dir = %config.storage_dir,
@@ -609,8 +618,8 @@ fn main() {
             "client starting with configuration"
         );
 
-        // Dispatch based on sync mode and database type.
-        let result = match (config.sync_mode, materialized_database_type) {
+        // Dispatch based on sync mode and database family.
+        let result = match (config.sync_mode, config.family) {
             (SyncMode::Full, DatabaseType::Any) => {
                 run_any(context.with_label("sync"), config).await
             }
@@ -623,16 +632,16 @@ fn main() {
             (SyncMode::Full, DatabaseType::Keyless) => {
                 run_keyless(context.with_label("sync"), config).await
             }
-            (SyncMode::Compact, DatabaseType::ImmutableCompact) => {
+            (SyncMode::Compact, DatabaseType::Immutable) => {
                 run_immutable_compact(context.with_label("sync"), config).await
             }
-            (SyncMode::Compact, DatabaseType::KeylessCompact) => {
+            (SyncMode::Compact, DatabaseType::Keyless) => {
                 run_keyless_compact(context.with_label("sync"), config).await
             }
             _ => Err(Box::<dyn std::error::Error>::from(format!(
-                "unsupported combination: mode={} db={}",
+                "unsupported combination: mode={} family={}",
                 config.sync_mode.as_str(),
-                config.database_type.as_str()
+                config.family.as_str()
             ))),
         };
 

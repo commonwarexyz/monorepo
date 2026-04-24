@@ -58,10 +58,13 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
 
 /// Create deterministic test operations for demonstration purposes.
 ///
-/// Generates Append operations and periodic Commit operations, advancing the inactivity
-/// floor at each commit to the *previous* commit's location. This models a realistic
-/// application that declares older commits inactive over time (enabling pruning) while
-/// always keeping the most recent commit readable.
+/// Generates Append operations and periodic Commit operations for a freshly initialized
+/// example database.
+///
+/// The commit floors in this returned stream are exact for bootstrapping from the initial
+/// commit at location 0. When later appending demo operations onto an already-running
+/// example database, `add_operations` recomputes each commit's floor from the live db
+/// state so repeated server-side growth keeps the floor monotonic.
 pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
@@ -126,7 +129,8 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata, floor) => {
+                Operation::Commit(metadata, _floor) => {
+                    let floor = self.last_commit_loc();
                     let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
