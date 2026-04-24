@@ -281,12 +281,12 @@ pub(crate) fn child_label(prefix: &str, label: &str) -> String {
     name
 }
 
-struct RuntimeRegistration {
+struct RegistryGuard {
     id: u64,
     registry: Weak<Mutex<RegistryInner>>,
 }
 
-impl RegistrationGuard for RuntimeRegistration {
+impl RegistrationGuard for RegistryGuard {
     fn registration_cloned(&self, registration: &RegistrationHandle) {
         let Some(registry) = self.registry.upgrade() else {
             return;
@@ -579,8 +579,7 @@ impl RegistryInner {
         self.assert_family_matches(&name, &help, metric_type);
 
         let id = self.allocate_metric_id();
-        let registration =
-            Registration::from_registration_guard(RuntimeRegistration { id, registry });
+        let registration = Registration::from_registration_guard(RegistryGuard { id, registry });
         let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
         self.insert_metric_entry(
             id,
