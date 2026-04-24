@@ -15,7 +15,7 @@ use crate::{
         },
         Plan,
     },
-    types::{Round as Rnd, View},
+    types::{Participant, Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
@@ -28,7 +28,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    channel::{mpsc, oneshot, request},
+    channel::{mpsc, oneshot},
     futures::AbortablePool,
 };
 use core::{future::Future, panic};
@@ -39,7 +39,6 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::BTreeSet,
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
@@ -684,6 +683,27 @@ impl<
             .await;
     }
 
+    /// Sends a view update to the batcher without blocking the voter.
+    fn send_batcher_update(
+        &self,
+        batcher: &batcher::Mailbox<S, D>,
+        current: View,
+        leader: Participant,
+        finalized: View,
+        forwardable_proposal: Option<Proposal<D>>,
+    ) where
+        batcher::Message<S, D>: Send + 'static,
+    {
+        let mut batcher = batcher.clone();
+        self.context
+            .with_label("batcher_update")
+            .spawn(move |_| async move {
+                batcher
+                    .send_update(current, leader, finalized, forwardable_proposal)
+                    .await;
+            });
+    }
+
     /// Spawns the actor event loop with the provided channels.
     pub fn start(
         mut self,
@@ -827,14 +847,7 @@ impl<
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
-        let mut pending_batcher_updates = request::Pool::default();
-        pending_batcher_updates.push(batcher.update_deferred(
-            observed_view,
-            leader,
-            self.state.last_finalized(),
-            None,
-        ));
-        let mut pending_batcher_update_views = BTreeSet::from([observed_view]);
+        self.send_batcher_update(&batcher, observed_view, leader, self.state.last_finalized(), None);
         let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
         select_loop! {
@@ -852,40 +865,35 @@ impl<
                     }
                 }
 
-                let waiting_for_batcher =
-                    pending_batcher_update_views.contains(&self.state.current_view());
-                if !waiting_for_batcher {
-                    // If needed, propose a container
-                    if pending_propose.is_none() {
-                        pending_propose = self.try_propose().await;
-                    }
+                // If needed, propose a container
+                if pending_propose.is_none() {
+                    pending_propose = self.try_propose().await;
+                }
 
-                    // If needed, verify current view
-                    if pending_verify.is_none() {
-                        pending_verify = self.try_verify().await;
-                    }
+                // If needed, verify current view
+                if pending_verify.is_none() {
+                    pending_verify = self.try_verify().await;
+                }
 
-                    // Attempt to certify any views that we have notarizations for.
-                    for (proposal, is_local) in self.state.certify_candidates() {
-                        let round = proposal.round;
-                        let view = round.view();
-                        debug!(%view, "attempting certification");
-                        let result = if is_local {
-                            Either::Left(ready(Ok(true)))
-                        } else {
-                            let receiver = self.automaton.certify(round, proposal.payload).await;
-                            Either::Right(receiver)
-                        };
-                        let handle = certify_pool.push(async move { (round, result.await) });
-                        self.state.set_certify_handle(view, handle);
-                    }
+                // Attempt to certify any views that we have notarizations for.
+                for (proposal, is_local) in self.state.certify_candidates() {
+                    let round = proposal.round;
+                    let view = round.view();
+                    debug!(%view, "attempting certification");
+                    let result = if is_local {
+                        Either::Left(ready(Ok(true)))
+                    } else {
+                        let receiver = self.automaton.certify(round, proposal.payload).await;
+                        Either::Right(receiver)
+                    };
+                    let handle = certify_pool.push(async move { (round, result.await) });
+                    self.state.set_certify_handle(view, handle);
                 }
 
                 // Prepare waiters
                 let propose_wait = Waiter(&mut pending_propose);
                 let verify_wait = Waiter(&mut pending_verify);
                 let certify_wait = certify_pool.next_completed();
-                let batcher_update_wait = pending_batcher_updates.next_completed();
 
                 // Wait for a timeout to fire or for a message to arrive
                 let timeout = self.state.next_timeout_deadline();
@@ -1001,26 +1009,6 @@ impl<
                     }
                 };
             },
-            (updated, response) = batcher_update_wait => {
-                pending_batcher_update_views.remove(&updated);
-                view = updated;
-                if updated != self.state.current_view() {
-                    trace!(
-                        %updated,
-                        current = %self.state.current_view(),
-                        "dropping stale batcher update"
-                    );
-                    continue;
-                }
-                if let Some(reason) = response {
-                    let leader = self
-                        .state
-                        .leader_index(updated)
-                        .expect("leader not set");
-                    debug!(%updated, %leader, ?reason, "nullifying round");
-                    self.state.trigger_timeout(updated, reason);
-                }
-            },
             Some(msg) = self.mailbox_receiver.recv() else break => {
                 // Handle messages from resolver and batcher
                 match msg {
@@ -1075,32 +1063,32 @@ impl<
                     }
                     Message::Timeout(target_view, reason) => {
                         view = target_view;
-                        debug!(%target_view, ?reason, "timing out view");
-                        self.state.trigger_timeout(target_view, reason);
+                        if reason == TimeoutReason::Inactivity
+                            && self.state.has_leader_activity(target_view)
+                        {
+                            trace!(
+                                %target_view,
+                                ?reason,
+                                "dropping stale timeout hint for active view"
+                            );
+                        } else {
+                            debug!(%target_view, ?reason, "timing out view");
+                            self.state.trigger_timeout(target_view, reason);
+                        }
                     }
                 }
             },
             on_end => {
                 // Attempt to send any new view messages
-                //
-                // The batcher may drop votes we construct here if it has not yet been updated to the
-                // message's view. This only happens when we skip ahead multiple views, which always
-                // coincides with entering a new view (triggering a batcher update below before we send
-                // any votes for the new current view). This has no impact on liveness, however, we may miss
-                // building a finalization for an old view where we otherwise could have contributed.
-                let waiting_for_batcher =
-                    pending_batcher_update_views.contains(&self.state.current_view());
-                if !waiting_for_batcher {
-                    self.notify(
-                        &mut batcher,
-                        &mut resolver,
-                        &mut vote_sender,
-                        &mut certificate_sender,
-                        view,
-                        resolved,
-                    )
-                    .await;
-                }
+                self.notify(
+                    &mut batcher,
+                    &mut resolver,
+                    &mut vote_sender,
+                    &mut certificate_sender,
+                    view,
+                    resolved,
+                )
+                .await;
 
                 // After sending all required messages, prune any views
                 // we no longer need
@@ -1120,16 +1108,13 @@ impl<
                         .previous()
                         .and_then(|view| self.state.forwardable_proposal(view));
 
-                    // If the leader nullified or is inactive, reduce leader
-                    // timeout to now
-                    if pending_batcher_update_views.insert(current_view) {
-                        pending_batcher_updates.push(batcher.update_deferred(
-                            current_view,
-                            leader,
-                            self.state.last_finalized(),
-                            forwardable_proposal,
-                        ));
-                    }
+                    self.send_batcher_update(
+                        &batcher,
+                        current_view,
+                        leader,
+                        self.state.last_finalized(),
+                        forwardable_proposal,
+                    );
                 }
             },
         }

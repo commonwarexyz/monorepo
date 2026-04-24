@@ -799,6 +799,11 @@ pub trait PrivateKeyExt: PrivateKey {
 - Utilize `commonware_macros::select!` for concurrent operations
 - Always add `Send + 'static` bounds for async traits
 
+### Actor Messaging
+
+- Actors must not block inline waiting for a response from another actor. This includes awaiting `sender.request(...)` or `request::pending(...)` from inside an actor loop. It can deadlock when bounded channels fill, especially if the recipient can also block waiting for an acknowledgement from the sender.
+- Prefer fire-and-forget actor messages, or enqueue pending responses and poll them alongside the actor mailbox with `select!`/`select_loop!`.
+
 ### Test Organization
 
 ```rust

@@ -325,9 +325,8 @@ mod tests {
         loop {
             match batcher_receiver.recv().await.unwrap() {
                 batcher::Message::Update {
-                    current, response, ..
+                    current, ..
                 } => {
-                    response.send(None).unwrap();
                     if current < target {
                         continue;
                     }
@@ -444,12 +443,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -474,12 +471,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -532,12 +527,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(301));
                         assert_eq!(finalized, View::new(300));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -681,12 +674,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -719,12 +710,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(51));
                         assert_eq!(finalized, View::new(50));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -814,12 +803,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -897,12 +884,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1017,12 +1002,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1088,8 +1071,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(_)) => {
                         panic!("finalize vote should not be broadcast");
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => continue,
                 }
@@ -1148,8 +1130,7 @@ mod tests {
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { response, .. } => {
-                    response.send(None).unwrap();
+                batcher::Message::Update { .. } => {
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1206,8 +1187,7 @@ mod tests {
                         );
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
@@ -1323,8 +1303,7 @@ mod tests {
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { response, .. } => {
-                    response.send(None).unwrap();
+                batcher::Message::Update { .. } => {
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1379,8 +1358,7 @@ mod tests {
                         assert_eq!(finalize.proposal, proposal);
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
@@ -1517,12 +1495,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1545,12 +1521,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(2));
                         assert_eq!(finalized, View::new(1));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -1599,8 +1573,7 @@ mod tests {
                         assert_eq!(f.proposal, conflicting_proposal);
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
@@ -1718,12 +1691,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1809,12 +1780,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(3));
                     assert_eq!(finalized, View::new(2));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1939,7 +1908,7 @@ mod tests {
             );
 
             match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                batcher::Message::Update { .. } => {}
                 _ => panic!("expected initial update"),
             }
 
@@ -1957,7 +1926,7 @@ mod tests {
 
             // Restart and inject startup timeout hint from first update.
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
@@ -1983,12 +1952,13 @@ mod tests {
                 batcher::Message::Update {
                     current,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, target_view);
                     assert_eq!(finalized, target_view.previous().unwrap());
-                    response.send(Some(TimeoutReason::LeaderNullify)).unwrap();
+                    mailbox
+                        .timeout(current, TimeoutReason::LeaderNullify)
+                        .await;
                 }
                 _ => panic!("expected startup update after restart"),
             }
@@ -2002,7 +1972,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -2078,12 +2048,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -2178,12 +2146,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -2206,14 +2172,11 @@ mod tests {
                 match message {
                     batcher::Message::Update {
                         finalized,
-                        response,
                         ..
                     } if finalized == view => {
-                        response.send(None).unwrap();
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => continue,
                 }
@@ -2349,7 +2312,7 @@ mod tests {
             // Wait for initial batcher update
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                batcher::Message::Update { .. } => {}
                 _ => panic!("expected Update message"),
             }
 
@@ -2375,10 +2338,8 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } => {
-                            response.send(None).unwrap();
                             if current > current_view {
                                 break (current, leader);
                             }
@@ -2433,7 +2394,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -2563,10 +2524,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -2589,15 +2548,13 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -2612,7 +2569,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2639,7 +2596,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(duplicate_window) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2769,10 +2726,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -2795,15 +2750,13 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -2815,7 +2768,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2939,7 +2892,7 @@ mod tests {
 
             // Initial batcher update.
             match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                batcher::Message::Update { .. } => {}
                 _ => panic!("expected initial update"),
             }
 
@@ -2961,10 +2914,8 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } => {
-                            response.send(None).unwrap();
                             if current > current_view {
                                 break (current, leader);
                             }
@@ -3005,7 +2956,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -3096,10 +3047,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -3121,15 +3070,13 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -3153,7 +3100,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -3317,10 +3264,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -3343,15 +3288,13 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -3365,7 +3308,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(ready_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     },
                     message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
@@ -3401,17 +3344,15 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             if leader != me_idx {
                                 found = Some((current, participants[usize::from(leader)].clone()));
                             }
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -3449,7 +3390,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(target_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     },
                     message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
@@ -3587,10 +3528,9 @@ mod tests {
             );
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Step 1: Send finalization for view 2 (certify should NOT be called)
@@ -3609,11 +3549,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update {
                     finalized,
-                    response,
                     ..
                 } = batcher_receiver.recv().await.unwrap()
                 {
-                    response.send(None).unwrap();
                     if finalized >= view2 {
                         break;
                     }
@@ -3645,10 +3583,9 @@ mod tests {
             // Wait for view advancement (certification complete)
             loop {
                 if let batcher::Message::Update {
-                    current, response, ..
+                    current, ..
                 } = batcher_receiver.recv().await.unwrap()
                 {
-                    response.send(None).unwrap();
                     if current > view3 {
                         break;
                     }
@@ -3723,10 +3660,9 @@ mod tests {
             );
 
             // Wait for replay to complete
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Give time for any erroneous certification attempts
@@ -3864,8 +3800,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -3891,7 +3826,7 @@ mod tests {
                     {
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4023,8 +3958,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4048,7 +3982,7 @@ mod tests {
                     {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             };
@@ -4127,10 +4061,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
                         break;
@@ -4151,7 +4083,7 @@ mod tests {
                     {
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4293,8 +4225,7 @@ mod tests {
             // Wait for startup, then advance into the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4410,10 +4341,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
                         break;
@@ -4442,7 +4371,7 @@ mod tests {
                              still be cached in marshal"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4575,8 +4504,7 @@ mod tests {
             // parent payload, which we reuse below.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4611,7 +4539,7 @@ mod tests {
                         assert_eq!(notarize.proposal, proposal);
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4690,10 +4618,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::from_usize(target_leader_idx));
                         break;
@@ -4716,7 +4642,7 @@ mod tests {
                     {
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4853,8 +4779,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4878,7 +4803,7 @@ mod tests {
                     {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             };
@@ -4904,7 +4829,7 @@ mod tests {
                             "leader-owned proposal should certify locally instead of nullifying view {target_view}"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -5026,8 +4951,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -5052,7 +4976,7 @@ mod tests {
                     {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             };
@@ -5129,10 +5053,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
                         break;
@@ -5165,7 +5087,7 @@ mod tests {
                             "leader-owned recovered proposal should certify locally instead of nullifying view {target_view}"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -5304,8 +5226,7 @@ mod tests {
             // Wait for startup, then advance into the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -5361,7 +5282,7 @@ mod tests {
                              view {target_view}"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {}
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -5488,10 +5409,9 @@ mod tests {
             actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Send a notarization for view 5 to trigger certification
@@ -5526,11 +5446,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update {
                     finalized,
-                    response,
                     ..
                 } = batcher_receiver.recv().await.unwrap()
                 {
-                    response.send(None).unwrap();
                     if finalized >= view5 {
                         break;
                     }
@@ -5682,10 +5600,9 @@ mod tests {
             actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Send a notarization for view 5 to trigger certification
@@ -5724,8 +5641,7 @@ mod tests {
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -5837,8 +5753,7 @@ mod tests {
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(6)) => break None,
@@ -5936,7 +5851,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(15)) => {
@@ -5961,10 +5876,9 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break true;
                             }
@@ -6068,7 +5982,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6087,7 +6001,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -6107,10 +6021,9 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break true;
                             }
@@ -6213,7 +6126,7 @@ mod tests {
                         {
                             break n.proposal.clone();
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6232,7 +6145,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -6252,10 +6165,9 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break true;
                             }
@@ -6374,7 +6286,7 @@ mod tests {
                             batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
                                 break;
                             }
-                            batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                            batcher::Message::Update { .. } => {}
                             _ => {}
                         }
                     },
@@ -6526,10 +6438,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             let target_view = View::new(3);
@@ -6564,10 +6475,9 @@ mod tests {
             let advanced_before_restart = select! {
                 msg = batcher_receiver.recv() => {
                     if let batcher::Message::Update {
-                        current, response, ..
+                        current, ..
                     } = msg.unwrap()
                     {
-                        response.send(None).unwrap();
                         current > target_view
                     } else {
                         false
@@ -6639,10 +6549,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             loop {
@@ -6661,8 +6570,7 @@ mod tests {
                             {
                                 panic!("unexpected immediate nullify for view {target_view} after restart");
                             }
-                            batcher::Message::Update { response, .. } => {
-                                response.send(None).unwrap();
+                            batcher::Message::Update { .. } => {
                             }
                             _ => {}
                         }
@@ -6785,7 +6693,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_4 =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(10)) => {
@@ -6823,9 +6731,8 @@ mod tests {
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
                             batcher::Message::Update {
-                                current, response, ..
+                                current, ..
                             } => {
-                                response.send(None).unwrap();
                                 if current > view_4 {
                                     break true;
                                 }
@@ -6871,10 +6778,9 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > view_5 {
                                 break true;
                             }
@@ -6991,7 +6897,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7015,7 +6921,7 @@ mod tests {
                             // Successfully voted nullify after having voted notarize
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -7126,7 +7032,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7153,7 +7059,7 @@ mod tests {
                             // certification being indefinitely pending.
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(8)) => {
@@ -7253,7 +7159,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7277,7 +7183,7 @@ mod tests {
                                 "received nullify for view {target_view} before certification timeout"
                             );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     }
                 }
@@ -7292,7 +7198,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -7410,7 +7316,7 @@ mod tests {
                                 "received nullify for view {target_view} before certification timeout after recovered certificate"
                             );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     }
                 }
@@ -7425,7 +7331,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -7502,9 +7408,8 @@ mod tests {
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current, response, ..
+                        current, ..
                     } => {
-                        response.send(None).unwrap();
                         if current == View::new(1) {
                             break;
                         }
@@ -7522,7 +7427,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7549,9 +7454,8 @@ mod tests {
                             );
                         }
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } => {
-                            response.send(None).unwrap();
                             if current == View::new(2) {
                                 break;
                             }
@@ -7578,7 +7482,7 @@ mod tests {
                                 "received nullify for view 2 before its fresh leader timeout elapsed"
                             );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     }
                 }
@@ -7658,12 +7562,10 @@ mod tests {
                 batcher::Message::Update {
                     current,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -7695,7 +7597,7 @@ mod tests {
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7726,9 +7628,8 @@ mod tests {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } => {
-                            response.send(None).unwrap();
                             if current >= View::new(2) {
                                 break true;
                             }
@@ -7749,9 +7650,8 @@ mod tests {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } => {
-                            response.send(None).unwrap();
                             if current >= View::new(2) {
                                 break true;
                             }
@@ -7883,10 +7783,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3 (leader = participant 1).
@@ -7928,8 +7827,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -7941,8 +7839,7 @@ mod tests {
             // Drain any pending batcher messages so the view has advanced.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { response, .. } = msg {
-                    response.send(None).unwrap();
+                if let batcher::Message::Update { .. } = msg {
                 }
             }
 
@@ -8023,10 +7920,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break;
                             }
@@ -8153,10 +8049,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3.
@@ -8198,8 +8093,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -8211,8 +8105,7 @@ mod tests {
             // Let the journal sync.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { response, .. } = msg {
-                    response.send(None).unwrap();
+                if let batcher::Message::Update { .. } = msg {
                 }
             }
 
@@ -8285,10 +8178,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             // After replay, should be at target_view (not past it).
                             if current == target_view && replayed_certified {
                                 break;
@@ -8413,10 +8305,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3.
@@ -8439,7 +8330,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -8460,10 +8351,9 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break;
                             }
@@ -8478,8 +8368,7 @@ mod tests {
             // Let journal sync.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { response, .. } = msg {
-                    response.send(None).unwrap();
+                if let batcher::Message::Update { .. } = msg {
                 }
             }
 
@@ -8553,10 +8442,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view && replayed_nullification {
                                 break;
                             }
@@ -8592,19 +8480,23 @@ mod tests {
         nullify_and_nullification_replayed_after_restart(secp256r1::fixture);
     }
 
-    /// Tests that when the batcher signals a timeout reason on view update,
+    /// Tests that when the batcher signals a timeout after a view update,
     /// the voter immediately triggers a timeout for the current view.
     ///
-    /// This covers the path where `batcher.update()` returns `Some(TimeoutReason)`
+    /// This covers the path where the batcher sends [Message::Timeout]
     /// (e.g., because the leader is inactive or has already nullified the view).
-    fn batcher_update_triggers_timeout<S, F>(mut fixture: F)
+    fn batcher_inactivity_hint<S, F>(mut fixture: F, activity_before_hint: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"batcher_update_timeout".to_vec();
+        let namespace = if activity_before_hint {
+            b"batcher_update_timeout_stale".to_vec()
+        } else {
+            b"batcher_update_timeout".to_vec()
+        };
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             let Fixture {
@@ -8646,7 +8538,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter,
-                partition: format!("batcher_timeout_test_{me}"),
+                partition: format!("batcher_timeout_test_{activity_before_hint}_{me}"),
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(100),
@@ -8679,10 +8571,9 @@ mod tests {
             voter.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Consume initial Update.
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3 using finalization.
@@ -8711,20 +8602,36 @@ mod tests {
                 .resolved(Certificate::Notarization(notarization))
                 .await;
 
-            // Wait for the Update for view 4 and respond with a timeout reason
-            // to simulate batcher signaling that the leader should be skipped.
+            // Wait for the Update for view 4 and then simulate the batcher
+            // signaling that the leader should be skipped.
+            let next_view = target_view.next();
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } if current > target_view => {
-                            // Signal leader inactivity to trigger the timeout path.
-                            response.send(Some(TimeoutReason::Inactivity)).unwrap();
+                            assert_eq!(current, next_view);
+                            if activity_before_hint {
+                                let proposal = Proposal::new(
+                                    Round::new(Epoch::new(333), next_view),
+                                    target_view,
+                                    Sha256::hash(b"batcher_timeout_view4"),
+                                );
+                                let leader = participants[2].clone();
+                                let contents = (
+                                    proposal.round,
+                                    Sha256::hash(b"batcher_timeout_view3"),
+                                    0u64,
+                                )
+                                    .encode();
+                                relay.broadcast(&leader, (proposal.payload, contents));
+                                mailbox.proposal(proposal).await;
+                            }
+                            mailbox.timeout(current, TimeoutReason::Inactivity).await;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => {
-                            response.send(None).unwrap();
+                        batcher::Message::Update { .. } => {
                         }
                         _ => {}
                     },
@@ -8734,10 +8641,31 @@ mod tests {
                 }
             }
 
+            if activity_before_hint {
+                // The proposal above is leader activity for `next_view`, so the queued
+                // inactivity hint should not force an immediate nullify.
+                let deadline = context.current() + Duration::from_secs(5);
+                loop {
+                    select! {
+                        msg = batcher_receiver.recv() => match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == next_view =>
+                            {
+                                panic!("stale inactivity hint nullified active view {next_view}");
+                            }
+                            batcher::Message::Update { .. } => {
+                            }
+                            _ => {}
+                        },
+                        _ = context.sleep_until(deadline) => break,
+                    }
+                }
+                return;
+            }
+
             // The voter should emit a nullify vote for view 4 quickly (not
             // after the 100s leader timeout) because the batcher signaled
             // immediate timeout.
-            let next_view = target_view.next();
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
@@ -8746,8 +8674,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => {
-                            response.send(None).unwrap();
+                        batcher::Message::Update { .. } => {
                         }
                         _ => {}
                     },
@@ -8763,19 +8690,29 @@ mod tests {
 
     #[test_traced]
     fn test_batcher_update_triggers_timeout() {
-        batcher_update_triggers_timeout(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        batcher_update_triggers_timeout(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinPk, _>);
-        batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinSig, _>);
-        batcher_update_triggers_timeout(ed25519::fixture);
-        batcher_update_triggers_timeout(secp256r1::fixture);
+        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinPk, _>, false);
+        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinSig, _>, false);
+        batcher_inactivity_hint(bls12381_multisig::fixture::<MinPk, _>, false);
+        batcher_inactivity_hint(bls12381_multisig::fixture::<MinSig, _>, false);
+        batcher_inactivity_hint(ed25519::fixture, false);
+        batcher_inactivity_hint(secp256r1::fixture, false);
     }
 
     #[test_traced]
-    fn voter_drains_mailbox_while_batcher_update_is_pending() {
+    fn test_stale_batcher_inactivity_hint_is_ignored_after_activity() {
+        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinPk, _>, true);
+        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinSig, _>, true);
+        batcher_inactivity_hint(bls12381_multisig::fixture::<MinPk, _>, true);
+        batcher_inactivity_hint(bls12381_multisig::fixture::<MinSig, _>, true);
+        batcher_inactivity_hint(ed25519::fixture, true);
+        batcher_inactivity_hint(secp256r1::fixture, true);
+    }
+
+    #[test_traced]
+    fn voter_drains_mailbox_when_batcher_channel_is_full() {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"voter_pending_batcher_update".to_vec();
+        let namespace = b"voter_full_batcher_channel".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
             let Fixture {
@@ -8817,7 +8754,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter,
-                partition: format!("voter_pending_batcher_update_{me}"),
+                partition: format!("voter_full_batcher_channel_{me}"),
                 epoch: Epoch::new(333),
                 mailbox_size: 1,
                 leader_timeout: Duration::from_secs(5),
@@ -8853,12 +8790,10 @@ mod tests {
                 batcher::Message::Update {
                     current,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::zero());
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }

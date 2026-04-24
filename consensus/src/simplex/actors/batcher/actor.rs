@@ -25,7 +25,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc},
+    channel::mpsc,
     ordered::{Quorum, Set},
 };
 use prometheus_client::metrics::{
@@ -315,7 +315,6 @@ where
                     leader,
                     finalized: new_finalized,
                     forwardable_proposal,
-                    response,
                 } => {
                     let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
@@ -348,7 +347,9 @@ where
                     if timeout_reason.is_some() {
                         current.timed_out = true;
                     }
-                    response.send_lossy(timeout_reason);
+                    if let Some(reason) = timeout_reason {
+                        voter.timeout(current.view, reason).await;
+                    }
 
                     // Forward the proposal, if enabled and we have something to forward
                     if let Some((proposal, round)) = forwardable_proposal
@@ -366,8 +367,10 @@ where
                 }
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
+                    // Local votes may arrive before the detached view update
+                    // that made them current.
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                    if !interesting(self.activity_timeout, finalized, current.view, view, true) {
                         continue;
                     }
 
