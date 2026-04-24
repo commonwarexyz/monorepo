@@ -474,6 +474,24 @@ fn create_gauge_encoder(
     })
 }
 
+struct DescriptorSkippingWriter<'a> {
+    output: &'a mut String,
+    remaining: usize,
+}
+
+impl Write for DescriptorSkippingWriter<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if self.remaining >= value.len() {
+            self.remaining -= value.len();
+            return Ok(());
+        }
+        let start = self.remaining;
+        self.remaining = 0;
+        self.output.push_str(&value[start..]);
+        Ok(())
+    }
+}
+
 // Fast path for native scalar metrics.
 //
 // Source:
@@ -499,24 +517,21 @@ where
         return create_gauge_encoder(name, &attributes, gauge);
     }
 
+    let metric_type = metric.metric_type();
+    let mut descriptor = String::new();
+    encode_descriptor(&mut descriptor, &name, ".", metric_type)
+        .expect("encoding fallback descriptor failed");
+    let descriptor_len = descriptor.len();
+
     let mut registry = registry::Registry::with_labels(attributes.into_iter());
     registry.register(name, "", SharedMetric(metric));
-    Box::new(move |samples| {
-        let mut encoded = String::new();
-        encode_registry(&mut encoded, &registry).expect("encoding temporary metric registry failed");
 
-        let Some(after_help) = encoded.find('\n').map(|index| index + 1) else {
-            return Ok(());
+    Box::new(move |samples| {
+        let mut writer = DescriptorSkippingWriter {
+            output: samples,
+            remaining: descriptor_len,
         };
-        let Some(after_type) = encoded[after_help..]
-            .find('\n')
-            .map(|index| after_help + index + 1)
-        else {
-            return Ok(());
-        };
-        if encoded.len() > after_type {
-            samples.push_str(&encoded[after_type..]);
-        }
+        encode_registry(&mut writer, &registry).expect("encoding temporary metric registry failed");
         Ok(())
     })
 }
