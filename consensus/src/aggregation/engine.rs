@@ -419,9 +419,13 @@ impl<
                     .pop()
                     .expect("no rebroadcast deadline");
                 trace!(%height, "rebroadcasting");
+                let mut guard = self.metrics.rebroadcast.guard(Status::Invalid);
                 if let Err(err) = self.handle_rebroadcast(height, &mut sender).await {
                     warn!(?err, %height, "rebroadcast failed");
-                };
+                    guard.set(Status::Failure);
+                } else {
+                    guard.set(Status::Success);
+                }
             },
         }
 
