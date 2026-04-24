@@ -230,14 +230,17 @@ impl Freelist {
         let put_entries = |masks: &mut [u64]| {
             // Masks are staged by word after parking the buffers. The later
             // Release `fetch_or` makes every staged slot in that word available.
-            for (slot, buffer) in [(slot, buffer), (next_slot, next_buffer)]
-                .into_iter()
-                .chain(entries)
-            {
+            let mut stage = |slot, buffer| {
                 // Park first, then stage the bit for the later per-word insert.
                 self.park(slot, buffer);
                 let (word_index, mask) = self.slot_word(slot);
                 masks[word_index] |= mask;
+            };
+
+            stage(slot, buffer);
+            stage(next_slot, next_buffer);
+            for (slot, buffer) in entries {
+                stage(slot, buffer);
             }
 
             for (word_index, &mask) in masks.iter().enumerate() {
@@ -659,7 +662,7 @@ pub(super) mod tests {
         assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
 
         set.put_batch(
-            [0u32, 1, 64, 4096]
+            [0u32, 1, 64, 8192]
                 .into_iter()
                 .map(|slot| (slot, AlignedBuffer::new(64, 64))),
         );
@@ -678,7 +681,7 @@ pub(super) mod tests {
             })
             .collect::<Vec<_>>();
         slots.sort_unstable();
-        assert_eq!(slots, vec![0, 1, 64, 4096]);
+        assert_eq!(slots, vec![0, 1, 64, 8192]);
         assert_eq!(len(&set), 0);
     }
 

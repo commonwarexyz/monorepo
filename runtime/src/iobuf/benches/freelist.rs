@@ -35,8 +35,6 @@ const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
-const BENCH_PARALLELISM: usize = 8;
-
 #[derive(Debug)]
 struct Entry {
     slot: u32,
@@ -49,7 +47,7 @@ unsafe impl Send for Entry {}
 
 trait FreelistImplementation: Send + Sync {
     fn as_str() -> &'static str;
-    fn with_capacity(capacity: usize) -> Self;
+    fn with_capacity(capacity: usize, parallelism: usize) -> Self;
     fn take_batch(&self, out: &mut Vec<Entry>, max: usize);
     fn put_batch(&self, entries: &mut Vec<Entry>);
 
@@ -112,7 +110,7 @@ fn bench_case<S: FreelistImplementation>(
     let name = bench_name::<S>(slots, threading, batch);
     c.bench_function(&name, |b| {
         b.iter_custom(|iters| {
-            let shared = Arc::new(S::with_capacity(slots));
+            let shared = Arc::new(S::with_capacity(slots, threading.threads()));
             measure(
                 iters,
                 threading,
@@ -147,7 +145,7 @@ impl FreelistImplementation for MutexVec {
         "mutex_vec"
     }
 
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
         let slots = (0..capacity)
             .map(|slot| Entry {
                 slot: slot as u32,
@@ -179,7 +177,7 @@ impl FreelistImplementation for ArrayQueueFreelist {
         "array_queue"
     }
 
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
         let queue = ArrayQueue::new(capacity);
         for slot in 0..capacity {
             queue
@@ -218,11 +216,11 @@ impl FreelistImplementation for Freelist {
         "freelist"
     }
 
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(capacity: usize, parallelism: usize) -> Self {
         let freelist = Self::new(
             NonZeroU32::new(u32::try_from(capacity).expect("bench capacity must fit in u32"))
                 .expect("bench capacity must be non-zero"),
-            NonZeroUsize::new(BENCH_PARALLELISM).expect("bench parallelism must be non-zero"),
+            NonZeroUsize::new(parallelism).expect("bench parallelism must be non-zero"),
         );
         for slot in 0..capacity {
             freelist.put(
