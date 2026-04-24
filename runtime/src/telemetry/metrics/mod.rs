@@ -234,10 +234,6 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
 //
 // Source:
 // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L218-L275
-//
-// Commonware needs a local copy because upstream keeps this helper internal
-// while the runtime assembles metric samples independently. We only emit
-// unit-less descriptors, so the `# UNIT` line is omitted.
 fn encode_descriptor<W>(
     writer: &mut W,
     name: &str,
@@ -295,7 +291,7 @@ impl Drop for RegistryGuard {
 }
 
 /// A metric handle whose lifetime controls registry exposure and attached cleanup.
-#[must_use = "registered metrics are removed and attached cleanup runs when the returned handle is dropped"]
+#[must_use = "registered metrics are removed when the returned handle is dropped"]
 pub struct Registered<M> {
     metric: Arc<M>,
     registration: Registration,
