@@ -1,54 +1,18 @@
 use commonware_utils::sync::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-pub(crate) trait RegistrationGuard: Send + Sync {
-    fn registration_dropped(&self, registration: &Arc<RegistrationInner>) {
-        registration.release();
-    }
+pub(crate) type RegistrationHandle = Arc<dyn RegistrationGuard>;
+pub(crate) type WeakRegistrationHandle = Weak<dyn RegistrationGuard>;
+
+pub(crate) trait RegistrationGuard: Send + Sync + 'static {
+    fn registration_cloned(&self, _registration: &RegistrationHandle) {}
+
+    fn registration_dropped(&self, _registration: &RegistrationHandle) {}
 }
 
 impl<G: Send + 'static> RegistrationGuard for GuardHolder<G> {}
 
 struct GuardHolder<G>(Mutex<G>);
-
-pub(crate) struct RegistrationInner {
-    guard: Box<dyn RegistrationGuard>,
-    // Counts live Registration claims, not Arc strong references. The registry
-    // only holds Weak references, and duplicate registration may briefly
-    // upgrade one without claiming it.
-    claims: Mutex<usize>,
-}
-
-impl RegistrationInner {
-    pub(crate) fn new<G>(guard: G) -> Arc<Self>
-    where
-        G: RegistrationGuard + 'static,
-    {
-        Arc::new(Self {
-            guard: Box::new(guard),
-            claims: Mutex::new(1),
-        })
-    }
-
-    pub(crate) fn claim(inner: Arc<Self>) -> Option<Registration> {
-        let mut claims = inner.claims.lock();
-        if *claims == 0 {
-            return None;
-        }
-        *claims = claims.checked_add(1).expect("registration claims overflow");
-        drop(claims);
-        Some(Registration { inner })
-    }
-
-    pub(crate) fn release(&self) -> bool {
-        let mut claims = self.claims.lock();
-        let remaining = claims
-            .checked_sub(1)
-            .expect("registration claim count underflow");
-        *claims = remaining;
-        remaining == 0
-    }
-}
 
 /// A shared lifecycle token for a [`Registered`](super::Registered) metric handle.
 ///
@@ -57,19 +21,30 @@ impl RegistrationInner {
 /// metrics use that drop to unregister themselves from the runtime registry,
 /// while external callers may attach any custom drop guard.
 pub struct Registration {
-    pub(crate) inner: Arc<RegistrationInner>,
+    pub(crate) guard: RegistrationHandle,
 }
 
 impl Clone for Registration {
     fn clone(&self) -> Self {
-        RegistrationInner::claim(Arc::clone(&self.inner))
-            .expect("live registration claim count missing")
+        self.guard.registration_cloned(&self.guard);
+        Self {
+            guard: Arc::clone(&self.guard),
+        }
     }
 }
 
 impl Registration {
-    pub(crate) const fn from_inner(inner: Arc<RegistrationInner>) -> Self {
-        Self { inner }
+    pub(crate) fn from_handle(handle: RegistrationHandle) -> Self {
+        Self { guard: handle }
+    }
+
+    pub(crate) fn from_registration_guard<G>(guard: G) -> Self
+    where
+        G: RegistrationGuard,
+    {
+        Self {
+            guard: Arc::new(guard),
+        }
     }
 
     /// Create a registration that performs no action when dropped.
@@ -87,18 +62,16 @@ impl Registration {
     where
         G: Send + 'static,
     {
-        Self {
-            inner: RegistrationInner::new(GuardHolder(Mutex::new(guard))),
-        }
+        Self::from_registration_guard(GuardHolder(Mutex::new(guard)))
     }
 
-    pub(crate) fn downgrade(&self) -> std::sync::Weak<RegistrationInner> {
-        Arc::downgrade(&self.inner)
+    pub(crate) fn downgrade(&self) -> WeakRegistrationHandle {
+        Arc::downgrade(&self.guard)
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.inner.guard.registration_dropped(&self.inner);
+        self.guard.registration_dropped(&self.guard);
     }
 }

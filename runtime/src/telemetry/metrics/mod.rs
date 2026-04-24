@@ -40,7 +40,7 @@ use prometheus_client::encoding::{
     MetricEncoder as PromMetricEncoder,
 };
 pub use registration::Registration;
-use registration::{RegistrationGuard, RegistrationInner};
+use registration::{RegistrationGuard, RegistrationHandle, WeakRegistrationHandle};
 use std::{
     any::Any,
     borrow::Cow,
@@ -287,12 +287,15 @@ struct RuntimeRegistration {
 }
 
 impl RegistrationGuard for RuntimeRegistration {
-    fn registration_dropped(&self, registration: &Arc<RegistrationInner>) {
-        // Keep the dropped claim counted until the registry lock is held. A
-        // concurrent register can then either acquire this live registration or
-        // wait for the entry to be removed.
+    fn registration_cloned(&self, registration: &RegistrationHandle) {
         let Some(registry) = self.registry.upgrade() else {
-            registration.release();
+            return;
+        };
+        registry.lock().claim_registration(self.id, registration);
+    }
+
+    fn registration_dropped(&self, registration: &RegistrationHandle) {
+        let Some(registry) = self.registry.upgrade() else {
             return;
         };
         registry.lock().release_registration(self.id, registration);
@@ -397,7 +400,7 @@ struct PendingMetricEntry {
     attributes: MetricAttributes,
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
-    registration: Weak<RegistrationInner>,
+    registration: WeakRegistrationHandle,
 }
 
 pub(crate) struct SharedMetric<M>(pub(crate) Arc<M>);
@@ -464,7 +467,8 @@ struct MetricEntry {
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
     /// Weak handle to the lifecycle token owned by the outstanding [`Registered<_>`].
-    registration: Weak<RegistrationInner>,
+    registration: WeakRegistrationHandle,
+    claims: usize,
     family_index: usize,
 }
 
@@ -571,23 +575,21 @@ impl RegistryInner {
                         key.0, key.1
                     )
                 });
-            // Runtime registrations release under this same mutex, so a keyed
-            // entry cannot have a closed lifecycle token.
             let registration = entry
                 .registration
                 .upgrade()
-                .and_then(RegistrationInner::claim)
                 .expect("metric key references closed registration");
+            self.claim_registration(existing_id, &registration);
             return Registered {
                 metric: existing_metric,
-                registration,
+                registration: Registration::from_handle(registration),
             };
         }
         self.assert_family_matches(&name, &help, metric_type);
 
         let id = self.allocate_metric_id();
         let registration =
-            Registration::from_inner(RegistrationInner::new(RuntimeRegistration { id, registry }));
+            Registration::from_registration_guard(RuntimeRegistration { id, registry });
         let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
         self.insert_metric_entry(
             id,
@@ -699,31 +701,51 @@ impl RegistryInner {
             encode_samples,
             metric_any,
             registration,
+            claims: 1,
             family_index,
         });
     }
 
-    fn release_registration(&mut self, id: u64, registration: &Arc<RegistrationInner>) {
+    fn claim_registration(&mut self, id: u64, registration: &RegistrationHandle) {
         let Some(entry) = self
             .metrics
-            .get(Self::metric_index(id))
-            .and_then(Option::as_ref)
+            .get_mut(Self::metric_index(id))
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        let registration_weak = Arc::downgrade(registration);
+        if !entry.registration.ptr_eq(&registration_weak) {
+            return;
+        }
+        entry.claims = entry
+            .claims
+            .checked_add(1)
+            .expect("registration claims overflow");
+    }
+
+    fn release_registration(&mut self, id: u64, registration: &RegistrationHandle) {
+        let Some(entry) = self
+            .metrics
+            .get_mut(Self::metric_index(id))
+            .and_then(Option::as_mut)
         else {
             // The registry may already have explicitly removed this metric
             // while an older handle still owns a lifecycle claim.
-            registration.release();
             return;
         };
         let registration_weak = Arc::downgrade(registration);
         if !entry.registration.ptr_eq(&registration_weak) {
             // The metric id has been reused for a newer registration. Release
             // only the stale claim and leave the replacement entry intact.
-            registration.release();
             return;
         }
-        // A duplicate register may have acquired this registration while the
-        // dropping claim waited for the registry lock.
-        if registration.release() {
+        let remaining = entry
+            .claims
+            .checked_sub(1)
+            .expect("registration claim count underflow");
+        entry.claims = remaining;
+        if remaining == 0 {
             self.drop_metric_entry(id);
         }
     }
