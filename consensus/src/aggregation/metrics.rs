@@ -22,16 +22,11 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
         let tip = context.gauge("tip", "Lowest height without a certificate");
-        let digest = context.register(
+        let digest = context.family(
             "digest",
             "Number of digests returned by the automaton by status",
-            status::Raw::default(),
         );
-        let acks = context.register(
-            "acks",
-            "Number of Ack messages processed by status",
-            status::Raw::default(),
-        );
+        let acks = context.family("acks", "Number of Ack messages processed by status");
         let certificates = context.counter("certificates", "Number of certificates produced");
         let digest_duration = context.histogram(
             "digest_duration",

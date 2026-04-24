@@ -1,6 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered},
+    telemetry::metrics::{Metric, Registered, Registration},
     Metrics,
 };
 use criterion::criterion_main;
@@ -40,7 +40,7 @@ impl Metrics for DummyMetrics {
         _: H,
         metric: M,
     ) -> Registered<M> {
-        Registered::detached(metric)
+        Registered::with_registration(metric, Registration::from(()))
     }
 
     fn encode(&self) -> String {

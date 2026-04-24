@@ -12,7 +12,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{

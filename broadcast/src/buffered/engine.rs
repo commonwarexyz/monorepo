@@ -8,10 +8,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{
-        status::{CounterExt, Status},
-        GaugeExt as _,
-    },
+    telemetry::metrics::{status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{

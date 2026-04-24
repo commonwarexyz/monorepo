@@ -37,32 +37,12 @@ impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
         let sequencer_heights = context.family("sequencer_heights", "Height per sequencer tracked");
-        let acks = context.register(
-            "acks",
-            "Number of acks processed by status",
-            status::Raw::default(),
-        );
-        let nodes = context.register(
-            "nodes",
-            "Number of nodes processed by status",
-            status::Raw::default(),
-        );
-        let verify = context.register(
-            "verify",
-            "Number of application verifications by status",
-            status::Raw::default(),
-        );
+        let acks = context.family("acks", "Number of acks processed by status");
+        let nodes = context.family("nodes", "Number of nodes processed by status");
+        let verify = context.family("verify", "Number of application verifications by status");
         let certificates = context.counter("certificates", "Number of certificates produced");
-        let propose = context.register(
-            "propose",
-            "Number of propose attempts by status",
-            status::Raw::default(),
-        );
-        let rebroadcast = context.register(
-            "rebroadcast",
-            "Number of rebroadcast attempts by status",
-            status::Raw::default(),
-        );
+        let propose = context.family("propose", "Number of propose attempts by status");
+        let rebroadcast = context.family("rebroadcast", "Number of rebroadcast attempts by status");
         let verify_duration = context.histogram(
             "verify_duration",
             "Histogram of application verification durations",

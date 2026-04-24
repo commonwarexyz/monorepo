@@ -4,7 +4,7 @@ use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram::Buckets,
-        status::{self, CounterExt, Status},
+        status::{self, Status},
         EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, Metrics,
@@ -161,15 +161,11 @@ where
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
         );
-        let requests_created = context.register(
-            "requests_created",
-            "Status of request creation attempts",
-            status::Raw::default(),
-        );
-        let requests_sent = context.register(
+        let requests_created =
+            context.family("requests_created", "Status of request creation attempts");
+        let requests_sent = context.family(
             "requests_sent",
             "Status of individual network requests sent to peers",
-            status::Raw::default(),
         );
         let resolves = context.histogram(
             "resolves",

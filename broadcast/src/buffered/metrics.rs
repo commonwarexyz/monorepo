@@ -30,21 +30,9 @@ impl<P: PublicKey> Metrics<P> {
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         Self {
             peer: context.family("peer", "Number of broadcasts received by peer"),
-            receive: context.register(
-                "receive",
-                "Number of received messages by status",
-                status::Raw::default(),
-            ),
-            subscribe: context.register(
-                "subscribe",
-                "Number of `subscribe` requests by status",
-                status::Raw::default(),
-            ),
-            get: context.register(
-                "get",
-                "Number of `get` requests by status",
-                status::Raw::default(),
-            ),
+            receive: context.family("receive", "Number of received messages by status"),
+            subscribe: context.family("subscribe", "Number of `subscribe` requests by status"),
+            get: context.family("get", "Number of `get` requests by status"),
             waiters: context.gauge("waiters", "Number of digests being awaited"),
         }
     }
