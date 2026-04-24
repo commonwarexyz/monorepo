@@ -1062,11 +1062,11 @@ impl<
             on_end => {
                 // Attempt to send any new view messages
                 //
-                // The batcher may drop votes we construct here if it has not
-                // yet been updated to the message's view. This only happens
-                // when we skip ahead multiple views, which always coincides
-                // with entering a new view and updating the batcher below
-                // before sending votes for the new current view.
+                // The batcher may drop votes we construct here if it has not yet been updated to the
+                // message's view. This only happens when we skip ahead multiple views, which always
+                // coincides with entering a new view (triggering a batcher update below before we send
+                // any votes for the new current view). This has no impact on liveness, however, we may miss
+                // building a finalization for an old view where we otherwise could have contributed.
                 self.notify(
                     &mut batcher,
                     &mut resolver,
