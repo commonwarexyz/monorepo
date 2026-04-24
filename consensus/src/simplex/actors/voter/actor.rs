@@ -342,7 +342,7 @@ impl<
     ) {
         // Process nullify (and persist it if it is a first attempt)
         if !retry {
-            batcher.constructed(Vote::Nullify(nullify.clone())).await;
+            batcher.constructed(Vote::Nullify(nullify.clone()));
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal so first-attempt nullify votes survive restarts.
@@ -477,7 +477,7 @@ impl<
         };
 
         // Inform the batcher so it can aggregate our vote with others.
-        batcher.constructed(Vote::Notarize(notarize.clone())).await;
+        batcher.constructed(Vote::Notarize(notarize.clone()));
         // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
         // Keep the vote durable for crash recovery.
@@ -514,8 +514,7 @@ impl<
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Notarization {
             resolver
-                .updated(Certificate::Notarization(notarization.clone()))
-                .await;
+                .updated(Certificate::Notarization(notarization.clone()));
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
@@ -564,8 +563,7 @@ impl<
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Nullification {
             resolver
-                .updated(Certificate::Nullification(nullification.clone()))
-                .await;
+                .updated(Certificate::Nullification(nullification.clone()));
         }
         // Track the certificate locally to avoid rebuilding it.
         if let Some(floor) = self.handle_nullification(nullification.clone()).await {
@@ -600,7 +598,7 @@ impl<
         };
 
         // Provide the vote to the batcher pipeline.
-        batcher.constructed(Vote::Finalize(finalize.clone())).await;
+        batcher.constructed(Vote::Finalize(finalize.clone()));
         // Update the round before persisting.
         self.handle_finalize(finalize.clone()).await;
         // Keep the vote durable for recovery.
@@ -637,8 +635,7 @@ impl<
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Finalization {
             resolver
-                .updated(Certificate::Finalization(finalization.clone()))
-                .await;
+                .updated(Certificate::Finalization(finalization.clone()));
         }
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
@@ -749,8 +746,7 @@ impl<
                     Artifact::Notarization(notarization) => {
                         self.handle_notarization(notarization.clone()).await;
                         resolver
-                            .updated(Certificate::Notarization(notarization.clone()))
-                            .await;
+                            .updated(Certificate::Notarization(notarization.clone()));
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
@@ -761,7 +757,7 @@ impl<
                         else {
                             continue;
                         };
-                        resolver.certified(round.view(), success).await;
+                        resolver.certified(round.view(), success);
                         if success {
                             self.reporter
                                 .report(Activity::Certification(notarization))
@@ -775,8 +771,7 @@ impl<
                     Artifact::Nullification(nullification) => {
                         self.handle_nullification(nullification.clone()).await;
                         resolver
-                            .updated(Certificate::Nullification(nullification.clone()))
-                            .await;
+                            .updated(Certificate::Nullification(nullification.clone()));
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
@@ -788,8 +783,7 @@ impl<
                     Artifact::Finalization(finalization) => {
                         self.handle_finalization(finalization.clone()).await;
                         resolver
-                            .updated(Certificate::Finalization(finalization.clone()))
-                            .await;
+                            .updated(Certificate::Finalization(finalization.clone()));
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
@@ -823,8 +817,7 @@ impl<
             .leader_index(observed_view)
             .expect("leader not set");
         batcher
-            .update(observed_view, leader, self.state.last_finalized(), None)
-            .await;
+            .update(observed_view, leader, self.state.last_finalized(), None);
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
@@ -972,7 +965,7 @@ impl<
                         // This can happen after a nullification for the same view because
                         // certification is asynchronous; finalization is the boundary that
                         // cancels in-flight certification and suppresses late reporting.
-                        resolver.certified(view, certified).await;
+                        resolver.certified(view, certified);
                         if certified {
                             self.reporter
                                 .report(Activity::Certification(notarization))
@@ -1102,8 +1095,7 @@ impl<
                             leader,
                             self.state.last_finalized(),
                             forwardable_proposal,
-                        )
-                        .await;
+                        );
                 }
             },
         }

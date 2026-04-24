@@ -27,13 +27,13 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a certificate.
-    pub async fn updated(&mut self, certificate: Certificate<S, D>) {
+    pub fn updated(&mut self, certificate: Certificate<S, D>) {
         self.sender
             .send_lossy(MailboxMessage::Certificate(certificate));
     }
 
     /// Notify the resolver of a certification result.
-    pub async fn certified(&mut self, view: View, success: bool) {
+    pub fn certified(&mut self, view: View, success: bool) {
         self.sender
             .send_lossy(MailboxMessage::Certified { view, success });
     }

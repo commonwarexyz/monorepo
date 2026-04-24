@@ -33,23 +33,23 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a leader's proposal.
-    pub async fn proposal(&mut self, proposal: Proposal<D>) {
+    pub fn proposal(&mut self, proposal: Proposal<D>) {
         self.sender.send_lossy(Message::Proposal(proposal));
     }
 
     /// Signal that the current view should timeout (if not already).
-    pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
+    pub fn timeout(&mut self, view: View, reason: TimeoutReason) {
         self.sender.send_lossy(Message::Timeout(view, reason));
     }
 
     /// Send a recovered certificate.
-    pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
+    pub fn recovered(&mut self, certificate: Certificate<S, D>) {
         self.sender
             .send_lossy(Message::Verified(certificate, false));
     }
 
     /// Send a resolved certificate.
-    pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
+    pub fn resolved(&mut self, certificate: Certificate<S, D>) {
         self.sender.send_lossy(Message::Verified(certificate, true));
     }
 }

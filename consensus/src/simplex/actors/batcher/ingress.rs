@@ -30,7 +30,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send an update message.
-    pub async fn update(
+    pub fn update(
         &mut self,
         current: View,
         leader: Participant,
@@ -46,7 +46,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a constructed vote.
-    pub async fn constructed(&mut self, message: Vote<S, D>) {
+    pub fn constructed(&mut self, message: Vote<S, D>) {
         self.sender.send_lossy(Message::Constructed(message));
     }
 }

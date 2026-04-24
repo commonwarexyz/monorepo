@@ -348,7 +348,7 @@ where
                         current.timed_out = true;
                     }
                     if let Some(reason) = timeout_reason {
-                        voter.timeout(current.view, reason).await;
+                        voter.timeout(current.view, reason);
                     }
 
                     // Forward the proposal, if enabled and we have something to forward
@@ -435,8 +435,7 @@ where
                             .or_insert_with(|| self.new_round())
                             .set_notarization(notarization.clone());
                         voter
-                            .recovered(Certificate::Notarization(notarization))
-                            .await;
+                            .recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
                         // Skip if we already have a nullification for this view
@@ -460,8 +459,7 @@ where
                             .or_insert_with(|| self.new_round())
                             .set_nullification(nullification.clone());
                         voter
-                            .recovered(Certificate::Nullification(nullification))
-                            .await;
+                            .recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
                         // Skip if we already have a finalization for this view
@@ -481,8 +479,7 @@ where
                             .or_insert_with(|| self.new_round())
                             .set_finalization(finalization.clone());
                         voter
-                            .recovered(Certificate::Finalization(finalization))
-                            .await;
+                            .recovered(Certificate::Finalization(finalization));
                     }
                 }
 
@@ -540,8 +537,7 @@ where
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
                         voter
-                            .timeout(current.view, TimeoutReason::LeaderNullify)
-                            .await;
+                            .timeout(current.view, TimeoutReason::LeaderNullify);
                     }
                 }
                 updated_view = view;
@@ -556,7 +552,7 @@ where
                 if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
-                            voter.proposal(proposal).await;
+                            voter.proposal(proposal);
                         }
                     }
                 }
@@ -630,8 +626,7 @@ where
 
                     // Forward notarization to voter
                     voter
-                        .recovered(Certificate::Notarization(notarization))
-                        .await;
+                        .recovered(Certificate::Notarization(notarization));
                 }
                 if let Some(nullification) = self
                     .recover_latency
@@ -639,8 +634,7 @@ where
                 {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
-                        .recovered(Certificate::Nullification(nullification))
-                        .await;
+                        .recovered(Certificate::Nullification(nullification));
                 }
                 if let Some(finalization) = self
                     .recover_latency
@@ -648,8 +642,7 @@ where
                 {
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter
-                        .recovered(Certificate::Finalization(finalization))
-                        .await;
+                        .recovered(Certificate::Finalization(finalization));
                 }
 
                 // Drop any rounds that are no longer interesting

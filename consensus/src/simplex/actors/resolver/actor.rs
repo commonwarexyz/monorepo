@@ -252,7 +252,7 @@ impl<
                 response.send_lossy(true);
 
                 // Notify voter as soon as possible
-                voter.resolved(parsed.clone()).await;
+                voter.resolved(parsed.clone());
 
                 // Process message with the request view for tracking
                 self.state.handle(parsed, Some(view), resolver).await;
