@@ -179,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            let mut registry = crate::telemetry::metrics::Registry::new();
+            let mut registry = crate::telemetry::metrics::Registry::default();
             MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
         })
         .await;
@@ -189,7 +189,7 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
-            let mut registry = crate::telemetry::metrics::Registry::new();
+            let mut registry = crate::telemetry::metrics::Registry::default();
             MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
         })
         .await;
@@ -200,7 +200,7 @@ mod tests {
         const MSG_SIZE: usize = 100;
 
         // Create a registry and network
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry);
 
         // Set up server.

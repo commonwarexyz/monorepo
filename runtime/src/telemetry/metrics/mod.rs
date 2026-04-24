@@ -1,11 +1,4 @@
-//! Observability helpers for Prometheus-style metrics.
-//!
-//! This module owns all Prometheus-facing logic used by the runtime:
-//! - Re-exports of the underlying `prometheus_client` types and derive macros.
-//! - Ergonomic [`Registered`] handles that auto-unregister on drop.
-//! - The runtime's [`Registry`] implementation that backs [`crate::Metrics::encode`].
-//! - Helpers for label validation, attribute management, gauge/histogram ergonomics,
-//!   and task introspection (`count_running_tasks`).
+//! Utility functions for metrics
 
 pub mod histogram;
 pub mod status;
@@ -97,11 +90,6 @@ impl GaugeExt for raw::Gauge {
 pub use histogram::HistogramExt;
 
 /// One-line constructors for the common metric types.
-///
-/// ```ignore
-/// use commonware_runtime::telemetry::metrics::MetricsExt;
-/// let votes = context.counter("votes", "vote count");
-/// ```
 pub trait MetricsExt: crate::Metrics {
     /// Register a counter with the runtime.
     fn counter<N: Into<String>, H: Into<String>>(&self, name: N, help: H) -> Counter {
@@ -847,17 +835,12 @@ impl RegistryInner {
     }
 }
 
-pub struct Scope {
+pub(crate) struct Scope {
     registry: Registry,
     prefix: String,
 }
 
-/// Shared registration surface accepted by runtime-owned constructors.
-///
-/// Both [`Registry`] (no prefix) and [`Scope`] (with prefix) implement
-/// this, so a `fn new(registry: &mut impl Register)` can accept either
-/// without the caller having to produce a scope first.
-pub trait Register {
+pub(crate) trait Register {
     /// Register a metric under this scope's prefix.
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M>;
 

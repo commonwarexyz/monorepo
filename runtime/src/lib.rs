@@ -399,8 +399,6 @@ stability_scope!(BETA {
         /// # Querying The Latest Attribute
         ///
         /// To query the latest attribute value dynamically, create a gauge to track the current value.
-        /// The returned [`telemetry::metrics::Registered`] handle must be retained on the long-lived owner: dropping it
-        /// unregisters the metric.
         /// ```ignore
         /// // Create a gauge to track the current epoch. Hold the handle on `self`.
         /// let latest_epoch = context.with_label("orchestrator").gauge("latest_epoch", "current epoch");
@@ -438,11 +436,6 @@ stability_scope!(BETA {
         /// returns another handle to the existing metric when the concrete metric
         /// type matches. Registering the same key with a different metric type
         /// panics.
-        ///
-        /// Implementations outside `commonware-runtime` that do not expose metrics
-        /// through a runtime registry may return [`telemetry::metrics::Registered::detached`] or
-        /// use [`telemetry::metrics::Registered::with_registration`] with a custom
-        /// [`telemetry::metrics::Registration`].
         ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
         fn register<N: Into<String>, H: Into<String>, M: telemetry::metrics::Metric>(

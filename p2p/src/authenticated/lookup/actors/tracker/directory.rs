@@ -715,7 +715,7 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+            let mut directory = Directory::init(context.clone(), my_pk.clone(), config, releaser);
 
             directory.track(
                 0,
@@ -735,6 +735,10 @@ mod tests {
                 Some(Ingress::Socket(addr_2))
             );
             assert!(!directory.peers.contains_key(&pk_3));
+            assert_eq!(
+                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                None
+            );
 
             directory.track(
                 1,
@@ -750,6 +754,10 @@ mod tests {
                 Some(Ingress::Socket(addr_2))
             );
             assert!(!directory.peers.contains_key(&pk_3));
+            assert_eq!(
+                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                Some(1)
+            );
 
             directory.track(
                 2,
@@ -793,6 +801,58 @@ mod tests {
                 ),
             );
             assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn test_track_updates_metric_for_secondary_address_change() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(3),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            directory
+                .track(
+                    0,
+                    AddressableTrackedPeers::new(
+                        Map::default(),
+                        [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                None
+            );
+
+            directory
+                .track(
+                    1,
+                    AddressableTrackedPeers::new(
+                        Map::default(),
+                        [(pk_1.clone(), addr(addr_2))].try_into().unwrap(),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                Some(1)
+            );
         });
     }
 
