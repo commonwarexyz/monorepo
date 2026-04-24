@@ -411,13 +411,15 @@ struct PoolMetrics {
 impl PoolMetrics {
     fn new(registry: &mut impl Register) -> Self {
         Self {
-            created: registry.family(
+            created: registry.register(
                 "buffer_pool_created",
                 "Number of tracked buffers currently created for the pool",
+                raw::Family::default(),
             ),
-            exhausted_total: registry.family(
+            exhausted_total: registry.register(
                 "buffer_pool_exhausted_total",
                 "Total number of failed allocations due to pool exhaustion",
+                raw::Family::default(),
             ),
             oversized_total: registry.register(
                 "buffer_pool_oversized_total",

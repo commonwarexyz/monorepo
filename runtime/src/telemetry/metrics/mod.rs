@@ -1,8 +1,5 @@
 //! Utility functions for metrics
 
-mod counter;
-mod family;
-mod gauge;
 pub mod histogram;
 mod registration;
 pub mod status;
@@ -12,9 +9,6 @@ pub(crate) mod task;
 pub(crate) const METRICS_PREFIX: &str = "runtime";
 
 pub use commonware_runtime_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
-pub use counter::{Counter as RawCounter, CounterValue};
-pub use family::{Family as RawFamily, FamilyValue};
-pub use gauge::{Gauge as RawGauge, GaugeValue};
 pub use prometheus_client::{
     collector, encoding,
     encoding::{
@@ -29,17 +23,20 @@ pub use prometheus_client::{
     registry::Metric,
 };
 
-/// Underlying metric types. Used when constructing a metric to pass to
-/// [`crate::Metrics::register`].
+/// Underlying Prometheus metric types. Used when constructing a metric
+/// to pass to [`crate::Metrics::register`].
 pub mod raw {
-    pub use super::{
-        histogram::Histogram, RawCounter as Counter, RawFamily as Family, RawGauge as Gauge,
+    pub use prometheus_client::metrics::{
+        counter::Counter,
+        family::{self, Family},
+        gauge::Gauge,
+        histogram::Histogram,
     };
 }
 
 use commonware_utils::sync::Mutex;
 use prometheus_client::encoding::{
-    text::{encode_eof, encode_registry},
+    text::{encode, encode_eof},
     MetricEncoder as PromMetricEncoder,
 };
 pub use registration::Registration;
@@ -48,10 +45,18 @@ use std::{
     any::Any,
     borrow::Cow,
     collections::{BTreeMap, HashMap},
-    fmt::Write,
     ops::Deref,
-    sync::{Arc, Weak},
+    sync::{atomic::Ordering, Arc, Weak},
 };
+
+/// Native integer width used by [`raw::Gauge`] on this target.
+///
+/// `i64` on platforms with 64-bit atomics, `i32` otherwise. Matches
+/// `prometheus_client::metrics::gauge::Gauge`'s backing type.
+#[cfg(target_has_atomic = "64")]
+pub type GaugeValue = i64;
+#[cfg(not(target_has_atomic = "64"))]
+pub type GaugeValue = i32;
 
 /// A registered counter metric.
 pub type Counter = Registered<raw::Counter>;
@@ -59,12 +64,33 @@ pub type Counter = Registered<raw::Counter>;
 pub type Gauge = Registered<raw::Gauge>;
 /// A registered histogram metric.
 pub type Histogram = Registered<raw::Histogram>;
-/// A registered metric family keyed by `L`.
-pub type Family<L, M> = Registered<raw::Family<L, M>>;
 /// A registered family of counters keyed by `L`.
-pub type CounterFamily<L> = Family<L, raw::Counter>;
+pub type CounterFamily<L> = Registered<raw::Family<L, raw::Counter>>;
 /// A registered family of gauges keyed by `L`.
-pub type GaugeFamily<L> = Family<L, raw::Gauge>;
+pub type GaugeFamily<L> = Registered<raw::Family<L, raw::Gauge>>;
+
+/// Convenience methods for Prometheus gauges.
+pub trait GaugeExt {
+    /// Set a gauge from a lossless integer conversion.
+    fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
+
+    /// Atomically raise a gauge to at least the provided value.
+    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error>;
+}
+
+impl GaugeExt for raw::Gauge {
+    fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
+        let value = value.try_into()?;
+        Ok(self.set(value))
+    }
+
+    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error> {
+        let value = value.try_into()?;
+        Ok(self.inner().fetch_max(value, Ordering::Relaxed))
+    }
+}
+
+pub use histogram::HistogramExt;
 
 /// One-line constructors for the common metric types.
 pub trait MetricsExt: crate::Metrics {
@@ -91,22 +117,16 @@ pub trait MetricsExt: crate::Metrics {
         self.register(name, help, raw::Histogram::new(buckets))
     }
 
-    /// Register a native counter or gauge family with the runtime.
-    fn family<N, H, S, M>(&self, name: N, help: H) -> Family<S, M>
+    /// Register a metric family with the runtime.
+    fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
     where
         N: Into<String>,
         H: Into<String>,
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: FamilyValue + Default + EncodeMetric,
+        S: Clone + std::hash::Hash + Eq,
+        M: Default,
+        raw::Family<S, M>: Metric,
     {
-        self.register_family(name, help)
+        self.register(name, help, raw::Family::<S, M>::default())
     }
 }
 
@@ -322,12 +342,12 @@ impl<M> Registered<M> {
     }
 }
 
-impl<S, M> Registered<raw::Family<S, M>>
+impl<S, M, C> Registered<raw::Family<S, M, C>>
 where
-    S: Clone + std::hash::Hash + Eq + EncodeLabelSetTrait + Send + Sync + std::fmt::Debug + 'static,
-    M: FamilyValue + Default + EncodeMetric,
+    S: Clone + std::hash::Hash + Eq,
+    C: raw::family::MetricConstructor<M>,
 {
-    pub fn get_by<Q>(&self, label_set: &Q) -> Option<Arc<M>>
+    pub fn get_by<Q>(&self, label_set: &Q) -> Option<impl Deref<Target = M> + '_>
     where
         for<'a> S: From<&'a Q>,
     {
@@ -335,7 +355,7 @@ where
         self.get(&label_set)
     }
 
-    pub fn get_or_create_by<Q>(&self, label_set: &Q) -> Arc<M>
+    pub fn get_or_create_by<Q>(&self, label_set: &Q) -> impl Deref<Target = M> + '_
     where
         for<'a> S: From<&'a Q>,
     {
@@ -370,7 +390,9 @@ impl<M: std::fmt::Debug> std::fmt::Debug for Registered<M> {
 
 type MetricAttributes = Vec<(Cow<'static, str>, Cow<'static, str>)>;
 type MetricKey = (String, MetricAttributes);
-type SampleEncoder = dyn Fn(&mut String) -> Result<(), std::fmt::Error> + Send + Sync;
+type SampleEncoder = dyn Fn(&mut String, &str, &[(Cow<'static, str>, Cow<'static, str>)]) -> Result<(), std::fmt::Error>
+    + Send
+    + Sync;
 
 struct PendingMetricEntry {
     family_name: String,
@@ -398,180 +420,23 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
     }
 }
 
-fn encode_label_suffix(attributes: &MetricAttributes) -> String {
-    if attributes.is_empty() {
-        return String::new();
-    }
-
-    let mut output = String::new();
-    output.push('{');
-    for (i, (key, value)) in attributes.iter().enumerate() {
-        if i != 0 {
-            output.push(',');
-        }
-        output.push_str(key);
-        output.push_str("=\"");
-        output.push_str(value);
-        output.push('"');
-    }
-    output.push('}');
-    output
-}
-
-fn create_counter_encoder(
-    name: String,
-    attributes: &MetricAttributes,
-    metric: Arc<raw::Counter>,
-) -> Box<SampleEncoder> {
-    let mut line_prefix = name;
-    line_prefix.push_str("_total");
-    line_prefix.push_str(&encode_label_suffix(attributes));
-    line_prefix.push(' ');
-
-    Box::new(move |samples| {
-        samples.push_str(&line_prefix);
-        write!(samples, "{}", metric.get())?;
-        samples.push('\n');
-        Ok(())
-    })
-}
-
-fn create_gauge_encoder(
-    name: String,
-    attributes: &MetricAttributes,
-    metric: Arc<raw::Gauge>,
-) -> Box<SampleEncoder> {
-    let mut line_prefix = name;
-    line_prefix.push_str(&encode_label_suffix(attributes));
-    line_prefix.push(' ');
-
-    Box::new(move |samples| {
-        samples.push_str(&line_prefix);
-        write!(samples, "{}", metric.get())?;
-        samples.push('\n');
-        Ok(())
-    })
-}
-
-// Adaptation of client_rust's text histogram encoder.
-//
-// Source:
-// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L399-L466
-//
-// Histogram bucket bounds and registration labels are fixed after
-// registration, so we cache their text prefixes once and only format the
-// changing sample values during scrapes.
-fn encode_histogram_bucket_label_suffix(base: &str, upper_bound: f64) -> String {
-    let label = if upper_bound == f64::MAX {
-        "+Inf".to_string()
-    } else {
-        dtoa::Buffer::new().format(upper_bound).to_string()
-    };
-    let mut suffix = String::new();
-    if base.is_empty() {
-        suffix.push_str("{le=\"");
-        suffix.push_str(&label);
-        suffix.push_str("\"}");
-    } else {
-        suffix.push_str(&base[..base.len() - 1]);
-        suffix.push_str(",le=\"");
-        suffix.push_str(&label);
-        suffix.push_str("\"}");
-    }
-    suffix
-}
-
-fn create_histogram_encoder(
-    name: String,
-    attributes: &MetricAttributes,
-    histogram: Arc<raw::Histogram>,
-) -> Box<SampleEncoder> {
-    let label_suffix = encode_label_suffix(attributes);
-    let mut sum_prefix = name.clone();
-    sum_prefix.push_str("_sum");
-    sum_prefix.push_str(&label_suffix);
-    sum_prefix.push(' ');
-
-    let mut count_prefix = name.clone();
-    count_prefix.push_str("_count");
-    count_prefix.push_str(&label_suffix);
-    count_prefix.push(' ');
-
-    let bucket_prefixes = histogram
-        .bucket_bounds()
-        .into_iter()
-        .map(|upper_bound| {
-            let mut prefix = name.clone();
-            prefix.push_str("_bucket");
-            prefix.push_str(&encode_histogram_bucket_label_suffix(
-                &label_suffix,
-                upper_bound,
-            ));
-            prefix.push(' ');
-            prefix
-        })
-        .collect::<Vec<_>>();
-    Box::new(move |samples| {
-        histogram.encode_samples(&sum_prefix, &count_prefix, &bucket_prefixes, samples)
-    })
-}
-
-fn create_family_encoder<S, M>(
-    name: String,
-    attributes: &MetricAttributes,
-    family: Arc<raw::Family<S, M>>,
-) -> Box<SampleEncoder>
-where
-    S: Clone + std::hash::Hash + Eq + EncodeLabelSetTrait + Send + Sync + std::fmt::Debug + 'static,
-    M: FamilyValue + Default + EncodeMetric,
-{
-    let label_suffix = encode_label_suffix(attributes);
-    Box::new(move |samples| family.encode_samples(&name, &label_suffix, samples))
-}
-
-// Fast path for native metrics.
-//
-// Source:
-// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L314-L361
-//
-// `prometheus-client` keeps its text `MetricEncoder` constructor private, so
-// generic metrics still use a temporary upstream registry below. Native
-// counters, gauges, histograms, and supported families have simple, stable
-// sample shapes, so we encode those lines directly and keep the generic path as
-// a fallback.
-fn create_sample_encoder<M>(
-    name: String,
-    attributes: MetricAttributes,
-    metric: Arc<M>,
-) -> Box<SampleEncoder>
+fn create_sample_encoder<M>(metric: Arc<M>) -> Box<SampleEncoder>
 where
     M: Metric,
 {
-    let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
-    if let Ok(counter) = Arc::downcast::<raw::Counter>(metric_any.clone()) {
-        return create_counter_encoder(name, &attributes, counter);
-    }
-    if let Ok(gauge) = Arc::downcast::<raw::Gauge>(metric_any) {
-        return create_gauge_encoder(name, &attributes, gauge);
-    }
-    let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
-    if let Ok(histogram) = Arc::downcast::<raw::Histogram>(metric_any) {
-        return create_histogram_encoder(name, &attributes, histogram);
-    }
-    let metric_type = metric.metric_type();
-    let mut descriptor = String::new();
-    encode_descriptor(&mut descriptor, &name, ".", metric_type)
-        .expect("encoding fallback descriptor failed");
-    let descriptor_len = descriptor.len();
-
-    Box::new(move |samples| {
-        let mut registry = registry::Registry::with_labels(attributes.clone().into_iter());
-        registry.register(name.as_str(), "", SharedMetric(metric.clone()));
+    Box::new(move |samples, name, labels| {
+        let mut registry = registry::Registry::with_labels(labels.iter().cloned());
+        registry.register(name, "", SharedMetric(metric.clone()));
 
         let mut encoded = String::new();
-        encode_registry(&mut encoded, &registry)
-            .expect("encoding temporary metric registry failed");
-        samples.push_str(&encoded[descriptor_len.min(encoded.len())..]);
+        encode(&mut encoded, &registry).expect("encoding temporary metric registry failed");
+        for line in encoded.lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            samples.push_str(line);
+            samples.push('\n');
+        }
         Ok(())
     })
 }
@@ -655,28 +520,6 @@ impl Registry {
         inner.register(Arc::downgrade(&self.inner), name, help, attributes, metric)
     }
 
-    pub(crate) fn register_family<S, M>(
-        &self,
-        name: String,
-        help: String,
-        attributes: Vec<(String, String)>,
-        family: Arc<raw::Family<S, M>>,
-    ) -> Registered<raw::Family<S, M>>
-    where
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: FamilyValue + Default + EncodeMetric,
-    {
-        let mut inner = self.inner.lock();
-        inner.register_family(Arc::downgrade(&self.inner), name, help, attributes, family)
-    }
-
     pub fn encode(&self) -> String {
         self.inner.lock().encode()
     }
@@ -707,8 +550,7 @@ impl RegistryInner {
         let attributes = owned_attributes(attributes);
         let help = normalize_help(help);
         let metric_type = metric.metric_type();
-        let encode_samples =
-            create_sample_encoder(name.clone(), attributes.clone(), metric.clone());
+        let encode_samples = create_sample_encoder(metric.clone());
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
@@ -759,81 +601,6 @@ impl RegistryInner {
         );
         Registered {
             metric,
-            registration,
-        }
-    }
-
-    fn register_family<S, M>(
-        &mut self,
-        registry: Weak<Mutex<Self>>,
-        name: String,
-        help: String,
-        attributes: Vec<(String, String)>,
-        family: Arc<raw::Family<S, M>>,
-    ) -> Registered<raw::Family<S, M>>
-    where
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: FamilyValue + Default + EncodeMetric,
-    {
-        let attributes = owned_attributes(attributes);
-        let help = normalize_help(help);
-        let metric_type = family.metric_type();
-        let encode_samples = create_family_encoder(name.clone(), &attributes, family.clone());
-        let key = (name.clone(), attributes.clone());
-        if let Some(existing_id) = self.keys.get(&key).copied() {
-            let entry = self.metric_ref(existing_id);
-            if let Some(family_meta) = self.families.get(&name) {
-                assert_eq!(
-                    family_meta.help, help,
-                    "metric family `{}` registered with inconsistent help text",
-                    name
-                );
-            }
-            let existing_metric = Arc::clone(&entry.metric_any)
-                .downcast::<raw::Family<S, M>>()
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "duplicate metric `{}` with attributes {:?} registered with different type",
-                        key.0, key.1
-                    )
-                });
-            let registration = entry
-                .registration
-                .upgrade()
-                .and_then(RegistrationInner::claim)
-                .expect("metric key references closed registration");
-            return Registered {
-                metric: existing_metric,
-                registration,
-            };
-        }
-        self.assert_family_matches(&name, &help, metric_type);
-
-        let id = self.allocate_metric_id();
-        let registration =
-            Registration::from_inner(RegistrationInner::new(RuntimeRegistration { id, registry }));
-        let metric_any: Arc<dyn Any + Send + Sync> = family.clone();
-        self.insert_metric_entry(
-            id,
-            help,
-            metric_type,
-            PendingMetricEntry {
-                family_name: name,
-                attributes,
-                encode_samples,
-                metric_any,
-                registration: registration.downgrade(),
-            },
-        );
-        Registered {
-            metric: family,
             registration,
         }
     }
@@ -998,17 +765,16 @@ impl RegistryInner {
     pub fn encode(&self) -> String {
         let mut output = String::new();
         let mut samples = String::new();
-        for family in self.families.values() {
+        for (name, family) in &self.families {
             samples.clear();
             for metric_id in &family.metric_ids {
                 let metric = self.metric_ref(*metric_id);
-                (metric.encode_samples)(&mut samples).expect("encoding live metric samples failed");
+                (metric.encode_samples)(&mut samples, name, &metric.attributes)
+                    .expect("encoding live metric samples failed");
             }
             // Suppress the HELP/TYPE descriptor when the family produced no
-            // samples (e.g. a `Family<S, M>` with no child entries).
-            //
-            // Source:
-            // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L1283-L1298
+            // samples (e.g. a `Family<S, M>` with no child entries). Matches
+            // upstream prometheus-client's empty-metric filtering.
             if samples.is_empty() {
                 continue;
             }
@@ -1030,19 +796,6 @@ pub(crate) trait Register {
     /// Register a metric under this scope's prefix.
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M>;
 
-    /// Register a native counter or gauge family under this scope's prefix.
-    fn family<S, M>(&mut self, name: &str, help: &str) -> Registered<raw::Family<S, M>>
-    where
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: FamilyValue + Default + EncodeMetric;
-
     /// Create a child scope by appending `prefix` to the current prefix.
     fn sub_registry(&mut self, prefix: &str) -> Scope;
 }
@@ -1056,29 +809,6 @@ impl Register for Registry {
             help.to_string(),
             Vec::new(),
             Arc::new(metric),
-        )
-    }
-
-    fn family<S, M>(&mut self, name: &str, help: &str) -> Registered<raw::Family<S, M>>
-    where
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: FamilyValue + Default + EncodeMetric,
-    {
-        validate_label(name);
-        let family = raw::Family::<S, M>::default();
-        Self::register_family(
-            self,
-            name.to_string(),
-            help.to_string(),
-            Vec::new(),
-            Arc::new(family),
         )
     }
 
@@ -1100,29 +830,6 @@ impl Register for Scope {
         Registry::register(&self.registry, name, help, Vec::new(), metric)
     }
 
-    fn family<S, M>(&mut self, name: &str, help: &str) -> Registered<raw::Family<S, M>>
-    where
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: FamilyValue + Default + EncodeMetric,
-    {
-        validate_label(name);
-        let family = raw::Family::<S, M>::default();
-        Registry::register_family(
-            &self.registry,
-            prefixed_name(&self.prefix, name),
-            help.to_string(),
-            Vec::new(),
-            Arc::new(family),
-        )
-    }
-
     fn sub_registry(&mut self, prefix: &str) -> Scope {
         validate_label(prefix);
         Self {
@@ -1138,7 +845,6 @@ mod tests {
     use crate::{deterministic, Metrics, Runner, Spawner};
     use commonware_macros::test_traced;
     use futures::future;
-    use prometheus_client::encoding::text::encode;
     use std::sync::mpsc::{self, TryRecvError};
 
     #[test_traced]
@@ -1506,49 +1212,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_native_counter_family() {
-        let mut registry = Registry::default();
-        let family: CounterFamily<Vec<(String, String)>> =
-            Register::family(&mut registry, "votes", "vote count");
-        family
-            .get_or_create(&vec![("epoch".to_string(), "1".to_string())])
-            .inc();
-        family
-            .get_or_create(&vec![("epoch".to_string(), "2".to_string())])
-            .inc_by(2);
-
-        let encoded = registry.encode();
-        assert_eq!(
-            encoded.matches("# HELP votes").count(),
-            1,
-            "single HELP: {encoded}"
-        );
-        assert!(encoded.contains("votes_total{epoch=\"1\"} 1"));
-        assert!(encoded.contains("votes_total{epoch=\"2\"} 2"));
-    }
-
-    #[test]
-    fn test_encode_native_counter_family_with_attributes() {
-        let registry = Registry::default();
-        let family = raw::Family::<Vec<(String, String)>, raw::Counter>::default();
-        let family = registry.register_family(
-            "votes".to_string(),
-            "vote count".to_string(),
-            vec![("region".to_string(), "us".to_string())],
-            Arc::new(family),
-        );
-        family
-            .get_or_create(&vec![("epoch".to_string(), "1".to_string())])
-            .inc();
-
-        let encoded = registry.encode();
-        assert!(
-            encoded.contains("votes_total{region=\"us\",epoch=\"1\"} 1"),
-            "attributes and family labels should both be encoded: {encoded}"
-        );
-    }
-
-    #[test]
     fn test_encode_registers_without_prefix() {
         let registry = Registry::default();
         let _registered = register_counter(&registry, "votes", "vote count", 1);
@@ -1600,7 +1263,7 @@ mod tests {
         counter.inc_by(7);
         let gauge = raw::Gauge::<i64>::default();
         gauge.set(-3);
-        let histogram = raw::Histogram::new([1e-7, 0.1, 1.0, 1e30]);
+        let histogram = raw::Histogram::new([0.1, 1.0]);
         histogram.observe(0.5);
 
         let ours = Registry::default();
@@ -1636,71 +1299,6 @@ mod tests {
             "output diverged from upstream prometheus-client registry"
         );
 
-        let sum = ours_encoded
-            .find("latency_sum ")
-            .expect("histogram sum present");
-        let count = ours_encoded
-            .find("latency_count ")
-            .expect("histogram count present");
-        let bucket = ours_encoded
-            .find("latency_bucket")
-            .expect("histogram bucket present");
-        assert!(
-            sum < count && count < bucket,
-            "upstream order changed: {ours_encoded}"
-        );
-        assert!(
-            ours_encoded.contains("latency_bucket{le=\"1e-7\"}"),
-            "small finite bucket must use upstream dtoa formatting: {ours_encoded}"
-        );
-        assert!(
-            ours_encoded.contains("latency_bucket{le=\"1e30\"}"),
-            "large finite bucket must use upstream dtoa formatting: {ours_encoded}"
-        );
-    }
-
-    #[test]
-    fn test_encode_native_families_match_upstream_registry() {
-        // Covers native family sample formatting, including registry labels
-        // merged ahead of child labels.
-        let levels = raw::Family::<Vec<(String, String)>, raw::Gauge>::default();
-        levels
-            .get_or_create(&vec![("queue".to_string(), "pending".to_string())])
-            .set(4);
-        let requests = raw::Family::<Vec<(String, String)>, raw::Counter>::default();
-        requests
-            .get_or_create(&vec![("method".to_string(), "GET".to_string())])
-            .inc_by(3);
-        requests
-            .get_or_create(&vec![("method".to_string(), "POST".to_string())])
-            .inc_by(5);
-
-        let ours = Registry::default();
-        let labels = vec![("region".to_string(), "us".to_string())];
-        let _levels = ours.register_family(
-            "levels".to_string(),
-            "current queue depth".to_string(),
-            labels.clone(),
-            Arc::new(levels.clone()),
-        );
-        let _requests = ours.register_family(
-            "requests".to_string(),
-            "number of requests".to_string(),
-            labels.clone(),
-            Arc::new(requests.clone()),
-        );
-        let ours_encoded = ours.encode();
-
-        let mut theirs = registry::Registry::with_labels(owned_attributes(labels).into_iter());
-        theirs.register("levels", "current queue depth", levels);
-        theirs.register("requests", "number of requests", requests);
-        let mut theirs_encoded = String::new();
-        encode(&mut theirs_encoded, &theirs).expect("upstream encode failed");
-
-        assert_eq!(
-            ours_encoded, theirs_encoded,
-            "native family output diverged from upstream prometheus-client registry"
-        );
     }
 
     #[test]

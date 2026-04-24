@@ -68,8 +68,16 @@ struct Metrics {
 impl Metrics {
     pub fn init(registry: &mut impl Register) -> Self {
         Self {
-            tasks_spawned: registry.family("tasks_spawned", "Total number of tasks spawned"),
-            tasks_running: registry.family("tasks_running", "Number of tasks currently running"),
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
         }
     }
 }
@@ -472,7 +480,7 @@ impl crate::Runner for Runner {
         // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label);
+        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
         // Run the future
         let context = Context {
@@ -717,32 +725,6 @@ impl crate::Metrics for Context {
             help,
             self.attributes.clone(),
             metric,
-        )
-    }
-
-    fn register_family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
-    where
-        N: Into<String>,
-        H: Into<String>,
-        S: Clone
-            + std::hash::Hash
-            + Eq
-            + crate::telemetry::metrics::EncodeLabelSetTrait
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
-        M: crate::telemetry::metrics::FamilyValue
-            + Default
-            + crate::telemetry::metrics::EncodeMetric,
-    {
-        let name = name.into();
-        let help = help.into();
-        self.executor.registry.register_family(
-            prefixed_name(&self.name, &name),
-            help,
-            self.attributes.clone(),
-            Arc::new(raw::Family::<S, M>::default()),
         )
     }
 

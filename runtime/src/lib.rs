@@ -445,27 +445,6 @@ stability_scope!(BETA {
             metric: M,
         ) -> telemetry::metrics::Registered<M>;
 
-        #[doc(hidden)]
-        fn register_family<N, H, S, M>(
-            &self,
-            name: N,
-            help: H,
-        ) -> telemetry::metrics::Registered<telemetry::metrics::raw::Family<S, M>>
-        where
-            N: Into<String>,
-            H: Into<String>,
-            S: Clone
-                + std::hash::Hash
-                + Eq
-                + telemetry::metrics::EncodeLabelSetTrait
-                + Send
-                + Sync
-                + std::fmt::Debug
-                + 'static,
-            M: telemetry::metrics::FamilyValue
-                + Default
-                + telemetry::metrics::EncodeMetric;
-
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }

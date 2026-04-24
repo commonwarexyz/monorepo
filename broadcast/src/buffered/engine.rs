@@ -7,8 +7,9 @@ use commonware_p2p::{
     Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::Status, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner,
+    spawn_cell,
+    telemetry::metrics::{status::Status, GaugeExt},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},

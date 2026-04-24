@@ -29,7 +29,7 @@ use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, T
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{Counter, EncodeStruct, GaugeFamily, MetricsExt as _},
+    telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };

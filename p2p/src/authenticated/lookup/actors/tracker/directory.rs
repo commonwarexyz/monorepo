@@ -9,7 +9,7 @@ use crate::{
     AddressableTrackedPeers, Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{ordered::Set, IpAddrExt, PrioritySet, SystemTimeExt};
 use rand::Rng;
 use std::{

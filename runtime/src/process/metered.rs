@@ -1,6 +1,6 @@
 //! Process metrics collection.
 
-use crate::telemetry::metrics::{raw, Gauge, Register};
+use crate::telemetry::metrics::{raw, Gauge, GaugeExt, Register};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 

@@ -5,7 +5,7 @@ use commonware_runtime::{
     telemetry::metrics::{
         histogram::Buckets,
         status::{self, Status},
-        EncodeStruct, GaugeFamily, Histogram, MetricsExt as _,
+        EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, Metrics,
 };
