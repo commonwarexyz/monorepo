@@ -277,7 +277,7 @@ pub(crate) fn child_label(prefix: &str, label: &str) -> String {
 }
 
 struct RegistryGuard {
-    id: u64,
+    id: usize,
     registry: Weak<Mutex<RegistryInner>>,
 }
 
@@ -456,7 +456,7 @@ struct MetricFamily {
     help: String,
     metric_type: MetricType,
     descriptor: String,
-    metric_ids: Vec<u64>,
+    metric_ids: Vec<usize>,
 }
 
 /// Manages metrics with explicit lifetimes.
@@ -469,13 +469,13 @@ struct RegistryInner {
     /// Dense metric storage indexed by stable metric id.
     metrics: Vec<Option<MetricEntry>>,
     /// Metric ids that can be reused after a metric is fully unregistered.
-    free_metric_ids: Vec<u64>,
+    free_metric_ids: Vec<usize>,
     /// Metric families keyed by family name, kept sorted for deterministic encoding.
     families: BTreeMap<String, MetricFamily>,
     /// Exact metric keys for duplicate registration detection.
-    keys: HashMap<MetricKey, u64>,
+    keys: HashMap<MetricKey, usize>,
     /// Monotonic id source used when there is no reusable metric slot.
-    next_metric_id: u64,
+    next_metric_id: usize,
 }
 
 impl Default for Registry {
@@ -586,33 +586,28 @@ impl RegistryInner {
         }
     }
 
-    fn metric_index(id: u64) -> usize {
-        usize::try_from(id).expect("metric id overflowed usize")
-    }
-
-    fn metric_slot_mut(&mut self, id: u64) -> &mut Option<MetricEntry> {
-        let index = Self::metric_index(id);
-        if index == self.metrics.len() {
+    fn metric_slot_mut(&mut self, id: usize) -> &mut Option<MetricEntry> {
+        if id == self.metrics.len() {
             self.metrics.push(None);
         }
-        &mut self.metrics[index]
+        &mut self.metrics[id]
     }
 
-    fn metric_ref(&self, id: u64) -> &MetricEntry {
+    fn metric_ref(&self, id: usize) -> &MetricEntry {
         self.metrics
-            .get(Self::metric_index(id))
+            .get(id)
             .and_then(Option::as_ref)
             .expect("metric id missing from registry")
     }
 
-    fn metric_mut(&mut self, id: u64) -> &mut MetricEntry {
+    fn metric_mut(&mut self, id: usize) -> &mut MetricEntry {
         self.metrics
-            .get_mut(Self::metric_index(id))
+            .get_mut(id)
             .and_then(Option::as_mut)
             .expect("metric id missing from registry")
     }
 
-    fn allocate_metric_id(&mut self) -> u64 {
+    fn allocate_metric_id(&mut self) -> usize {
         if let Some(id) = self.free_metric_ids.pop() {
             return id;
         }
@@ -642,7 +637,7 @@ impl RegistryInner {
 
     fn insert_metric_entry(
         &mut self,
-        id: u64,
+        id: usize,
         help: String,
         metric_type: MetricType,
         entry: PendingMetricEntry,
@@ -681,7 +676,7 @@ impl RegistryInner {
         });
     }
 
-    fn claim_registration(&mut self, id: u64) {
+    fn claim_registration(&mut self, id: usize) {
         let entry = self.metric_mut(id);
         entry.claims = entry
             .claims
@@ -689,7 +684,7 @@ impl RegistryInner {
             .expect("registration claims overflow");
     }
 
-    fn release_registration(&mut self, id: u64) {
+    fn release_registration(&mut self, id: usize) {
         let entry = self.metric_mut(id);
         entry.claims = entry
             .claims
@@ -701,10 +696,10 @@ impl RegistryInner {
         self.drop_metric_entry(id);
     }
 
-    fn drop_metric_entry(&mut self, id: u64) {
+    fn drop_metric_entry(&mut self, id: usize) {
         let metric = self
             .metrics
-            .get_mut(Self::metric_index(id))
+            .get_mut(id)
             .and_then(Option::take)
             .expect("metric id missing from registry");
         let MetricEntry {
