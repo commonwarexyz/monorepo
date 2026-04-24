@@ -16,6 +16,7 @@ members = [
     "parallel",
     "resolver",
     "runtime",
+    "runtime/macros",
     "storage",
     "stream",
     "invariants",
@@ -104,6 +105,7 @@ commonware-p2p = { version = "2026.4.0", path = "p2p" }
 commonware-parallel = { version = "2026.4.0", path = "parallel", default-features = false }
 commonware-resolver = { version = "2026.4.0", path = "resolver" }
 commonware-runtime = { version = "2026.4.0", path = "runtime" }
+commonware-runtime-macros = { version = "2026.4.0", path = "runtime/macros" }
 commonware-storage = { version = "2026.4.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.4.0", path = "stream" }
 commonware-utils = { version = "2026.4.0", path = "utils", default-features = false }

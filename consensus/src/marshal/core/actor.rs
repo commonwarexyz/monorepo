@@ -27,8 +27,9 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    spawn_cell,
+    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -43,7 +44,6 @@ use commonware_utils::{
 };
 use futures::{future::join_all, try_join, FutureExt};
 use pin_project::pin_project;
-use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
@@ -319,18 +319,8 @@ where
             .unwrap_or(Height::zero());
 
         // Create metrics
-        let finalized_height = Gauge::default();
-        context.register(
-            "finalized_height",
-            "Finalized height of application",
-            finalized_height.clone(),
-        );
-        let processed_height = Gauge::default();
-        context.register(
-            "processed_height",
-            "Processed height of application",
-            processed_height.clone(),
-        );
+        let finalized_height = context.gauge("finalized_height", "Finalized height of application");
+        let processed_height = context.gauge("processed_height", "Processed height of application");
         let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox

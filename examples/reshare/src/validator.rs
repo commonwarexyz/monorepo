@@ -1472,7 +1472,7 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn reshare_scoped_metrics_cleanup() {
+    fn reshare_epoch_metrics_cleanup() {
         Runner::seeded(0).start(|mut ctx| async move {
             let (network, mut oracle) = Network::<_, PublicKey>::new(
                 ctx.with_label("network"),
@@ -1539,7 +1539,7 @@ mod test {
             // Allow the orchestrator to process the epoch exit
             ctx.sleep(Duration::from_secs(1)).await;
 
-            // Verify scoped metrics: epoch 0 should be gone, epoch 1 should be present
+            // Verify epoch 0 metrics are gone and epoch 1 metrics are present.
             let buffer = ctx.encode();
             assert!(
                 !buffer.contains("epoch=\"0\""),

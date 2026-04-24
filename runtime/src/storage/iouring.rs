@@ -23,11 +23,11 @@
 use super::Header;
 use crate::{
     iouring::{self},
+    telemetry::metrics::Register,
     utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};
-use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
@@ -75,7 +75,7 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
+    pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
             mut iouring_config,
@@ -357,8 +357,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, utils::thread, Blob as _, BufferPool, BufferPoolConfig,
-        IoBuf, IoBufMut, Storage as _,
+        storage::tests::run_storage_tests, telemetry::metrics::Registry, utils::thread, Blob as _,
+        BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
     };
     use std::{
         env,
@@ -372,6 +372,10 @@ mod tests {
 
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
+    fn test_pool(scope: &mut impl Register) -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_storage(), scope)
+    }
+
     /// Build a fresh storage instance rooted in a unique temporary directory.
     fn create_test_storage() -> (Storage, PathBuf) {
         let storage_directory = env::temp_dir().join(format!(
@@ -381,14 +385,15 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&storage_directory);
 
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
-            &mut Registry::default(),
+            &mut registry.sub_registry("storage"),
             pool,
         );
         (storage, storage_directory)
@@ -706,14 +711,15 @@ mod tests {
 
         // Start storage against the invalid root so `open` reaches the
         // filesystem setup path under realistic wrapper code.
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut Registry::default(),
+            &mut registry.sub_registry("storage"),
             pool,
         );
 
@@ -740,14 +746,15 @@ mod tests {
         // fails once the wrapper reaches the open call.
         std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
 
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut Registry::default(),
+            &mut registry.sub_registry("storage"),
             pool,
         );
 
@@ -802,9 +809,11 @@ mod tests {
         // Drop the loop immediately so the handle behaves like a dead
         // backend while the blob handle still exists.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
         drop(io_loop);
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
@@ -852,9 +861,11 @@ mod tests {
         // Construct a blob handle whose handle has already lost its loop so
         // the wrapper must synthesize the disconnect error locally.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
         drop(io_loop);
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
@@ -886,9 +897,11 @@ mod tests {
         // `set_len` on a socket-backed file descriptor should fail in the
         // kernel, letting the wrapper expose `BlobResizeFailed`.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
         drop(io_loop);
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
@@ -915,9 +928,11 @@ mod tests {
         // Run a real loop so the request reaches the kernel and fails there
         // rather than through the wrapper's disconnected-submit path.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
         let handle = std::thread::spawn(move || io_loop.run());
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter.clone(), pool);
