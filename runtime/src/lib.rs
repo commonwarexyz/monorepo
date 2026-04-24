@@ -398,7 +398,7 @@ stability_scope!(BETA {
         ///
         /// # Querying The Latest Attribute
         ///
-        /// To query the latest attribute value dynamically, create a gauge to track the current value.
+        /// To query the latest attribute value dynamically, create a gauge to track the current value:
         /// ```ignore
         /// // Create a gauge to track the current epoch. Hold the handle on `self`.
         /// let latest_epoch = context.with_label("orchestrator").gauge("latest_epoch", "current epoch");
