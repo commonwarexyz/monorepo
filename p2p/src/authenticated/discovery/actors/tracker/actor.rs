@@ -142,13 +142,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 debug!("mailbox closed, stopping tracker");
                 break;
             } => {
-                self.handle_msg(msg).await;
+                self.handle_msg(msg);
             },
         }
     }
 
     /// Handle a [`Message`].
-    async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
+    fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
                 // Ensure that the primary peer set is not too large.
