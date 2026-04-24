@@ -28,16 +28,13 @@ pub use prometheus_client::{
 
 pub use counter::{Counter as RawCounter, CounterValue};
 pub use family::{Family, FamilyValue};
-pub use gauge::{Gauge as RawGauge, GaugeExt, GaugeValue};
+pub use gauge::{Gauge as RawGauge, GaugeValue};
 pub use histogram::HistogramExt;
 
 /// Underlying metric types. Used when constructing a metric to pass to
 /// [`crate::Metrics::register`].
 pub mod raw {
-    pub use super::{Family, RawCounter as Counter, RawGauge as Gauge};
-    pub use prometheus_client::metrics::{
-        histogram::Histogram,
-    };
+    pub use super::{histogram::Histogram, Family, RawCounter as Counter, RawGauge as Gauge};
 }
 
 use commonware_utils::sync::Mutex;
@@ -437,6 +434,66 @@ fn create_gauge_encoder(
     })
 }
 
+fn push_sample_prefix(samples: &mut String, name: &str, suffix: &str, labels: &str) {
+    samples.push_str(name);
+    samples.push('_');
+    samples.push_str(suffix);
+    samples.push_str(labels);
+    samples.push(' ');
+}
+
+fn push_histogram_bucket_labels(samples: &mut String, base: &str, upper_bound: f64) {
+    let label = if upper_bound == f64::MAX {
+        "+Inf".to_string()
+    } else if upper_bound.fract() == 0.0 {
+        format!("{upper_bound:.1}")
+    } else {
+        upper_bound.to_string()
+    };
+    if base.is_empty() {
+        samples.push_str("{le=\"");
+        samples.push_str(&label);
+        samples.push_str("\"}");
+    } else {
+        samples.push_str(&base[..base.len() - 1]);
+        samples.push_str(",le=\"");
+        samples.push_str(&label);
+        samples.push_str("\"}");
+    }
+}
+
+fn create_histogram_encoder(
+    name: String,
+    attributes: &MetricAttributes,
+    histogram: Arc<raw::Histogram>,
+) -> Box<SampleEncoder> {
+    let label_suffix = encode_label_suffix(attributes);
+    Box::new(move |samples| {
+        let (sum, count, buckets) = histogram.snapshot();
+
+        push_sample_prefix(samples, &name, "sum", &label_suffix);
+        write!(samples, "{sum}")?;
+        samples.push('\n');
+
+        push_sample_prefix(samples, &name, "count", &label_suffix);
+        write!(samples, "{count}")?;
+        samples.push('\n');
+
+        let mut cumulative = 0;
+        for (upper_bound, count) in buckets {
+            cumulative += count;
+            samples.push_str(&name);
+            samples.push_str("_bucket");
+            push_histogram_bucket_labels(samples, &label_suffix, upper_bound);
+            samples.push(' ');
+            write!(samples, "{cumulative}")?;
+            samples.push('\n');
+        }
+
+        Ok(())
+    })
+}
+
 fn create_family_encoder<S, M>(
     name: String,
     attributes: &MetricAttributes,
@@ -480,6 +537,10 @@ where
     }
     if let Ok(gauge) = Arc::downcast::<raw::Gauge>(metric_any) {
         return create_gauge_encoder(name, &attributes, gauge);
+    }
+    let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
+    if let Ok(histogram) = Arc::downcast::<raw::Histogram>(metric_any) {
+        return create_histogram_encoder(name, &attributes, histogram);
     }
     let metric_type = metric.metric_type();
     let mut descriptor = String::new();

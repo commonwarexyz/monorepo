@@ -20,7 +20,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram::{self, Buckets},
-        Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
+        Counter, CounterFamily, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };

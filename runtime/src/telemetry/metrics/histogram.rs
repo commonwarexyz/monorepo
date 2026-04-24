@@ -1,8 +1,77 @@
 //! Utilities for working with histograms.
 
-use super::{raw, Histogram};
+use super::Registered;
 use crate::Clock;
-use std::{sync::Arc, time::SystemTime};
+use commonware_utils::sync::Mutex;
+use prometheus_client::{
+    encoding::{EncodeMetric, MetricEncoder, NoLabelSet},
+    metrics::{MetricType, TypedMetric},
+};
+use std::{iter::once, sync::Arc, time::SystemTime};
+
+/// Native histogram metric.
+#[derive(Clone, Debug)]
+pub struct Histogram {
+    inner: Arc<Mutex<Inner>>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    sum: f64,
+    count: u64,
+    buckets: Vec<(f64, u64)>,
+}
+
+impl Histogram {
+    /// Create a new histogram with the provided bucket upper bounds.
+    pub fn new(buckets: impl IntoIterator<Item = f64>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                sum: 0.0,
+                count: 0,
+                buckets: buckets
+                    .into_iter()
+                    .chain(once(f64::MAX))
+                    .map(|upper_bound| (upper_bound, 0))
+                    .collect(),
+            })),
+        }
+    }
+
+    /// Observe a value.
+    pub fn observe(&self, value: f64) {
+        let mut inner = self.inner.lock();
+        inner.sum += value;
+        inner.count += 1;
+        if let Some((_, count)) = inner
+            .buckets
+            .iter_mut()
+            .find(|(upper_bound, _)| *upper_bound >= value)
+        {
+            *count += 1;
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> (f64, u64, Vec<(f64, u64)>) {
+        let inner = self.inner.lock();
+        (inner.sum, inner.count, inner.buckets.clone())
+    }
+}
+
+impl TypedMetric for Histogram {
+    const TYPE: MetricType = MetricType::Histogram;
+}
+
+impl EncodeMetric for Histogram {
+    fn encode(&self, mut encoder: MetricEncoder<'_>) -> Result<(), std::fmt::Error> {
+        let (sum, count, buckets) = self.snapshot();
+        encoder.encode_histogram::<NoLabelSet>(sum, count, &buckets, None)
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+}
 
 /// Convenience methods for Prometheus histograms.
 pub trait HistogramExt {
@@ -12,7 +81,7 @@ pub trait HistogramExt {
     fn observe_between(&self, start: SystemTime, end: SystemTime);
 }
 
-impl HistogramExt for raw::Histogram {
+impl HistogramExt for Histogram {
     fn observe_between(&self, start: SystemTime, end: SystemTime) {
         let duration = end
             .duration_since(start)
@@ -57,7 +126,7 @@ impl Buckets {
 #[derive(Clone)]
 pub struct Timed<C: Clock> {
     /// The histogram to record durations in.
-    histogram: Histogram,
+    histogram: Registered<Histogram>,
 
     /// The clock to use for recording durations.
     clock: Arc<C>,
@@ -65,7 +134,7 @@ pub struct Timed<C: Clock> {
 
 impl<C: Clock> Timed<C> {
     /// Create a new timed histogram.
-    pub const fn new(histogram: Histogram, clock: Arc<C>) -> Self {
+    pub const fn new(histogram: Registered<Histogram>, clock: Arc<C>) -> Self {
         Self { histogram, clock }
     }
 
@@ -94,7 +163,7 @@ impl<C: Clock> Timed<C> {
 /// A timer that records a duration when dropped.
 pub struct Timer<C: Clock> {
     /// The histogram to record durations in.
-    histogram: Histogram,
+    histogram: Registered<Histogram>,
 
     /// The clock to use for recording durations.
     clock: Arc<C>,

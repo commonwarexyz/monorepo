@@ -9,7 +9,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Write,
     },
-    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Blob, BufferPool, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;

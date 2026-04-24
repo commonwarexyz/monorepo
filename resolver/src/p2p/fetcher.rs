@@ -4,8 +4,8 @@ use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram::Buckets,
-        status::{self, CounterExt, Status},
-        EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
+        status::{self, Status},
+        EncodeStruct, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, Metrics,
 };

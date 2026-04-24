@@ -3,7 +3,7 @@ use crate::Context;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Blob, BufMut, Error as RError,
 };
 use commonware_utils::{sync::AsyncMutex, Span};

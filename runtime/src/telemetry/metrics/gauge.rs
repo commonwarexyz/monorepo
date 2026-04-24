@@ -88,6 +88,21 @@ impl Gauge<GaugeValue> {
     pub fn set_max(&self, value: GaugeValue) -> GaugeValue {
         self.value.fetch_max(value, Ordering::Relaxed)
     }
+
+    /// Set a gauge from a lossless integer conversion.
+    pub fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
+        let value = value.try_into()?;
+        Ok(self.set(value))
+    }
+
+    /// Atomically raise the gauge to at least the provided value.
+    pub fn try_set_max<T: TryInto<GaugeValue> + Copy>(
+        &self,
+        value: T,
+    ) -> Result<GaugeValue, T::Error> {
+        let value = value.try_into()?;
+        Ok(self.set_max(value))
+    }
 }
 
 impl<N> TypedMetric for Gauge<N> {
@@ -101,26 +116,5 @@ impl EncodeMetric for Gauge<GaugeValue> {
 
     fn metric_type(&self) -> MetricType {
         <Self as TypedMetric>::TYPE
-    }
-}
-
-/// Convenience methods for gauges.
-pub trait GaugeExt {
-    /// Set a gauge from a lossless integer conversion.
-    fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
-
-    /// Atomically raise a gauge to at least the provided value.
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error>;
-}
-
-impl GaugeExt for Gauge {
-    fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
-        let value = value.try_into()?;
-        Ok(self.set(value))
-    }
-
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error> {
-        let value = value.try_into()?;
-        Ok(self.set_max(value))
     }
 }

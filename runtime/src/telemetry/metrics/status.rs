@@ -32,16 +32,9 @@ pub type Raw = raw::Family<Label, raw::Counter>;
 /// A registered counter metric with a status label.
 pub type Counter = Registered<Raw>;
 
-/// Trait providing convenience methods for `Counter`.
-pub trait CounterExt {
-    fn guard(&self, status: Status) -> CounterGuard;
-    fn inc(&self, status: Status);
-    fn inc_by(&self, status: Status, n: u64);
-}
-
-impl CounterExt for Counter {
+impl Counter {
     /// Create a new CounterGuard with a given status.
-    fn guard(&self, status: Status) -> CounterGuard {
+    pub fn guard(&self, status: Status) -> CounterGuard {
         CounterGuard {
             metric: self.clone(),
             status,
@@ -49,12 +42,12 @@ impl CounterExt for Counter {
     }
 
     /// Increment the metric with a given status.
-    fn inc(&self, status: Status) {
+    pub fn inc(&self, status: Status) {
         self.get_or_create(&Label { status }).inc();
     }
 
     /// Increment the metric with a given status.
-    fn inc_by(&self, status: Status, n: u64) {
+    pub fn inc_by(&self, status: Status, n: u64) {
         self.get_or_create(&Label { status }).inc_by(n);
     }
 }

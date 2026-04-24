@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Buf, BufMut, BufferPooler, Metrics, Storage,
 };
 use commonware_utils::Array;

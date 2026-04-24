@@ -35,8 +35,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
-        GaugeExt,
+        status::Status,
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };

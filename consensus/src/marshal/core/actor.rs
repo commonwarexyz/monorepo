@@ -28,7 +28,7 @@ use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{Gauge, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::{

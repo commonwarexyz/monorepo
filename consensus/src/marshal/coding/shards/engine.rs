@@ -162,7 +162,7 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{GaugeExt as _, HistogramExt as _},
+    telemetry::metrics::{HistogramExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
