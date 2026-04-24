@@ -868,7 +868,7 @@ pub trait Register {
 impl Register for Registry {
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M> {
         validate_label(name);
-        Registry::register(
+        Self::register(
             self,
             name.to_string(),
             help.to_string(),
@@ -897,7 +897,7 @@ impl Register for Scope {
 
     fn sub_registry(&mut self, prefix: &str) -> Scope {
         validate_label(prefix);
-        Scope {
+        Self {
             registry: self.registry.clone(),
             prefix: prefixed_name(&self.prefix, prefix),
         }
