@@ -1,6 +1,5 @@
 //! Utilities for working with histograms.
 
-use super::Registered;
 use crate::Clock;
 use commonware_utils::sync::Mutex;
 use prometheus_client::{
@@ -76,7 +75,7 @@ impl Histogram {
         let inner = self.inner.lock();
 
         samples.push_str(sum_prefix);
-        write!(samples, "{}", inner.sum)?;
+        samples.push_str(dtoa::Buffer::new().format(inner.sum));
         samples.push('\n');
 
         samples.push_str(count_prefix);
@@ -93,6 +92,16 @@ impl Histogram {
 
         Ok(())
     }
+
+    /// Observe the duration between two points in time, in seconds.
+    ///
+    /// If the clock goes backwards, the duration is 0.
+    pub fn observe_between(&self, start: SystemTime, end: SystemTime) {
+        let duration = end
+            .duration_since(start)
+            .map_or(0.0, |duration| duration.as_secs_f64());
+        self.observe(duration);
+    }
 }
 
 impl TypedMetric for Histogram {
@@ -107,23 +116,6 @@ impl EncodeMetric for Histogram {
 
     fn metric_type(&self) -> MetricType {
         Self::TYPE
-    }
-}
-
-/// Convenience methods for Prometheus histograms.
-pub trait HistogramExt {
-    /// Observe the duration between two points in time, in seconds.
-    ///
-    /// If the clock goes backwards, the duration is 0.
-    fn observe_between(&self, start: SystemTime, end: SystemTime);
-}
-
-impl HistogramExt for Histogram {
-    fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = end
-            .duration_since(start)
-            .map_or(0.0, |duration| duration.as_secs_f64());
-        self.observe(duration);
     }
 }
 
@@ -163,7 +155,7 @@ impl Buckets {
 #[derive(Clone)]
 pub struct Timed<C: Clock> {
     /// The histogram to record durations in.
-    histogram: Registered<Histogram>,
+    histogram: super::Histogram,
 
     /// The clock to use for recording durations.
     clock: Arc<C>,
@@ -171,7 +163,7 @@ pub struct Timed<C: Clock> {
 
 impl<C: Clock> Timed<C> {
     /// Create a new timed histogram.
-    pub const fn new(histogram: Registered<Histogram>, clock: Arc<C>) -> Self {
+    pub const fn new(histogram: super::Histogram, clock: Arc<C>) -> Self {
         Self { histogram, clock }
     }
 
@@ -200,7 +192,7 @@ impl<C: Clock> Timed<C> {
 /// A timer that records a duration when dropped.
 pub struct Timer<C: Clock> {
     /// The histogram to record durations in.
-    histogram: Registered<Histogram>,
+    histogram: super::Histogram,
 
     /// The clock to use for recording durations.
     clock: Arc<C>,

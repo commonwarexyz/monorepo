@@ -8,8 +8,7 @@ use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    telemetry::metrics::{HistogramExt as _, MetricsExt as _},
-    tokio, Buf, Metrics, Quota, Runner, Spawner,
+    telemetry::metrics::MetricsExt as _, tokio, Buf, Metrics, Quota, Runner, Spawner,
 };
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;

@@ -1583,6 +1583,7 @@ dependencies = [
  "console-subscriber",
  "criterion",
  "crossbeam-queue",
+ "dtoa",
  "futures",
  "getrandom 0.2.16",
  "governor",

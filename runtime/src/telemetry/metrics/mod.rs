@@ -15,7 +15,6 @@ pub use commonware_runtime_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStru
 pub use counter::{Counter as RawCounter, CounterValue};
 pub use family::{Family, FamilyValue};
 pub use gauge::{Gauge as RawGauge, GaugeValue};
-pub use histogram::HistogramExt;
 pub use prometheus_client::{
     collector, encoding,
     encoding::{
@@ -461,10 +460,8 @@ fn create_gauge_encoder(
 fn encode_histogram_bucket_label_suffix(base: &str, upper_bound: f64) -> String {
     let label = if upper_bound == f64::MAX {
         "+Inf".to_string()
-    } else if upper_bound.fract() == 0.0 {
-        format!("{upper_bound:.1}")
     } else {
-        upper_bound.to_string()
+        dtoa::Buffer::new().format(upper_bound).to_string()
     };
     let mut suffix = String::new();
     if base.is_empty() {
@@ -1599,7 +1596,7 @@ mod tests {
         counter.inc_by(7);
         let gauge = raw::Gauge::<i64>::default();
         gauge.set(-3);
-        let histogram = raw::Histogram::new([0.1, 1.0]);
+        let histogram = raw::Histogram::new([1e-7, 0.1, 1.0, 1e30]);
         histogram.observe(0.5);
 
         let ours = Registry::default();
@@ -1633,6 +1630,25 @@ mod tests {
         assert_eq!(
             ours_encoded, theirs_encoded,
             "output diverged from upstream prometheus-client registry"
+        );
+
+        let sum = ours_encoded
+            .find("latency_sum ")
+            .expect("histogram sum present");
+        let count = ours_encoded
+            .find("latency_count ")
+            .expect("histogram count present");
+        let bucket = ours_encoded
+            .find("latency_bucket")
+            .expect("histogram bucket present");
+        assert!(sum < count && count < bucket, "upstream order changed: {ours_encoded}");
+        assert!(
+            ours_encoded.contains("latency_bucket{le=\"1e-7\"}"),
+            "small finite bucket must use upstream dtoa formatting: {ours_encoded}"
+        );
+        assert!(
+            ours_encoded.contains("latency_bucket{le=\"1e30\"}"),
+            "large finite bucket must use upstream dtoa formatting: {ours_encoded}"
         );
     }
 
