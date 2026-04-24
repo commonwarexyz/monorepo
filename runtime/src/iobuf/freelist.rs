@@ -152,42 +152,27 @@ impl Freelist {
         }
     }
 
+    /// Returns the bitmap word index and bit mask for a slot id.
+    ///
+    /// Low slot-id bits choose the cache-line-padded word. High slot-id bits
+    /// choose the bit inside that word, spreading consecutive slots across
+    /// stripes instead of packing them into one atomic word.
     #[inline]
-    fn slot_word(&self, slot: u32) -> (usize, u64) {
+    const fn slot_word(&self, slot: u32) -> (usize, u64) {
         let slot = slot as usize;
-        // Low slot-id bits select the word, high bits select the bit inside
-        // that word. This is the striped mapping described in the module docs.
         let word_index = slot & self.word_mask;
         let bit = slot >> self.word_shift;
-        debug_assert!(bit < SLOT_BITMAP_WORD_BITS);
         (word_index, 1u64 << bit)
     }
 
-    #[inline]
-    fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
-        // Inverse of `slot_word`.
-        let slot = (bit << self.word_shift) | word_index;
-        debug_assert!(slot < self.storage.len());
-        slot as u32
-    }
-
-    /// Returns the current number of free slots for tests and debug assertions.
+    /// Returns the slot id represented by a bitmap word index and bit index.
     ///
-    /// This count is intentionally derived on demand rather than maintained on
-    /// the hot path, because a contended global length counter would add an
-    /// extra atomic read-modify-write to every `put` and `take`.
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.words
-            .iter()
-            .map(|word| word.load(Ordering::Acquire).count_ones() as usize)
-            .sum()
-    }
-
-    #[cfg(test)]
+    /// This is the inverse of [`Self::slot_word`] and is used after a bit has
+    /// been claimed from the bitmap.
     #[inline]
-    pub(super) fn num_words(&self) -> usize {
-        self.words.len()
+    const fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
+        let slot = (bit << self.word_shift) | word_index;
+        slot as u32
     }
 
     /// Publishes one tracked buffer into the global freelist.
@@ -491,13 +476,30 @@ impl SlotBitmapProbe {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use commonware_utils::{NZUsize, NZU32};
     use std::sync::{
         atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
         Arc, Barrier,
     };
+
+    /// Returns the current number of free slots.
+    ///
+    /// This count is intentionally derived on demand rather than maintained on
+    /// the hot path, because a contended global length counter would add an
+    /// extra atomic read-modify-write to every `put` and `take`.
+    pub fn len(freelist: &Freelist) -> usize {
+        freelist
+            .words
+            .iter()
+            .map(|word| word.load(Ordering::Acquire).count_ones() as usize)
+            .sum()
+    }
+
+    pub fn num_words(freelist: &Freelist) -> usize {
+        freelist.words.len()
+    }
 
     #[test]
     fn test_freelist_returns_each_slot_once() {
@@ -519,7 +521,7 @@ mod tests {
             drop(buffer);
         }
 
-        assert_eq!(set.len(), 0);
+        assert_eq!(len(&set), 0);
         assert!(seen.into_iter().all(|seen| seen));
         assert!(set.take().is_none());
     }
@@ -543,8 +545,8 @@ mod tests {
 
         for (capacity, parallelism, expected_words) in cases {
             let set = Freelist::new(NZU32!(capacity), NZUsize!(parallelism));
-            assert_eq!(set.num_words(), expected_words);
-            assert!(set.num_words().is_power_of_two());
+            assert_eq!(num_words(&set), expected_words);
+            assert!(num_words(&set).is_power_of_two());
 
             // Validate the striped mapping and its inverse for every slot that
             // can actually be handed out by this freelist.
@@ -563,12 +565,12 @@ mod tests {
 
         // Empty batches are a no-op and must not publish anything.
         set.put_batch(std::iter::empty());
-        assert_eq!(set.len(), 0);
+        assert_eq!(len(&set), 0);
 
         // A single-entry batch delegates to `put`, preserving the cheaper
         // one-buffer path.
         set.put_batch([(3, AlignedBuffer::new(64, 64))]);
-        assert_eq!(set.len(), 1);
+        assert_eq!(len(&set), 1);
 
         let mut taken = Vec::new();
         assert_eq!(
@@ -586,7 +588,7 @@ mod tests {
                 .into_iter()
                 .map(|slot| (slot, AlignedBuffer::new(64, 64))),
         );
-        assert_eq!(set.len(), 3);
+        assert_eq!(len(&set), 3);
 
         assert_eq!(
             set.take_batch(3, |slot, buffer| taken.push((slot, buffer))),
@@ -599,7 +601,7 @@ mod tests {
         let mut slots = slots.collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![1, 5, 7]);
-        assert_eq!(set.len(), 0);
+        assert_eq!(len(&set), 0);
     }
 
     #[test]
@@ -607,14 +609,14 @@ mod tests {
         // A capacity of 4097 requires more than 64 bitmap words after rounding,
         // forcing `put_batch` to use heap scratch for its per-word masks.
         let set = Freelist::new(NZU32!(4097), NZUsize!(65));
-        assert!(set.num_words() > INLINE_PUT_BATCH_MASKS);
+        assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
 
         set.put_batch(
             [0u32, 1, 64, 4096]
                 .into_iter()
                 .map(|slot| (slot, AlignedBuffer::new(64, 64))),
         );
-        assert_eq!(set.len(), 4);
+        assert_eq!(len(&set), 4);
 
         let mut taken = Vec::new();
         assert_eq!(
@@ -630,7 +632,7 @@ mod tests {
             .collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 64, 4096]);
-        assert_eq!(set.len(), 0);
+        assert_eq!(len(&set), 0);
     }
 
     #[test]
@@ -718,7 +720,7 @@ mod tests {
             .collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![slot0, slot1]);
-        assert_eq!(set.len(), 0);
+        assert_eq!(len(&set), 0);
     }
 
     #[test]
@@ -742,7 +744,7 @@ mod tests {
             set.take_batch(2, |slot, buffer| taken.push((slot, buffer))),
             2
         );
-        assert_eq!(set.len(), 1);
+        assert_eq!(len(&set), 1);
 
         // The third slot should remain published and be retrievable normally.
         let remaining = set.take().expect("one slot should remain published");
@@ -809,7 +811,7 @@ mod tests {
             }
 
             assert_eq!(successes.load(AtomicOrdering::Relaxed), 1);
-            assert_eq!(set.len(), 0);
+            assert_eq!(len(&set), 0);
         }
     }
 

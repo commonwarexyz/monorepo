@@ -931,7 +931,7 @@ mod tests {
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZU32, NZUsize, NZU16};
+    use commonware_utils::{NZUsize, NZU16, NZU32};
     use prometheus_client::registry::Registry;
     use std::num::NonZeroU16;
 

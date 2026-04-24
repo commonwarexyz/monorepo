@@ -1112,7 +1112,7 @@ impl BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::IoBuf;
+    use crate::iobuf::{freelist::tests as freelist_tests, IoBuf};
     use bytes::{Buf, BufMut};
     use commonware_utils::NZU32;
     use std::{
@@ -1157,14 +1157,19 @@ mod tests {
     fn get_allocated(pool: &BufferPool, size: usize) -> usize {
         let class_index = pool.inner.config.class_index(size).unwrap();
         let class = &pool.inner.classes[class_index];
-        class.created.load(Ordering::Relaxed) - class.global.len() - get_local_len(class)
+        class.created.load(Ordering::Relaxed) - get_global_len(class) - get_local_len(class)
     }
 
     /// Helper to get the number of free buffers visible to the current thread.
     fn get_available(pool: &BufferPool, size: usize) -> i64 {
         let class_index = pool.inner.config.class_index(size).unwrap();
         let class = &pool.inner.classes[class_index];
-        (class.global.len() + get_local_len(class)) as i64
+        (get_global_len(class) + get_local_len(class)) as i64
+    }
+
+    /// Helper to get the number of free buffers parked in the global freelist.
+    fn get_global_len(class: &SizeClass) -> usize {
+        freelist_tests::len(&class.global)
     }
 
     /// Helper to get the number of free buffers parked in the current thread's
@@ -1508,7 +1513,10 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(config, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].global.num_words(), 16);
+        assert_eq!(
+            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            16
+        );
 
         // When expected parallelism rounds above capacity, the freelist caps
         // stripes so every word can contain at least one slot.
@@ -1517,7 +1525,10 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(capped, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].global.num_words(), 8);
+        assert_eq!(
+            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            8
+        );
 
         // Disabling thread-local caches should not change global striping.
         let disabled = test_config(page, page, 64)
@@ -1527,7 +1538,10 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(disabled, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].global.num_words(), 16);
+        assert_eq!(
+            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            16
+        );
     }
 
     #[test]
@@ -1544,7 +1558,10 @@ mod tests {
 
         // Fixed capacity should bypass the derived parallelism heuristic.
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 7);
-        assert_eq!(pool.inner.classes[class_index].global.num_words(), 8);
+        assert_eq!(
+            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            8
+        );
     }
 
     #[test]
@@ -1565,7 +1582,7 @@ mod tests {
         // freelist, but should never retain buffers in the current thread.
         assert_eq!(class.thread_cache_capacity, 0);
         assert_eq!(get_local_len(class), 0);
-        assert_eq!(class.global.len(), 1);
+        assert_eq!(get_global_len(class), 1);
     }
 
     #[test]
@@ -1595,8 +1612,8 @@ mod tests {
         // thread's local caches, nothing has been pushed to the global queues.
         assert_eq!(get_local_len(small_class), 1);
         assert_eq!(get_local_len(large_class), 1);
-        assert_eq!(small_class.global.len(), 0);
-        assert_eq!(large_class.global.len(), 0);
+        assert_eq!(get_global_len(small_class), 0);
+        assert_eq!(get_global_len(large_class), 0);
 
         // Flushing should walk the entire TLS registry, drop every local cache,
         // and let each cache's drop implementation return its buffers to the
@@ -1607,8 +1624,8 @@ mod tests {
         // buffers are once again visible through their class-global queues.
         assert_eq!(get_local_len(small_class), 0);
         assert_eq!(get_local_len(large_class), 0);
-        assert_eq!(small_class.global.len(), 1);
-        assert_eq!(large_class.global.len(), 1);
+        assert_eq!(get_global_len(small_class), 1);
+        assert_eq!(get_global_len(large_class), 1);
     }
 
     #[test]
@@ -1715,13 +1732,13 @@ mod tests {
 
         // The first return should stay entirely in the current thread's local cache.
         drop(tracked1);
-        assert_eq!(pool.inner.classes[class_index].global.len(), 0);
+        assert_eq!(get_global_len(&pool.inner.classes[class_index]), 0);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
 
         // Returning another tracked buffer should route overflow to the global
         // freelist and retain one in the current thread's local bin.
         drop(tracked2);
-        assert_eq!(pool.inner.classes[class_index].global.len(), 1);
+        assert_eq!(get_global_len(&pool.inner.classes[class_index]), 1);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
         assert_eq!(get_available(&pool, page), 2);
     }
@@ -1779,7 +1796,7 @@ mod tests {
         }
 
         assert_eq!(get_local_len(class), class.thread_cache_capacity / 2 + 1);
-        assert_eq!(class.global.len(), class.thread_cache_capacity / 2);
+        assert_eq!(get_global_len(class), class.thread_cache_capacity / 2);
 
         // Drain the local half, then hit global once. That global take should
         // batch-refill the local cache back up to the configured target.
@@ -1788,11 +1805,11 @@ mod tests {
             reused.push(pool.try_alloc(page).expect("local reuse"));
         }
         assert_eq!(get_local_len(class), 0);
-        assert_eq!(class.global.len(), class.thread_cache_capacity / 2);
+        assert_eq!(get_global_len(class), class.thread_cache_capacity / 2);
 
         let _global = pool.try_alloc(page).expect("global reuse with refill");
         assert_eq!(get_local_len(class), class.thread_cache_capacity / 2 - 1);
-        assert_eq!(class.global.len(), 0);
+        assert_eq!(get_global_len(class), 0);
     }
 
     #[test]
@@ -1805,7 +1822,7 @@ mod tests {
         BufferPoolThreadCache::refill(&class, MIN_THREAD_CACHE_BATCHING_CAPACITY);
 
         assert_eq!(get_local_len(&class), 1);
-        assert_eq!(class.global.len(), 0);
+        assert_eq!(get_global_len(&class), 0);
     }
 
     #[test]
@@ -2262,7 +2279,7 @@ mod tests {
             .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
-        assert_eq!(pool.inner.classes[class_index].global.len(), 1);
+        assert_eq!(get_global_len(&pool.inner.classes[class_index]), 1);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 0);
 
         // The flushed buffer should be reusable from the main thread.
@@ -2292,14 +2309,14 @@ mod tests {
         drop(buf1);
         drop(buf2);
 
-        assert_eq!(class.global.len(), 1);
+        assert_eq!(get_global_len(&class), 1);
         assert_eq!(get_local_len(&class), 1);
 
         // Pool drop should drain only the global freelist. The thread-local
         // cache remains untouched until thread exit.
         drop(pool);
 
-        assert_eq!(class.global.len(), 0);
+        assert_eq!(get_global_len(&class), 0);
         assert_eq!(get_local_len(&class), 1);
         assert_eq!(class.created.load(Ordering::Relaxed), 1);
     }
