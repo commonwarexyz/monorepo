@@ -404,22 +404,6 @@ impl BufferPoolConfig {
             }
         }
     }
-
-    /// Resolves the minimum number of global freelist stripes for a size class.
-    ///
-    /// The freelist is striped for the pool's expected contention level. If the
-    /// class has too few slots to cover the requested parallelism without
-    /// permanently empty stripes, use the largest power-of-two stripe count that
-    /// fits.
-    const fn resolve_freelist_min_stripes(&self) -> NonZeroUsize {
-        let capacity = self.max_per_class.get() as usize;
-        let stripes = match self.parallelism.get().checked_next_power_of_two() {
-            Some(rounded) if rounded <= capacity => self.parallelism.get(),
-            _ => 1usize << capacity.ilog2(),
-        };
-
-        NonZeroUsize::new(stripes).expect("resolved freelist stripe count must be non-zero")
-    }
 }
 
 /// Label for buffer pool metrics, identifying the size class.
@@ -510,11 +494,11 @@ impl SizeClass {
         size: usize,
         alignment: usize,
         max: NonZeroU32,
-        min_stripes: NonZeroUsize,
+        parallelism: NonZeroUsize,
         thread_cache_capacity: usize,
         prefill: bool,
     ) -> Self {
-        let freelist = Freelist::new(max, min_stripes);
+        let freelist = Freelist::new(max, parallelism);
         let max = max.get() as usize;
         let mut created = 0;
         if prefill {
@@ -911,7 +895,6 @@ impl BufferPool {
         let metrics = PoolMetrics::new(registry);
         let mut classes = Vec::with_capacity(config.num_classes());
         let thread_cache_capacity = config.resolve_thread_cache_capacity();
-        let freelist_min_stripes = config.resolve_freelist_min_stripes();
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
             let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
@@ -920,7 +903,7 @@ impl BufferPool {
                 size,
                 config.alignment.get(),
                 config.max_per_class,
-                freelist_min_stripes,
+                config.parallelism,
                 thread_cache_capacity,
                 config.prefill,
             ));
@@ -1521,25 +1504,30 @@ mod tests {
     fn test_parallelism_policy_resolves_freelist_stripes() {
         let page = page_size();
         let config = test_config(page, page, 64).with_parallelism(NZUsize!(16));
-        assert_eq!(config.resolve_freelist_min_stripes(), NZUsize!(16));
 
         let mut registry = test_registry();
         let pool = BufferPool::new(config, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].global.num_words(), 16);
 
+        // When expected parallelism rounds above capacity, the freelist caps
+        // stripes so every word can contain at least one slot.
         let capped = test_config(page, page, 12).with_parallelism(NZUsize!(9));
-        assert_eq!(capped.resolve_freelist_min_stripes(), NZUsize!(8));
 
         let mut registry = test_registry();
         let pool = BufferPool::new(capped, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].global.num_words(), 8);
 
+        // Disabling thread-local caches should not change global striping.
         let disabled = test_config(page, page, 64)
             .with_parallelism(NZUsize!(16))
             .with_thread_cache_disabled();
-        assert_eq!(disabled.resolve_freelist_min_stripes(), NZUsize!(16));
+
+        let mut registry = test_registry();
+        let pool = BufferPool::new(disabled, &mut registry);
+        let class_index = pool.inner.config.class_index(page).unwrap();
+        assert_eq!(pool.inner.classes[class_index].global.num_words(), 16);
     }
 
     #[test]

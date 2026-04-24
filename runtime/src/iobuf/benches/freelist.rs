@@ -35,7 +35,7 @@ const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
-const BENCH_MIN_STRIPES: usize = 8;
+const BENCH_PARALLELISM: usize = 8;
 
 #[derive(Debug)]
 struct Entry {
@@ -222,8 +222,7 @@ impl FreelistImplementation for Freelist {
         let freelist = Self::new(
             NonZeroU32::new(u32::try_from(capacity).expect("bench capacity must fit in u32"))
                 .expect("bench capacity must be non-zero"),
-            NonZeroUsize::new(BENCH_MIN_STRIPES.min(capacity).max(1))
-                .expect("bench minimum stripe count must be non-zero"),
+            NonZeroUsize::new(BENCH_PARALLELISM).expect("bench parallelism must be non-zero"),
         );
         for slot in 0..capacity {
             freelist.put(

@@ -32,10 +32,12 @@
 //! - `word = slot & word_mask`
 //! - `bit = slot >> word_shift`
 //!
-//! `min_stripes` lets the pool match the bitmap width to expected parallelism.
-//! It is rounded up to a power of two and must fit within capacity, so striping
-//! does not create words that can never contain a slot. Larger capacities may
-//! still use more words so no bitmap word tracks more than 64 slots.
+//! The pool passes its expected parallelism so the freelist can match the
+//! bitmap width to the expected contention level. The freelist rounds that
+//! target up to a power of two and caps it at the largest power of two that can
+//! fit within capacity, so striping does not create words that can never contain
+//! a slot. Larger capacities may still use more words so no bitmap word tracks
+//! more than 64 slots.
 //!
 //! The hot paths are fast for a few concrete reasons:
 //!
@@ -103,36 +105,33 @@ unsafe impl Sync for Freelist {}
 impl Freelist {
     /// Creates a new fixed-capacity freelist.
     ///
-    /// `min_stripes` is rounded up to a power of two. The freelist will use at
-    /// least that many striped words, and may use more words when capacity needs
-    /// more bitmap bits.
-    ///
-    /// # Panics
-    ///
-    /// Panics if:
-    /// - `min_stripes` does not round to a representable power of two
-    /// - rounded `min_stripes > capacity`
-    pub fn new(capacity: NonZeroU32, min_stripes: NonZeroUsize) -> Self {
+    /// `parallelism` is the expected number of threads contending for the
+    /// freelist. The actual word count is rounded to a power of two and capped
+    /// so every word can contain at least one slot.
+    pub fn new(capacity: NonZeroU32, parallelism: NonZeroUsize) -> Self {
         let capacity = capacity.get() as usize;
-        let min_stripes = min_stripes
+
+        // Keep the caller-facing knob as expected parallelism, then derive an
+        // implementation-friendly stripe count here. Capping at capacity avoids
+        // permanently empty stripes when a small pool is used with a large
+        // parallelism setting.
+        let max_stripes = 1usize << capacity.ilog2();
+        let target_stripes = parallelism
             .get()
             .checked_next_power_of_two()
-            .expect("freelist minimum stripe count must round to a representable power of two");
-        // Each requested stripe must be able to hold at least one slot. Empty
-        // stripes caused only by over-striping add contention-avoidance state
-        // that can never participate in reuse.
-        assert!(
-            capacity >= min_stripes,
-            "freelist capacity ({capacity}) must be >= rounded minimum stripe count ({min_stripes})"
-        );
+            .unwrap_or(max_stripes)
+            .min(max_stripes);
 
-        // Small freelists reserve at least the requested number of striped words
-        // so different threads can start from different cache lines. Large
-        // freelists are constrained by the number of bits required to represent
-        // all slots.
-        let word_count = min_stripes
+        // Small freelists reserve the target number of striped words when
+        // capacity allows it, so different threads can start from different
+        // cache lines. Large freelists are constrained by the number of bits
+        // required to represent all slots.
+        let word_count = target_stripes
             .max(capacity.div_ceil(SLOT_BITMAP_WORD_BITS))
             .next_power_of_two();
+        // `word_count` is always a power of two, so slot mapping can use the
+        // low bits as a word index and the remaining high bits as the bit
+        // index inside that word.
         let word_shift = word_count.trailing_zeros();
         let word_mask = word_count - 1;
 
@@ -527,13 +526,14 @@ mod tests {
 
     #[test]
     fn test_freelist_uses_striped_power_of_two_words() {
-        // Covers both requested stripe floors and capacity-driven word growth.
-        // The constructor rounds to powers of two, but never allows a rounded
-        // minimum stripe count larger than capacity.
+        // Covers target parallelism, capping when capacity is too small, and
+        // capacity-driven word growth for large slot counts.
         let cases = [
             (1, 1, 1),
             (2, 2, 2),
+            (3, 4, 2),
             (4, 4, 4),
+            (12, 9, 8),
             (16, 8, 8),
             (64, 8, 8),
             (512, 8, 8),
@@ -541,8 +541,8 @@ mod tests {
             (4097, 8, 128),
         ];
 
-        for (capacity, min_stripes, expected_words) in cases {
-            let set = Freelist::new(NZU32!(capacity), NZUsize!(min_stripes));
+        for (capacity, parallelism, expected_words) in cases {
+            let set = Freelist::new(NZU32!(capacity), NZUsize!(parallelism));
             assert_eq!(set.num_words(), expected_words);
             assert!(set.num_words().is_power_of_two());
 
@@ -555,14 +555,6 @@ mod tests {
                 assert_eq!(set.slot_index(word_index, bit), slot);
             }
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "freelist capacity (3) must be >= rounded minimum stripe count (4)")]
-    fn test_freelist_requires_capacity_to_cover_minimum_stripes() {
-        // A rounded minimum stripe count larger than capacity would create
-        // permanently empty stripes, which the constructor rejects.
-        let _ = Freelist::new(NZU32!(3), NZUsize!(4));
     }
 
     #[test]
