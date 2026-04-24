@@ -798,6 +798,17 @@ mod tests {
         // Empty aligned owners should detach into empty Bytes cleanly.
         let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page)).into_bytes();
         assert!(empty_bytes.is_empty());
+        let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page))
+            .into_aligned()
+            .into_bytes();
+        assert!(empty_bytes.is_empty());
+
+        // Non-empty mutable owners should hand their readable window to Bytes
+        // without copying.
+        let mut bytes_mut_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
+        bytes_mut_source.put_slice(b"data");
+        let owned_bytes = bytes_mut_source.into_bytes();
+        assert_eq!(owned_bytes.as_ref(), b"data");
 
         // Cover immutable debug/view/slice paths on the aligned wrapper.
         let mut aligned = aligned_mut.into_aligned();
@@ -806,6 +817,7 @@ mod tests {
         assert_eq!(aligned.as_ptr(), aligned.as_ref().as_ptr());
         assert_eq!(aligned.as_ref(), b"wxyz");
         assert_eq!(aligned.slice(..2).unwrap().as_ref(), b"wx");
+        assert_eq!(aligned.slice(..=2).unwrap().as_ref(), b"wxy");
         assert_eq!(aligned.slice(1..).unwrap().as_ref(), b"xyz");
         assert_eq!(aligned.slice(1..=2).unwrap().as_ref(), b"xy");
         assert_eq!(
@@ -872,6 +884,8 @@ mod tests {
         // Slicing the frozen buffer works.
         let slice = iobuf.slice(0..5);
         assert_eq!(slice.len(), 5);
+        let slice = iobuf.slice(1..=4);
+        assert_eq!(slice.as_ref(), &[2, 3, 4, 5]);
     }
 
     #[test]

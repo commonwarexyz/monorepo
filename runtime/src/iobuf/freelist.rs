@@ -660,12 +660,12 @@ pub(super) mod tests {
         let set = Freelist::new(NZU32!(8), NZUsize!(8));
 
         // Empty batches are a no-op and must not make anything available.
-        set.put_batch(std::iter::empty());
+        set.put_batch(Vec::new());
         assert_eq!(len(&set), 0);
 
         // A single-entry batch delegates to `put`, preserving the cheaper
         // one-buffer path.
-        set.put_batch([(3, AlignedBuffer::new(64, 64))]);
+        set.put_batch(vec![(3, AlignedBuffer::new(64, 64))]);
         assert_eq!(len(&set), 1);
 
         let mut taken = Vec::new();
@@ -679,11 +679,11 @@ pub(super) mod tests {
 
         // Multi-entry batches should make every slot available and preserve ownership
         // of each parked buffer until it is taken.
-        set.put_batch(
-            [1u32, 5, 7]
-                .into_iter()
-                .map(|slot| (slot, AlignedBuffer::new(64, 64))),
-        );
+        set.put_batch(vec![
+            (1, AlignedBuffer::new(64, 64)),
+            (5, AlignedBuffer::new(64, 64)),
+            (7, AlignedBuffer::new(64, 64)),
+        ]);
         assert_eq!(len(&set), 3);
 
         assert_eq!(
@@ -707,11 +707,12 @@ pub(super) mod tests {
         let set = Freelist::new(NZU32!(8193), NZUsize!(65));
         assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
 
-        set.put_batch(
-            [0u32, 1, 64, 8192]
-                .into_iter()
-                .map(|slot| (slot, AlignedBuffer::new(64, 64))),
-        );
+        set.put_batch(vec![
+            (0, AlignedBuffer::new(64, 64)),
+            (1, AlignedBuffer::new(64, 64)),
+            (64, AlignedBuffer::new(64, 64)),
+            (8192, AlignedBuffer::new(64, 64)),
+        ]);
         assert_eq!(len(&set), 4);
 
         let mut taken = Vec::new();
@@ -752,42 +753,22 @@ pub(super) mod tests {
         }
 
         let mut taken = Vec::new();
+        let mut record = |slot, buffer| taken.push((slot, buffer));
+
         // `max == 0` must return immediately and must not call the callback.
-        assert_eq!(
-            set.take_batch(0, |_, _| panic!(
-                "take_batch should not have produced an entry"
-            )),
-            0
-        );
-        assert!(taken.is_empty());
+        assert_eq!(set.take_batch(0, &mut record), 0);
 
         // `max == 1` should still claim exactly one slot.
-        assert_eq!(
-            set.take_batch(1, |slot, buffer| taken.push((slot, buffer))),
-            1
-        );
-        assert_eq!(taken.len(), 1);
+        assert_eq!(set.take_batch(1, &mut record), 1);
 
-        // A request larger than the remaining occupancy should return only the
-        // slots that were actually available.
-        assert_eq!(
-            set.take_batch(8, |slot, buffer| taken.push((slot, buffer))),
-            2
-        );
-        assert_eq!(taken.len(), 3);
+        // A request larger than the remaining occupancy should return only
+        // the slots that were actually available.
+        assert_eq!(set.take_batch(8, &mut record), 2);
+
         // Once empty, neither the batch nor single path may invoke the callback.
-        assert_eq!(
-            set.take_batch(8, |_, _| panic!(
-                "take_batch should not have produced an entry"
-            )),
-            0
-        );
-        assert_eq!(
-            set.take_batch(1, |_, _| panic!(
-                "take_batch should not have produced an entry"
-            )),
-            0
-        );
+        assert_eq!(set.take_batch(8, &mut record), 0);
+        assert_eq!(set.take_batch(1, &mut record), 0);
+        assert_eq!(taken.len(), 3);
 
         let mut slots = taken
             .into_iter()

@@ -1894,6 +1894,9 @@ mod tests {
 
     #[test]
     fn test_global_freelist_returns_each_slot_once() {
+        // Use a two-slot class with TLS capacity one so this test can exercise
+        // the class-global freelist directly without involving local-cache
+        // refill or spill behavior.
         let class = Arc::new(SizeClass::new(
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             64,
@@ -1904,6 +1907,8 @@ mod tests {
             false,
         ));
 
+        // Reserve both slot ids and keep each allocation's pointer so we can
+        // verify that the freelist returns the same buffer parked for that slot.
         let slot0 = class.try_reserve().expect("first slot");
         let slot1 = class.try_reserve().expect("second slot");
         let buffer0 = AlignedBuffer::new(64, 64);
@@ -1914,29 +1919,21 @@ mod tests {
         class.global.put(slot0, buffer0);
         class.global.put(slot1, buffer1);
 
-        let popped = [
+        // The freelist does not preserve insertion order, so normalize by slot
+        // before asserting identity. The important property is that each slot is
+        // returned exactly once with its original parked buffer.
+        let mut popped = [
             class.global.take().expect("first pop"),
             class.global.take().expect("second pop"),
         ];
-        let mut saw_slot0 = false;
-        let mut saw_slot1 = false;
-        for (slot, buffer) in popped {
-            match slot {
-                s if s == slot0 => {
-                    assert_eq!(buffer.as_ptr(), ptr0);
-                    assert!(!saw_slot0);
-                    saw_slot0 = true;
-                }
-                s if s == slot1 => {
-                    assert_eq!(buffer.as_ptr(), ptr1);
-                    assert!(!saw_slot1);
-                    saw_slot1 = true;
-                }
-                other => panic!("unexpected slot {other}"),
-            }
-        }
-        assert!(saw_slot0);
-        assert!(saw_slot1);
+        popped.sort_by_key(|(slot, _)| *slot);
+
+        assert_eq!(popped[0].0, slot0);
+        assert_eq!(popped[0].1.as_ptr(), ptr0);
+        assert_eq!(popped[1].0, slot1);
+        assert_eq!(popped[1].1.as_ptr(), ptr1);
+
+        // Both slots were claimed above, so the global freelist is empty.
         assert!(class.global.take().is_none());
     }
 
