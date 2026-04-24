@@ -411,7 +411,7 @@ fn create_sample_encoder<M>(
 where
     M: Metric,
 {
-    // TODO: Avoid allocating an upstream registry per metric once
+    // TODO (#3659): Avoid allocating an upstream registry per metric once
     // `prometheus-client` exposes a public sample-only `MetricEncoder` path
     // for encoding one metric with const labels.
     let mut registry = registry::Registry::with_labels(labels.into_iter());
