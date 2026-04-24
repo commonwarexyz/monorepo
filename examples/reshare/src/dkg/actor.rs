@@ -40,6 +40,13 @@ use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
 
+/// Background `Logs::pre_verify` completed for a snapshot of [`Logs`] at `version` for `epoch`.
+struct PreVerifiedLogs<V: Variant, P: PublicKey> {
+    epoch: Epoch,
+    version: u64,
+    logs: Logs<V, P, N3f1>,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Peer {
     peer: String,
@@ -366,6 +373,28 @@ where
                 })
                 .flatten();
 
+            // Accumulate dealer logs and pre-verify off the cooperative executor before epoch end.
+            let mut active_logs = Logs::<V, C::PublicKey, N3f1>::new(round.clone());
+            let mut logs_version = 0u64;
+            for (dealer, log) in storage.logs(epoch) {
+                active_logs.record(dealer, log);
+                logs_version += 1;
+            }
+            let (preverify_tx, mut preverify_rx) =
+                mpsc::channel::<PreVerifiedLogs<V, C::PublicKey>>(64);
+            let mut preverify_inflight = false;
+            let mut preverify_dirty = false;
+            if logs_version > 0 {
+                self.schedule_logs_preverify(
+                    &preverify_tx,
+                    epoch,
+                    logs_version,
+                    &active_logs,
+                    &mut preverify_inflight,
+                    &mut preverify_dirty,
+                );
+            }
+
             select_loop! {
                 self.context,
                 on_stopped => {
@@ -440,6 +469,31 @@ where
                         }
                     }
                 },
+                msg = preverify_rx.recv() => {
+                    let Some(msg) = msg else {
+                        warn!("preverify channel closed");
+                        break 'actor;
+                    };
+                    // A spawned task completed and sent a result; clear inflight even if we ignore
+                    // the payload (e.g. stale epoch after overlapping completions).
+                    preverify_inflight = false;
+                    if msg.epoch != epoch {
+                        continue;
+                    }
+                    if msg.version == logs_version {
+                        active_logs = msg.logs;
+                    }
+                    if (preverify_dirty || msg.version != logs_version) && logs_version > 0 {
+                        self.schedule_logs_preverify(
+                            &preverify_tx,
+                            epoch,
+                            logs_version,
+                            &active_logs,
+                            &mut preverify_inflight,
+                            &mut preverify_dirty,
+                        );
+                    }
+                },
                 Some(mailbox_msg) = self.mailbox.recv() else {
                     warn!("dkg actor mailbox closed");
                     break 'actor;
@@ -480,7 +534,19 @@ where
                                         ds.take_finalized();
                                     }
                                 }
-                                storage.append_log(epoch, dealer, dealer_log).await;
+                                let dealer_log_active = dealer_log.clone();
+                                if storage.append_log(epoch, dealer.clone(), dealer_log).await {
+                                    active_logs.record(dealer, dealer_log_active);
+                                    logs_version += 1;
+                                    self.schedule_logs_preverify(
+                                        &preverify_tx,
+                                        epoch,
+                                        logs_version,
+                                        &active_logs,
+                                        &mut preverify_inflight,
+                                        &mut preverify_dirty,
+                                    );
+                                }
                             }
                         }
 
@@ -513,13 +579,9 @@ where
                             continue;
                         }
 
-                        // Finalize the round before acknowledging
-                        //
-                        // TODO(#3453): Minimize end-of-epoch processing via pre-verify
-                        let mut logs = Logs::<_, _, N3f1>::new(round.clone());
-                        for (dealer, log) in storage.logs(epoch) {
-                            logs.record(dealer, log);
-                        }
+                        // Finalize the round before acknowledging (reuse warm `active_logs`
+                        // from incremental background `pre_verify` work).
+                        let logs = active_logs;
                         let (success, next_round, next_output, next_share) = if let Some(ps) =
                             player_state.take()
                         {
@@ -609,6 +671,43 @@ where
             }
         }
         info!("exiting DKG actor");
+    }
+
+    /// Schedule a background [`Logs::pre_verify`] for `active_logs` at `logs_version`, or mark dirty
+    /// if a run is already in flight.
+    fn schedule_logs_preverify(
+        &mut self,
+        preverify_tx: &mpsc::Sender<PreVerifiedLogs<V, C::PublicKey>>,
+        epoch: Epoch,
+        logs_version: u64,
+        active_logs: &Logs<V, C::PublicKey, N3f1>,
+        preverify_inflight: &mut bool,
+        preverify_dirty: &mut bool,
+    ) {
+        if *preverify_inflight {
+            *preverify_dirty = true;
+            return;
+        }
+        *preverify_inflight = true;
+        *preverify_dirty = false;
+        let mut clone = active_logs.clone();
+        let tx = preverify_tx.clone();
+        let _handle = self
+            .context
+            .clone()
+            .shared(true)
+            .with_label("dkg_preverify_logs")
+            .spawn(move |ctx| async move {
+                let mut ctx = ctx;
+                clone.pre_verify::<Batch>(&mut ctx, &Sequential);
+                let _ = tx
+                    .send(PreVerifiedLogs {
+                        epoch,
+                        version: logs_version,
+                        logs: clone,
+                    })
+                    .await;
+            });
     }
 
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
