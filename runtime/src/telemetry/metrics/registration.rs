@@ -68,7 +68,7 @@ impl Clone for Registration {
 }
 
 impl Registration {
-    pub(crate) fn from_inner(inner: Arc<RegistrationInner>) -> Self {
+    pub(crate) const fn from_inner(inner: Arc<RegistrationInner>) -> Self {
         Self { inner }
     }
 

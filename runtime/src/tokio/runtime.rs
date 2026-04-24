@@ -472,7 +472,7 @@ impl crate::Runner for Runner {
         // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
+        let gauge = executor.metrics.tasks_running.get_or_create(&label);
 
         // Run the future
         let context = Context {

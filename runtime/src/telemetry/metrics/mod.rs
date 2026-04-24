@@ -1325,7 +1325,7 @@ mod tests {
         // it obtains the registry lock. The dropped claim is still counted in
         // this window.
         let duplicate = registry.register(
-            key.0.clone(),
+            key.0,
             "vote count".to_string(),
             Vec::new(),
             Arc::new(raw::Counter::<u64>::default()),
