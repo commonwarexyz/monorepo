@@ -276,8 +276,8 @@ pub(crate) fn child_label(prefix: &str, label: &str) -> String {
 }
 
 trait RegistrationGuard: Send + Sync {
-    fn release(&self, registration: &Arc<RegistrationInner>) {
-        registration.release_owner();
+    fn registration_dropped(&self, registration: &Arc<RegistrationInner>) {
+        registration.release();
     }
 }
 
@@ -287,10 +287,10 @@ struct GuardHolder<G>(Mutex<G>);
 
 struct RegistrationInner {
     guard: Box<dyn RegistrationGuard>,
-    // Counts logical Registration handles, not Arc strong references. The
-    // registry only holds Weak references, and duplicate registration may
-    // briefly upgrade one without taking ownership.
-    owners: Mutex<usize>,
+    // Counts live Registration claims, not Arc strong references. The registry
+    // only holds Weak references, and duplicate registration may briefly
+    // upgrade one without claiming it.
+    claims: Mutex<usize>,
 }
 
 impl RegistrationInner {
@@ -300,40 +300,31 @@ impl RegistrationInner {
     {
         Arc::new(Self {
             guard: Box::new(guard),
-            owners: Mutex::new(1),
+            claims: Mutex::new(1),
         })
     }
 
-    fn acquire(inner: Arc<Self>) -> Option<Registration> {
-        let mut owners = inner.owners.lock();
-        if *owners == 0 {
+    fn claim(inner: Arc<Self>) -> Option<Registration> {
+        let mut claims = inner.claims.lock();
+        if *claims == 0 {
             return None;
         }
-        *owners = owners.checked_add(1).expect("registration owners overflow");
-        drop(owners);
+        *claims = claims.checked_add(1).expect("registration claims overflow");
+        drop(claims);
         Some(Registration { inner })
     }
 
-    fn release(&self, registration: &Arc<Self>) {
-        self.guard.release(registration);
+    fn registration_dropped(&self, registration: &Arc<Self>) {
+        self.guard.registration_dropped(registration);
     }
 
-    fn release_owner(&self) -> bool {
-        let mut owners = self.owners.lock();
-        assert!(*owners > 0, "registration owner count underflow");
-        *owners -= 1;
-        *owners == 0
+    fn release(&self) -> bool {
+        let mut claims = self.claims.lock();
+        assert!(*claims > 0, "registration claim count underflow");
+        *claims -= 1;
+        *claims == 0
     }
 
-    fn release_if_not_last_owner(&self) -> bool {
-        let mut owners = self.owners.lock();
-        assert!(*owners > 0, "registration owner count underflow");
-        if *owners == 1 {
-            return false;
-        }
-        *owners -= 1;
-        true
-    }
 }
 
 /// A shared lifecycle token for a [`Registered`] metric handle.
@@ -348,8 +339,8 @@ pub struct Registration {
 
 impl Clone for Registration {
     fn clone(&self) -> Self {
-        RegistrationInner::acquire(Arc::clone(&self.inner))
-            .expect("live registration owner count missing")
+        RegistrationInner::claim(Arc::clone(&self.inner))
+            .expect("live registration claim count missing")
     }
 }
 
@@ -381,7 +372,7 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.inner.release(&self.inner);
+        self.inner.registration_dropped(&self.inner);
     }
 }
 
@@ -391,17 +382,15 @@ struct RuntimeRegistration {
 }
 
 impl RegistrationGuard for RuntimeRegistration {
-    fn release(&self, registration: &Arc<RegistrationInner>) {
-        if registration.release_if_not_last_owner() {
-            return;
-        }
+    fn registration_dropped(&self, registration: &Arc<RegistrationInner>) {
+        // Keep the dropped claim counted until the registry lock is held. A
+        // concurrent register can then either acquire this live registration or
+        // wait for the entry to be removed.
         let Some(registry) = self.registry.upgrade() else {
-            registration.release_owner();
+            registration.release();
             return;
         };
-        registry
-            .lock()
-            .unregister_if_last_registration(self.id, registration);
+        registry.lock().release_registration(self.id, registration);
     }
 }
 
@@ -677,7 +666,7 @@ impl RegistryInner {
             let registration = entry
                 .registration
                 .upgrade()
-                .and_then(RegistrationInner::acquire)
+                .and_then(RegistrationInner::claim)
                 .expect("metric key references closed registration");
             return Registered {
                 metric: existing_metric,
@@ -817,21 +806,23 @@ impl RegistryInner {
         self.drop_metric_entry(id);
     }
 
-    fn unregister_if_last_registration(&mut self, id: u64, registration: &Arc<RegistrationInner>) {
+    fn release_registration(&mut self, id: u64, registration: &Arc<RegistrationInner>) {
         let Some(entry) = self
             .metrics
             .get(Self::metric_index(id))
             .and_then(Option::as_ref)
         else {
-            registration.release_owner();
+            registration.release();
             return;
         };
         let registration_weak = Arc::downgrade(registration);
         if !entry.registration.ptr_eq(&registration_weak) {
-            registration.release_owner();
+            registration.release();
             return;
         }
-        if registration.release_owner() {
+        // A duplicate register may have acquired this registration while the
+        // dropping claim waited for the registry lock.
+        if registration.release() {
             self.drop_metric_entry(id);
         }
     }
@@ -1142,11 +1133,9 @@ mod tests {
                 .expect("registration missing")
         };
 
-        assert!(
-            !original_registration.release_if_not_last_owner(),
-            "single owner should take the registry cleanup path"
-        );
-
+        // Simulate the final drop after it has decided to clean up but before
+        // it obtains the registry lock. The dropped claim is still counted in
+        // this window.
         let duplicate = registry.register(
             key.0.clone(),
             "vote count".to_string(),
@@ -1158,7 +1147,7 @@ mod tests {
         registry
             .inner
             .lock()
-            .unregister_if_last_registration(original_id, &original_registration);
+            .release_registration(original_id, &original_registration);
 
         duplicate.inc_by(7);
         let encoded = registry.encode();
@@ -1416,7 +1405,7 @@ mod tests {
     #[test]
     fn test_register_drop_race_does_not_panic() {
         // Concurrently re-registers and drops the same metric key from multiple
-        // threads. Before explicit owner accounting, concurrent final drops
+        // threads. Before explicit claim accounting, concurrent final drops
         // could leave the key present with a closed registration.
         let registry = Registry::new();
         let threads: Vec<_> = (0..8)
