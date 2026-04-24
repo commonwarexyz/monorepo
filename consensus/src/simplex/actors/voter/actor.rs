@@ -1089,14 +1089,13 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
-                    // Notify can advance state, so update the batcher with
-                    // the latest view after any new messages have been sent.
                     // If we skip a view, we don't worry about forwarding our latest certified proposal
                     // because the network has already moved on
                     let forwardable_proposal = current_view
                         .previous()
                         .and_then(|view| self.state.forwardable_proposal(view));
 
+                    // Update the batcher with the latest view and leader
                     batcher
                         .update(
                             current_view,
