@@ -1117,6 +1117,71 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_register_acquires_during_last_drop_window() {
+        let registry = Registry::new();
+        let key: MetricKey = ("votes".to_string(), Vec::new());
+
+        let original = registry.register(
+            key.0.clone(),
+            "vote count".to_string(),
+            Vec::new(),
+            Arc::new(raw::Counter::<u64>::default()),
+        );
+        let original_metric = Arc::clone(&original.metric);
+        let _original = std::mem::ManuallyDrop::new(original);
+        let original_id = {
+            let registry = registry.inner.lock();
+            *registry.keys.get(&key).expect("metric key missing")
+        };
+        let original_registration = {
+            let registry = registry.inner.lock();
+            registry
+                .metric_ref(original_id)
+                .registration
+                .upgrade()
+                .expect("registration missing")
+        };
+
+        assert!(
+            !original_registration.release_if_not_last_owner(),
+            "single owner should take the registry cleanup path"
+        );
+
+        let duplicate = registry.register(
+            key.0.clone(),
+            "vote count".to_string(),
+            Vec::new(),
+            Arc::new(raw::Counter::<u64>::default()),
+        );
+        assert!(Arc::ptr_eq(&original_metric, &duplicate.metric));
+
+        registry
+            .inner
+            .lock()
+            .unregister_if_last_registration(original_id, &original_registration);
+
+        duplicate.inc_by(7);
+        let encoded = registry.encode();
+        assert!(
+            encoded.contains("votes_total 7"),
+            "last drop removed duplicate registration: {encoded}"
+        );
+
+        drop(duplicate);
+        let registry = registry.inner.lock();
+        assert!(
+            registry.keys.is_empty(),
+            "keys left behind: {:?}",
+            registry.keys
+        );
+        assert!(
+            registry.families.is_empty(),
+            "families left behind: {:?}",
+            registry.families
+        );
+    }
+
+    #[test]
     fn test_registered_detached_creates_detached_handle() {
         let registered = Registered::detached(raw::Counter::<u64>::default());
         let clone = registered.clone();
