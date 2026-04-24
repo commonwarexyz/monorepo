@@ -128,6 +128,9 @@ const fn cache_line_size() -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BufferPoolThreadCacheConfig {
     /// Derive the per-thread cache size from the pool's expected parallelism.
+    ///
+    /// Small per-class budgets may resolve to zero, disabling thread-local
+    /// caching so free buffers do not become stranded in other threads.
     Auto,
     /// Disable thread-local caching and route all reuse through the shared global freelist.
     Disabled,
@@ -388,15 +391,15 @@ impl BufferPoolConfig {
 
     /// Resolves the effective per-thread cache size for each size class.
     ///
-    /// Derived capacities reserve half of the class budget for the shared freelist so
-    /// cross-thread reuse remains effective, and are clamped to `[1, 8]` to cap
-    /// per-thread retention.
+    /// Derived capacities reserve half of the class budget for the shared
+    /// freelist so cross-thread reuse remains effective, and are capped at
+    /// eight buffers per thread. Small class budgets may resolve to zero.
     fn resolve_thread_cache_capacity(&self) -> usize {
         match self.thread_cache_config {
             BufferPoolThreadCacheConfig::Auto => {
                 let max_per_class = self.max_per_class.get() as usize;
                 let effective_threads = self.parallelism.get().min(max_per_class);
-                (max_per_class / (2 * effective_threads)).clamp(1, 8)
+                (max_per_class / (2 * effective_threads)).min(8)
             }
             BufferPoolThreadCacheConfig::Disabled => 0,
             BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity) => {
@@ -1495,6 +1498,55 @@ mod tests {
         );
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 4);
+    }
+
+    #[test]
+    fn test_auto_thread_cache_disables_when_parallelism_exceeds_budget() {
+        let page = page_size();
+        let mut registry = test_registry();
+
+        // With only two buffers and eight expected threads, the auto policy's
+        // per-thread share is zero: 2 / (2 * min(8, 2)) == 0. In that case the
+        // pool should disable TLS instead of forcing every thread to retain at
+        // least one buffer.
+        let pool = BufferPool::new(
+            test_config(page, page, 2).with_parallelism(NZUsize!(8)),
+            &mut registry,
+        );
+        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class = &pool.inner.classes[class_index];
+        assert_eq!(class.thread_cache_capacity, 0);
+
+        // Exhaust the size class so the only way the main thread can allocate
+        // again is if the worker's returned buffers are globally visible.
+        let first = pool.try_alloc(page).expect("first tracked allocation");
+        let second = pool.try_alloc(page).expect("second tracked allocation");
+
+        let pool_for_thread = pool.clone();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            // Return both buffers from another thread. The thread stays alive
+            // after the drops, so any TLS entries it retained would remain
+            // invisible to the main thread until `release_rx` fires.
+            drop(first);
+            drop(second);
+            returned_tx.send(()).expect("signal returned buffers");
+            release_rx.recv().expect("release worker");
+            drop(pool_for_thread);
+        });
+
+        returned_rx.recv().expect("wait for returned buffers");
+
+        // Both allocations must succeed while the worker thread is still
+        // alive. Before auto capacity could resolve to zero, one returned
+        // buffer could remain stranded in the worker's TLS cache and this
+        // second allocation would report exhaustion.
+        let _first = pool.try_alloc(page).expect("first global reuse");
+        let _second = pool.try_alloc(page).expect("second global reuse");
+
+        release_tx.send(()).expect("release worker");
+        handle.join().expect("worker should not panic");
     }
 
     #[test]
