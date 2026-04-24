@@ -310,8 +310,8 @@ impl<M> Registered<M> {
     /// Create a metric handle with an explicit lifecycle registration.
     ///
     /// The provided [`Registration`] controls what happens when the last clone
-    /// of this handle is dropped. Use [`Registration::from(())`] for a raw
-    /// handle that is not exposed by a runtime registry.
+    /// of this handle is dropped. Use [`Registration::from`] with `()` for a
+    /// raw handle that is not exposed by a runtime registry.
     pub fn with_registration(metric: M, registration: Registration) -> Self {
         Self {
             metric: Arc::new(metric),
