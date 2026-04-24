@@ -35,9 +35,7 @@ pub mod raw {
 }
 
 use commonware_utils::sync::Mutex;
-use prometheus_client::encoding::{
-    text::{encode_descriptor, encode_eof, encode_metric},
-};
+use prometheus_client::encoding::text::{encode_descriptor, encode_eof, encode_metric};
 pub use registration::Registration;
 use std::{
     any::Any,
@@ -664,6 +662,11 @@ impl RegistryInner {
             let mut encoded_descriptor = false;
             for metric_id in &family.metric_ids {
                 let metric = self.metric_ref(*metric_id);
+
+                // Suppress the HELP/TYPE descriptor when the family would
+                // produce no samples (e.g. a `Family<S, M>` with no child
+                // entries). Matches upstream prometheus-client's empty-metric
+                // filtering.
                 if metric.metric.is_empty() {
                     continue;
                 }
@@ -1149,7 +1152,10 @@ mod tests {
 
         family.clear();
         let cleared = registry.encode();
-        assert!(!cleared.contains("votes"), "cleared family leaked: {cleared}");
+        assert!(
+            !cleared.contains("votes"),
+            "cleared family leaked: {cleared}"
+        );
         assert_eq!(cleared, "# EOF\n");
     }
 
