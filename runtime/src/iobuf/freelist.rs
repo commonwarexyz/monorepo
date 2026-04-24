@@ -436,7 +436,25 @@ impl Freelist {
     /// Returns the number of drained slots.
     #[inline]
     pub fn drain(&self) -> usize {
-        self.take_batch(usize::MAX, |_, _| {})
+        let mut drained = 0;
+
+        for (word_index, word) in self.words.iter().enumerate() {
+            // Drain clears each whole word directly instead of using the
+            // probe-based take path. That keeps destruction independent from
+            // thread-local probe state, which may already be unavailable while
+            // TLS caches are being destroyed.
+            let mut claimed = word.swap(0, Ordering::Acquire);
+
+            while claimed != 0 {
+                let bit = claimed.trailing_zeros() as usize;
+                let slot = self.slot_index(word_index, bit);
+                drop(self.unpark(slot));
+                claimed &= claimed - 1;
+                drained += 1;
+            }
+        }
+
+        drained
     }
 
     /// Parks a buffer in the storage cell for a slot outside the freelist.
