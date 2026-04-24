@@ -1641,7 +1641,10 @@ mod tests {
         let bucket = ours_encoded
             .find("latency_bucket")
             .expect("histogram bucket present");
-        assert!(sum < count && count < bucket, "upstream order changed: {ours_encoded}");
+        assert!(
+            sum < count && count < bucket,
+            "upstream order changed: {ours_encoded}"
+        );
         assert!(
             ours_encoded.contains("latency_bucket{le=\"1e-7\"}"),
             "small finite bucket must use upstream dtoa formatting: {ours_encoded}"
