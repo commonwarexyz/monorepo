@@ -8448,18 +8448,19 @@ mod tests {
     ///
     /// This covers the path where the batcher sends [Message::Timeout]
     /// (e.g., because the leader is inactive or has already nullified the view).
-    fn batcher_inactivity_hint<S, F>(mut fixture: F, activity_before_hint: bool)
+    fn batcher_timeout_hint<S, F>(
+        mut fixture: F,
+        reason: TimeoutReason,
+        activity_before_hint: bool,
+    )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = if activity_before_hint {
-            b"batcher_update_timeout_stale".to_vec()
-        } else {
-            b"batcher_update_timeout".to_vec()
-        };
+        let namespace =
+            format!("batcher_update_timeout_{reason:?}_{activity_before_hint}").into_bytes();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             let Fixture {
@@ -8501,7 +8502,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter,
-                partition: format!("batcher_timeout_test_{activity_before_hint}_{me}"),
+                partition: format!("batcher_timeout_test_{reason:?}_{activity_before_hint}_{me}"),
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
@@ -8533,10 +8534,10 @@ mod tests {
             voter.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Consume initial Update.
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            assert!(matches!(
+                batcher_receiver.recv().await.unwrap(),
+                batcher::Message::Update { .. }
+            ));
 
             // Advance to follower view 3 using finalization.
             let target_view = View::new(3);
@@ -8590,7 +8591,7 @@ mod tests {
                                 relay.broadcast(&leader, (proposal.payload, contents));
                                 mailbox.proposal(proposal).await;
                             }
-                            mailbox.timeout(current, TimeoutReason::Inactivity).await;
+                            mailbox.timeout(current, reason).await;
                             break;
                         }
                         batcher::Message::Update { .. } => {
@@ -8603,7 +8604,7 @@ mod tests {
                 }
             }
 
-            if activity_before_hint {
+            if activity_before_hint && reason == TimeoutReason::Inactivity {
                 // The proposal above is leader activity for `next_view`, so the queued
                 // inactivity hint should not force an immediate nullify.
                 let deadline = context.current() + Duration::from_secs(5);
@@ -8627,7 +8628,7 @@ mod tests {
 
             // The voter should emit a nullify vote for view 4 quickly (not
             // after the 100s leader timeout) because the batcher signaled
-            // immediate timeout.
+            // immediate timeout. Only stale inactivity hints are ignored.
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
@@ -8652,22 +8653,59 @@ mod tests {
 
     #[test_traced]
     fn test_batcher_update_triggers_timeout() {
-        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinPk, _>, false);
-        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinSig, _>, false);
-        batcher_inactivity_hint(bls12381_multisig::fixture::<MinPk, _>, false);
-        batcher_inactivity_hint(bls12381_multisig::fixture::<MinSig, _>, false);
-        batcher_inactivity_hint(ed25519::fixture, false);
-        batcher_inactivity_hint(secp256r1::fixture, false);
+        batcher_timeout_hint(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            TimeoutReason::Inactivity,
+            false,
+        );
+        batcher_timeout_hint(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            TimeoutReason::Inactivity,
+            false,
+        );
+        batcher_timeout_hint(
+            bls12381_multisig::fixture::<MinPk, _>,
+            TimeoutReason::Inactivity,
+            false,
+        );
+        batcher_timeout_hint(
+            bls12381_multisig::fixture::<MinSig, _>,
+            TimeoutReason::Inactivity,
+            false,
+        );
+        batcher_timeout_hint(ed25519::fixture, TimeoutReason::Inactivity, false);
+        batcher_timeout_hint(secp256r1::fixture, TimeoutReason::Inactivity, false);
     }
 
     #[test_traced]
     fn test_stale_batcher_inactivity_hint_is_ignored_after_activity() {
-        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinPk, _>, true);
-        batcher_inactivity_hint(bls12381_threshold_vrf::fixture::<MinSig, _>, true);
-        batcher_inactivity_hint(bls12381_multisig::fixture::<MinPk, _>, true);
-        batcher_inactivity_hint(bls12381_multisig::fixture::<MinSig, _>, true);
-        batcher_inactivity_hint(ed25519::fixture, true);
-        batcher_inactivity_hint(secp256r1::fixture, true);
+        batcher_timeout_hint(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            TimeoutReason::Inactivity,
+            true,
+        );
+        batcher_timeout_hint(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            TimeoutReason::Inactivity,
+            true,
+        );
+        batcher_timeout_hint(
+            bls12381_multisig::fixture::<MinPk, _>,
+            TimeoutReason::Inactivity,
+            true,
+        );
+        batcher_timeout_hint(
+            bls12381_multisig::fixture::<MinSig, _>,
+            TimeoutReason::Inactivity,
+            true,
+        );
+        batcher_timeout_hint(ed25519::fixture, TimeoutReason::Inactivity, true);
+        batcher_timeout_hint(secp256r1::fixture, TimeoutReason::Inactivity, true);
+    }
+
+    #[test_traced]
+    fn test_stale_batcher_non_inactivity_hint_is_not_ignored_after_activity() {
+        batcher_timeout_hint(ed25519::fixture, TimeoutReason::LeaderNullify, true);
     }
 
     #[test_traced]
