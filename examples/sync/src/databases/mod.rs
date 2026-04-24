@@ -153,7 +153,7 @@ pub trait ExampleDatabase: Sized {
     /// Get the database's root digest.
     fn root(&self) -> Key;
 
-    /// Get the database family name for logging.
+    /// Get the display name used in logs.
     fn name() -> &'static str;
 }
 

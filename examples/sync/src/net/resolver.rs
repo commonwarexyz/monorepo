@@ -71,7 +71,7 @@ where
         }
     }
 
-    /// Returns compact authenticated state for the given target.
+    /// Returns the compact sync target currently served by the remote.
     pub async fn get_compact_target(
         &self,
     ) -> Result<compact::Target<mmr::Family, D>, crate::Error> {

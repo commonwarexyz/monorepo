@@ -80,7 +80,7 @@ where
     }
 
     fn name() -> &'static str {
-        "keyless-compact"
+        "compact keyless"
     }
 }
 

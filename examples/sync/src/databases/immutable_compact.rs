@@ -79,7 +79,7 @@ where
     }
 
     fn name() -> &'static str {
-        "immutable-compact"
+        "compact immutable"
     }
 }
 

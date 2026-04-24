@@ -64,6 +64,8 @@ struct Config {
     max_outstanding_requests: usize,
 }
 
+/// Every `interval_duration`, request an updated full-sync target from `resolver` and send any
+/// changes on `update_tx`.
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,

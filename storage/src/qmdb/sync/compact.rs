@@ -67,7 +67,9 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage};
 use commonware_utils::{sync::AsyncRwLock, Array};
@@ -136,6 +138,47 @@ pub struct State<F: Family, Op, D: Digest> {
     pub last_commit_op: Op,
     /// Proof authenticating `last_commit_op` against the target root.
     pub last_commit_proof: Proof<F, D>,
+}
+
+impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
+where
+    Op: Write,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.leaf_count.write(buf);
+        self.pinned_nodes.write(buf);
+        self.last_commit_op.write(buf);
+        self.last_commit_proof.write(buf);
+    }
+}
+
+impl<F: Family, Op, D: Digest> EncodeSize for State<F, Op, D>
+where
+    Op: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.leaf_count.encode_size()
+            + self.pinned_nodes.encode_size()
+            + self.last_commit_op.encode_size()
+            + self.last_commit_proof.encode_size()
+    }
+}
+
+impl<F: Family, Op, D: Digest> Read for State<F, Op, D>
+where
+    Op: Read,
+{
+    type Cfg = (RangeCfg<usize>, Op::Cfg, usize);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let (pinned_nodes_cfg, op_cfg, max_proof_digests) = cfg;
+        Ok(Self {
+            leaf_count: Location::<F>::read(buf)?,
+            pinned_nodes: Vec::<D>::read_cfg(buf, &(*pinned_nodes_cfg, ()))?,
+            last_commit_op: Op::read_cfg(buf, op_cfg)?,
+            last_commit_proof: Proof::<F, D>::read_cfg(buf, max_proof_digests)?,
+        })
+    }
 }
 
 /// Resolver-side errors for compact state serving.

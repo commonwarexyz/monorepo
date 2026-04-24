@@ -504,10 +504,7 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
-        self.state.leaf_count.write(buf);
-        self.state.pinned_nodes.write(buf);
-        self.state.last_commit_op.write(buf);
-        self.state.last_commit_proof.write(buf);
+        self.state.write(buf);
     }
 }
 
@@ -517,11 +514,7 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size()
-            + self.state.leaf_count.encode_size()
-            + self.state.pinned_nodes.encode_size()
-            + self.state.last_commit_op.encode_size()
-            + self.state.last_commit_proof.encode_size()
+        self.request_id.encode_size() + self.state.encode_size()
     }
 }
 
@@ -534,19 +527,14 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let leaf_count = Location::read(buf)?;
-        let range_cfg = RangeCfg::from(0..=MAX_PINNED_NODES);
-        let pinned_nodes = Vec::<D>::read_cfg(buf, &(range_cfg, ()))?;
-        let last_commit_op = Op::read_cfg(buf, &Op::Cfg::default())?;
-        let last_commit_proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
-        Ok(Self {
-            request_id,
-            state: State {
-                leaf_count,
-                pinned_nodes,
-                last_commit_op,
-                last_commit_proof,
-            },
-        })
+        let state = State::<mmr::Family, Op, D>::read_cfg(
+            buf,
+            &(
+                RangeCfg::from(0..=MAX_PINNED_NODES),
+                Op::Cfg::default(),
+                MAX_DIGESTS,
+            ),
+        )?;
+        Ok(Self { request_id, state })
     }
 }
