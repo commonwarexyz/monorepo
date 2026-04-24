@@ -547,7 +547,8 @@ impl RegistryInner {
         let attributes = owned_attributes(attributes);
         let help = normalize_help(help);
         let metric_type = metric.metric_type();
-        let encode_samples = create_sample_encoder(name.clone(), attributes.clone(), metric.clone());
+        let encode_samples =
+            create_sample_encoder(name.clone(), attributes.clone(), metric.clone());
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
@@ -1299,7 +1300,6 @@ mod tests {
             ours_encoded, theirs_encoded,
             "output diverged from upstream prometheus-client registry"
         );
-
     }
 
     #[test]
