@@ -1,6 +1,9 @@
 //! Utility functions for metrics
 
 pub mod histogram;
+mod counter;
+mod family;
+mod gauge;
 mod registration;
 pub mod status;
 pub(crate) mod task;
@@ -23,13 +26,16 @@ pub use prometheus_client::{
     registry::Metric,
 };
 
-/// Underlying Prometheus metric types. Used when constructing a metric
-/// to pass to [`crate::Metrics::register`].
+pub use counter::{Counter as RawCounter, CounterValue};
+pub use family::{Family, FamilyValue};
+pub use gauge::{Gauge as RawGauge, GaugeExt, GaugeValue};
+pub use histogram::HistogramExt;
+
+/// Underlying metric types. Used when constructing a metric to pass to
+/// [`crate::Metrics::register`].
 pub mod raw {
+    pub use super::{Family, RawCounter as Counter, RawGauge as Gauge};
     pub use prometheus_client::metrics::{
-        counter::Counter,
-        family::{self, Family},
-        gauge::Gauge,
         histogram::Histogram,
     };
 }
@@ -47,17 +53,8 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt::Write,
     ops::Deref,
-    sync::{atomic::Ordering, Arc, Weak},
+    sync::{Arc, Weak},
 };
-
-/// Native integer width used by [`raw::Gauge`] on this target.
-///
-/// `i64` on platforms with 64-bit atomics, `i32` otherwise. Matches
-/// `prometheus_client::metrics::gauge::Gauge`'s backing type.
-#[cfg(target_has_atomic = "64")]
-pub type GaugeValue = i64;
-#[cfg(not(target_has_atomic = "64"))]
-pub type GaugeValue = i32;
 
 /// A registered counter metric.
 pub type Counter = Registered<raw::Counter>;
@@ -69,29 +66,6 @@ pub type Histogram = Registered<raw::Histogram>;
 pub type CounterFamily<L> = Registered<raw::Family<L, raw::Counter>>;
 /// A registered family of gauges keyed by `L`.
 pub type GaugeFamily<L> = Registered<raw::Family<L, raw::Gauge>>;
-
-/// Convenience methods for Prometheus gauges.
-pub trait GaugeExt {
-    /// Set a gauge from a lossless integer conversion.
-    fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
-
-    /// Atomically raise a gauge to at least the provided value.
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error>;
-}
-
-impl GaugeExt for raw::Gauge {
-    fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
-        let value = value.try_into()?;
-        Ok(self.set(value))
-    }
-
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error> {
-        let value = value.try_into()?;
-        Ok(self.inner().fetch_max(value, Ordering::Relaxed))
-    }
-}
-
-pub use histogram::HistogramExt;
 
 /// One-line constructors for the common metric types.
 pub trait MetricsExt: crate::Metrics {
@@ -118,17 +92,6 @@ pub trait MetricsExt: crate::Metrics {
         self.register(name, help, raw::Histogram::new(buckets))
     }
 
-    /// Register a metric family with the runtime.
-    fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
-    where
-        N: Into<String>,
-        H: Into<String>,
-        S: Clone + std::hash::Hash + Eq,
-        M: Default,
-        raw::Family<S, M>: Metric,
-    {
-        self.register(name, help, raw::Family::<S, M>::default())
-    }
 }
 
 impl<T: crate::Metrics> MetricsExt for T {}
@@ -343,12 +306,12 @@ impl<M> Registered<M> {
     }
 }
 
-impl<S, M, C> Registered<raw::Family<S, M, C>>
+impl<S, M> Registered<raw::Family<S, M>>
 where
-    S: Clone + std::hash::Hash + Eq,
-    C: raw::family::MetricConstructor<M>,
+    S: Clone + std::hash::Hash + Eq + EncodeLabelSetTrait + Send + Sync + std::fmt::Debug + 'static,
+    M: FamilyValue + Default + EncodeMetric,
 {
-    pub fn get_by<Q>(&self, label_set: &Q) -> Option<impl Deref<Target = M> + '_>
+    pub fn get_by<Q>(&self, label_set: &Q) -> Option<Arc<M>>
     where
         for<'a> S: From<&'a Q>,
     {
@@ -356,7 +319,7 @@ where
         self.get(&label_set)
     }
 
-    pub fn get_or_create_by<Q>(&self, label_set: &Q) -> impl Deref<Target = M> + '_
+    pub fn get_or_create_by<Q>(&self, label_set: &Q) -> Arc<M>
     where
         for<'a> S: From<&'a Q>,
     {
@@ -474,22 +437,24 @@ fn create_gauge_encoder(
     })
 }
 
-struct DescriptorSkippingWriter<'a> {
-    output: &'a mut String,
-    remaining: usize,
-}
-
-impl Write for DescriptorSkippingWriter<'_> {
-    fn write_str(&mut self, value: &str) -> std::fmt::Result {
-        if self.remaining >= value.len() {
-            self.remaining -= value.len();
-            return Ok(());
-        }
-        let start = self.remaining;
-        self.remaining = 0;
-        self.output.push_str(&value[start..]);
-        Ok(())
-    }
+fn create_family_encoder<S, M>(
+    name: String,
+    attributes: &MetricAttributes,
+    family: Arc<raw::Family<S, M>>,
+) -> Box<SampleEncoder>
+where
+    S: Clone
+        + std::hash::Hash
+        + Eq
+        + EncodeLabelSetTrait
+        + Send
+        + Sync
+        + std::fmt::Debug
+        + 'static,
+    M: FamilyValue + Default + EncodeMetric,
+{
+    let label_suffix = encode_label_suffix(attributes);
+    Box::new(move |samples| family.encode_samples(&name, &label_suffix, samples))
 }
 
 // Fast path for native scalar metrics.
@@ -516,22 +481,19 @@ where
     if let Ok(gauge) = Arc::downcast::<raw::Gauge>(metric_any) {
         return create_gauge_encoder(name, &attributes, gauge);
     }
-
     let metric_type = metric.metric_type();
     let mut descriptor = String::new();
     encode_descriptor(&mut descriptor, &name, ".", metric_type)
         .expect("encoding fallback descriptor failed");
     let descriptor_len = descriptor.len();
 
-    let mut registry = registry::Registry::with_labels(attributes.into_iter());
-    registry.register(name, "", SharedMetric(metric));
-
     Box::new(move |samples| {
-        let mut writer = DescriptorSkippingWriter {
-            output: samples,
-            remaining: descriptor_len,
-        };
-        encode_registry(&mut writer, &registry).expect("encoding temporary metric registry failed");
+        let mut registry = registry::Registry::with_labels(attributes.clone().into_iter());
+        registry.register(name.as_str(), "", SharedMetric(metric.clone()));
+
+        let mut encoded = String::new();
+        encode_registry(&mut encoded, &registry).expect("encoding temporary metric registry failed");
+        samples.push_str(&encoded[descriptor_len.min(encoded.len())..]);
         Ok(())
     })
 }
@@ -611,6 +573,28 @@ impl Registry {
     {
         let mut inner = self.inner.lock();
         inner.register(Arc::downgrade(&self.inner), name, help, attributes, metric)
+    }
+
+    pub(crate) fn register_family<S, M>(
+        &self,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        family: Arc<raw::Family<S, M>>,
+    ) -> Registered<raw::Family<S, M>>
+    where
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric,
+    {
+        let mut inner = self.inner.lock();
+        inner.register_family(Arc::downgrade(&self.inner), name, help, attributes, family)
     }
 
     pub fn encode(&self) -> String {
@@ -695,6 +679,82 @@ impl RegistryInner {
         );
         Registered {
             metric,
+            registration,
+        }
+    }
+
+    fn register_family<S, M>(
+        &mut self,
+        registry: Weak<Mutex<Self>>,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        family: Arc<raw::Family<S, M>>,
+    ) -> Registered<raw::Family<S, M>>
+    where
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric,
+    {
+        let attributes = owned_attributes(attributes);
+        let help = normalize_help(help);
+        let metric_type = family.metric_type();
+        let encode_samples =
+            create_family_encoder(name.clone(), &attributes, family.clone());
+        let key = (name.clone(), attributes.clone());
+        if let Some(existing_id) = self.keys.get(&key).copied() {
+            let entry = self.metric_ref(existing_id);
+            if let Some(family_meta) = self.families.get(&name) {
+                assert_eq!(
+                    family_meta.help, help,
+                    "metric family `{}` registered with inconsistent help text",
+                    name
+                );
+            }
+            let existing_metric = Arc::clone(&entry.metric_any)
+                .downcast::<raw::Family<S, M>>()
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "duplicate metric `{}` with attributes {:?} registered with different type",
+                        key.0, key.1
+                    )
+                });
+            let registration = entry
+                .registration
+                .upgrade()
+                .and_then(RegistrationInner::claim)
+                .expect("metric key references closed registration");
+            return Registered {
+                metric: existing_metric,
+                registration,
+            };
+        }
+        self.assert_family_matches(&name, &help, metric_type);
+
+        let id = self.allocate_metric_id();
+        let registration =
+            Registration::from_inner(RegistrationInner::new(RuntimeRegistration { id, registry }));
+        let metric_any: Arc<dyn Any + Send + Sync> = family.clone();
+        self.insert_metric_entry(
+            id,
+            help,
+            metric_type,
+            PendingMetricEntry {
+                family_name: name,
+                attributes,
+                encode_samples,
+                metric_any,
+                registration: registration.downgrade(),
+            },
+        );
+        Registered {
+            metric: family,
             registration,
         }
     }
@@ -889,6 +949,19 @@ pub(crate) trait Register {
     /// Register a metric under this scope's prefix.
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M>;
 
+    /// Register a native counter or gauge family under this scope's prefix.
+    fn family<S, M>(&mut self, name: &str, help: &str) -> Registered<raw::Family<S, M>>
+    where
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric;
+
     /// Create a child scope by appending `prefix` to the current prefix.
     fn sub_registry(&mut self, prefix: &str) -> Scope;
 }
@@ -902,6 +975,29 @@ impl Register for Registry {
             help.to_string(),
             Vec::new(),
             Arc::new(metric),
+        )
+    }
+
+    fn family<S, M>(&mut self, name: &str, help: &str) -> Registered<raw::Family<S, M>>
+    where
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric,
+    {
+        validate_label(name);
+        let family = Family::<S, M>::default();
+        Self::register_family(
+            self,
+            name.to_string(),
+            help.to_string(),
+            Vec::new(),
+            Arc::new(family),
         )
     }
 
@@ -921,6 +1017,29 @@ impl Register for Scope {
         let help = help.to_string();
         let metric = Arc::new(metric);
         Registry::register(&self.registry, name, help, Vec::new(), metric)
+    }
+
+    fn family<S, M>(&mut self, name: &str, help: &str) -> Registered<raw::Family<S, M>>
+    where
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric,
+    {
+        validate_label(name);
+        let family = Family::<S, M>::default();
+        Registry::register_family(
+            &self.registry,
+            prefixed_name(&self.prefix, name),
+            help.to_string(),
+            Vec::new(),
+            Arc::new(family),
+        )
     }
 
     fn sub_registry(&mut self, prefix: &str) -> Scope {
@@ -1303,6 +1422,49 @@ mod tests {
         );
         assert!(encoded.contains("votes_total{epoch=\"1\"} 1"));
         assert!(encoded.contains("votes_total{epoch=\"2\"} 2"));
+    }
+
+    #[test]
+    fn test_encode_native_counter_family() {
+        let mut registry = Registry::default();
+        let family: CounterFamily<Vec<(String, String)>> =
+            Register::family(&mut registry, "votes", "vote count");
+        family
+            .get_or_create(&vec![("epoch".to_string(), "1".to_string())])
+            .inc();
+        family
+            .get_or_create(&vec![("epoch".to_string(), "2".to_string())])
+            .inc_by(2);
+
+        let encoded = registry.encode();
+        assert_eq!(
+            encoded.matches("# HELP votes").count(),
+            1,
+            "single HELP: {encoded}"
+        );
+        assert!(encoded.contains("votes_total{epoch=\"1\"} 1"));
+        assert!(encoded.contains("votes_total{epoch=\"2\"} 2"));
+    }
+
+    #[test]
+    fn test_encode_native_counter_family_with_attributes() {
+        let registry = Registry::default();
+        let family = raw::Family::<Vec<(String, String)>, raw::Counter>::default();
+        let family = registry.register_family(
+            "votes".to_string(),
+            "vote count".to_string(),
+            vec![("region".to_string(), "us".to_string())],
+            Arc::new(family),
+        );
+        family
+            .get_or_create(&vec![("epoch".to_string(), "1".to_string())])
+            .inc();
+
+        let encoded = registry.encode();
+        assert!(
+            encoded.contains("votes_total{region=\"us\",epoch=\"1\"} 1"),
+            "attributes and family labels should both be encoded: {encoded}"
+        );
     }
 
     #[test]

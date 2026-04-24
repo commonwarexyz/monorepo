@@ -15,7 +15,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{CounterFamily, MetricsExt as _},
+    telemetry::metrics::CounterFamily,
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
 use commonware_utils::channel::mpsc;

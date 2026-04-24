@@ -445,6 +445,28 @@ stability_scope!(BETA {
             metric: M,
         ) -> telemetry::metrics::Registered<M>;
 
+        /// Register a native counter or gauge family with the runtime.
+        fn family<N, H, S, M>(
+            &self,
+            name: N,
+            help: H,
+        ) -> telemetry::metrics::Registered<telemetry::metrics::raw::Family<S, M>>
+        where
+            N: Into<String>,
+            H: Into<String>,
+            S: Clone
+                + std::hash::Hash
+                + Eq
+                + telemetry::metrics::EncodeLabelSetTrait
+                + Send
+                + Sync
+                + std::fmt::Debug
+                + 'static,
+            M: telemetry::metrics::FamilyValue + Default + telemetry::metrics::EncodeMetric,
+        {
+            self.register(name, help, telemetry::metrics::raw::Family::<S, M>::default())
+        }
+
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }

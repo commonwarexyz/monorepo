@@ -15,7 +15,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{CounterFamily, MetricsExt as _},
+    telemetry::metrics::CounterFamily,
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
     StreamOf,
 };

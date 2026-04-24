@@ -37,21 +37,9 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Current number of serves currently processing",
         );
         let peers_blocked = context.gauge("peers_blocked", "Current number of blocked peers");
-        let fetch = context.register(
-            "fetch",
-            "Number of fetches by status",
-            status::Raw::default(),
-        );
-        let cancel = context.register(
-            "cancel",
-            "Number of canceled fetches by status",
-            status::Raw::default(),
-        );
-        let serve = context.register(
-            "serve",
-            "Number of serves by status",
-            status::Raw::default(),
-        );
+        let fetch = context.family("fetch", "Number of fetches by status");
+        let cancel = context.family("cancel", "Number of canceled fetches by status");
+        let serve = context.family("serve", "Number of serves by status");
         let serve_duration_registered = context.histogram(
             "serve_duration",
             "Histogram of successful serves",
