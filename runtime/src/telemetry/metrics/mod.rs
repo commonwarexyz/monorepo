@@ -434,6 +434,14 @@ fn create_gauge_encoder(
     })
 }
 
+// Adaptation of client_rust's text histogram encoder.
+//
+// Source:
+// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L399-L466
+//
+// Histogram bucket bounds and registration labels are fixed after
+// registration, so we cache their text prefixes once and only format the
+// changing sample values during scrapes.
 fn encode_histogram_bucket_label_suffix(base: &str, upper_bound: f64) -> String {
     let label = if upper_bound == f64::MAX {
         "+Inf".to_string()
@@ -508,15 +516,16 @@ where
     Box::new(move |samples| family.encode_samples(&name, &label_suffix, samples))
 }
 
-// Fast path for native scalar metrics.
+// Fast path for native metrics.
 //
 // Source:
 // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L314-L361
 //
 // `prometheus-client` keeps its text `MetricEncoder` constructor private, so
-// generic metrics still use a cached upstream registry below. Native counters
-// and gauges have simple, stable sample shapes, so we encode those lines
-// directly and keep the generic path as a fallback.
+// generic metrics still use a temporary upstream registry below. Native
+// counters, gauges, histograms, and supported families have simple, stable
+// sample shapes, so we encode those lines directly and keep the generic path as
+// a fallback.
 fn create_sample_encoder<M>(
     name: String,
     attributes: MetricAttributes,
@@ -560,8 +569,10 @@ fn owned_attributes(attributes: Vec<(String, String)>) -> MetricAttributes {
         .collect()
 }
 
-// Match upstream prometheus-client's `Descriptor::new` normalization,
-// which unconditionally appends `.` to the help text.
+// Match upstream prometheus-client's `Descriptor::new` normalization.
+//
+// Source:
+// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/registry.rs#L340-L348
 fn normalize_help(help: String) -> String {
     help + "."
 }
@@ -981,8 +992,10 @@ impl RegistryInner {
                 (metric.encode_samples)(&mut samples).expect("encoding live metric samples failed");
             }
             // Suppress the HELP/TYPE descriptor when the family produced no
-            // samples (e.g. a `Family<S, M>` with no child entries). Matches
-            // upstream prometheus-client's empty-metric filtering.
+            // samples (e.g. a `Family<S, M>` with no child entries).
+            //
+            // Source:
+            // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L1283-L1298
             if samples.is_empty() {
                 continue;
             }
@@ -1608,6 +1621,50 @@ mod tests {
         assert_eq!(
             ours_encoded, theirs_encoded,
             "output diverged from upstream prometheus-client registry"
+        );
+    }
+
+    #[test]
+    fn test_encode_native_families_match_upstream_registry() {
+        // Covers native family sample formatting, including registry labels
+        // merged ahead of child labels.
+        let levels = raw::Family::<Vec<(String, String)>, raw::Gauge>::default();
+        levels
+            .get_or_create(&vec![("queue".to_string(), "pending".to_string())])
+            .set(4);
+        let requests = raw::Family::<Vec<(String, String)>, raw::Counter>::default();
+        requests
+            .get_or_create(&vec![("method".to_string(), "GET".to_string())])
+            .inc_by(3);
+        requests
+            .get_or_create(&vec![("method".to_string(), "POST".to_string())])
+            .inc_by(5);
+
+        let ours = Registry::default();
+        let labels = vec![("region".to_string(), "us".to_string())];
+        let _levels = ours.register_family(
+            "levels".to_string(),
+            "current queue depth".to_string(),
+            labels.clone(),
+            Arc::new(levels.clone()),
+        );
+        let _requests = ours.register_family(
+            "requests".to_string(),
+            "number of requests".to_string(),
+            labels.clone(),
+            Arc::new(requests.clone()),
+        );
+        let ours_encoded = ours.encode();
+
+        let mut theirs = registry::Registry::with_labels(owned_attributes(labels).into_iter());
+        theirs.register("levels", "current queue depth", levels);
+        theirs.register("requests", "number of requests", requests);
+        let mut theirs_encoded = String::new();
+        encode(&mut theirs_encoded, &theirs).expect("upstream encode failed");
+
+        assert_eq!(
+            ours_encoded, theirs_encoded,
+            "native family output diverged from upstream prometheus-client registry"
         );
     }
 
