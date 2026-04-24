@@ -197,3 +197,15 @@ hash = "de132e1ab2576fd8227c5ca2e04ca93e5f8e6f8c46369457af0d0383b3559034"
 ["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Setup<TestG>>"]
 n_cases = 65536
 hash = "baa7fede6bfe35a0b2bfe1195b6df3a31fb6be8f9d2f4877c65444602ef13797"
+
+["commonware_cryptography::zk::pedersen_to_plain::conformance::CodecConformance<Claim<TestG>>"]
+n_cases = 65536
+hash = "d646b76dd2d950039f2512bb5a30560836b3f29a5510f49a5796c142c3ecab21"
+
+["commonware_cryptography::zk::pedersen_to_plain::conformance::CodecConformance<Proof<TestF,TestG>>"]
+n_cases = 65536
+hash = "c69140dbdc77aa23e08cd6f230e4716d7b010556cb0defdc4019eb60c20440d8"
+
+["commonware_cryptography::zk::pedersen_to_plain::conformance::CodecConformance<Setup<TestG>>"]
+n_cases = 65536
+hash = "d646b76dd2d950039f2512bb5a30560836b3f29a5510f49a5796c142c3ecab21"
