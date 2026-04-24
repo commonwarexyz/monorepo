@@ -505,6 +505,8 @@ fn owned_attributes(attributes: Vec<(String, String)>) -> MetricAttributes {
         .collect()
 }
 
+// Match upstream prometheus-client's `Descriptor::new` normalization,
+// which unconditionally appends `.` to the help text.
 fn normalize_help(help: String) -> String {
     help + "."
 }
@@ -600,8 +602,6 @@ impl RegistryInner {
         M: Metric,
     {
         let attributes = owned_attributes(attributes);
-        // Match upstream prometheus-client's `Descriptor::new` normalization,
-        // which unconditionally appends `.` to the help text.
         let help = normalize_help(help);
         let metric_type = metric.metric_type();
         let encode_samples = create_sample_encoder(metric.clone());
