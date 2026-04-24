@@ -322,9 +322,7 @@ mod tests {
         // Wait for target view update
         loop {
             match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update {
-                    current, ..
-                } => {
+                batcher::Message::Update { current, .. } => {
                     if current < target {
                         continue;
                     }
@@ -1067,8 +1065,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(_)) => {
                         panic!("finalize vote should not be broadcast");
                     }
-                    batcher::Message::Update { .. } => {
-                    }
+                    batcher::Message::Update { .. } => {}
                     _ => continue,
                 }
             }
@@ -1126,8 +1123,7 @@ mod tests {
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { .. } => {
-                }
+                batcher::Message::Update { .. } => {}
                 _ => panic!("unexpected batcher message"),
             }
 
@@ -1183,8 +1179,7 @@ mod tests {
                         );
                         break;
                     }
-                    batcher::Message::Update { .. } => {
-                    }
+                    batcher::Message::Update { .. } => {}
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
             }
@@ -1298,8 +1293,7 @@ mod tests {
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { .. } => {
-                }
+                batcher::Message::Update { .. } => {}
                 _ => panic!("unexpected batcher message"),
             }
 
@@ -1353,8 +1347,7 @@ mod tests {
                         assert_eq!(finalize.proposal, proposal);
                         break;
                     }
-                    batcher::Message::Update { .. } => {
-                    }
+                    batcher::Message::Update { .. } => {}
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
             }
@@ -1567,8 +1560,7 @@ mod tests {
                         assert_eq!(f.proposal, conflicting_proposal);
                         break;
                     }
-                    batcher::Message::Update { .. } => {
-                    }
+                    batcher::Message::Update { .. } => {}
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
             }
@@ -2161,14 +2153,10 @@ mod tests {
             loop {
                 let message = batcher_receiver.recv().await.unwrap();
                 match message {
-                    batcher::Message::Update {
-                        finalized,
-                        ..
-                    } if finalized == view => {
+                    batcher::Message::Update { finalized, .. } if finalized == view => {
                         break;
                     }
-                    batcher::Message::Update { .. } => {
-                    }
+                    batcher::Message::Update { .. } => {}
                     _ => continue,
                 }
             }
@@ -2326,9 +2314,7 @@ mod tests {
                 let (new_view, leader) = loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } => {
                             if current > current_view {
                                 break (current, leader);
@@ -2511,12 +2497,8 @@ mod tests {
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current,
-                        leader,
-                        ..
-                    } => {
-                        (current, leader)
-                    }
+                        current, leader, ..
+                    } => (current, leader),
                     _ => panic!("expected initial update"),
                 };
 
@@ -2535,9 +2517,7 @@ mod tests {
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } if current > current_view => {
                             current_view = current;
                             current_leader = leader;
@@ -2712,12 +2692,8 @@ mod tests {
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current,
-                        leader,
-                        ..
-                    } => {
-                        (current, leader)
-                    }
+                        current, leader, ..
+                    } => (current, leader),
                     _ => panic!("expected initial update"),
                 };
 
@@ -2736,9 +2712,7 @@ mod tests {
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } if current > current_view => {
                             current_view = current;
                             current_leader = leader;
@@ -2899,9 +2873,7 @@ mod tests {
                 let (new_view, leader) = loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } => {
                             if current > current_view {
                                 break (current, leader);
@@ -3032,12 +3004,8 @@ mod tests {
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current,
-                        leader,
-                        ..
-                    } => {
-                        (current, leader)
-                    }
+                        current, leader, ..
+                    } => (current, leader),
                     _ => panic!("expected initial update"),
                 };
 
@@ -3055,9 +3023,7 @@ mod tests {
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } if current > current_view => {
                             current_view = current;
                             current_leader = leader;
@@ -3248,12 +3214,8 @@ mod tests {
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current,
-                        leader,
-                        ..
-                    } => {
-                        (current, leader)
-                    }
+                        current, leader, ..
+                    } => (current, leader),
                     _ => panic!("expected initial update"),
                 };
 
@@ -3272,9 +3234,7 @@ mod tests {
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } if current > current_view => {
                             current_view = current;
                             current_leader = leader;
@@ -3328,9 +3288,7 @@ mod tests {
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            leader,
-                            ..
+                            current, leader, ..
                         } if current > current_view => {
                             current_view = current;
                             if leader != me_idx {
@@ -3532,10 +3490,8 @@ mod tests {
 
             // Wait for finalization
             loop {
-                if let batcher::Message::Update {
-                    finalized,
-                    ..
-                } = batcher_receiver.recv().await.unwrap()
+                if let batcher::Message::Update { finalized, .. } =
+                    batcher_receiver.recv().await.unwrap()
                 {
                     if finalized >= view2 {
                         break;
@@ -3567,9 +3523,8 @@ mod tests {
 
             // Wait for view advancement (certification complete)
             loop {
-                if let batcher::Message::Update {
-                    current, ..
-                } = batcher_receiver.recv().await.unwrap()
+                if let batcher::Message::Update { current, .. } =
+                    batcher_receiver.recv().await.unwrap()
                 {
                     if current > view3 {
                         break;
@@ -3644,10 +3599,7 @@ mod tests {
             );
 
             // Wait for replay to complete
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
             // Give time for any erroneous certification attempts
             context.sleep(Duration::from_millis(100)).await;
@@ -4318,9 +4270,7 @@ mod tests {
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current,
-                        leader,
-                        ..
+                        current, leader, ..
                     } => {
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
@@ -5381,10 +5331,7 @@ mod tests {
             actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
             // Send a notarization for view 5 to trigger certification
             let view5 = View::new(5);
@@ -5416,10 +5363,8 @@ mod tests {
 
             // Wait for finalization to be processed
             loop {
-                if let batcher::Message::Update {
-                    finalized,
-                    ..
-                } = batcher_receiver.recv().await.unwrap()
+                if let batcher::Message::Update { finalized, .. } =
+                    batcher_receiver.recv().await.unwrap()
                 {
                     if finalized >= view5 {
                         break;
@@ -5571,10 +5516,7 @@ mod tests {
             actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
             // Send a notarization for view 5 to trigger certification
             let view5 = View::new(5);
@@ -7529,9 +7471,7 @@ mod tests {
             let message = batcher_receiver.recv().await.unwrap();
             match message {
                 batcher::Message::Update {
-                    current,
-                    finalized,
-                    ..
+                    current, finalized, ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -8015,10 +7955,7 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
             // Advance to follower view 3.
             let target_view = View::new(3);
@@ -8071,8 +8008,7 @@ mod tests {
             // Let the journal sync.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { .. } = msg {
-                }
+                if let batcher::Message::Update { .. } = msg {}
             }
 
             // Abort first voter.
@@ -8269,10 +8205,7 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
             // Advance to follower view 3.
             let target_view = View::new(3);
@@ -8332,8 +8265,7 @@ mod tests {
             // Let journal sync.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { .. } = msg {
-                }
+                if let batcher::Message::Update { .. } = msg {}
             }
 
             // Abort first voter.
@@ -8448,11 +8380,7 @@ mod tests {
     ///
     /// This covers the path where the batcher sends [Message::Timeout]
     /// (e.g., because the leader is inactive or has already nullified the view).
-    fn batcher_timeout_hint<S, F>(
-        mut fixture: F,
-        reason: TimeoutReason,
-        activity_before_hint: bool,
-    )
+    fn batcher_timeout_hint<S, F>(mut fixture: F, reason: TimeoutReason, activity_before_hint: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -8787,9 +8715,7 @@ mod tests {
 
             match batcher_receiver.recv().await.unwrap() {
                 batcher::Message::Update {
-                    current,
-                    finalized,
-                    ..
+                    current, finalized, ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::zero());

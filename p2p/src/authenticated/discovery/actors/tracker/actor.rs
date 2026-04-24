@@ -286,12 +286,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::{
-        authenticated::{
-            discovery::{
-                actors::{peer, tracker},
-                config::Bootstrapper,
-                types,
-            },
+        authenticated::discovery::{
+            actors::{peer, tracker},
+            config::Bootstrapper,
+            types,
         },
         Ingress, Manager, Provider, TrackedPeers,
     };

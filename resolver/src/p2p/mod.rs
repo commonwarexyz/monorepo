@@ -101,12 +101,7 @@ mod tests {
         sync::Mutex,
         NZUsize, NZU32,
     };
-    use std::{
-        collections::HashMap,
-        num::NonZeroU32,
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{collections::HashMap, num::NonZeroU32, sync::Arc, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);

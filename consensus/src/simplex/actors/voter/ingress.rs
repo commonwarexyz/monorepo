@@ -50,7 +50,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Send a resolved certificate.
     pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
-        self.sender
-            .send_lossy(Message::Verified(certificate, true));
+        self.sender.send_lossy(Message::Verified(certificate, true));
     }
 }

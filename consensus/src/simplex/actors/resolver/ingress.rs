@@ -91,11 +91,10 @@ impl Producer for Handler {
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(HandlerMessage::Produce {
-                view: View::new(key.into()),
-                response,
-            });
+        self.sender.send_lossy(HandlerMessage::Produce {
+            view: View::new(key.into()),
+            response,
+        });
         receiver
     }
 }

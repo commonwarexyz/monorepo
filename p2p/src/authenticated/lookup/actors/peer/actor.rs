@@ -1,8 +1,8 @@
 use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
     data::EncodedData,
-    mailbox::UnboundedMailbox,
     lookup::{channels::Channels, metrics, types},
+    mailbox::UnboundedMailbox,
     relay::{recv_prioritized, Prioritized, Relay},
 };
 use commonware_codec::Decode;
