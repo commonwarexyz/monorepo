@@ -55,8 +55,8 @@
 //! The shared bitmap operations are lock-free, but the structure is not a
 //! standalone general-purpose container. It relies on the buffer pool's
 //! ownership discipline: a slot is either checked out, parked in a thread-local
-//! cache, or published in this freelist. Only the thread that owns an unpublished
-//! slot may access that slot's parking cell.
+//! cache, or available in this freelist. Only the thread that owns a slot
+//! outside the freelist may access that slot's parking cell.
 use super::aligned::AlignedBuffer;
 use crossbeam_utils::CachePadded;
 use std::{
@@ -69,7 +69,7 @@ use std::{
 /// Number of slot bits tracked in each bitmap word.
 const SLOT_BITMAP_WORD_BITS: usize = u64::BITS as usize;
 /// Number of word masks stored on the stack before falling back to heap scratch.
-const INLINE_PUT_BATCH_MASKS: usize = 64;
+const INLINE_PUT_BATCH_MASKS: usize = 128;
 
 /// Bounded lock-free freelist of tracked buffers for one size class.
 ///
@@ -157,7 +157,7 @@ impl Freelist {
     /// Low slot-id bits choose the cache-line-padded word. High slot-id bits
     /// choose the bit inside that word, spreading consecutive slots across
     /// stripes instead of packing them into one atomic word.
-    #[inline]
+    #[inline(always)]
     const fn slot_word(&self, slot: u32) -> (usize, u64) {
         let slot = slot as usize;
         let word_index = slot & self.word_mask;
@@ -169,52 +169,53 @@ impl Freelist {
     ///
     /// This is the inverse of [`Self::slot_word`] and is used after a bit has
     /// been claimed from the bitmap.
-    #[inline]
+    #[inline(always)]
     const fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
         let slot = (bit << self.word_shift) | word_index;
         slot as u32
     }
 
-    /// Publishes one tracked buffer into the global freelist.
+    /// Puts one tracked buffer into the global freelist.
     ///
     /// The buffer is first written back into its parking cell, then the slot's
     /// free bit is set with `Release` ordering. A successful `take` performs
     /// the matching `Acquire` operation before reading the buffer back out.
     ///
-    /// The caller must own `slot`, and `slot` must not already be published in
+    /// The caller must own `slot`, and `slot` must not already be available in
     /// this freelist.
     #[inline]
     pub fn put(&self, slot: u32, buffer: AlignedBuffer) {
-        // SAFETY: the caller owns this slot while it is unpublished, so no other
-        // thread can access the parking cell until the slot bit is set.
-        unsafe {
-            (*self.storage(slot).get()).write(buffer);
-        }
+        // Park the buffer before marking the slot free.
+        self.park(slot, buffer);
 
+        // Setting the slot bit makes the parked buffer available. `Release` pairs
+        // with the taker's `Acquire` clear before it reads the parking cell.
         let (word_index, mask) = self.slot_word(slot);
         let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
-        debug_assert_eq!(
+        assert_eq!(
             previous & mask,
             0,
             "returned slot must not already be marked free"
         );
     }
 
-    /// Publishes several tracked buffers into the global freelist.
+    /// Puts several tracked buffers into the global freelist.
     ///
     /// Batch insertion groups returned slots by bitmap word so each touched
     /// stripe needs only one atomic `fetch_or`, regardless of how many entries
     /// in the batch map to that word.
     ///
     /// The caller must own every slot in the batch. Slots must be unique within
-    /// the batch and must not already be published in this freelist.
+    /// the batch and must not already be available in this freelist.
     ///
-    /// The iterator is expected not to panic after yielding an entry. BufferPool
-    /// callers use simple drain and array iterators; avoiding per-entry guards
-    /// keeps this path allocation-free for ordinary batches.
+    /// The iterator **must not panic** after yielding an entry.
+    ///
+    /// `BufferPool` callers use simple drain and array iterators, avoiding
+    /// per-entry guards keeps this path allocation-free for ordinary batches.
     #[inline]
     pub fn put_batch(&self, entries: impl IntoIterator<Item = (u32, AlignedBuffer)>) {
         let mut entries = entries.into_iter();
+
         // Keep empty and single-entry batches on the cheapest path. The mask
         // scratch space is only needed once there are multiple slots to
         // coalesce.
@@ -226,55 +227,45 @@ impl Freelist {
             return;
         };
 
-        // Masks are staged by word after parking the buffers. The later
-        // Release `fetch_or` publishes every staged slot in that word.
-        let mut inline_masks = [0u64; INLINE_PUT_BATCH_MASKS];
-        let mut heap_masks = Vec::new();
-        let masks = if self.words.len() <= INLINE_PUT_BATCH_MASKS {
-            &mut inline_masks[..self.words.len()]
+        let put_entries = |masks: &mut [u64]| {
+            // Masks are staged by word after parking the buffers. The later
+            // Release `fetch_or` makes every staged slot in that word available.
+            for (slot, buffer) in [(slot, buffer), (next_slot, next_buffer)]
+                .into_iter()
+                .chain(entries)
+            {
+                // Park first, then stage the bit for the later per-word publish.
+                self.park(slot, buffer);
+                let (word_index, mask) = self.slot_word(slot);
+                masks[word_index] |= mask;
+            }
+
+            for (word_index, &mask) in masks.iter().enumerate() {
+                if mask == 0 {
+                    continue;
+                }
+
+                // One Release operation makes every parked buffer represented
+                // by this word mask.
+                let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
+                assert_eq!(
+                    previous & mask,
+                    0,
+                    "returned slot batch must not already contain a free slot"
+                );
+            }
+        };
+
+        let word_count = self.words.len();
+        if word_count <= INLINE_PUT_BATCH_MASKS {
+            let mut masks = [0u64; INLINE_PUT_BATCH_MASKS];
+            put_entries(&mut masks[..word_count]);
         } else {
             // Very large freelists are uncommon, so keep the common case on the
             // stack and fall back to heap scratch only when the bitmap is wider
             // than the fixed inline staging area.
-            heap_masks.resize(self.words.len(), 0);
-            heap_masks.as_mut_slice()
-        };
-
-        for (slot, buffer) in [(slot, buffer), (next_slot, next_buffer)] {
-            // SAFETY: the caller owns this slot while it is unpublished, so no
-            // other thread can access the parking cell until the slot bit is set.
-            unsafe {
-                (*self.storage(slot).get()).write(buffer);
-            }
-
-            let (word_index, mask) = self.slot_word(slot);
-            masks[word_index] |= mask;
-        }
-
-        for (slot, buffer) in entries {
-            // SAFETY: the caller owns this slot while it is unpublished, so no
-            // other thread can access the parking cell until the slot bit is set.
-            unsafe {
-                (*self.storage(slot).get()).write(buffer);
-            }
-
-            let (word_index, mask) = self.slot_word(slot);
-            masks[word_index] |= mask;
-        }
-
-        for (word_index, &mask) in masks.iter().enumerate() {
-            if mask == 0 {
-                continue;
-            }
-
-            // One Release operation publishes every parked buffer represented
-            // by this word mask.
-            let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
-            debug_assert_eq!(
-                previous & mask,
-                0,
-                "returned slot batch must not already contain a free slot"
-            );
+            let mut masks = vec![0u64; word_count];
+            put_entries(masks.as_mut_slice());
         }
     }
 
@@ -308,12 +299,10 @@ impl Freelist {
                 let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
                 if observed & mask != 0 {
                     let slot = self.slot_index(word_index, bit);
-                    // SAFETY: a successful bit clear removes this slot from
-                    // the free set, so we now have exclusive access to the
-                    // initialized buffer that was published by the matching
-                    // put.
-                    let buffer = unsafe { (*self.storage(slot).get()).assume_init_read() };
-                    return Some((slot, buffer));
+                    // Clear the bit before reading the parked buffer. The
+                    // Acquire `fetch_and` above synchronizes with the put-side
+                    // Release operation.
+                    return Some((slot, self.unpark(slot)));
                 }
 
                 // Another thread removed that bit first. Reuse the returned
@@ -378,11 +367,10 @@ impl Freelist {
                 while claimed != 0 {
                     let bit = SlotBitmapProbe::select_set_bit(claimed, bit_offset);
                     let slot = self.slot_index(word_index, bit);
-                    // SAFETY: the cleared bit removed this slot from the free
-                    // set, so we now have exclusive access to the initialized
-                    // buffer published by the matching put.
-                    let buffer = unsafe { (*self.storage(slot).get()).assume_init_read() };
-                    put_entry(slot, buffer);
+                    // These bits were cleared by the Acquire `fetch_and`
+                    // above, so each corresponding parked buffer is now owned
+                    // by this caller.
+                    put_entry(slot, self.unpark(slot));
                     claimed &= !(1u64 << bit);
                     filled += 1;
                 }
@@ -395,19 +383,46 @@ impl Freelist {
         filled
     }
 
-    #[inline]
-    fn storage(&self, slot: u32) -> &UnsafeCell<MaybeUninit<AlignedBuffer>> {
-        // Slot ids are allocated by the owning size class. A failed lookup means
-        // the caller violated that ownership contract.
-        self.storage
-            .get(slot as usize)
-            .expect("slot id must refer to an allocated slot")
+    /// Parks a buffer in the storage cell for a slot outside the freelist.
+    ///
+    /// The caller must own `slot` and mark the corresponding bit only after
+    /// this write completes.
+    #[inline(always)]
+    fn park(&self, slot: u32, buffer: AlignedBuffer) {
+        // SAFETY: the caller owns this slot while it is outside the freelist, so no
+        // other thread can access the parking cell until the slot bit is set.
+        unsafe {
+            (*self
+                .storage
+                .get(slot as usize)
+                .expect("slot id must refer to an allocated slot")
+                .get())
+            .write(buffer);
+        }
+    }
+
+    /// Removes the parked buffer from a slot whose free bit was just claimed.
+    ///
+    /// The caller must have cleared the slot's bit before reading the cell.
+    #[inline(always)]
+    fn unpark(&self, slot: u32) -> AlignedBuffer {
+        // SAFETY: a successful bit clear removes this slot from the free set,
+        // so we have exclusive access to the initialized buffer that was
+        // made available by the matching put.
+        unsafe {
+            (*self
+                .storage
+                .get(slot as usize)
+                .expect("slot id must refer to an allocated slot")
+                .get())
+            .assume_init_read()
+        }
     }
 }
 
 impl Drop for Freelist {
     fn drop(&mut self) {
-        // Any slot still published in the freelist owns an initialized parked
+        // Any slot still free in the freelist owns an initialized parked
         // buffer in its parking cell. Drain them explicitly so the underlying
         // aligned allocations are released before the raw storage backing the
         // freelist itself goes away.
@@ -420,7 +435,7 @@ impl Drop for Freelist {
 /// Helper facade for per-thread probe state and per-word bit selection.
 ///
 /// Keeping this logic in one place makes the claim path easier to read and
-/// keeps the freelist API focused on slot publication and removal.
+/// keeps the freelist API focused on putting and taking slots.
 struct SlotBitmapProbe;
 
 static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
@@ -511,7 +526,7 @@ pub(super) mod tests {
             set.put(slot, AlignedBuffer::new(64, 64));
         }
 
-        // Every published slot should be returned exactly once, and the
+        // Every free slot should be returned exactly once, and the
         // freelist should report empty afterward.
         let mut seen = [false; 3];
         for _ in 0..3 {
@@ -563,7 +578,7 @@ pub(super) mod tests {
     fn test_freelist_put_batch_handles_empty_single_and_multi_entry_paths() {
         let set = Freelist::new(NZU32!(8), NZUsize!(8));
 
-        // Empty batches are a no-op and must not publish anything.
+        // Empty batches are a no-op and must not make anything available.
         set.put_batch(std::iter::empty());
         assert_eq!(len(&set), 0);
 
@@ -581,7 +596,7 @@ pub(super) mod tests {
         assert_eq!(taken[0].0, 3);
         taken.clear();
 
-        // Multi-entry batches should publish every slot and preserve ownership
+        // Multi-entry batches should make every slot available and preserve ownership
         // of each parked buffer until it is taken.
         set.put_batch(
             [1u32, 5, 7]
@@ -606,9 +621,9 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_put_batch_uses_heap_masks_when_word_count_exceeds_inline_capacity() {
-        // A capacity of 4097 requires more than 64 bitmap words after rounding,
+        // A capacity of 8193 requires more than 128 bitmap words after rounding,
         // forcing `put_batch` to use heap scratch for its per-word masks.
-        let set = Freelist::new(NZU32!(4097), NZUsize!(65));
+        let set = Freelist::new(NZU32!(8193), NZUsize!(65));
         assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
 
         set.put_batch(
@@ -637,7 +652,7 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_take_batch_handles_zero_single_and_partial_fill() {
-        // Publish fewer slots than the largest requested batch to cover exact,
+        // Put fewer slots than the largest requested batch to cover exact,
         // partial, and empty refill behavior in one setup.
         let set = Freelist::new(NZU32!(4), NZUsize!(4));
         for slot in 0..3 {
@@ -662,7 +677,7 @@ pub(super) mod tests {
         assert_eq!(taken.len(), 1);
 
         // A request larger than the remaining occupancy should return only the
-        // slots that were actually published.
+        // slots that were actually available.
         assert_eq!(
             set.take_batch(8, |slot, buffer| taken.push((slot, buffer))),
             2
@@ -700,7 +715,7 @@ pub(super) mod tests {
         let slot0 = set.slot_index(start_word, 0);
         let slot1 = set.slot_index(start_word, 1);
 
-        // Publish exactly two slots in this thread's first probed word. A
+        // Put exactly two slots in this thread's first probed word. A
         // two-slot batch should fill from that word and stop immediately.
         set.put(slot0, AlignedBuffer::new(64, 64));
         set.put(slot1, AlignedBuffer::new(64, 64));
@@ -746,8 +761,8 @@ pub(super) mod tests {
         );
         assert_eq!(len(&set), 1);
 
-        // The third slot should remain published and be retrievable normally.
-        let remaining = set.take().expect("one slot should remain published");
+        // The third slot should remain free and be retrievable normally.
+        let remaining = set.take().expect("one slot should remain free");
         let mut seen = taken
             .into_iter()
             .map(|(slot, buffer)| {
@@ -780,7 +795,7 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_take_retries_after_losing_a_same_bit_race() {
-        // Force repeated same-word contention on a single published slot. Some
+        // Force repeated same-word contention on a single free slot. Some
         // contenders should observe a stale non-zero word and follow the retry
         // path before discovering that another thread already claimed the slot.
         for _ in 0..32 {
