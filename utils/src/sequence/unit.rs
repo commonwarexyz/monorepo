@@ -71,8 +71,8 @@ mod test {
     #[test]
     fn test_deref_asref() {
         let unit = Unit;
-        assert_eq!(unit.deref(), &[]);
-        assert_eq!(unit.as_ref(), &[]);
+        assert_eq!(unit.deref(), &[] as &[u8]);
+        assert_eq!(unit.as_ref(), &[] as &[u8]);
     }
 
     #[test]

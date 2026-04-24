@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 /// Metrics for the [super::Engine].
 pub struct Metrics<E: RuntimeMetrics + Clock> {
-    /// Lowest index without a certificate
+    /// Lowest height without a certificate
     pub tip: Gauge,
     /// Number of digests returned by the automaton by status
     pub digest: status::Counter,
@@ -23,7 +23,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
         let tip = Gauge::default();
-        context.register("tip", "Lowest index without a certificate", tip.clone());
+        context.register("tip", "Lowest height without a certificate", tip.clone());
         let digest = status::Counter::default();
         context.register(
             "digest",

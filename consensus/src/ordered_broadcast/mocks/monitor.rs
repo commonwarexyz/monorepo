@@ -1,6 +1,9 @@
 use crate::{types::Epoch, Monitor as M};
-use futures::channel::mpsc;
-use std::sync::{Arc, Mutex};
+use commonware_utils::{
+    channel::{fallible::AsyncFallibleExt, mpsc},
+    sync::Mutex,
+};
+use std::sync::Arc;
 
 struct Inner {
     epoch: Epoch,
@@ -18,7 +21,7 @@ impl Inner {
     fn update(&mut self, epoch: Epoch) {
         self.epoch = epoch;
         for subscriber in &mut self.subscribers {
-            subscriber.try_send(epoch).ok();
+            subscriber.try_send_lossy(epoch);
         }
     }
 
@@ -43,7 +46,7 @@ impl Monitor {
     }
 
     pub fn update(&self, epoch: Epoch) {
-        self.inner.lock().unwrap().update(epoch);
+        self.inner.lock().update(epoch);
     }
 }
 
@@ -51,6 +54,6 @@ impl M for Monitor {
     type Index = Epoch;
 
     async fn subscribe(&mut self) -> (Self::Index, mpsc::Receiver<Self::Index>) {
-        self.inner.lock().unwrap().subscribe()
+        self.inner.lock().subscribe()
     }
 }

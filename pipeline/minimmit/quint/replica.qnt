@@ -120,7 +120,7 @@ module replica {
     // and that there is a `notarization(c', view_parent)` for the parent block `c'`.
     def valid_parent(view: ViewNumber, view_parent: ViewNumber, certificates: Set[Certificate]): bool = {
         is_view_notarized(view_parent, certificates) and
-            are_views_nullified(view_parent + 1, view - 1, certificates)
+            are_views_nullified(view_parent, view, certificates)
     }
 
     // Create a nullify certificate from a set of votes.
@@ -635,12 +635,11 @@ module replica {
             nondet senders = BYZANTINE.powerset().oneOf()
             nondet view = VIEWS.oneOf()
             nondet block = AllBlocks.union(Set(DUMMY_BLOCK)).oneOf()
-            nondet sig = oneOf(BYZANTINE)
             nondet k = oneOf(Set(NotarizeKind, NullifyKind))
-            val votes = senders.map(s => {
+            val votes = senders.map(sender => {
                 view: view,
                 block: block,
-                sig: sig,
+                sig: sender,
                 kind: k
             })
             sent_vote' = sent_vote.union(votes),

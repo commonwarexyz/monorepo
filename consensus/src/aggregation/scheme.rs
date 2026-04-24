@@ -8,6 +8,8 @@
 //!
 //! - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly,
 //!   no trusted setup required.
+//! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly,
+//!   no trusted setup required.
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
@@ -33,10 +35,10 @@ pub mod bls12381_multisig {
     //! This scheme is attributable: certificates are compact while still preserving
     //! per-validator attribution.
 
-    use super::Item;
+    use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_bls12381_multisig;
 
-    impl_certificate_bls12381_multisig!(&'a Item<D>);
+    impl_certificate_bls12381_multisig!(&'a Item<D>, Namespace);
 }
 
 pub mod bls12381_threshold {
@@ -46,10 +48,10 @@ pub mod bls12381_threshold {
     //! This scheme is non-attributable: partial signatures should not be exposed as
     //! third-party evidence.
 
-    use super::Item;
+    use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_bls12381_threshold;
 
-    impl_certificate_bls12381_threshold!(&'a Item<D>);
+    impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace);
 }
 
 pub mod ed25519 {
@@ -59,8 +61,21 @@ pub mod ed25519 {
     //! This scheme is attributable: individual signatures can be safely exposed as
     //! evidence of liveness or faults.
 
-    use super::Item;
+    use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_ed25519;
 
-    impl_certificate_ed25519!(&'a Item<D>);
+    impl_certificate_ed25519!(&'a Item<D>, Namespace);
+}
+
+pub mod secp256r1 {
+    //! Secp256r1 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait
+    //! for `aggregation`.
+    //!
+    //! This scheme is attributable: individual signatures can be safely exposed as
+    //! evidence of liveness or faults.
+
+    use crate::aggregation::types::{Item, Namespace};
+    use commonware_cryptography::impl_certificate_secp256r1;
+
+    impl_certificate_secp256r1!(&'a Item<D>, Namespace);
 }

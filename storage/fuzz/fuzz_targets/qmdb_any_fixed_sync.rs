@@ -2,24 +2,26 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
+    journal::contiguous::fixed::Config as FConfig,
+    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
     qmdb::{
         any::{
-            unordered::{fixed::Any, FixedOperation},
+            unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
-        store::CleanStore as _,
         sync,
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{non_empty_range, sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::sync::Arc;
+use std::{num::NonZeroU16, sync::Arc};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
+type FixedDb<F> = Db<F, deterministic::Context, Key, Value, Sha256, TwoCap>;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -35,7 +37,7 @@ enum Operation {
     SyncFull { fetch_batch_size: u64 },
 
     // Failure simulation
-    SimulateFailure { sync_log: bool },
+    SimulateFailure,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -57,10 +59,7 @@ impl<'a> Arbitrary<'a> for Operation {
                 let fetch_batch_size = u.arbitrary()?;
                 Ok(Operation::SyncFull { fetch_batch_size })
             }
-            6 => {
-                let sync_log: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure { sync_log })
-            }
+            6 => Ok(Operation::SimulateFailure {}),
             7 => {
                 let key = u.arbitrary()?;
                 Ok(Operation::Delete { key })
@@ -89,49 +88,61 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-const PAGE_SIZE: usize = 128;
+const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str) -> Config<TwoCap> {
+fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
-        log_items_per_blob: NZU64!(3),
-        log_write_buffer: NZUsize!(1024),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("{test_name}-merkle"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FConfig {
+            partition: format!("{test_name}-log"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
     }
 }
 
-async fn test_sync<
-    R: sync::resolver::Resolver<
-        Digest = commonware_cryptography::sha256::Digest,
-        Op = FixedOperation<Key, Value>,
-    >,
->(
+async fn test_sync<F, R>(
     context: deterministic::Context,
     resolver: R,
-    target: sync::Target<commonware_cryptography::sha256::Digest>,
+    target: sync::Target<F, commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
-) -> bool {
-    let db_config = test_config(test_name);
+    sync_id: usize,
+) -> bool
+where
+    F: MerkleFamily,
+    R: sync::resolver::Resolver<
+        Family = F,
+        Digest = commonware_cryptography::sha256::Digest,
+        Op = FixedOperation<F, Key, Value>,
+    >,
+{
+    let db_config = test_config(test_name, &context);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<Any<_, Key, Value, Sha256, TwoCap>, R> =
-        sync::engine::Config {
-            context,
-            update_rx: None,
-            db_config,
-            fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
-            target,
-            resolver,
-            apply_batch_size: 100,
-            max_outstanding_requests: 10,
-        };
+    let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
+        context: context.with_label("sync").with_attribute("id", sync_id),
+        update_rx: None,
+        finish_rx: None,
+        reached_target_tx: None,
+        db_config,
+        fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
+        target,
+        resolver,
+        apply_batch_size: 100,
+        max_outstanding_requests: 10,
+        max_retained_roots: 8,
+    };
 
     if let Ok(synced) = sync::sync(sync_config).await {
         let actual_root = synced.root();
@@ -146,31 +157,30 @@ async fn test_sync<
     }
 }
 
-const TEST_NAME: &str = "qmdb_any_fixed_fuzz_test";
-
-fn fuzz(mut input: FuzzInput) {
+fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
+    input.commit_counter = 0;
     let runner = deterministic::Runner::default();
 
+    let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let mut db =
-            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
-                .await
-                .expect("Failed to init source db");
+        let cfg = test_config(&test_name, &context);
+        let mut db: FixedDb<F> = Db::init(context.clone(), cfg)
+            .await
+            .expect("Failed to init source db");
+        let mut restarts = 0usize;
 
         let mut sync_id = 0;
+
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
         for op in &input.ops {
             match op {
                 Operation::Update { key, value } => {
-                    db.update(Key::new(*key), Value::new(*value))
-                        .await
-                        .expect("Update should not fail");
+                    pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                 }
 
                 Operation::Delete { key } => {
-                    db.delete(Key::new(*key))
-                        .await
-                        .expect("Delete should not fail");
+                    pending_writes.push((Key::new(*key), None));
                 }
 
                 Operation::Commit => {
@@ -186,65 +196,99 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    db.commit(Some(FixedBytes::new(commit_id)))
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
+                    db.prune(db.sync_boundary())
                         .await
                         .expect("Prune should not fail");
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
-                    if db.op_count() == 0 {
+                    if db.bounds().await.end == 0 {
                         continue;
                     }
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    db.commit(Some(FixedBytes::new(commit_id)))
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
                         .await
-                        .expect("Commit should not fail");
-
+                        .unwrap();
+                    db.apply_batch(merkleized)
+                        .await
+                        .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
-                        range: db.inactivity_floor_loc()..db.op_count(),
+                        range: non_empty_range!(db.sync_boundary(), db.bounds().await.end),
                     };
 
-                    let wrapped_src = Arc::new(RwLock::new(db));
+                    let wrapped_src = Arc::new(db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
-                        &format!("full_{sync_id}"),
+                        &format!("{test_name}-full_{sync_id}"),
+                        sync_id,
                     )
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
-                        .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_inner();
+                        .unwrap_or_else(|_| panic!("Failed to unwrap src"));
                     sync_id += 1;
                 }
 
-                Operation::SimulateFailure { sync_log } => {
-                    db.simulate_failure(*sync_log)
-                        .await
-                        .expect("Simulate failure should not fail");
+                Operation::SimulateFailure => {
+                    // Simulate unclean shutdown by dropping the db without committing
+                    pending_writes.clear();
+                    drop(db);
 
-                    db = Any::<_, Key, Value, Sha256, TwoCap>::init(
-                        context.clone(),
-                        test_config(TEST_NAME),
+                    let cfg = test_config(&test_name, &context);
+                    db = Db::init(
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init source db");
+                    restarts += 1;
                 }
             }
         }
 
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized)
+            .await
+            .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
+}
+
+fn fuzz(mut input: FuzzInput) {
+    fuzz_family::<mmr::Family>(&mut input, "qmdb-any-fixed-fuzz-mmr");
+    fuzz_family::<mmb::Family>(&mut input, "qmdb-any-fixed-fuzz-mmb");
 }
 
 fuzz_target!(|input: FuzzInput| {

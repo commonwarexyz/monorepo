@@ -1,6 +1,9 @@
-use super::types::Index;
+use crate::types::Height;
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::{Quorum, Set};
+use commonware_utils::{
+    ordered::{Quorum, Set},
+    N3f1,
+};
 use std::collections::{btree_map, BTreeMap, HashMap};
 
 /// A data structure that keeps track of the reported tip for each validator.
@@ -8,18 +11,18 @@ use std::collections::{btree_map, BTreeMap, HashMap};
 /// that can be tolerated for the given set of validators.
 pub struct SafeTip<P: PublicKey> {
     /// For each validator, the maximum tip that it has reported.
-    tips: HashMap<P, Index>,
+    tips: HashMap<P, Height>,
 
-    /// The `f` highest tips, stored as a map from index to number of validators.
+    /// The `f` highest tips, stored as a map from height to number of validators.
     ///
     /// We assume that all of these values could have been reported by faulty validators.
-    hi: BTreeMap<Index, usize>,
+    hi: BTreeMap<Height, usize>,
 
-    /// The `n-f` lowest tips, stored as a map from index to number of validators.
+    /// The `n-f` lowest tips, stored as a map from height to number of validators.
     ///
     /// Treat the highest value as the safe tip, which is the tip that at least one honest validator
     /// has reached.
-    lo: BTreeMap<Index, usize>,
+    lo: BTreeMap<Height, usize>,
 }
 
 impl<P: PublicKey> Default for SafeTip<P> {
@@ -44,20 +47,20 @@ impl<P: PublicKey> SafeTip<P> {
 
         // Get the number of validators and the maximum number of faults
         let n = validators.len();
-        let f = validators.max_faults() as usize;
+        let f = validators.max_faults::<N3f1>() as usize;
 
         // Initialize the tips map
         let mut tips = HashMap::with_capacity(n);
         for validator in validators {
-            tips.insert(validator.clone(), Index::default());
+            tips.insert(validator.clone(), Height::default());
         }
 
         // Initialize the heaps
         let mut lo = BTreeMap::new();
-        lo.insert(Index::default(), n - f);
+        lo.insert(Height::default(), n - f);
         let mut hi = BTreeMap::new();
         if f > 0 {
-            hi.insert(Index::default(), f);
+            hi.insert(Height::default(), f);
         }
 
         self.tips = tips;
@@ -90,7 +93,7 @@ impl<P: PublicKey> SafeTip<P> {
         for val in exiting_vals {
             // Remove the validator from the set of validators.
             let old = self.tips.remove(&val).unwrap();
-            let new = Index::default();
+            let new = Height::default();
 
             // Update the heaps. Since the value is decreasing (or stays at 0), there are four
             // cases, which we check in order-of-preference:
@@ -138,7 +141,7 @@ impl<P: PublicKey> SafeTip<P> {
             inc(self.hi.entry(max_lo));
         }
 
-        // Add new validators with default index
+        // Add new validators with default height
         for new_val in validators {
             self.tips.entry(new_val.clone()).or_default();
         }
@@ -151,7 +154,7 @@ impl<P: PublicKey> SafeTip<P> {
     /// Returns `None` if the new tip is not higher than the old tip.
     ///
     /// Otherwise, returns the old tip.
-    pub fn update(&mut self, public_key: P, new: Index) -> Option<Index> {
+    pub fn update(&mut self, public_key: P, new: Height) -> Option<Height> {
         // Update the tip for the given validator. Return early if the validator is not in the set.
         let &old = self.tips.get(&public_key)?;
 
@@ -210,7 +213,7 @@ impl<P: PublicKey> SafeTip<P> {
     /// # Panics
     ///
     /// Panics if the set of validators is empty.
-    pub fn get(&self) -> Index {
+    pub fn get(&self) -> Height {
         self.lo
             .last_key_value()
             .map(|(k, _)| *k)
@@ -221,7 +224,7 @@ impl<P: PublicKey> SafeTip<P> {
 /// Increments the value of the entry in the map.
 ///
 /// If the entry does not exist, it is created with a value of 1.
-fn inc(entry: btree_map::Entry<'_, Index, usize>) {
+fn inc(entry: btree_map::Entry<'_, Height, usize>) {
     *entry.or_default() += 1;
 }
 
@@ -232,7 +235,7 @@ fn inc(entry: btree_map::Entry<'_, Index, usize>) {
 /// # Panics
 ///
 /// Panics if the entry is [btree_map::Entry::Vacant].
-fn dec(entry: btree_map::Entry<'_, Index, usize>) {
+fn dec(entry: btree_map::Entry<'_, Height, usize>) {
     let btree_map::Entry::Occupied(mut value) = entry else {
         panic!("Cannot decrement a non-existent entry");
     };
@@ -268,12 +271,12 @@ mod tests {
 
     fn setup_with_tips(
         validator_count: usize,
-        tips: &[Index],
+        tips: &[u64],
     ) -> (SafeTip<PublicKey>, Set<PublicKey>) {
         let (mut safe_tip, validators) = setup_safe_tip(validator_count);
         for (i, &tip) in tips.iter().enumerate() {
             if i < validators.len() && tip > 0 {
-                safe_tip.update(validators[i].clone(), tip);
+                safe_tip.update(validators[i].clone(), Height::new(tip));
             }
         }
         (safe_tip, validators)
@@ -283,7 +286,7 @@ mod tests {
     fn test_init() {
         let (safe_tip, _) = setup_safe_tip(4);
         assert_eq!(safe_tip.tips.len(), 4);
-        assert_eq!(safe_tip.get(), 0);
+        assert_eq!(safe_tip.get(), Height::zero());
     }
 
     #[test]
@@ -306,7 +309,7 @@ mod tests {
         // Test dec function with non-existent entry
         let mut map = BTreeMap::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dec(map.entry(42));
+            dec(map.entry(Height::new(42)));
         }));
         assert!(result.is_err());
     }
@@ -316,24 +319,39 @@ mod tests {
         let (mut safe_tip, validators) = setup_safe_tip(4);
 
         // Valid update
-        assert_eq!(safe_tip.update(validators[0].clone(), 10), Some(0));
-        assert_eq!(safe_tip.get(), 0);
+        assert_eq!(
+            safe_tip.update(validators[0].clone(), Height::new(10)),
+            Some(Height::zero())
+        );
+        assert_eq!(safe_tip.get(), Height::zero());
 
         // Update with lower tip - no-op
-        assert_eq!(safe_tip.update(validators[0].clone(), 5), None);
-        assert_eq!(safe_tip.get(), 0);
+        assert_eq!(safe_tip.update(validators[0].clone(), Height::new(5)), None);
+        assert_eq!(safe_tip.get(), Height::zero());
 
         // Update with same tip - no-op
-        assert_eq!(safe_tip.update(validators[0].clone(), 10), None);
-        assert_eq!(safe_tip.get(), 0);
+        assert_eq!(
+            safe_tip.update(validators[0].clone(), Height::new(10)),
+            None
+        );
+        assert_eq!(safe_tip.get(), Height::zero());
 
         // Update remaining validators
-        assert_eq!(safe_tip.update(validators[1].clone(), 20), Some(0));
-        assert_eq!(safe_tip.get(), 10);
-        assert_eq!(safe_tip.update(validators[2].clone(), 30), Some(0));
-        assert_eq!(safe_tip.get(), 20);
-        assert_eq!(safe_tip.update(validators[3].clone(), 40), Some(0));
-        assert_eq!(safe_tip.get(), 30);
+        assert_eq!(
+            safe_tip.update(validators[1].clone(), Height::new(20)),
+            Some(Height::zero())
+        );
+        assert_eq!(safe_tip.get(), Height::new(10));
+        assert_eq!(
+            safe_tip.update(validators[2].clone(), Height::new(30)),
+            Some(Height::zero())
+        );
+        assert_eq!(safe_tip.get(), Height::new(20));
+        assert_eq!(
+            safe_tip.update(validators[3].clone(), Height::new(40)),
+            Some(Height::zero())
+        );
+        assert_eq!(safe_tip.get(), Height::new(30));
     }
 
     #[test]
@@ -342,12 +360,12 @@ mod tests {
         let old_validators = &[key(1), key(2), key(3), key(4)];
         safe_tip.init(&old_validators.try_into().unwrap());
 
-        safe_tip.update(key(1), 10);
-        safe_tip.update(key(2), 20);
-        safe_tip.update(key(3), 30);
-        safe_tip.update(key(4), 40);
+        safe_tip.update(key(1), Height::new(10));
+        safe_tip.update(key(2), Height::new(20));
+        safe_tip.update(key(3), Height::new(30));
+        safe_tip.update(key(4), Height::new(40));
 
-        assert_eq!(safe_tip.get(), 30);
+        assert_eq!(safe_tip.get(), Height::new(30));
 
         // Reconcile with a new set of validators
         let new_validators = &[key(3), key(4), key(5), key(6)];
@@ -358,11 +376,11 @@ mod tests {
         assert!(safe_tip.tips.contains_key(&key(4)));
         assert!(safe_tip.tips.contains_key(&key(5)));
         assert!(safe_tip.tips.contains_key(&key(6)));
-        assert_eq!(*safe_tip.tips.get(&key(3)).unwrap(), 30);
-        assert_eq!(*safe_tip.tips.get(&key(4)).unwrap(), 40);
-        assert_eq!(*safe_tip.tips.get(&key(5)).unwrap(), 0);
-        assert_eq!(*safe_tip.tips.get(&key(6)).unwrap(), 0);
-        assert_eq!(safe_tip.get(), 30);
+        assert_eq!(*safe_tip.tips.get(&key(3)).unwrap(), Height::new(30));
+        assert_eq!(*safe_tip.tips.get(&key(4)).unwrap(), Height::new(40));
+        assert_eq!(*safe_tip.tips.get(&key(5)).unwrap(), Height::zero());
+        assert_eq!(*safe_tip.tips.get(&key(6)).unwrap(), Height::zero());
+        assert_eq!(safe_tip.get(), Height::new(30));
     }
 
     #[test]
@@ -372,9 +390,9 @@ mod tests {
         safe_tip.init(&validators.try_into().unwrap());
 
         // Set some initial tips
-        safe_tip.update(key(1), 10);
-        safe_tip.update(key(2), 20);
-        safe_tip.update(key(3), 30);
+        safe_tip.update(key(1), Height::new(10));
+        safe_tip.update(key(2), Height::new(20));
+        safe_tip.update(key(3), Height::new(30));
 
         let initial_safe_tip = safe_tip.get();
         let initial_tips = safe_tip.tips.clone();
@@ -400,7 +418,7 @@ mod tests {
 
         // Test multiple non-existent validators
         for nonexistent_key in [key(100), key(200), key(300)] {
-            assert_eq!(safe_tip.update(nonexistent_key, 50), None);
+            assert_eq!(safe_tip.update(nonexistent_key, Height::new(50)), None);
         }
 
         // State should remain unchanged
@@ -418,22 +436,22 @@ mod tests {
         let (mut safe_tip, validators) = setup_safe_tip(n);
 
         // Initial state checks
-        assert_eq!(safe_tip.get(), 0);
+        assert_eq!(safe_tip.get(), Height::zero());
 
         if f == 0 {
             assert_eq!(safe_tip.hi.len(), 0,);
             assert_eq!(safe_tip.lo.len(), 1,);
 
             // When f=0, updates should immediately change safe tip
-            safe_tip.update(validators[0].clone(), 10);
-            assert_eq!(safe_tip.get(), 10,);
+            safe_tip.update(validators[0].clone(), Height::new(10));
+            assert_eq!(safe_tip.get(), Height::new(10),);
         } else {
             assert_eq!(safe_tip.hi.len(), 1,);
             assert_eq!(safe_tip.lo.len(), 1,);
 
             if n == 7 && f == 2 {
-                assert_eq!(safe_tip.hi.get(&0), Some(&2),);
-                assert_eq!(safe_tip.lo.get(&0), Some(&5),);
+                assert_eq!(safe_tip.hi.get(&Height::zero()), Some(&2),);
+                assert_eq!(safe_tip.lo.get(&Height::zero()), Some(&5),);
             }
         }
     }
@@ -444,37 +462,37 @@ mod tests {
         let mut map = BTreeMap::new();
 
         // Test inc on non-existent entry
-        inc(map.entry(10));
-        assert_eq!(map.get(&10), Some(&1));
+        inc(map.entry(Height::new(10)));
+        assert_eq!(map.get(&Height::new(10)), Some(&1));
 
         // Test inc on existing entry
-        inc(map.entry(10));
-        assert_eq!(map.get(&10), Some(&2));
+        inc(map.entry(Height::new(10)));
+        assert_eq!(map.get(&Height::new(10)), Some(&2));
 
         // Test inc on different keys
-        inc(map.entry(20));
-        inc(map.entry(30));
-        assert_eq!(map.get(&20), Some(&1));
-        assert_eq!(map.get(&30), Some(&1));
+        inc(map.entry(Height::new(20)));
+        inc(map.entry(Height::new(30)));
+        assert_eq!(map.get(&Height::new(20)), Some(&1));
+        assert_eq!(map.get(&Height::new(30)), Some(&1));
         assert_eq!(map.len(), 3);
 
         // Test dec function
         // Test dec on existing entry
-        dec(map.entry(10));
-        assert_eq!(map.get(&10), Some(&1));
+        dec(map.entry(Height::new(10)));
+        assert_eq!(map.get(&Height::new(10)), Some(&1));
 
         // Test dec that removes entry (value becomes 0)
-        dec(map.entry(10));
-        assert_eq!(map.get(&10), None);
+        dec(map.entry(Height::new(10)));
+        assert_eq!(map.get(&Height::new(10)), None);
         assert_eq!(map.len(), 2);
 
         // Test dec on other entries
-        dec(map.entry(20));
-        assert_eq!(map.get(&20), None);
+        dec(map.entry(Height::new(20)));
+        assert_eq!(map.get(&Height::new(20)), None);
         assert_eq!(map.len(), 1);
 
-        dec(map.entry(30));
-        assert_eq!(map.get(&30), None);
+        dec(map.entry(Height::new(30)));
+        assert_eq!(map.get(&Height::new(30)), None);
         assert_eq!(map.len(), 0);
     }
 
@@ -482,21 +500,21 @@ mod tests {
     fn test_reconcile_overall_behavior_lo_heap() {
         // Test overall reconcile behavior when removing validator from lo heap
         let (mut safe_tip, _) = setup_with_tips(7, &[5, 10, 15, 20, 25, 30, 35]);
-        assert_eq!(safe_tip.get(), 25);
+        assert_eq!(safe_tip.get(), Height::new(25));
 
         // Remove validator with tip 10 (in lo heap), replace with new validator
         let new_validators = &[key(1), key(8), key(3), key(4), key(5), key(6), key(7)];
         safe_tip.reconcile(&new_validators.try_into().unwrap());
 
-        assert_eq!(safe_tip.get(), 25); // Should remain the same
-        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0); // New validator starts at 0
+        assert_eq!(safe_tip.get(), Height::new(25)); // Should remain the same
+        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), Height::zero()); // New validator starts at 0
     }
 
     #[test]
     fn test_reconcile_overall_behavior_hi_heap() {
         // Test overall reconcile behavior when removing validator from hi heap
         let (mut safe_tip, _) = setup_with_tips(7, &[5, 10, 15, 20, 25, 30, 35]);
-        assert_eq!(safe_tip.get(), 25);
+        assert_eq!(safe_tip.get(), Height::new(25));
 
         // Remove validator with tip 30 (in hi heap), replace with new validator
         let new_validators = &[key(1), key(2), key(3), key(4), key(5), key(8), key(7)];
@@ -504,15 +522,15 @@ mod tests {
 
         // When a validator with tip 30 is removed and replaced with one at tip 0,
         // the max of lo heap should drop from 25 to 20
-        assert_eq!(safe_tip.get(), 20);
-        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0);
+        assert_eq!(safe_tip.get(), Height::new(20));
+        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), Height::zero());
     }
 
     #[test]
     fn test_reconcile_overall_behavior_with_rebalancing() {
         // Test overall reconcile behavior when heap rebalancing occurs
         let (mut safe_tip, validators) = setup_with_tips(4, &[10, 20, 30, 0]);
-        assert_eq!(safe_tip.get(), 20);
+        assert_eq!(safe_tip.get(), Height::new(20));
 
         // Remove validator with tip 30 (validators[2] in hi heap), causing rebalancing
         let new_validators = &[
@@ -523,10 +541,10 @@ mod tests {
         ];
         safe_tip.reconcile(&new_validators.try_into().unwrap());
 
-        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0);
+        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), Height::zero());
         // After removing validator with tip 30 and adding one with tip 0,
         // the safe tip should now be 10 (with tips [10, 20, 0, 0], lo heap has [0, 0, 10])
-        assert_eq!(safe_tip.get(), 10);
+        assert_eq!(safe_tip.get(), Height::new(10));
     }
 
     #[test]
@@ -549,21 +567,21 @@ mod tests {
         // Heaps should be unchanged since removing 0 -> 0 is a no-op
         assert_eq!(safe_tip.hi, initial_hi);
         assert_eq!(safe_tip.lo, initial_lo);
-        assert_eq!(safe_tip.get(), 20);
+        assert_eq!(safe_tip.get(), Height::new(20));
     }
 
     #[test]
     fn test_reconcile_internal_case_2_remains_in_lo() {
         // Test Case 2: Value remains in lo heap
         let (mut safe_tip, validators) = setup_with_tips(4, &[5, 15, 25, 30]);
-        assert_eq!(safe_tip.get(), 25);
+        assert_eq!(safe_tip.get(), Height::new(25));
 
         // Verify initial heap state: with n=4, f=1, we have 1 in hi, 3 in lo
         // Tips [5, 15, 25, 30] -> hi has [30], lo has [5, 15, 25]
-        assert!(safe_tip.lo.contains_key(&5));
-        assert!(safe_tip.lo.contains_key(&15));
-        assert!(safe_tip.lo.contains_key(&25));
-        assert!(safe_tip.hi.contains_key(&30));
+        assert!(safe_tip.lo.contains_key(&Height::new(5)));
+        assert!(safe_tip.lo.contains_key(&Height::new(15)));
+        assert!(safe_tip.lo.contains_key(&Height::new(25)));
+        assert!(safe_tip.hi.contains_key(&Height::new(30)));
 
         // Remove validator with tip 5 (validators[0] in lo heap)
         let new_validators = &[
@@ -575,19 +593,19 @@ mod tests {
         safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // The removed tip 5 should be replaced with 0, both in lo heap
-        assert!(safe_tip.lo.contains_key(&0));
-        assert!(!safe_tip.lo.contains_key(&5));
-        assert_eq!(safe_tip.get(), 25); // Safe tip unchanged
+        assert!(safe_tip.lo.contains_key(&Height::zero()));
+        assert!(!safe_tip.lo.contains_key(&Height::new(5)));
+        assert_eq!(safe_tip.get(), Height::new(25)); // Safe tip unchanged
     }
 
     #[test]
     fn test_reconcile_internal_case_3_remains_in_hi() {
         // Test Case 3: Value remains in hi heap when new value >= max(lo)
         let (safe_tip, _) = setup_with_tips(4, &[5, 15, 25, 35]);
-        assert_eq!(safe_tip.get(), 25);
+        assert_eq!(safe_tip.get(), Height::new(25));
 
         // Verify tip 35 is in hi heap
-        assert!(safe_tip.hi.contains_key(&35));
+        assert!(safe_tip.hi.contains_key(&Height::new(35)));
 
         // Create a scenario where removed value can stay in hi:
         // Remove validator with tip 35, all lo values (5,15,25) <= 0 is false
@@ -595,7 +613,7 @@ mod tests {
 
         // Actually, let's test the condition directly by creating the right setup
         let (mut safe_tip, _) = setup_with_tips(7, &[0, 0, 0, 0, 0, 10, 20]);
-        assert_eq!(safe_tip.get(), 0);
+        assert_eq!(safe_tip.get(), Height::zero());
 
         // With n=7, f=2: hi has [10, 20], lo has [0, 0, 0, 0, 0]
         // Remove validator with tip 10 (in hi), max_lo is 0, so 0 <= 0 is true
@@ -603,15 +621,15 @@ mod tests {
         safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // Value should remain in hi heap as 0, since max_lo (0) <= new (0)
-        assert!(safe_tip.hi.contains_key(&0) || safe_tip.hi.is_empty());
-        assert_eq!(safe_tip.get(), 0);
+        assert!(safe_tip.hi.contains_key(&Height::zero()) || safe_tip.hi.is_empty());
+        assert_eq!(safe_tip.get(), Height::zero());
     }
 
     #[test]
     fn test_reconcile_internal_case_4_move_hi_to_lo() {
         // Test Case 4: Value must move from hi to lo heap with rebalancing
         let (mut safe_tip, validators) = setup_with_tips(4, &[10, 20, 30, 40]);
-        assert_eq!(safe_tip.get(), 30);
+        assert_eq!(safe_tip.get(), Height::new(30));
 
         // With n=4, f=1: hi has [40], lo has [10, 20, 30]
         // Remove validator with tip 40 (validators[3] in hi), max_lo is 30, so 30 > 0, condition fails
@@ -625,41 +643,41 @@ mod tests {
 
         // This should trigger Case 4: move from hi to lo with rebalancing
         // The 0 goes to lo, and max_lo (30) moves to hi
-        assert!(safe_tip.hi.contains_key(&30));
-        assert!(safe_tip.lo.contains_key(&0));
-        assert_eq!(safe_tip.get(), 20); // New max of lo heap
+        assert!(safe_tip.hi.contains_key(&Height::new(30)));
+        assert!(safe_tip.lo.contains_key(&Height::zero()));
+        assert_eq!(safe_tip.get(), Height::new(20)); // New max of lo heap
     }
 
     #[test]
     fn test_update_internal_case_2_remains_in_lo() {
         // Test Case 2 in update: Value remains in lo heap
         let (mut safe_tip, validators) = setup_with_tips(4, &[5, 15, 25, 35]);
-        assert_eq!(safe_tip.get(), 25);
+        assert_eq!(safe_tip.get(), Height::new(25));
 
         // With n=4, f=1: hi has [35], lo has [5, 15, 25]
         // Update validators[0]'s tip from 5 to 10 - both should stay in lo since min_hi (35) >= 10
-        assert!(safe_tip.lo.contains_key(&5));
-        safe_tip.update(validators[0].clone(), 10);
+        assert!(safe_tip.lo.contains_key(&Height::new(5)));
+        safe_tip.update(validators[0].clone(), Height::new(10));
 
-        assert!(safe_tip.lo.contains_key(&10));
-        assert!(!safe_tip.lo.contains_key(&5));
-        assert_eq!(safe_tip.get(), 25); // Safe tip unchanged
+        assert!(safe_tip.lo.contains_key(&Height::new(10)));
+        assert!(!safe_tip.lo.contains_key(&Height::new(5)));
+        assert_eq!(safe_tip.get(), Height::new(25)); // Safe tip unchanged
     }
 
     #[test]
     fn test_update_internal_case_3_move_lo_to_hi() {
         // Test Case 3 in update: Value must move from lo to hi heap with rebalancing
         let (mut safe_tip, validators) = setup_with_tips(4, &[5, 15, 25, 35]);
-        assert_eq!(safe_tip.get(), 25);
+        assert_eq!(safe_tip.get(), Height::new(25));
 
         // With n=4, f=1: hi has [35], lo has [5, 15, 25]
         // Update tip 5 to 40 - should move to hi and cause rebalancing
-        safe_tip.update(validators[0].clone(), 40);
+        safe_tip.update(validators[0].clone(), Height::new(40));
 
         // The 40 goes to hi, min_hi (35) moves to lo
-        assert!(safe_tip.hi.contains_key(&40));
-        assert!(safe_tip.lo.contains_key(&35));
-        assert_eq!(safe_tip.get(), 35); // New max of lo heap
+        assert!(safe_tip.hi.contains_key(&Height::new(40)));
+        assert!(safe_tip.lo.contains_key(&Height::new(35)));
+        assert_eq!(safe_tip.get(), Height::new(35)); // New max of lo heap
     }
 
     #[test]
@@ -670,10 +688,10 @@ mod tests {
         // With n=7, f=2: initially hi has [10, 20], lo has [0, 0, 0, 0, 0]
 
         // Update one of the 0s to a very high value
-        safe_tip.update(validators[0].clone(), 100);
+        safe_tip.update(validators[0].clone(), Height::new(100));
 
         // This should cause rebalancing
-        assert!(safe_tip.hi.contains_key(&100));
-        assert_eq!(safe_tip.get(), 10); // Should now be higher than 0
+        assert!(safe_tip.hi.contains_key(&Height::new(100)));
+        assert_eq!(safe_tip.get(), Height::new(10)); // Should now be higher than 0
     }
 }

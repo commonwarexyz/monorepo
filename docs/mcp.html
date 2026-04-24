@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > MCP</title>
+    <meta name="description" content="Interact with the Commonware Library via Model Context Protocol.">
+    <meta name="keywords" content="commonware, mcp, model context protocol, llm, ai, claude, cursor, tools, source code">
+
+    <link rel="canonical" href="https://commonware.xyz/mcp" />
+
+    <meta property="og:url" content="https://commonware.xyz/mcp" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="commonware > MCP" />
+    <meta property="og:title" content="commonware > MCP" />
+    <meta property="og:description" content="Interact with the Commonware Library via Model Context Protocol." />
+    <meta property="og:image" content="https://commonware.xyz/card.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/mcp" />
+    <meta property="twitter:title" content="commonware > MCP" />
+    <meta property="twitter:description" content="Interact with the Commonware Library via Model Context Protocol." />
+    <meta property="twitter:image" content="https://commonware.xyz/card.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@commonwarexyz" />
+    <meta property="twitter:creator:id" content="@commonwarexyz" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>MCP</h1>
+        <p>Interact with the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a> via <a href="https://modelcontextprotocol.io">Model Context Protocol</a>.</p>
+
+        <h2>Why Provide an MCP Server?</h2>
+        <p>LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first). And, the results you do find probably don't match the version you're building against.</p>
+        <p>We built our own MCP server to make LLMs building with the Commonware Library more effective. <a href="https://mcp.commonware.xyz">mcp.commonware.xyz</a> provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).</p>
+
+        <h3>Claude Code</h3>
+        <pre><code>claude mcp add --transport http commonware-library https://mcp.commonware.xyz</code></pre>
+
+        <h3>Cursor</h3>
+        <p>Add to <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project):</p>
+        <pre><code>{
+  "mcpServers": {
+    "commonware-library": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}</code></pre>
+
+        <h3>Other Clients</h3>
+        <p>Use the Streamable HTTP endpoint: <code>https://mcp.commonware.xyz</code></p>
+        <p><em>If your AI assistant does not support MCP, you can use <a href="/llms.txt">llms.txt</a> to provide context manually.</em></p>
+
+        <h2>Try It</h2>
+        <div id="tools-loading">Loading tools...</div>
+        <div id="tools-error" style="display: none; color: red;"></div>
+        <div id="tool-selector" style="display: none;">
+            <label for="tool-select">Select a tool:</label>
+            <select id="tool-select">
+                <option value="">-- Select a tool --</option>
+            </select>
+        </div>
+
+        <div id="tool-form" style="display: none;">
+            <h3 id="tool-form-title"></h3>
+            <p id="tool-form-description"></p>
+            <div id="tool-params"></div>
+            <button id="execute-tool">Execute</button>
+        </div>
+
+        <div id="tool-result" style="display: none;">
+            <h3 id="result-title">Result</h3>
+            <pre id="result-content"></pre>
+        </div>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script type="module">
+        // MCP Client using the official SDK
+        // https://github.com/modelcontextprotocol/typescript-sdk
+        import { Client } from 'https://esm.sh/@modelcontextprotocol/sdk@1.12.0/client';
+        import { StreamableHTTPClientTransport } from 'https://esm.sh/@modelcontextprotocol/sdk@1.12.0/client/streamableHttp';
+
+        const MCP_ENDPOINT = 'https://mcp.commonware.xyz';
+
+        let mcpClient = null;
+        let toolsCache = null;
+
+        // Initialize MCP client
+        async function initializeClient() {
+            const transport = new StreamableHTTPClientTransport(new URL(MCP_ENDPOINT));
+
+            mcpClient = new Client({
+                name: 'commonware-mcp-viewer',
+                version: '1.0.0',
+            });
+
+            await mcpClient.connect(transport);
+        }
+
+        // List available tools
+        async function listTools() {
+            const result = await mcpClient.listTools();
+            return result.tools;
+        }
+
+        // Call a tool
+        async function callTool(name, args) {
+            return await mcpClient.callTool({ name, arguments: args });
+        }
+
+        // Render tool list
+        function renderTools(tools) {
+            const select = document.getElementById('tool-select');
+            select.innerHTML = '<option value="">-- Select a tool --</option>';
+
+            for (const tool of tools) {
+                const option = document.createElement('option');
+                option.value = tool.name;
+                option.textContent = tool.name;
+                select.appendChild(option);
+            }
+
+            document.getElementById('tools-loading').style.display = 'none';
+            document.getElementById('tool-selector').style.display = 'block';
+        }
+
+        // Render tool form
+        function renderToolForm(tool) {
+            const form = document.getElementById('tool-form');
+            const title = document.getElementById('tool-form-title');
+            const desc = document.getElementById('tool-form-description');
+            const params = document.getElementById('tool-params');
+
+            title.textContent = tool.name;
+            desc.textContent = tool.description;
+            params.innerHTML = '';
+
+            if (tool.inputSchema && tool.inputSchema.properties) {
+                for (const [name, schema] of Object.entries(tool.inputSchema.properties)) {
+                    const div = document.createElement('div');
+                    div.className = 'tool-param';
+
+                    const label = document.createElement('label');
+                    label.htmlFor = `param-${name}`;
+                    const required = tool.inputSchema.required?.includes(name) ? ' *' : '';
+                    label.textContent = `${name}${required}:`;
+                    div.appendChild(label);
+
+                    let input;
+                    if (schema.enum) {
+                        input = document.createElement('select');
+                        input.id = `param-${name}`;
+                        input.dataset.paramName = name;
+                        input.dataset.paramType = 'enum';
+
+                        // Add empty option for optional params
+                        if (!tool.inputSchema.required?.includes(name)) {
+                            const emptyOption = document.createElement('option');
+                            emptyOption.value = '';
+                            emptyOption.textContent = '-- Select --';
+                            input.appendChild(emptyOption);
+                        }
+
+                        for (const value of schema.enum) {
+                            const option = document.createElement('option');
+                            option.value = value;
+                            option.textContent = value;
+                            if (schema.default === value) {
+                                option.selected = true;
+                            }
+                            input.appendChild(option);
+                        }
+                    } else if (schema.type === 'boolean') {
+                        input = document.createElement('input');
+                        input.type = 'checkbox';
+                        input.id = `param-${name}`;
+                        input.dataset.paramName = name;
+                        input.dataset.paramType = 'boolean';
+                        if (schema.default === true) {
+                            input.checked = true;
+                        }
+                    } else if (schema.type === 'number' || schema.type === 'integer') {
+                        input = document.createElement('input');
+                        input.type = 'number';
+                        if (schema.type === 'integer') {
+                            input.step = '1';
+                        }
+                        input.id = `param-${name}`;
+                        input.dataset.paramName = name;
+                        input.dataset.paramType = schema.type;
+                        if (schema.default !== undefined) {
+                            input.value = schema.default;
+                        }
+                    } else {
+                        input = document.createElement('input');
+                        input.type = 'text';
+                        input.id = `param-${name}`;
+                        input.dataset.paramName = name;
+                        input.dataset.paramType = schema.type || 'string';
+                        if (schema.default !== undefined) {
+                            input.value = schema.default;
+                        }
+                    }
+
+                    if (schema.description) {
+                        input.placeholder = schema.description;
+                        input.title = schema.description;
+                    }
+
+                    div.appendChild(input);
+                    params.appendChild(div);
+                }
+            }
+
+            form.style.display = 'block';
+            document.getElementById('tool-result').style.display = 'none';
+        }
+
+        // Execute tool
+        async function executeTool() {
+            const toolName = document.getElementById('tool-select').value;
+            if (!toolName) {
+                return;
+            }
+
+            const params = document.getElementById('tool-params');
+            const args = {};
+
+            for (const input of params.querySelectorAll('input, select')) {
+                const name = input.dataset.paramName;
+                const type = input.dataset.paramType;
+
+                if (type === 'boolean') {
+                    args[name] = input.checked;
+                    continue;
+                }
+
+                let value = input.value;
+                if (value === '') {
+                    continue;
+                }
+
+                if (type === 'integer') {
+                    const parsed = parseInt(value, 10);
+                    if (!isNaN(parsed)) {
+                        args[name] = parsed;
+                    }
+                } else if (type === 'number') {
+                    const parsed = parseFloat(value);
+                    if (!isNaN(parsed)) {
+                        args[name] = parsed;
+                    }
+                } else {
+                    args[name] = value;
+                }
+            }
+
+            const executeButton = document.getElementById('execute-tool');
+            const resultDiv = document.getElementById('tool-result');
+            const resultTitle = document.getElementById('result-title');
+            const resultContent = document.getElementById('result-content');
+
+            executeButton.disabled = true;
+            resultTitle.textContent = 'Result';
+            resultContent.textContent = 'Executing...';
+            resultDiv.style.display = 'block';
+
+            const startTime = performance.now();
+
+            try {
+                const result = await callTool(toolName, args);
+                const latency = (performance.now() - startTime).toFixed(0);
+
+                // Update title with latency
+                resultTitle.textContent = `Result (${latency}ms)`;
+
+                // Format the result
+                let output = '';
+                if (result.content) {
+                    for (const item of result.content) {
+                        if (item.type === 'text') {
+                            output += item.text + '\n';
+                        }
+                    }
+                }
+                if (result.isError) {
+                    output = 'Error: ' + output;
+                }
+
+                resultContent.textContent = output.trim() || JSON.stringify(result, null, 2);
+            } catch (error) {
+                const latency = (performance.now() - startTime).toFixed(0);
+                resultTitle.textContent = `Result (${latency}ms)`;
+                resultContent.textContent = 'Error: ' + error.message;
+            } finally {
+                executeButton.disabled = false;
+            }
+        }
+
+        // Initialize
+        async function init() {
+            try {
+                await initializeClient();
+                const tools = await listTools();
+                toolsCache = tools;
+                renderTools(tools);
+
+                // Set up event handlers
+                document.getElementById('tool-select').addEventListener('change', (e) => {
+                    const toolName = e.target.value;
+                    if (toolName) {
+                        const tool = toolsCache.find(t => t.name === toolName);
+                        if (tool) {
+                            renderToolForm(tool);
+                        }
+                    } else {
+                        document.getElementById('tool-form').style.display = 'none';
+                        document.getElementById('tool-result').style.display = 'none';
+                    }
+                });
+
+                document.getElementById('execute-tool').addEventListener('click', executeTool);
+            } catch (error) {
+                document.getElementById('tools-loading').style.display = 'none';
+                document.getElementById('tools-error').style.display = 'block';
+                document.getElementById('tools-error').textContent = 'Failed to connect to MCP server: ' + error.message;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+    <script src="/shared.js"></script>
+</body>
+
+</html>

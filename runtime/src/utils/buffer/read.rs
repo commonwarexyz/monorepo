@@ -1,15 +1,23 @@
-use crate::{Blob, Error};
-use commonware_utils::StableBuf;
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
 ///
+/// # Allocation Semantics
+///
+/// - The internal read buffer is allocated eagerly in [Self::new].
+/// - Refills try to reclaim mutable ownership of that same backing allocation.
+/// - If backing is still shared (for example, previously returned slices are alive), a pooled
+///   replacement is allocated and existing backing is left alive until all aliases drop.
+/// - [Self::read] returns zero-copy slices into refill buffers. Holding those slices may
+///   force allocation on subsequent refills.
+///
 /// # Example
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic, BufferPooler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -17,16 +25,15 @@ use std::num::NonZeroUsize;
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
-///     blob.write_at(data, 0).await.expect("unable to write data");
+///     blob.write_at(0, data).await.expect("unable to write data");
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
+///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
-///     let mut header = [0u8; 16];
-///     reader.read_exact(&mut header, 16).await.expect("unable to read data");
-///     println!("Read header: {:?}", header);
+///     let header = reader.read(16).await.expect("unable to read data");
+///     println!("Read header: {:?}", header.coalesce().as_ref());
 ///
 ///     // Position is still at 16 (after header)
 ///     assert_eq!(reader.position(), 16);
@@ -36,7 +43,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: StableBuf,
+    buffer: IoBuf,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -47,24 +54,38 @@ pub struct Read<B: Blob> {
     buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
+    /// Buffer pool used for internal allocations.
+    pool: BufferPool,
 }
 
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buffer_size` is zero.
-    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: vec![0; buffer_size.get()].into(),
+            buffer: pool.alloc(buffer_size.get()).freeze(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
             buffer_valid_len: 0,
             buffer_size: buffer_size.get(),
+            pool,
         }
+    }
+
+    /// Creates a new `Read`, extracting the storage [BufferPool] from a [BufferPooler].
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        blob: B,
+        blob_size: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Self {
+        Self::new(
+            blob,
+            blob_size,
+            buffer_size,
+            pooler.storage_buffer_pool().clone(),
+        )
     }
 
     /// Returns how many valid bytes are remaining in the buffer.
@@ -100,65 +121,66 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Read the data - we only need a single read operation since we know exactly how much data is available.
-        if bytes_to_read < self.buffer_size {
-            // Read into a temp buffer for the end-of-blob case to avoid truncating underlying buffer.
-            let mut tmp_buffer = vec![0u8; bytes_to_read];
-            tmp_buffer = self
-                .blob
-                .read_at(tmp_buffer, self.blob_position)
-                .await?
-                .into();
-            self.buffer.as_mut()[0..bytes_to_read].copy_from_slice(&tmp_buffer[0..bytes_to_read]);
-        } else {
-            self.buffer = self
-                .blob
-                .read_at(std::mem::take(&mut self.buffer), self.blob_position)
-                .await?;
-        }
-        self.buffer_valid_len = bytes_to_read;
+        // Reuse existing allocation when uniquely owned. If readers still hold slices from
+        // previous reads, allocate a pooled replacement and leave old memory alive until dropped.
+        let current = std::mem::take(&mut self.buffer);
+        let buf = match current.try_into_mut() {
+            Ok(mut reusable) if reusable.capacity() >= bytes_to_read => {
+                reusable.clear();
+                reusable
+            }
+            Ok(_) | Err(_) => self.pool.alloc(bytes_to_read),
+        };
+        let read_result = self
+            .blob
+            .read_at_buf(self.blob_position, bytes_to_read, buf)
+            .await?;
+        self.buffer = read_result.coalesce_with_pool(&self.pool).freeze();
+        self.buffer_valid_len = self.buffer.len();
 
-        Ok(bytes_to_read)
+        Ok(self.buffer_valid_len)
     }
 
-    /// Reads exactly `size` bytes into the provided buffer. Returns an error if not enough bytes
-    /// are available.
+    /// Reads exactly `len` bytes and returns them as immutable bytes.
     ///
-    /// # Panics
+    /// Returned bytes are composed of zero-copy slices from the internal read buffer.
+    /// Holding returned slices can keep the current backing shared, which may require
+    /// allocation on later refills.
     ///
-    /// Panics if `size` is greater than the length of `buf`.
-    pub async fn read_exact(&mut self, buf: &mut [u8], size: usize) -> Result<(), Error> {
-        assert!(
-            size <= buf.len(),
-            "provided buffer is too small for requested size"
-        );
+    /// Returns an error if not enough bytes are available.
+    pub async fn read(&mut self, len: usize) -> Result<IoBufs, Error> {
+        if len == 0 {
+            return Ok(IoBufs::default());
+        }
 
-        // Quick check if we have enough bytes total before attempting reads
-        if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
+        // Quick check against total remaining bytes at current position.
+        if self.blob_remaining() < len as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 
         // Read until we have enough bytes
-        let mut bytes_read = 0;
-        while bytes_read < size {
+        let mut remaining = len;
+        let mut out = IoBufs::default();
+        while remaining > 0 {
             // Check if we need to refill
             if self.buffer_position >= self.buffer_valid_len {
                 self.refill().await?;
             }
 
-            // Calculate how many bytes we can copy from the buffer
-            let bytes_to_copy = std::cmp::min(size - bytes_read, self.buffer_remaining());
+            // Calculate how many bytes we can take from the buffer
+            let bytes_to_take = std::cmp::min(remaining, self.buffer_remaining());
 
-            // Copy bytes from buffer to output
-            buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+            // Append bytes from buffer to output
+            out.append(
+                self.buffer
+                    .slice(self.buffer_position..(self.buffer_position + bytes_to_take)),
             );
 
-            self.buffer_position += bytes_to_copy;
-            bytes_read += bytes_to_copy;
+            self.buffer_position += bytes_to_take;
+            remaining -= bytes_to_take;
         }
 
-        Ok(())
+        Ok(out)
     }
 
     /// Returns the current absolute position in the blob.

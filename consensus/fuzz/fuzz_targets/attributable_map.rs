@@ -6,7 +6,7 @@ use commonware_consensus::{
         scheme::ed25519,
         types::{AttributableMap, Nullify},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
 };
 use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
 use commonware_math::algebra::Random;
@@ -17,15 +17,15 @@ const MAX_OPERATIONS: usize = 64;
 
 #[derive(Arbitrary, Debug, Clone)]
 struct VoteData {
-    signer: u32,
-    epoch: u64,
-    view: u64,
+    signer: Participant,
+    epoch: Epoch,
+    view: View,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 enum Operation {
     Insert(VoteData),
-    Get(u32),
+    Get(Participant),
     Clear,
 }
 
@@ -41,10 +41,10 @@ fn make_vote(
     sig: commonware_cryptography::ed25519::Signature,
 ) -> Nullify<ed25519::Scheme> {
     Nullify {
-        round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
+        round: Round::new(data.epoch, data.view),
         attestation: Attestation {
             signer: data.signer,
-            signature: sig,
+            signature: sig.into(),
         },
     }
 }
@@ -65,7 +65,7 @@ fn fuzz(input: FuzzInput) {
                 let nullify = make_vote(&data, dummy_sig.clone());
                 let result = map.insert(nullify);
 
-                let in_bounds = (signer_idx as usize) < (input.participants as usize);
+                let in_bounds = signer_idx.get() < u32::from(input.participants);
                 let already_inserted = inserted_signers.contains(&signer_idx);
 
                 if in_bounds && !already_inserted {

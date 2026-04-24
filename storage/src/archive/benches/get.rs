@@ -13,7 +13,15 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
+#[cfg(not(full_bench))]
+const ITEMS: u64 = 10_000;
+#[cfg(full_bench)]
 const ITEMS: u64 = 250_000;
+
+#[cfg(not(full_bench))]
+const READS: [usize; 1] = [1_000];
+#[cfg(full_bench)]
+const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(42);
@@ -59,95 +67,109 @@ async fn read_concurrent_indices(a: &Archive, indices: &[u64]) {
 }
 
 fn bench_get(c: &mut Criterion) {
-    // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            // Create a shared on-disk archive once so later setup is fast.
-            let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-            let keys = builder.start(|ctx| async move {
-                let mut a = Archive::init(ctx, variant, compression).await;
-                let keys = append_random(&mut a, ITEMS).await;
-                a.close().await.unwrap();
-                keys
-            });
-
-            // Run the benchmarks.
+            let mut initialized = false;
+            let mut keys = Vec::new();
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for reads in [1_000, 10_000, 50_000] {
-                        let label = format!(
-                            "{}/variant={} mode={} pattern={} comp={} reads={}",
-                            module_path!(),
-                            variant.name(),
-                            mode,
-                            pattern,
-                            compression
-                                .map(|l| l.to_string())
-                                .unwrap_or_else(|| "off".into()),
-                            reads
-                        );
-                        c.bench_function(&label, |b| {
-                            let keys = keys.clone();
-                            b.to_async(&runner).iter_custom(move |iters| {
-                                let keys = keys.clone();
-                                async move {
-                                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                    let archive = Archive::init(ctx, variant, compression).await;
-                                    if pattern == "key" {
-                                        let selected_keys = select_keys(&keys, reads);
-                                        let start = Instant::now();
-                                        for _ in 0..iters {
-                                            match mode {
-                                                "serial" => {
-                                                    read_serial_keys(&archive, &selected_keys).await
-                                                }
-                                                "concurrent" => {
-                                                    read_concurrent_keys(
-                                                        &archive,
-                                                        selected_keys.clone(),
-                                                    )
-                                                    .await
-                                                }
-                                                _ => unreachable!(),
-                                            }
-                                        }
-                                        start.elapsed()
-                                    } else {
-                                        let selected_indices = select_indices(reads);
-                                        let start = Instant::now();
-                                        for _ in 0..iters {
-                                            match mode {
-                                                "serial" => {
-                                                    read_serial_indices(&archive, &selected_indices)
-                                                        .await
-                                                }
-                                                "concurrent" => {
-                                                    read_concurrent_indices(
-                                                        &archive,
-                                                        &selected_indices,
-                                                    )
-                                                    .await
-                                                }
-                                                _ => unreachable!(),
-                                            }
-                                        }
-                                        start.elapsed()
-                                    }
+                    for reads in READS {
+                        c.bench_function(
+                            &format!(
+                                "{}/variant={} mode={} pattern={} comp={} reads={}",
+                                module_path!(),
+                                variant.name(),
+                                mode,
+                                pattern,
+                                compression
+                                    .map(|l| l.to_string())
+                                    .unwrap_or_else(|| "off".into()),
+                                reads
+                            ),
+                            |b| {
+                                // Setup: populate database (once, on first sample).
+                                if !initialized {
+                                    keys = commonware_runtime::tokio::Runner::new(cfg.clone())
+                                        .start(|ctx| async move {
+                                            let mut a =
+                                                Archive::init(ctx, variant, compression).await;
+                                            let keys = append_random(&mut a, ITEMS).await;
+                                            a.sync().await.unwrap();
+                                            keys
+                                        });
+                                    initialized = true;
                                 }
-                            });
-                        });
+
+                                // Benchmark: measure read time.
+                                let keys = keys.clone();
+                                b.to_async(&runner).iter_custom(move |iters| {
+                                    let keys = keys.clone();
+                                    async move {
+                                        let ctx =
+                                            context::get::<commonware_runtime::tokio::Context>();
+                                        let archive =
+                                            Archive::init(ctx, variant, compression).await;
+                                        if pattern == "key" {
+                                            let selected_keys = select_keys(&keys, reads);
+                                            let start = Instant::now();
+                                            for _ in 0..iters {
+                                                match mode {
+                                                    "serial" => {
+                                                        read_serial_keys(&archive, &selected_keys)
+                                                            .await
+                                                    }
+                                                    "concurrent" => {
+                                                        read_concurrent_keys(
+                                                            &archive,
+                                                            selected_keys.clone(),
+                                                        )
+                                                        .await
+                                                    }
+                                                    _ => unreachable!(),
+                                                }
+                                            }
+                                            start.elapsed()
+                                        } else {
+                                            let selected_indices = select_indices(reads);
+                                            let start = Instant::now();
+                                            for _ in 0..iters {
+                                                match mode {
+                                                    "serial" => {
+                                                        read_serial_indices(
+                                                            &archive,
+                                                            &selected_indices,
+                                                        )
+                                                        .await
+                                                    }
+                                                    "concurrent" => {
+                                                        read_concurrent_indices(
+                                                            &archive,
+                                                            &selected_indices,
+                                                        )
+                                                        .await
+                                                    }
+                                                    _ => unreachable!(),
+                                                }
+                                            }
+                                            start.elapsed()
+                                        }
+                                    }
+                                });
+                            },
+                        );
                     }
                 }
             }
 
-            // Clean up shared artifacts.
-            let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
-            cleaner.start(|ctx| async move {
-                let a = Archive::init(ctx, variant, compression).await;
-                a.destroy().await.unwrap();
-            });
+            // Cleanup: destroy database.
+            if initialized {
+                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
+                    let a = Archive::init(ctx, variant, compression).await;
+                    a.destroy().await.unwrap();
+                });
+            }
         }
     }
 }

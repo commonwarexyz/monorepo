@@ -1,30 +1,42 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the
-//! location of written data is stored in-memory by both index and key (via
-//! [crate::index::unordered::Index]) to enable **single-read lookups** for both query patterns over
-//! archived data.
+//! Data is stored across two backends: [crate::journal::segmented::fixed] for fixed-size index entries and
+//! [crate::journal::segmented::glob::Glob] for values (managed by [crate::journal::segmented::oversized]).
+//! The location of written data is stored in-memory by both index and key (via [crate::index::unordered::Index])
+//! to enable efficient lookups (on average).
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
 //!
 //! # Format
 //!
-//! [Archive] stores data in the following format:
+//! [Archive] uses a two-journal structure for efficient page cache usage:
 //!
+//! **Index Journal (segmented/fixed)** - Fixed-size entries for fast startup replay:
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |      ...      |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |          Index(u64)           |  Key(Fixed Size)  |     Data      |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |17 |18 |19 |20 |21 |22 |23 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |          Index(u64)           |Key(Fixed Size)|        val_offset(u64)        | val_size(u32) |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! ```
+//!
+//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no page cache):
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! |     Compressed Data (variable)    |   CRC32   |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
 //! # Uniqueness
 //!
-//! [Archive] assumes all stored indexes and keys are unique. If the same key is associated with
-//! multiple `indices`, there is no guarantee which value will be returned. If the key is written to
-//! an existing `index`, [Archive] will return an error.
+//! Indices are unique for [Archive] and writing to an occupied index is a no-op. Duplicate
+//! indices can be stored via [`crate::archive::MultiArchive::put_multi`].
+//!
+//! Keys may be stored at multiple indices with either put variant. A lookup by
+//! [`crate::archive::Identifier::Key`] may return any of the values at that key. Entries
+//! whose index has been pruned are never returned or reported as present, so a key matching
+//! both a pruned and a non-pruned entry resolves to the non-pruned entry.
 //!
 //! ## Conflicts
 //!
@@ -46,15 +58,13 @@
 //! _To avoid random memory reads in the common case, the in-memory index directly stores the first
 //! item in the linked list instead of a pointer to the first item._
 //!
-//! `index` is the key to the map used to serve lookups by `index` that stores the location of data
-//! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! [crate::journal::segmented::variable::Journal]s):
+//! `index` is the key to the map used to serve lookups by `index` that stores the position in the
+//! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
+//! the number of open blobs):
 //!
-//! ```rust
-//! struct Location {
-//!     offset: u32,
-//!     len: u32,
-//! }
+//! ```text
+//! // Maps index -> position in index journal
+//! indices: BTreeMap<u64, u64>
 //! ```
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
@@ -64,10 +74,25 @@
 //! ## Memory Overhead
 //!
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length).
+//! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
 //! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
 //! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
 //! the first `8` bytes of a key will use `~40` bytes to index each key.
+//!
+//! ### MultiArchive Overhead
+//!
+//! [Archive] stores index positions in a dual-map layout:
+//! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
+//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
+//!   [crate::archive::MultiArchive::put_multi].
+//!
+//! This means the baseline overhead above remains unchanged for the first item at an index. For
+//! indices with duplicates, the additional in-memory payload is:
+//! - one `Vec<u64>` header (`24` bytes), and
+//! - `n * 8` bytes for `n` additional positions.
+//!
+//! Equivalently, this is `24 + (n * 8)` bytes per duplicated index, excluding `BTreeMap` node
+//! overhead for `extra_indices`.
 //!
 //! # Pruning
 //!
@@ -78,17 +103,17 @@
 //! ## Lazy Index Cleanup
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of [crate::journal::segmented::variable::Journal],
+//! index per `section`, or replaying a `section` of the value blob,
 //! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
 //! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
 //! the in-memory index.
 //!
-//! # Single Operation Reads
+//! # Read Path
 //!
-//! To enable single operation reads (i.e. reading all of an item in a single call to
-//! [commonware_runtime::Blob]), [Archive] caches the length of each item in its in-memory index.
-//! While it increases the footprint per key stored, the benefit of only ever performing a single
-//! operation to read a key (when there are no conflicts) is worth the tradeoff.
+//! All reads (by index or key) first read the index entry from the index journal to get the
+//! value location (offset and size), then read the value from the value blob. The index journal
+//! uses a page cache for caching, so hot entries are served from memory. Values are read directly
+//! from disk without caching to avoid polluting the page cache with large values.
 //!
 //! # Compression
 //!
@@ -105,7 +130,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -114,33 +139,35 @@
 //!         prunable::{Archive, Config},
 //!     },
 //! };
-//! use commonware_utils::{NZUsize, NZU64};
+//! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
-//!         partition: "demo".into(),
+//!         key_partition: "demo-index".into(),
+//!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
-//!         write_buffer: NZUsize!(1024 * 1024),
+//!         key_write_buffer: NZUsize!(1024 * 1024),
+//!         value_write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
-//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
 //!     archive.put(1, Sha256::hash(b"data"), 10).await.unwrap();
 //!
-//!     // Close the archive (also closes the journal)
-//!     archive.close().await.unwrap();
+//!     // Sync the archive
+//!     archive.sync().await.unwrap();
 //! });
 //! ```
 
 use crate::translator::Translator;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
@@ -155,10 +182,16 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
-    /// The partition to use for the archive's [crate::journal] storage.
-    pub partition: String,
+    /// The partition to use for the key journal (stores index+key metadata).
+    pub key_partition: String,
 
-    /// The compression level to use for the archive's [crate::journal] storage.
+    /// The page cache to use for the key journal.
+    pub key_page_cache: CacheRef,
+
+    /// The partition to use for the value blob (stores values).
+    pub value_partition: String,
+
+    /// The compression level to use for the value blob.
     pub compression: Option<u8>,
 
     /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
@@ -167,37 +200,32 @@ pub struct Config<T: Translator, C> {
     /// The number of items per section (the granularity of pruning).
     pub items_per_section: NonZeroU64,
 
-    /// The amount of bytes that can be buffered in a section before being written to a
+    /// The amount of bytes that can be buffered for the key journal before being written to a
     /// [commonware_runtime::Blob].
-    pub write_buffer: NonZeroUsize,
+    pub key_write_buffer: NonZeroUsize,
+
+    /// The amount of bytes that can be buffered for the value journal before being written to a
+    /// [commonware_runtime::Blob].
+    pub value_write_buffer: NonZeroUsize,
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
-
-    /// The buffer pool to use for the archive's [crate::journal] storage.
-    pub buffer_pool: PoolRef,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        archive::{Archive as _, Error, Identifier},
+        archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };
-    use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
+    use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::collections::BTreeMap;
-
-    const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
-    const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_REPLAY_BUFFER: usize = 4096;
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    use std::{collections::BTreeMap, num::NonZeroU16};
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -207,6 +235,12 @@ mod tests {
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
+    const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
+    const DEFAULT_WRITE_BUFFER: usize = 1024;
+    const DEFAULT_REPLAY_BUFFER: usize = 4096;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
     #[test_traced]
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
@@ -214,16 +248,18 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -236,93 +272,41 @@ mod tests {
                 .await
                 .expect("Failed to put data");
 
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
+            // Sync and drop the archive
+            archive.sync().await.expect("Failed to sync archive");
+            drop(archive);
 
-            // Initialize the archive again without compression
+            // Initialize the archive again without compression.
+            // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.with_label("second"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Getting the value should fail because compression settings mismatch.
+            // Without compression, the codec sees extra bytes after decoding the value
+            // (because the compressed data doesn't match the expected format).
+            let result: Result<Option<i32>, _> = archive.get(Identifier::Index(index)).await;
             assert!(matches!(
                 result,
-                Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
+                Err(Error::Journal(JournalError::Codec(CodecError::ExtraData(
+                    _
+                ))))
             ));
-        });
-    }
-
-    #[test_traced]
-    fn test_archive_record_corruption() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            let index = 1u64;
-            let key = test_key("testkey");
-            let data = 1;
-
-            // Put the key-data pair
-            archive
-                .put(index, key.clone(), data)
-                .await
-                .expect("Failed to put data");
-
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
-
-            // Corrupt the value
-            let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
-            let (blob, _) = context
-                .open("test_partition", &section.to_be_bytes())
-                .await
-                .unwrap();
-            let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 64 + 4 /* value length */;
-            blob.write_at(b"testdaty".to_vec(), value_location).await.unwrap();
-            blob.sync().await.unwrap();
-
-            // Initialize the archive again
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context,
-                Config {
-                    partition: "test_partition".into(),
-                    translator: FourCap,
-                    codec_config: (),
-                    compression: None,
-                    write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                    replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                    items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                },
-            )
-            .await.expect("Failed to initialize archive");
-
-            // Check that the archive is empty
-            let retrieved: Option<i32> = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
         });
     }
 
@@ -333,14 +317,16 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -396,14 +382,16 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -453,14 +441,16 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -539,16 +529,18 @@ mod tests {
             // Initialize the archive
             let items_per_section = 256u64;
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: TwoCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.with_label("init1"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -592,24 +584,29 @@ mod tests {
             assert!(buffer.contains(&tracked));
             assert!(buffer.contains("pruned_total 0"));
 
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
+            // Sync and drop the archive
+            archive.sync().await.expect("Failed to sync archive");
+            drop(archive);
 
             // Reinitialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: TwoCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut archive =
-                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
+                context.with_label("init2"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -686,5 +683,165 @@ mod tests {
         let state1 = test_archive_keys_and_restart(5_000);
         let state2 = test_archive_keys_and_restart(5_000);
         assert_eq!(state1, state2);
+    }
+
+    /// Regression: when the same key is stored at multiple indices and the
+    /// earlier index is pruned, a subsequent `get`/`has` by key must resolve
+    /// to the surviving, non-pruned entry rather than report the pruned one.
+    /// Callers such as consensus's marshal cache rely on this to retain a
+    /// reproposal of the same block at a later index even after the
+    /// earlier index's retention window closes.
+    #[test_traced]
+    fn test_archive_key_lookup_skips_pruned_duplicates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(1),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Same key stored at two different indices. Distinct values only
+            // to make it observable which entry wins; a real caller would
+            // store the same value (e.g. the same block) at both indices.
+            let key = test_key("dupe-key");
+            archive.put(2, key.clone(), 20).await.unwrap();
+            archive.put(5, key.clone(), 50).await.unwrap();
+
+            // Before pruning, either entry is a permitted answer per the
+            // trait contract. The implementation happens to return the
+            // earlier index, but we only assert a value is present.
+            assert!(archive.get(Identifier::Key(&key)).await.unwrap().is_some());
+            assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+
+            // Prune the earlier index (section 2). The later index must be
+            // the sole surviving answer.
+            archive.prune(3).await.unwrap();
+            let got = archive.get(Identifier::Key(&key)).await.unwrap();
+            assert_eq!(
+                got,
+                Some(50),
+                "key lookup must skip the pruned entry and return the surviving one"
+            );
+            assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+
+            // Prune past the later index too — now nothing survives.
+            archive.prune(6).await.unwrap();
+            assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), None);
+            assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
+        });
+    }
+
+    #[test_traced]
+    fn test_get_all_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(1),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            archive.put_multi(1, test_key("aaa"), 10).await.unwrap();
+            archive.put_multi(1, test_key("bbb"), 20).await.unwrap();
+            archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
+
+            // Prune below index 3
+            archive.prune(3).await.unwrap();
+
+            // Pruned index returns None
+            let all = archive.get_all(1).await.unwrap();
+            assert_eq!(all, None);
+
+            // Surviving index still works
+            let all = archive.get_all(3).await.unwrap();
+            assert_eq!(all, Some(vec![30]));
+        });
+    }
+
+    #[test_traced]
+    fn test_put_multi_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(1),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Two items at index 1, one at index 3
+            archive.put_multi(1, test_key("aaa"), 10).await.unwrap();
+            archive.put_multi(1, test_key("bbb"), 20).await.unwrap();
+            archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
+
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 2"));
+
+            // Prune below index 3
+            archive.prune(3).await.unwrap();
+
+            // Both items at index 1 are gone
+            assert_eq!(
+                archive
+                    .get(Identifier::Key(&test_key("aaa")))
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                archive
+                    .get(Identifier::Key(&test_key("bbb")))
+                    .await
+                    .unwrap(),
+                None
+            );
+
+            // Item at index 3 survives
+            assert_eq!(
+                archive
+                    .get(Identifier::Key(&test_key("ccc")))
+                    .await
+                    .unwrap(),
+                Some(30)
+            );
+
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 1"));
+            assert!(buffer.contains("indices_pruned_total 1"));
+
+            // put_multi below pruned index is rejected
+            let result = archive.put_multi(2, test_key("ddd"), 40).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
+        });
     }
 }

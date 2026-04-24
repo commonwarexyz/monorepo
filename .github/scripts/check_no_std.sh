@@ -5,7 +5,9 @@ no_std_packages=(
   commonware-codec
   commonware-utils
   commonware-cryptography
+  commonware-math
   commonware-storage
+  commonware-parallel
 )
 
 target="riscv32imac-unknown-none-elf"

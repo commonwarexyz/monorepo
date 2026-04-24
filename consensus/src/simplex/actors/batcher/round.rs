@@ -7,13 +7,17 @@ use crate::{
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
+    types::Participant,
     Reporter,
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
-use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
-use tracing::warn;
+use commonware_parallel::Strategy;
+use commonware_utils::{
+    ordered::{Quorum, Set},
+    N3f1,
+};
+use rand_core::CryptoRngCore;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -37,7 +41,7 @@ pub struct Round<
     /// Only these votes are used for certificate construction.
     verified_votes: VoteTracker<S, D>,
 
-    /// Whether we've already received and forwarded the leader's proposal.
+    /// Whether we've already sent the leader's proposal to the voter.
     proposal_sent: bool,
 
     /// Cached certificates for this view.
@@ -55,7 +59,7 @@ impl<
     > Round<S, B, D, R>
 {
     pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
-        let quorum = participants.quorum();
+        let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
             participants,
@@ -109,8 +113,7 @@ impl<
     pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
-            warn!(?sender, "blocking peer");
-            self.blocker.block(sender).await;
+            commonware_p2p::block!(self.blocker, sender, "unknown participant");
             return false;
         };
 
@@ -119,21 +122,21 @@ impl<
             Vote::Notarize(notarize) => {
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "notarize signer mismatch");
                     return false;
                 }
 
                 // Try to reserve
                 match self.pending_votes.notarize(index) {
                     Some(previous) => {
-                        if previous != &notarize {
+                        if previous.proposal != notarize.proposal {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
+                        } else if previous != &notarize {
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
                         }
                         false
                     }
@@ -150,8 +153,7 @@ impl<
             Vote::Nullify(nullify) => {
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "nullify signer mismatch");
                     return false;
                 }
 
@@ -161,8 +163,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
                     return false;
                 }
 
@@ -170,8 +171,7 @@ impl<
                 match self.pending_votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
-                            warn!(?sender, "blocking peer");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
                         }
                         false
                     }
@@ -188,8 +188,7 @@ impl<
             Vote::Finalize(finalize) => {
                 // Verify sender is signer
                 if index != finalize.signer() {
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "finalize signer mismatch");
                     return false;
                 }
 
@@ -199,21 +198,21 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
                     return false;
                 }
 
                 // Try to reserve
                 match self.pending_votes.finalize(index) {
                     Some(previous) => {
-                        if previous != &finalize {
+                        if previous.proposal != finalize.proposal {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
+                        } else if previous != &finalize {
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
                         }
                         false
                     }
@@ -281,7 +280,7 @@ impl<
     /// Sets the leader for this view. If the leader's vote has already been
     /// received, this will also set the leader's proposal (filtering out votes
     /// for other proposals).
-    pub fn set_leader(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: Participant) {
         self.verifier.set_leader(leader);
     }
 
@@ -289,7 +288,7 @@ impl<
     /// 1. We haven't already processed this (called at most once per round).
     /// 2. The leader's proposal is known.
     /// 3. We are not the leader (leaders don't need to forward their own proposal).
-    pub fn forward_proposal(&mut self, me: u32) -> Option<Proposal<D>> {
+    pub fn forward_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
@@ -301,7 +300,7 @@ impl<
         Some(proposal)
     }
 
-    pub const fn ready_notarizes(&self) -> bool {
+    pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -309,15 +308,15 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    pub fn verify_notarizes<E: Rng + CryptoRng>(
+    pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(rng, namespace)
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
+        self.verifier.verify_notarizes(rng, strategy)
     }
 
-    pub const fn ready_nullifies(&self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -325,15 +324,15 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    pub fn verify_nullifies<E: Rng + CryptoRng>(
+    pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(rng, namespace)
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
+        self.verifier.verify_nullifies(rng, strategy)
     }
 
-    pub const fn ready_finalizes(&self) -> bool {
+    pub fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;
@@ -341,18 +340,60 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    pub fn verify_finalizes<E: Rng + CryptoRng>(
+    pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_finalizes(rng, namespace)
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
+        self.verifier.verify_finalizes(rng, strategy)
     }
 
-    pub fn is_active(&self, leader: u32) -> bool {
-        self.pending_votes.has_notarize(leader)
-            || self.pending_votes.has_nullify(leader)
-            || self.pending_votes.has_finalize(leader)
+    /// Returns true if `signer` has a nullify vote in this round.
+    pub fn has_nullify(&self, signer: Participant) -> bool {
+        self.pending_votes.has_nullify(signer)
+    }
+
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
+    ///
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
+    ///
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
+    pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
+        if self
+            .pending_votes
+            .notarize(participant)
+            .is_some_and(|vote| &vote.proposal == proposal)
+        {
+            return false;
+        }
+
+        self.pending_votes
+            .finalize(participant)
+            .is_none_or(|vote| &vote.proposal != proposal)
+    }
+
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
+    ///
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
+    ///
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
+    pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
+        (0..self.participants.len())
+            .map(Participant::from_usize)
+            .filter(|&p| self.is_missing_voter(proposal, p))
+            .collect()
     }
 
     /// Stores a verified vote for certificate construction.
@@ -373,15 +414,19 @@ impl<
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_notarization(&mut self, scheme: &S) -> Option<Notarization<S, D>> {
+    pub fn try_construct_notarization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Notarization<S, D>> {
         if self.has_notarization() {
             return None;
         }
-        if self.verified_votes.len_notarizes() < self.participants.quorum() {
+        if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let notarization =
-            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes())?;
+            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
         Some(notarization)
     }
@@ -389,15 +434,19 @@ impl<
     /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_nullification(&mut self, scheme: &S) -> Option<Nullification<S>> {
+    pub fn try_construct_nullification(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Nullification<S>> {
         if self.has_nullification() {
             return None;
         }
-        if self.verified_votes.len_nullifies() < self.participants.quorum() {
+        if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let nullification =
-            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies())?;
+            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
         Some(nullification)
     }
@@ -405,15 +454,19 @@ impl<
     /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_finalization(&mut self, scheme: &S) -> Option<Finalization<S, D>> {
+    pub fn try_construct_finalization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Finalization<S, D>> {
         if self.has_finalization() {
             return None;
         }
-        if self.verified_votes.len_finalizes() < self.participants.quorum() {
+        if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes())?;
+            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }

@@ -4,7 +4,7 @@ use commonware_utils::sequence::U64;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
 /// Partition used across all metadata benchmarks.
-pub const PARTITION: &str = "metadata_bench_partition";
+pub const PARTITION: &str = "metadata-bench-partition";
 
 /// Concrete metadata type reused by every benchmark.
 pub type MetadataType = Metadata<Context, U64, Vec<u8>>;

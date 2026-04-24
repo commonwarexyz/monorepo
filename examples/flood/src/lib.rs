@@ -38,7 +38,7 @@
 //!
 //! ```bash
 //! cd assets
-//! deployer ec2 create --config config.yaml
+//! deployer aws create --config config.yaml
 //! ```
 //!
 //! # Monitor Performance on Grafana
@@ -58,13 +58,13 @@
 //! ## Restart Flood Binary on EC2 Instances
 //!
 //! ```bash
-//! deployer ec2 update --config config.yaml
+//! deployer aws update --config config.yaml
 //! ```
 //!
 //! # Destroy Infrastructure
 //!
 //! ```bash
-//! deployer ec2 destroy --config config.yaml
+//! deployer aws destroy --config config.yaml
 //! ```
 //!
 //! # Debugging
@@ -112,7 +112,7 @@ pub struct Config {
     pub allowed_peers: Vec<String>,
     pub bootstrappers: Vec<String>,
     pub worker_threads: usize,
-    pub message_size: usize,
+    pub message_size: u32,
     pub message_backlog: usize,
     pub mailbox_size: usize,
     pub instrument: bool,

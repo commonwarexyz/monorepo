@@ -14,13 +14,17 @@ documentation = "https://docs.rs/commonware-deployer"
 workspace = true
 
 [features]
-default = [ "aws" ]
+default = []
 aws = [
 	"aws-config",
 	"aws-sdk-ec2",
+	"aws-sdk-s3",
+	"chrono",
 	"clap",
+	"commonware-cryptography",
 	"futures",
 	"reqwest",
+	"serde_yaml",
 	"thiserror",
 	"tokio",
 	"tracing",
@@ -31,12 +35,16 @@ aws = [
 [dependencies]
 aws-config = { workspace = true, optional = true }
 aws-sdk-ec2 = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
 cfg-if.workspace = true
+chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, optional = true }
+commonware-macros.workspace = true
 futures = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
-serde_yaml.workspace = true
+serde_yaml = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["full"], optional = true }
 tracing = { workspace = true, optional = true }

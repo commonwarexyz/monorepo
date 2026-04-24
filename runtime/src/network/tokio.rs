@@ -1,8 +1,7 @@
-use crate::Error;
-use commonware_utils::StableBuf;
+use crate::{BufferPool, Error, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
@@ -17,37 +16,72 @@ pub struct Sink {
     sink: OwnedWriteHalf,
 }
 
+impl Sink {
+    async fn send_single(&mut self, buf: &[u8]) -> Result<(), Error> {
+        self.sink
+            .write_all(buf)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+
+    async fn send_vectored(&mut self, bufs: &mut IoBufs) -> Result<(), Error> {
+        self.sink
+            .write_all_buf(bufs)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+}
+
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let write_timeout = self.write_timeout;
+        let bufs = bufs.into();
+        let send = async {
+            match bufs.try_into_single() {
+                Ok(buf) => self.send_single(buf.as_ref()).await,
+                Err(mut bufs) => self.send_vectored(&mut bufs).await,
+            }
+        };
+
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all(msg.into().as_ref()))
+        timeout(write_timeout, send)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
-        Ok(())
     }
 }
 
 /// Implementation of [crate::Stream] for the [tokio] runtime.
+///
+/// Uses a [`BufReader`] to reduce syscall overhead. Multiple small reads
+/// can be satisfied from the buffer without additional network operations.
 pub struct Stream {
     read_timeout: Duration,
-    stream: OwnedReadHalf,
+    stream: BufReader<OwnedReadHalf>,
+    pool: BufferPool,
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
-        if buf.is_empty() {
-            return Ok(buf);
-        }
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
+        let read_fut = async {
+            // SAFETY: `len` bytes are written by read_exact below.
+            let mut buf = unsafe { self.pool.alloc_len(len) };
+            self.stream
+                .read_exact(buf.as_mut())
+                .await
+                .map_err(|_| Error::RecvFailed)?;
+            Ok(IoBufs::from(buf.freeze()))
+        };
 
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(buf.as_mut()))
+        timeout(self.read_timeout, read_fut)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
+    }
 
-        Ok(buf)
+    fn peek(&self, max_len: usize) -> &[u8] {
+        let buffered = self.stream.buffer();
+        let len = std::cmp::min(buffered.len(), max_len);
+        &buffered[..len]
     }
 }
 
@@ -55,6 +89,7 @@ impl crate::Stream for Stream {
 pub struct Listener {
     cfg: Config,
     listener: TcpListener,
+    pool: BufferPool,
 }
 
 impl crate::Listener for Listener {
@@ -72,6 +107,13 @@ impl crate::Listener for Listener {
             }
         }
 
+        // Set SO_LINGER to zero if configured
+        if self.cfg.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
         Ok((
@@ -82,7 +124,8 @@ impl crate::Listener for Listener {
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream,
+                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                pool: self.pool.clone(),
             },
         ))
     }
@@ -102,14 +145,30 @@ pub struct Config {
     /// be efficient on slow, congested networks. However, to do so the algorithm introduces
     /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
     /// consider disabling it to send the packets as soon as possible to reduce latency.
-    ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
     tcp_nodelay: Option<bool>,
-    /// Read timeout for connections, after which the connection will be closed
+    /// Whether to set `SO_LINGER` to zero on the socket.
+    ///
+    /// When enabled, causes an immediate RST on close, avoiding
+    /// `TIME_WAIT` state. This is useful in adversarial environments to
+    /// reclaim socket resources immediately when closing connections to
+    /// misbehaving peers.
+    zero_linger: bool,
+    /// Read timeout for connections, after which the connection will be closed.
+    ///
+    /// This bounds the entire `Stream::recv` call, not each underlying socket
+    /// read attempt.
     read_timeout: Duration,
-    /// Write timeout for connections, after which the connection will be closed
+    /// Write timeout for connections, after which the connection will be closed.
+    ///
+    /// This bounds the entire `Sink::send` call, not each underlying socket
+    /// write attempt. If callers batch more bytes into one send, slow links may
+    /// require a larger timeout.
     write_timeout: Duration,
+    /// Size of the read buffer for batching network reads.
+    ///
+    /// A larger buffer reduces syscall overhead by reading more data per call,
+    /// but uses more memory per connection. Defaults to 64 KB.
+    read_buffer_size: usize,
 }
 
 #[cfg_attr(feature = "iouring-network", allow(dead_code))]
@@ -118,6 +177,11 @@ impl Config {
     /// See [Config]
     pub const fn with_tcp_nodelay(mut self, tcp_nodelay: Option<bool>) -> Self {
         self.tcp_nodelay = tcp_nodelay;
+        self
+    }
+    /// See [Config]
+    pub const fn with_zero_linger(mut self, zero_linger: bool) -> Self {
+        self.zero_linger = zero_linger;
         self
     }
     /// See [Config]
@@ -130,11 +194,20 @@ impl Config {
         self.write_timeout = write_timeout;
         self
     }
+    /// See [Config]
+    pub const fn with_read_buffer_size(mut self, read_buffer_size: usize) -> Self {
+        self.read_buffer_size = read_buffer_size;
+        self
+    }
 
     // Getters
     /// See [Config]
     pub const fn tcp_nodelay(&self) -> Option<bool> {
         self.tcp_nodelay
+    }
+    /// See [Config]
+    pub const fn zero_linger(&self) -> bool {
+        self.zero_linger
     }
     /// See [Config]
     pub const fn read_timeout(&self) -> Duration {
@@ -144,33 +217,35 @@ impl Config {
     pub const fn write_timeout(&self) -> Duration {
         self.write_timeout
     }
+    /// See [Config]
+    pub const fn read_buffer_size(&self) -> usize {
+        self.read_buffer_size
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            tcp_nodelay: None,
+            tcp_nodelay: Some(true),
+            zero_linger: true,
             read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(60),
+            read_buffer_size: 64 * 1024, // 64 KB
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// [crate::Network] implementation that uses the [tokio] runtime.
 pub struct Network {
     cfg: Config,
+    pool: BufferPool,
 }
 
-impl From<Config> for Network {
-    fn from(cfg: Config) -> Self {
-        Self { cfg }
-    }
-}
-
-impl Default for Network {
-    fn default() -> Self {
-        Self::from(Config::default())
+impl Network {
+    /// Creates a new Network with the given configuration and buffer pool.
+    pub const fn new(cfg: Config, pool: BufferPool) -> Self {
+        Self { cfg, pool }
     }
 }
 
@@ -184,6 +259,7 @@ impl crate::Network for Network {
             .map(|listener| Listener {
                 cfg: self.cfg.clone(),
                 listener,
+                pool: self.pool.clone(),
             })
     }
 
@@ -203,6 +279,13 @@ impl crate::Network for Network {
             }
         }
 
+        // Set SO_LINGER to zero if configured
+        if self.cfg.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
         Ok((
@@ -212,7 +295,8 @@ impl crate::Network for Network {
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream,
+                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                pool: self.pool.clone(),
             },
         ))
     }
@@ -220,17 +304,26 @@ impl crate::Network for Network {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::{tests, tokio as TokioNetwork};
+    use crate::{
+        network::{tests, tokio as TokioNetwork},
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+    };
     use commonware_macros::test_group;
-    use std::time::Duration;
+    use prometheus_client::registry::Registry;
+    use std::time::{Duration, Instant};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    }
 
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            TokioNetwork::Network::from(
+            TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))
                     .with_write_timeout(Duration::from_secs(15)),
+                test_pool(),
             )
         })
         .await;
@@ -240,12 +333,192 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
-            TokioNetwork::Network::from(
+            TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))
                     .with_write_timeout(Duration::from_secs(15)),
+                test_pool(),
             )
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_small_send_read_quickly() {
+        // Use a long read timeout to ensure we're not just waiting for timeout
+        let read_timeout = Duration::from_secs(30);
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default()
+                .with_read_timeout(read_timeout)
+                .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
+        );
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task to accept and read
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Read a small message (much smaller than the 64KB buffer)
+            let start = Instant::now();
+            let received = stream.recv(10).await.unwrap();
+            let elapsed = start.elapsed();
+
+            (received, elapsed)
+        });
+
+        // Connect and send a small message
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        sink.send(msg.clone()).await.unwrap();
+
+        // Wait for the reader to complete
+        let (received, elapsed) = reader.await.unwrap();
+
+        // Verify we got the right data
+        assert_eq!(received.coalesce(), msg.as_slice());
+
+        // Verify it completed quickly (well under the read timeout)
+        // Should complete in milliseconds, not seconds
+        assert!(elapsed < read_timeout);
+    }
+
+    #[tokio::test]
+    async fn test_read_timeout_with_partial_data() {
+        // Use a short read timeout to make the test fast
+        let read_timeout = Duration::from_millis(100);
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default()
+                .with_read_timeout(read_timeout)
+                .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
+        );
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Try to read 100 bytes, but only 5 will be sent
+            let start = Instant::now();
+            let result = stream.recv(100).await;
+            let elapsed = start.elapsed();
+
+            (result, elapsed)
+        });
+
+        // Connect and send only partial data
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+
+        // Wait for the reader to complete
+        let (result, elapsed) = reader.await.unwrap();
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+
+        // Verify the timeout occurred around the expected time
+        assert!(elapsed >= read_timeout);
+        // Allow some margin for timing variance
+        assert!(elapsed < read_timeout * 2);
+    }
+
+    #[tokio::test]
+    async fn test_unbuffered_mode() {
+        // Set read_buffer_size to 0 to disable buffering
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default()
+                .with_read_buffer_size(0)
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
+        );
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task to accept and read
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // In unbuffered mode, peek should always return empty
+            assert!(stream.peek(100).is_empty());
+
+            // Read messages without buffering
+            let buf1 = stream.recv(5).await.unwrap();
+
+            // Even after recv, peek should be empty in unbuffered mode
+            assert!(stream.peek(100).is_empty());
+
+            let buf2 = stream.recv(5).await.unwrap();
+            assert!(stream.peek(100).is_empty());
+
+            (buf1, buf2)
+        });
+
+        // Connect and send two messages
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
+
+        // Wait for the reader to complete
+        let (buf1, buf2) = reader.await.unwrap();
+
+        // Verify we got the right data
+        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
+    }
+
+    #[tokio::test]
+    async fn test_peek_with_buffered_data() {
+        // Use default buffer size to enable buffering
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Initially peek should be empty (no data received yet)
+            assert!(stream.peek(100).is_empty());
+
+            // Receive partial data - this should buffer more than requested
+            let first = stream.recv(5).await.unwrap();
+            assert_eq!(first.coalesce(), b"hello");
+
+            // Peek should show remaining buffered data
+            let peeked = stream.peek(100);
+            assert!(!peeked.is_empty());
+            assert_eq!(peeked, b" world");
+
+            // Peek again should return the same (non-consuming)
+            assert_eq!(stream.peek(100), b" world");
+
+            // Peek with max_len should truncate
+            assert_eq!(stream.peek(3), b" wo");
+
+            // Receive the rest
+            let rest = stream.recv(6).await.unwrap();
+            assert_eq!(rest.coalesce(), b" world");
+
+            // Peek should be empty after consuming all buffered data
+            assert!(stream.peek(100).is_empty());
+        });
+
+        // Connect and send data
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"hello world").await.unwrap();
+
+        reader.await.unwrap();
     }
 }

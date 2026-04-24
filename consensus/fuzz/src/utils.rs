@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
-use governor::Quota;
+use commonware_runtime::{Clock, Quota};
 use std::{collections::HashMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation
@@ -26,7 +26,7 @@ pub enum Partition {
     /// No connections between any validators.
     Isolated,
     /// Ring topology: node i connects to i-1 and i+1 (with wraparound).
-    Linear,
+    Ring,
 }
 
 impl Partition {
@@ -36,7 +36,7 @@ impl Partition {
             Partition::Isolated => Some(|_, i, j| i == j),
             Partition::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
             Partition::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            Partition::Linear => Some(linear),
+            Partition::Ring => Some(ring),
         }
     }
 }
@@ -58,12 +58,12 @@ fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
 }
 
 // Ring topology: node i connects to i-1 and i+1 (with wraparound).
-fn linear(n: usize, i: usize, j: usize) -> bool {
+fn ring(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
-pub async fn link_peers<P: PublicKey>(
-    oracle: &mut Oracle<P>,
+pub async fn link_peers<P: PublicKey, E: Clock>(
+    oracle: &mut Oracle<P, E>,
     validators: &[P],
     action: Action,
     filter: Option<fn(usize, usize, usize) -> bool>,
@@ -97,20 +97,20 @@ pub async fn link_peers<P: PublicKey>(
     }
 }
 
-pub async fn register<P: PublicKey>(
-    oracle: &mut Oracle<P>,
+pub async fn register<P: PublicKey, E: Clock>(
+    oracle: &mut Oracle<P, E>,
     validators: &[P],
 ) -> HashMap<
     P,
     (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
+        (Sender<P, E>, Receiver<P>),
+        (Sender<P, E>, Receiver<P>),
+        (Sender<P, E>, Receiver<P>),
     ),
 > {
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let pending = control.register(0, TEST_QUOTA).await.unwrap();
         let recovered = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver = control.register(2, TEST_QUOTA).await.unwrap();

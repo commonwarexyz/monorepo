@@ -3,10 +3,10 @@ use crate::{
     freezer::{self, Checkpoint, Cursor, Freezer},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
+    Context,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_runtime::{Buf, BufMut, BufferPooler};
 use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
@@ -84,7 +84,7 @@ impl EncodeSize for Record {
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
-pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -103,7 +103,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
@@ -126,11 +126,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         let freezer = Freezer::init_with_checkpoint(
             context.with_label("freezer"),
             freezer::Config {
-                journal_partition: cfg.freezer_journal_partition,
-                journal_compression: cfg.freezer_journal_compression,
-                journal_write_buffer: cfg.write_buffer,
-                journal_target_size: cfg.freezer_journal_target_size,
-                journal_buffer_pool: cfg.freezer_journal_buffer_pool,
+                key_partition: cfg.freezer_key_partition,
+                key_write_buffer: cfg.freezer_key_write_buffer,
+                key_page_cache: cfg.freezer_key_page_cache,
+                value_partition: cfg.freezer_value_partition,
+                value_compression: cfg.freezer_value_compression,
+                value_write_buffer: cfg.freezer_value_write_buffer,
+                value_target_size: cfg.freezer_value_target_size,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,
@@ -165,7 +167,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             ordinal::Config {
                 partition: cfg.ordinal_partition,
                 items_per_blob: cfg.items_per_section,
-                write_buffer: cfg.write_buffer,
+                write_buffer: cfg.ordinal_write_buffer,
                 replay_buffer: cfg.replay_buffer,
             },
             Some(section_bits),
@@ -218,7 +220,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 
     /// Initialize the section.
-    async fn initialize_section(&mut self, section: u64) {
+    fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
         let bits = BitMap::zeroes(self.items_per_section);
 
@@ -229,7 +231,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archive
     for Archive<E, K, V>
 {
     type Key = K;
@@ -245,7 +247,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         let section = index / self.items_per_section;
         let ordinal_key = U64::new(ORDINAL_PREFIX, section);
         if self.metadata.get(&ordinal_key).is_none() {
-            self.initialize_section(section).await;
+            self.initialize_section(section);
         }
         let record = self.metadata.get_mut(&ordinal_key).unwrap();
 
@@ -317,29 +319,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.ranges()
     }
 
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.ordinal.ranges_from(from)
+    }
+
     fn first_index(&self) -> Option<u64> {
         self.ordinal.first_index()
     }
 
     fn last_index(&self) -> Option<u64> {
         self.ordinal.last_index()
-    }
-
-    async fn close(mut self) -> Result<(), Error> {
-        // Close ordinal
-        self.ordinal.close().await?;
-
-        // Close table
-        let checkpoint = self.freezer.close().await?;
-
-        // Update checkpoint
-        let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        self.metadata.put(freezer_key, Record::Freezer(checkpoint));
-
-        // Close metadata
-        self.metadata.close().await?;
-
-        Ok(())
     }
 
     async fn destroy(self) -> Result<(), Error> {

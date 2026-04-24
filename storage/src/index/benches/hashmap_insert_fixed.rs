@@ -14,7 +14,7 @@ struct MockIndex {
     _next: Option<Box<Self>>,
 }
 
-fn benchmark_hashmap_insert_fixed(c: &mut Criterion) {
+fn bench_hashmap_insert_fixed(c: &mut Criterion) {
     for n in N_ITEMS {
         c.bench_function(&format!("{}/n={} k={}", module_path!(), n, 4), |b| {
             b.iter_batched(
@@ -56,5 +56,5 @@ fn benchmark_hashmap_insert_fixed(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_hashmap_insert_fixed
+    targets = bench_hashmap_insert_fixed
 }

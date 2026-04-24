@@ -1,7 +1,7 @@
 use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
-use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_runtime::IoBuf;
 use commonware_utils::{time::SYSTEM_TIME_PRECISION, BigRationalExt, SystemTimeExt};
 use num_rational::BigRational;
 use num_traits::Zero;
@@ -17,7 +17,7 @@ pub struct Completion<P: PublicKey> {
     pub origin: P,
     pub recipient: P,
     pub channel: Channel,
-    pub message: Bytes,
+    pub message: IoBuf,
     pub deliver_at: Option<SystemTime>,
 }
 
@@ -27,7 +27,7 @@ impl<P: PublicKey> Completion<P> {
         origin: P,
         recipient: P,
         channel: Channel,
-        message: Bytes,
+        message: IoBuf,
         deliver_at: SystemTime,
     ) -> Self {
         Self {
@@ -40,7 +40,7 @@ impl<P: PublicKey> Completion<P> {
     }
 
     /// Creates a completion for a dropped message.
-    const fn dropped(origin: P, recipient: P, channel: Channel, message: Bytes) -> Self {
+    const fn dropped(origin: P, recipient: P, channel: Channel, message: IoBuf) -> Self {
         Self {
             origin,
             recipient,
@@ -55,7 +55,7 @@ impl<P: PublicKey> Completion<P> {
 #[derive(Clone, Debug)]
 struct Buffered {
     channel: Channel,
-    message: Bytes,
+    message: IoBuf,
     arrival_complete_at: SystemTime,
 }
 
@@ -63,7 +63,7 @@ struct Buffered {
 #[derive(Clone, Debug)]
 struct Queued {
     channel: Channel,
-    message: Bytes,
+    message: IoBuf,
     latency: Duration,
     should_deliver: bool,
     ready_at: Option<SystemTime>,
@@ -83,7 +83,7 @@ struct Status<P: PublicKey> {
     recipient: P,
     latency: Duration,
     channel: Channel,
-    message: Bytes,
+    message: IoBuf,
     sequence: Option<u128>, // delivered if some
     remaining: BigRational,
     rate: Rate,
@@ -230,7 +230,7 @@ impl<P: PublicKey> State<P> {
         origin: P,
         recipient: P,
         channel: Channel,
-        message: Bytes,
+        message: IoBuf,
         latency: Duration,
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
@@ -271,7 +271,7 @@ impl<P: PublicKey> State<P> {
         origin: P,
         recipient: P,
         channel: Channel,
-        message: Bytes,
+        message: IoBuf,
         latency: Duration,
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
@@ -436,7 +436,7 @@ impl<P: PublicKey> State<P> {
         completed.sort();
 
         // Record the next time at which a bandwidth event should fire.
-        self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));
+        self.next_bandwidth_event = earliest.map(|duration| now.saturating_add_ext(duration));
 
         self.finish(completed, now)
     }
@@ -494,7 +494,7 @@ impl<P: PublicKey> State<P> {
         origin: P,
         recipient: P,
         channel: Channel,
-        message: Bytes,
+        message: IoBuf,
         arrival_complete_at: SystemTime,
         sequence: Option<u128>,
     ) -> Vec<Completion<P>> {
@@ -698,7 +698,6 @@ impl<P: PublicKey> State<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -720,7 +719,7 @@ mod tests {
             origin,
             recipient,
             CHANNEL,
-            Bytes::from_static(b"hello"),
+            IoBuf::from(b"hello"),
             Duration::ZERO,
             true,
         );
@@ -742,7 +741,7 @@ mod tests {
             origin,
             recipient,
             CHANNEL,
-            Bytes::from_static(b"drop"),
+            IoBuf::from(b"drop"),
             Duration::ZERO,
             false,
         );
@@ -768,7 +767,7 @@ mod tests {
             origin.clone(),
             recipient.clone(),
             CHANNEL,
-            Bytes::from_static(b"x"),
+            IoBuf::from(b"x"),
             Duration::ZERO,
             true,
         );
@@ -785,7 +784,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(10);
         let recipient = key(11);
-        let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
+        let make_bytes = |value: u8| IoBuf::from(vec![value; 1_000]);
 
         let completions = state.limit(now, &origin, Some(1_000), None);
         assert!(completions.is_empty());
@@ -840,7 +839,7 @@ mod tests {
         let completion_b = &completions[0];
         assert_eq!(completion_b.deliver_at, Some(second_finish));
         assert_eq!(completion_b.message.len(), 1_000);
-        assert_eq!(completion_b.message[0], 2);
+        assert_eq!(completion_b.message.as_ref()[0], 2);
     }
 
     #[test]
@@ -853,8 +852,8 @@ mod tests {
         let completions = state.limit(start, &origin, Some(500_000), None); // 500 KB/s
         assert!(completions.is_empty());
 
-        let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
-        let msg_b = Bytes::from(vec![0xBB; 500_000]);
+        let msg_a = IoBuf::from(vec![0xAA; 1_000_000]);
+        let msg_b = IoBuf::from(vec![0xBB; 500_000]);
 
         let completions = state.enqueue(
             start,
@@ -936,7 +935,7 @@ mod tests {
             origin.clone(),
             recipient.clone(),
             CHANNEL,
-            Bytes::from_static(&[7u8; 1_000]),
+            IoBuf::from([7u8; 1_000].as_ref()),
             Duration::from_millis(250),
             true,
         );
@@ -977,7 +976,7 @@ mod tests {
             origin.clone(),
             recipient,
             CHANNEL,
-            Bytes::from_static(&[0xAB; 1_000]),
+            IoBuf::from([0xAB; 1_000].as_ref()),
             Duration::ZERO,
             true,
         );
@@ -1006,7 +1005,7 @@ mod tests {
             origin.clone(),
             recipient.clone(),
             CHANNEL,
-            Bytes::from_static(b"first"),
+            IoBuf::from(b"first"),
             Duration::from_millis(100),
             true,
         );
@@ -1021,7 +1020,7 @@ mod tests {
             origin,
             recipient,
             CHANNEL,
-            Bytes::from_static(b"second"),
+            IoBuf::from(b"second"),
             Duration::from_millis(50),
             true,
         );
@@ -1045,9 +1044,9 @@ mod tests {
         let completions = state.limit(start, &origin, Some(1_000_000), None); // 1 MB/s
         assert!(completions.is_empty());
 
-        let msg_a = Bytes::from(vec![0xAA; 3_000_000]);
-        let msg_b = Bytes::from(vec![0xBB; 1_000_000]);
-        let msg_c = Bytes::from(vec![0xCC; 1_000_000]);
+        let msg_a = IoBuf::from(vec![0xAA; 3_000_000]);
+        let msg_b = IoBuf::from(vec![0xBB; 1_000_000]);
+        let msg_c = IoBuf::from(vec![0xCC; 1_000_000]);
 
         let completions = state.enqueue(
             start,
@@ -1218,7 +1217,7 @@ mod tests {
         let completions = state.limit(now, &origin, Some(1_000), None); // 1 KB/s egress
         assert!(completions.is_empty());
 
-        let msg = Bytes::from(vec![0xDD; 1_000]);
+        let msg = IoBuf::from(vec![0xDD; 1_000]);
         let completions = state.enqueue(
             now,
             origin.clone(),
@@ -1255,8 +1254,8 @@ mod tests {
         let completions = state.limit(now, &origin, Some(1_000), None);
         assert!(completions.is_empty());
 
-        let msg_b = Bytes::from(vec![0xBB; 1_000]);
-        let msg_c = Bytes::from(vec![0xCC; 1_000]);
+        let msg_b = IoBuf::from(vec![0xBB; 1_000]);
+        let msg_c = IoBuf::from(vec![0xCC; 1_000]);
 
         let completions = state.enqueue(
             now,
@@ -1323,7 +1322,7 @@ mod tests {
             origin_small.clone(),
             recipient.clone(),
             CHANNEL,
-            Bytes::from_static(&[0xAA]),
+            IoBuf::from([0xAA].as_ref()),
             Duration::ZERO,
             true,
         );
@@ -1334,7 +1333,7 @@ mod tests {
             origin_large.clone(),
             recipient.clone(),
             CHANNEL,
-            Bytes::from(vec![0xBB; 10_000]),
+            IoBuf::from(vec![0xBB; 10_000]),
             Duration::ZERO,
             true,
         );

@@ -1,9 +1,12 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
-use futures::{
+use commonware_utils::{
     channel::oneshot,
+    sync::{Mutex, Once},
+};
+use futures::{
     future::{select, Either},
     pin_mut,
-    stream::{AbortHandle, Abortable},
+    stream::{AbortHandle, Abortable, Aborted},
     FutureExt as _,
 };
 use prometheus_client::metrics::gauge::Gauge;
@@ -12,7 +15,7 @@ use std::{
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Once},
+    sync::Arc,
     task::{Context, Poll},
 };
 use tracing::error;
@@ -31,6 +34,7 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
+    #[inline(always)]
     pub(crate) fn init<F>(
         f: F,
         metric: MetricHandle,
@@ -44,34 +48,38 @@ where
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
-        // Wrap the future to handle panics
-        let wrapped = async move {
-            // Run future
-            let result = AssertUnwindSafe(f).catch_unwind().await;
+        // Wrap the future with panic catching, abort support, and cleanup.
+        //
+        // Everything is done in a single async block (and the function is marked
+        // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
+        // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
+        let metric_handle = metric.clone();
+        let task = async move {
+            // Run future with panic catching and abort support
+            let result =
+                Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
 
             // Handle result
-            let result = match result {
-                Ok(result) => Ok(result),
-                Err(panic) => {
-                    panicker.notify(panic);
-                    Err(Error::Exited)
+            match result {
+                Ok(Ok(result)) => {
+                    let _ = sender.send(Ok(result));
                 }
-            };
-            let _ = sender.send(result);
-        };
+                Ok(Err(panic)) => {
+                    panicker.notify(panic);
+                    let _ = sender.send(Err(Error::Exited));
+                }
+                Err(Aborted) => {}
+            }
 
-        // Make the future abortable
-        let metric_handle = metric.clone();
-        let abortable = Abortable::new(wrapped, abort_registration).map(move |_| {
             // Mark the task as aborted and abort all descendants.
             tree.abort();
 
             // Finish the metric.
             metric_handle.finish();
-        });
+        };
 
         (
-            abortable,
+            task,
             Self {
                 abort_handle: Some(abort_handle),
                 receiver,
@@ -184,6 +192,7 @@ impl Panicker {
     }
 
     /// Returns whether the [Panicker] is configured to catch panics.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) const fn catch(&self) -> bool {
         self.catch
     }
@@ -200,7 +209,7 @@ impl Panicker {
         }
 
         // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock().unwrap();
+        let mut sender = self.sender.lock();
         let Some(sender) = sender.take() else {
             return;
         };

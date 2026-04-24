@@ -1,13 +1,12 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::hex;
+use commonware_utils::{channel::mpsc, hex, sync::Mutex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{channel::mpsc, SinkExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -16,12 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
-use std::{
-    io::stdout,
-    str::FromStr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io::stdout, str::FromStr, sync::Arc, time::Duration};
 use tracing::{debug, warn};
 
 pub const CHANNEL: u64 = 0;
@@ -55,7 +49,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend).unwrap();
 
     // Listen for input
-    let (mut tx, mut rx) = mpsc::channel(100);
+    let (tx, mut rx) = mpsc::channel(100);
     context.with_label("keyboard").spawn(|_| async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
@@ -172,7 +166,7 @@ pub async fn run(
 
                 // Display logs
                 let logs_height = chunks[1].height - HEIGHT_OFFSET;
-                let logs = logs.lock().unwrap();
+                let logs = logs.lock();
                 let logs_len = logs.len() as u16;
                 let logs_max_scroll = logs_len.saturating_sub(logs_height);
                 if focused_window != Focus::Logs {
@@ -201,7 +195,7 @@ pub async fn run(
         // Handle input
         let formatted_me = format!("{}**{}", &me[..4], &me[me.len() - 4..]);
         select! {
-            event = rx.next() => {
+            event = rx.recv() => {
                 let event = match event {
                     Some(event) => event,
                     None => break,
@@ -222,44 +216,66 @@ pub async fn run(
                                 Focus::Messages => Focus::Input,
                             };
                         }
-                        KeyCode::Up => {
-                            match focused_window {
-                                Focus::Logs => logs_scroll_vertical = logs_scroll_vertical.saturating_sub(1),
-                                Focus::Metrics => metrics_scroll_vertical = metrics_scroll_vertical.saturating_sub(1),
-                                Focus::Messages => messages_scroll_vertical = messages_scroll_vertical.saturating_sub(1),
-                                _ => {}
+                        KeyCode::Up => match focused_window {
+                            Focus::Logs => {
+                                logs_scroll_vertical = logs_scroll_vertical.saturating_sub(1)
                             }
-                        }
-                        KeyCode::Down => {
-                            match focused_window {
-                                Focus::Logs => logs_scroll_vertical = logs_scroll_vertical.saturating_add(1),
-                                Focus::Metrics => metrics_scroll_vertical = metrics_scroll_vertical.saturating_add(1),
-                                Focus::Messages => messages_scroll_vertical = messages_scroll_vertical.saturating_add(1),
-                                _ => {}
+                            Focus::Metrics => {
+                                metrics_scroll_vertical = metrics_scroll_vertical.saturating_sub(1)
                             }
-                        }
-                        KeyCode::Left => {
-                            match focused_window {
-                                Focus::Logs => logs_scroll_horizontal = logs_scroll_horizontal.saturating_sub(1),
-                                Focus::Metrics => metrics_scroll_horizontal = metrics_scroll_horizontal.saturating_sub(1),
-                                Focus::Messages => messages_scroll_horizontal = messages_scroll_horizontal.saturating_sub(1),
-                                _ => {}
+                            Focus::Messages => {
+                                messages_scroll_vertical =
+                                    messages_scroll_vertical.saturating_sub(1)
                             }
-                        }
-                        KeyCode::Right => {
-                            match focused_window {
-                                Focus::Logs => logs_scroll_horizontal = logs_scroll_horizontal.saturating_add(1),
-                                Focus::Metrics => metrics_scroll_horizontal = metrics_scroll_horizontal.saturating_add(1),
-                                Focus::Messages => messages_scroll_horizontal = messages_scroll_horizontal.saturating_add(1),
-                                _ => {}
+                            _ => {}
+                        },
+                        KeyCode::Down => match focused_window {
+                            Focus::Logs => {
+                                logs_scroll_vertical = logs_scroll_vertical.saturating_add(1)
                             }
-                        }
+                            Focus::Metrics => {
+                                metrics_scroll_vertical = metrics_scroll_vertical.saturating_add(1)
+                            }
+                            Focus::Messages => {
+                                messages_scroll_vertical =
+                                    messages_scroll_vertical.saturating_add(1)
+                            }
+                            _ => {}
+                        },
+                        KeyCode::Left => match focused_window {
+                            Focus::Logs => {
+                                logs_scroll_horizontal = logs_scroll_horizontal.saturating_sub(1)
+                            }
+                            Focus::Metrics => {
+                                metrics_scroll_horizontal =
+                                    metrics_scroll_horizontal.saturating_sub(1)
+                            }
+                            Focus::Messages => {
+                                messages_scroll_horizontal =
+                                    messages_scroll_horizontal.saturating_sub(1)
+                            }
+                            _ => {}
+                        },
+                        KeyCode::Right => match focused_window {
+                            Focus::Logs => {
+                                logs_scroll_horizontal = logs_scroll_horizontal.saturating_add(1)
+                            }
+                            Focus::Metrics => {
+                                metrics_scroll_horizontal =
+                                    metrics_scroll_horizontal.saturating_add(1)
+                            }
+                            Focus::Messages => {
+                                messages_scroll_horizontal =
+                                    messages_scroll_horizontal.saturating_add(1)
+                            }
+                            _ => {}
+                        },
                         KeyCode::Enter => {
                             if input.is_empty() {
                                 continue;
                             }
                             let mut successful = sender
-                                .send(Recipients::All, input.clone().into_bytes().into(), false)
+                                .send(Recipients::All, input.as_bytes().to_vec(), false)
                                 .await
                                 .expect("failed to send message");
                             if !successful.is_empty() {
@@ -274,12 +290,15 @@ pub async fn run(
                             } else {
                                 warn!(input, "dropped message");
                             }
-                            let msg = Line::styled(format!(
-                                "[{}] {}: {}",
-                                chrono::Local::now().format("%m/%d %H:%M:%S"),
-                                formatted_me,
-                                input,
-                            ), Style::default().fg(Color::Yellow));
+                            let msg = Line::styled(
+                                format!(
+                                    "[{}] {}: {}",
+                                    chrono::Local::now().format("%m/%d %H:%M:%S"),
+                                    formatted_me,
+                                    input,
+                                ),
+                                Style::default().fg(Color::Yellow),
+                            );
                             messages.push(msg);
                             input = String::new();
                         }
@@ -296,24 +315,25 @@ pub async fn run(
                     }
                 }
             },
-            result = receiver.recv() => {
-                match result {
-                    Ok((peer, msg)) => {
-                        let peer = hex(&peer);
-                        messages.push(format!(
+            result = receiver.recv() => match result {
+                Ok((peer, msg)) => {
+                    let peer = hex(&peer);
+                    messages.push(
+                        format!(
                             "[{}] {}**{}: {}",
                             chrono::Local::now().format("%m/%d %H:%M:%S"),
                             &peer[..4],
                             &peer[peer.len() - 4..],
-                            String::from_utf8_lossy(&msg)
-                        ).into());
-                    }
-                    Err(err) => {
-                        debug!(?err, "failed to receive message");
-                        continue;
-                    }
+                            String::from_utf8_lossy(msg.as_ref())
+                        )
+                        .into(),
+                    );
                 }
-            }
+                Err(err) => {
+                    debug!(?err, "failed to receive message");
+                    continue;
+                }
+            },
         };
     }
 }

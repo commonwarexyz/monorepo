@@ -1,44 +1,63 @@
 use crate::{
-    mmr::{Location, Proof},
+    merkle::{Family, Location, Proof},
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
+            ordered::{
+                fixed::{Db as OrderedFixedDb, Operation as OrderedFixedOperation},
+                variable::{Db as OrderedVariableDb, Operation as OrderedVariableOperation},
+            },
+            unordered::{
+                fixed::{Db as FixedDb, Operation as FixedOperation},
+                variable::{Db as VariableDb, Operation as VariableOperation},
+            },
             FixedValue, VariableValue,
         },
-        immutable::{Immutable, Operation as ImmutableOp},
-        store::CleanStore as _,
+        immutable::{
+            fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
+            variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
+        },
+        keyless::{
+            fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
+            variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
+        },
+        operation::Key,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, RwLock, Storage};
-use commonware_utils::Array;
-use futures::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
-/// Result from a fetch operation
-pub struct FetchResult<Op, D: Digest> {
+/// Result from a fetch operation.
+pub struct FetchResult<F: Family, Op, D: Digest> {
     /// The proof for the operations
-    pub proof: Proof<D>,
+    pub proof: Proof<F, D>,
     /// The operations that were fetched
     pub operations: Vec<Op>,
     /// Channel to report success/failure back to resolver
     pub success_tx: oneshot::Sender<bool>,
+    /// Pinned merkle nodes at the start location, if requested
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
-impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
+impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
             .field("operations", &self.operations)
             .field("success_tx", &"<callback>")
+            .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
 }
 
-/// Trait for network communication with the sync server
+/// Trait for network communication with the sync server.
 pub trait Resolver: Send + Sync + Clone + 'static {
+    /// The merkle family backing the resolver's proofs
+    type Family: Family;
+
     /// The digest type used in proofs returned by the resolver
     type Digest: Digest;
 
@@ -50,180 +69,448 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
-    /// `size` operations.
+    /// `op_count` operations. If `include_pinned_nodes` is true, the result will include the
+    /// pinned merkle nodes at `start_loc`.
+    ///
+    /// The corresponding `cancel_tx` is dropped when the engine no longer needs this
+    /// request (e.g. due to a target update), causing `cancel_rx.await` to return
+    /// `Err`. Implementations may `select!` on it to abort in-flight work early.
     #[allow(clippy::type_complexity)]
     fn get_operations<'a>(
         &'a self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
+        include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
+           + Send
+           + 'a;
 }
 
-impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
-    type Error = qmdb::Error;
+macro_rules! impl_resolver {
+    ($db:ident, $op:ident, $val_bound:ident) => {
+        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
+        where
+            F: Family,
+            E: Context,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let (proof, operations) =
+                    self.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(self.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
+        where
+            F: Family,
+            E: Context,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let db = self.read().await;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
+        where
+            F: Family,
+            E: Context,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+    };
 }
 
-/// Implement Resolver directly for `Arc<RwLock<Any>>` to eliminate the need for wrapper types
-/// while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
-    type Error = qmdb::Error;
+// Unordered Fixed
+impl_resolver!(FixedDb, FixedOperation, FixedValue);
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
+// Unordered Variable
+impl_resolver!(VariableDb, VariableOperation, VariableValue);
+
+// Ordered Fixed
+impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
+
+// Ordered Variable
+impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
+
+// Immutable types need a separate macro because the key bound varies
+// (Array for fixed, Key for variable) unlike the other DB types which
+// always use Array.
+macro_rules! impl_resolver_immutable {
+    ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
+        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
+        where
+            F: Family,
+            E: Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let (proof, operations) =
+                    self.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(self.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
+        where
+            F: Family,
+            E: Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let db = self.read().await;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
+        where
+            F: Family,
+            E: Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+    };
 }
 
-impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = ImmutableOp<K, V>;
-    type Error = crate::qmdb::Error;
+// Immutable Fixed
+impl_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
+// Immutable Variable
+impl_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+
+// Keyless types have no key or translator, so they need their own macro.
+macro_rules! impl_resolver_keyless {
+    ($db:ident, $op:ident, $val_bound:ident) => {
+        impl<F, E, V, H> Resolver for Arc<$db<F, E, V, H>>
+        where
+            F: Family,
+            E: Context,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let (proof, operations) =
+                    self.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(self.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<F, E, V, H> Resolver for Arc<AsyncRwLock<$db<F, E, V, H>>>
+        where
+            F: Family,
+            E: Context,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let db = self.read().await;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<F, E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H>>>>
+        where
+            F: Family,
+            E: Context,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, V>;
+            type Error = qmdb::Error<F>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location<Self::Family>,
+                start_loc: Location<Self::Family>,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+    };
 }
 
-/// Implement Resolver directly for `Arc<RwLock<Immutable>>` to eliminate the need for wrapper
-/// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = ImmutableOp<K, V>;
-    type Error = crate::qmdb::Error;
+// Keyless Fixed
+impl_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
+// Keyless Variable
+impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::marker::PhantomData;
 
+    /// A resolver that always fails.
     #[derive(Clone)]
-    pub struct FailResolver<D, K, V> {
-        _digest: PhantomData<D>,
-        _key: PhantomData<K>,
-        _value: PhantomData<V>,
+    pub struct FailResolver<F: Family, Op, D> {
+        _phantom: PhantomData<(F, Op, D)>,
     }
 
-    impl<D, K, V> Resolver for FailResolver<D, K, V>
+    impl<F, Op, D> Resolver for FailResolver<F, Op, D>
     where
+        F: Family,
         D: Digest,
-        K: Array,
-        V: FixedValue + Clone + Send + Sync + 'static,
+        Op: Send + Sync + Clone + 'static,
     {
+        type Family = F;
         type Digest = D;
-        type Op = FixedOperation<K, V>;
-        type Error = qmdb::Error;
+        type Op = Op;
+        type Error = qmdb::Error<F>;
 
         async fn get_operations(
             &self,
-            _op_count: Location,
-            _start_loc: Location,
+            _op_count: Location<F>,
+            _start_loc: Location<F>,
             _max_ops: NonZeroU64,
-        ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+            _include_pinned_nodes: bool,
+            _cancel: oneshot::Receiver<()>,
+        ) -> Result<FetchResult<F, Op, D>, qmdb::Error<F>> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }
 
-    impl<D, K, V> FailResolver<D, K, V> {
+    impl<F: Family, Op, D> FailResolver<F, Op, D> {
         pub fn new() -> Self {
             Self {
-                _digest: PhantomData,
-                _key: PhantomData,
-                _value: PhantomData,
+                _phantom: PhantomData,
             }
         }
     }

@@ -9,6 +9,7 @@ Commonware is a Rust library providing high-performance, production-ready distri
 ## Essential Commands
 
 ### Quick Reference
+
 ```bash
 # Build entire workspace
 cargo build --workspace --all-targets
@@ -31,6 +32,7 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 ## Architecture
 
 ### Core Primitives
+
 - **broadcast**: Disseminate data over a wide-area network.
 - **codec**: Serialize structured data.
 - **coding**: Encode data to enable recovery from a subset of fragments.
@@ -48,6 +50,7 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
 
 ### Examples
+
 - **alto** (https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
 - **bridge** (`examples/bridge`): Send succinct consensus certificates between two networks.
 - **chat** (`examples/chat`): Send encrypted messages to a group of friends.
@@ -57,6 +60,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 - **sync** (`examples/sync`): Synchronize state between a server and client.
 
 ### Key Design Principles
+
 1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.
 2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic.rs`) commonly in the repository to drive tests.
 3. **Performance Sensitive**: All primitives are optimized for high throughput/low latency.
@@ -65,21 +69,48 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
 7. **Own Core Mechanisms**: If a primitive relies heavily on some core mechanism/algorithm, we should implement it rather than relying on external crates.
 
+### Stability Levels
+
+All public primitives are annotated with stability levels that constrain what changes are permitted:
+
+| Level        | Index | Description                                                                              |
+|--------------|-------|------------------------------------------------------------------------------------------|
+| **ALPHA**    | 0     | Breaking changes expected. No migration path provided.                                   |
+| **BETA**     | 1     | Wire and storage formats stable. Breaking changes include a migration path.              |
+| **GAMMA**    | 2     | API stable. Extensively tested and fuzzed.                                               |
+| **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
+| **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
+
+**When modifying code at ALPHA**: Breaking changes to APIs, wire formats, and storage formats are permitted without a migration path. Do not add backwards-compatibility shims or preserve old behavior.
+
+**When modifying code at BETA or higher**: You must not introduce breaking changes to wire or storage formats without providing a migration path.
+
+All public API items must have stability annotations. CI enforces this via the `Stability` and `Unstable-Public` workflows (`just check-stability` and `just unstable-public`). The annotation check uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
+
+**To annotate public items**, use one of:
+- `#[stability(LEVEL)]` for individual items (structs, functions, traits, etc.)
+- `stability_scope!(LEVEL { ... })` for groups of items
+- `stability_mod!(LEVEL, pub mod name)` for modules
+- Manual `#[cfg(not(any(..., commonware_stability_RESERVED)))]` for `#[macro_export]` macros (can't use `stability_scope!` due to Rust limitations)
+
 ## Technical Documentation
 
 Extensive technical writing in `docs/blogs/` provides deep insights into design decisions and implementation details:
 
 ### Core Concepts
+
 - **introducing-commonware.html**: Overview of the library's philosophy and goals
 - **commonware-the-anti-framework.html**: Why Commonware avoids framework patterns
 
 ### Primitive Deep Dives
+
 - **commonware-runtime.html**: Abstract runtime design and implementation
 - **commonware-cryptography.html**: Cryptographic primitives and safety guarantees
 - **commonware-broadcast.html**: Reliable broadcast protocol implementation
 - **commonware-deployer.html**: Infrastructure deployment automation
 
 ### Algorithms & Data Structures
+
 - **adb-current.html** / **adb-any.html**: Authenticated data broadcast protocols
 - **mmr.html**: Merkle Mountain Range implementation
 - **minimmit.html**: Minimal commit protocol
@@ -95,7 +126,7 @@ The repository uses GitHub Actions with three main workflows: **Fast** (every pu
 Run these commands locally before pushing to avoid CI failures:
 
 ```bash
-# 1. Format and lint (REQUIRED)
+# 1. Format, lint, check stability (REQUIRED)
 just lint
 
 # 2. Run tests (REQUIRED)
@@ -134,33 +165,126 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 ```
 
 ### CI Matrix
+
 - **OS**: Ubuntu, Windows, macOS
 - **Features**: Standard, io_uring storage, io_uring network (Linux only)
 - **Toolchain**: Stable (default), Nightly (formatting/fuzzing)
 
 ## Testing Strategy
-- Unit tests: Core logic validation
-- Integration tests: Cross-primitive interaction
-- Fuzz tests: Input validation and edge cases
-- MIRI tests: Memory safety verification for unsafe code
+
+- Property: Core logic and invariant validation (use "minifuzz" from the invariants crate)
+- Unit: Testing edge cases or particular scenarios.
+- Integration: Cross-primitive interaction
+- Fuzz: Extending property tests (cf. "Plan" pattern in dkg.rs or the math crate).
+- MIRI: Memory safety verification for unsafe code
 - Benchmarks: Performance regression detection
 - Coverage: Track test coverage with llvm-cov (see CI section)
 
+## Benchmarks
+
+Benchmarks use [Criterion](https://docs.rs/criterion) and are organized per-module with one file per operation. Benchmark names are parsed by the [benchmarks dashboard](https://commonware.xyz/benchmarks) and must follow the format `module::operation/key=value key=value`.
+
+### Directory Structure
+
+Each module that has benchmarks places them in a `benches/` directory alongside the module code:
+
+```
+crate/src/module/
+  mod.rs
+  benches/
+    bench.rs          # criterion_main! entry point
+    operation_a.rs    # one file per benchmarked operation
+    operation_b.rs
+```
+
+### Adding a New Benchmark
+
+#### 1. Create the benchmark file
+
+Create `crate/src/module/benches/operation_name.rs`:
+
+```rust
+use criterion::{criterion_group, Criterion};
+use std::hint::black_box;
+
+fn bench_operation_name(c: &mut Criterion) {
+    for n in [10, 100, 1000] {
+        c.bench_function(
+            &format!("{}/n={n}", module_path!()),
+            |b| {
+                b.iter(|| black_box(/* benchmarked call */));
+            },
+        );
+    }
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_operation_name,
+}
+```
+
+#### 2. Create or update the entry point
+
+Create `crate/src/module/benches/bench.rs` (or add to an existing one):
+
+```rust
+use criterion::criterion_main;
+
+mod operation_name;
+
+criterion_main!(operation_name::benches);
+```
+
+#### 3. Register the benchmark binary in `Cargo.toml`
+
+```toml
+[[bench]]
+name = "module"
+harness = false
+path = "src/module/benches/bench.rs"
+```
+
+The `name` field becomes the first segment of the benchmark name (e.g., `module::operation_name/...`).
+
+### Naming Rules
+
+These are enforced by CI (`lint_benchmark_names.py`):
+
+1. Use `module_path!()` macro to include the `module::operation` prefix
+2. Use `key=value` format for parameters (e.g., `size=1024`, not just `1024`)
+3. Separate parameters with spaces, not commas
+4. Use only one `/` separator (between the operation name and parameters)
+
+### Examples from the Codebase
+
+```
+bls12381::combine_signatures/sigs=100
+ed25519::signature_generation/ns_len=9 msg_len=32
+bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=10%
+bitmap::count_ones/size=1024 chunk_size=8
+rational::log2_ceil/value=1:2 precision=4
+```
+
 ## Development Workflow
+
 1. Make changes in relevant primitive directory
 2. Run `just test -p <crate-name> <test_name>` for quick iteration
 3. Run `just test -p <crate-name>` to verify all crate tests pass
 4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
 5. Run `just pre-pr` before creating a PR
 
-_Avoid running tests for the entire workspace unless absolutely necessary. This can take a LONG time to run._
+_Avoid building or testing the entire workspace unless absolutely necessary. The repository is large and full workspace builds/tests can take a VERY long time. Prefer targeting specific crates (e.g., `cargo build -p commonware-runtime`, `just test -p commonware-runtime`)._
 
 ## Reviewing PRs
+
 When reviewing PRs, focus the majority of your effort on correctness and performance (not style). Pay special attention to bugs
 that can be caused by malicious participants when a function accepts untrusted input. This repository is designed to be
 used in adversarial environments, and as such, we should be extra careful to ensure that the code is robust.
 
 ## Deterministic Async Testing
+
 Exclusively use the deterministic runtime (`runtime/src/deterministic.rs`) for reproducible async tests:
 ```rust
 #[test]
@@ -188,6 +312,7 @@ fn test_async_behavior() {
 ### Advanced Testing Patterns
 
 #### Test Configuration
+
 ```rust
 // Use deterministic::Config for precise control
 let cfg = deterministic::Config::new()
@@ -200,6 +325,7 @@ let executor = deterministic::Runner::timed(Duration::from_secs(30));
 ```
 
 #### Stateful Recovery Testing
+
 ```rust
 // Test unclean shutdowns and recovery
 let mut prev_ctx = None;
@@ -215,7 +341,26 @@ loop {
 }
 ```
 
+#### Deterministic RNG
+
+Use `commonware_utils::test_rng()` for random number generation in tests:
+```rust
+let mut rng = test_rng();
+let key = PrivateKey::random(&mut rng);
+```
+
+When you need multiple independent RNG streams in the same test (e.g., to generate
+non-overlapping keys), use `test_rng_seeded(seed)`:
+```rust
+let mut rng1 = test_rng();           // Stream 1: seed 0
+let mut rng2 = test_rng_seeded(1);   // Stream 2: seed 1
+```
+
+Avoid `OsRng`, `StdRng::from_entropy()`, or raw `StdRng::seed_from_u64()`.
+Exceptions: fuzz tests deriving seed from input, or loops testing multiple seeds.
+
 ### Simulated Network Testing
+
 To simulate network operations, use the simulated network (`p2p/src/simulated`):
 ```rust
 let (network, mut oracle) = Network::new(
@@ -238,6 +383,7 @@ oracle.add_link(pk1, pk2, Link {
 ```
 
 #### Dynamic Network Conditions
+
 ```rust
 // Test network partitions
 fn separated(n: usize, a: usize, b: usize) -> bool {
@@ -263,6 +409,7 @@ let lossy_link = Link {
 ```
 
 ### Byzantine Testing Patterns
+
 ```rust
 // Test Byzantine actors by replacing normal participants
 if idx_scheme == 0 {
@@ -282,6 +429,7 @@ assert!(!blocked.is_empty()); // Byzantine nodes should be blocked
 ```
 
 ### Verification Patterns
+
 ```rust
 // Use supervisors to monitor and verify distributed behavior
 let supervisor = mocks::supervisor::Supervisor::new(config);
@@ -303,6 +451,7 @@ assert_eq!(state1, state2); // Must be deterministic with same seed
 ```
 
 ### Key Testing Patterns
+
 - **Determinism First**: Always verify tests are deterministic with `context.auditor().state()`
 - **Label Everything**: Use `context.with_label()` for all actors and spawned tasks
 - **Multi-Channel Testing**: Register multiple channels per peer for different message types
@@ -317,6 +466,7 @@ assert_eq!(state1, state2); // Must be deterministic with same seed
 The deterministic runtime provides a simulated storage backend for testing storage operations without real I/O:
 
 ### Basic Storage Operations
+
 ```rust
 #[test]
 fn test_storage_operations() {
@@ -329,12 +479,12 @@ fn test_storage_operations() {
             .expect("Failed to open blob");
 
         // Write data at offset
-        blob.write_at(vec![1, 2, 3, 4], 0)
+        blob.write_at(0, vec![1, 2, 3, 4])
             .await
             .expect("Failed to write");
 
         // Read data from offset
-        let data = blob.read_at(vec![0u8; 4], 0)
+        let data = blob.read_at(0, vec![0u8; 4])
             .await
             .expect("Failed to read");
 
@@ -345,6 +495,7 @@ fn test_storage_operations() {
 ```
 
 ### Testing Crash Recovery
+
 ```rust
 #[test]
 fn test_crash_recovery() {
@@ -358,8 +509,9 @@ fn test_crash_recovery() {
         // Append data
         journal.append(1, data).await.expect("Failed to append");
 
-        // Close to simulate clean shutdown
-        journal.close().await.expect("Failed to close");
+        // Sync and drop to simulate clean shutdown
+        journal.sync(1).await.expect("Failed to close");
+        drop(journal);
 
         // Re-initialize to simulate restart
         let journal = Journal::init(context.with_label("journal"), cfg)
@@ -374,6 +526,7 @@ fn test_crash_recovery() {
 ```
 
 ### Testing Corruption Handling
+
 ```rust
 #[test]
 fn test_corruption_recovery() {
@@ -382,7 +535,8 @@ fn test_corruption_recovery() {
         // Write valid data
         let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
         journal.append(1, valid_data).await.unwrap();
-        journal.close().await.unwrap();
+        journal.sync(1).await.unwrap();
+        drop(journal);
 
         // Manually corrupt data
         let (blob, size) = context
@@ -391,7 +545,7 @@ fn test_corruption_recovery() {
             .unwrap();
 
         // Corrupt checksum or truncate data
-        blob.write_at(vec![0xFF; 4], size - 4).await.unwrap();
+        blob.write_at(size - 4, vec![0xFF; 4]).await.unwrap();
         blob.sync().await.unwrap();
 
         // Re-initialize and verify recovery
@@ -407,6 +561,7 @@ fn test_corruption_recovery() {
 ### Storage Testing Patterns
 
 #### Simulating Partial Writes
+
 ```rust
 // Test recovery from incomplete writes
 let (blob, size) = context.open(&partition, &name).await.unwrap();
@@ -419,6 +574,7 @@ assert_eq!(journal.size().await.unwrap(), expected_size);
 ```
 
 #### Testing Blob Management
+
 ```rust
 // Test multiple blob handling
 for section in 0..10 {
@@ -436,6 +592,7 @@ assert!(buffer.contains("pruned_total 5"));
 ```
 
 #### Conformance Testing
+
 ```rust
 // Protect against accidental format changes
 #[test]
@@ -447,11 +604,12 @@ fn test_storage_conformance() {
         for i in 0..100 {
             journal.append(1, i).await.unwrap();
         }
-        journal.close().await.unwrap();
+        journal.sync(1).await.unwrap();
+        drop(journal);
 
         // Hash blob contents to verify format
         let (blob, size) = context.open(&partition, &name).await.unwrap();
-        let buf = blob.read_at(vec![0u8; size as usize], 0).await.unwrap();
+        let buf = blob.read_at(0, vec![0u8; size as usize]).await.unwrap().coalesce();
         let digest = hash(buf.as_ref());
 
         // Compare against known hash
@@ -461,6 +619,7 @@ fn test_storage_conformance() {
 ```
 
 ### Key Storage Testing Principles
+
 - **Test Recovery Paths**: Always test crash recovery and restart scenarios
 - **Corrupt Data Intentionally**: Test handling of truncated, corrupted, or missing data
 - **Verify Metrics**: Check storage metrics (tracked, synced, pruned) after operations
@@ -554,6 +713,7 @@ Run `just test-conformance` to generate the initial hash values. The test framew
 ## Code Style Guide
 
 ### Runtime Isolation Rule
+
 **CRITICAL**: All code outside the `runtime` primitive must be runtime-agnostic:
 - Never import or use `tokio` directly outside of `runtime/`
 - Always use `futures` for async operations
@@ -561,6 +721,7 @@ Run `just test-conformance` to generate the initial hash values. The test framew
 - This ensures all primitives remain portable across different runtime implementations
 
 ### Error Handling
+
 Use `thiserror` for all error types:
 ```rust
 #[derive(Error, Debug)]
@@ -577,13 +738,28 @@ pub enum Error {
 ```
 
 ### Documentation
+
 - Use `//!` for module-level docs with Status and Examples sections
 - Use `///` for public items with clear descriptions
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
+- Place explanatory comments above the logical code block they describe; do not split a single consecutive sequence with inline comments between adjacent lines.
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
+- Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
+
+### `lib.rs` Headers
+
+- For crates that allow `no_std`, enable `std` with an `std` feature flag or with `cfg(test)`. Example: `#![cfg_attr(not(any(feature = "std", test)), no_std)]`
+- Add the `commonware` logos with the doc attribute:
+```
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+```
 
 ### Naming Conventions
+
 - **Types**: `PascalCase` (e.g., `PublicKey`, `SignatureSet`)
 - **Functions/methods**: `snake_case` (e.g., `verify_signature`, `from_bytes`)
 - **Constants**: `SCREAMING_SNAKE_CASE` (e.g., `MAX_MESSAGE_SIZE`)
@@ -592,6 +768,7 @@ pub enum Error {
 _Generally, we try to minimize the length of functions and variables._
 
 ### Namespace Conventions
+
 Namespaces (used for domain separation in transcripts, hashing, etc.) must follow the pattern:
 ```
 _COMMONWARE_<CRATE>_<OPERATION>
@@ -605,6 +782,7 @@ Examples:
 This ensures namespaces are globally unique and clearly identify both the crate and the specific operation. Changing a namespace is a breaking change that affects transcript randomness and derived values.
 
 ### Trait Patterns
+
 ```rust
 // Comprehensive trait bounds
 pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
@@ -616,11 +794,13 @@ pub trait PrivateKeyExt: PrivateKey {
 ```
 
 ### Async Code
+
 - Use `impl Future<Output = Result<T, Error>> + Send` for async trait methods
 - Utilize `commonware_macros::select!` for concurrent operations
 - Always add `Send + 'static` bounds for async traits
 
 ### Test Organization
+
 ```rust
 #[cfg(test)]
 mod tests {
@@ -640,11 +820,28 @@ mod tests {
 ```
 
 ### Module Structure
+
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
-- Always place imports at the top of a module (never inline)
+- Always place imports at the top of a module (never inline within functions)
+
+```rust
+// BAD - inline import inside function
+fn foo() -> usize {
+    use crate::Bar;
+    Bar::get()
+}
+
+// GOOD - import at module top
+use crate::Bar;
+
+fn foo() -> usize {
+    Bar::get()
+}
+```
 
 ### Performance Patterns
+
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations
 - Use `Arc` for shared ownership without cloning data
 - Implement `Clone` as cheaply as possible (often just `Arc` clones)
@@ -654,12 +851,14 @@ mod tests {
 - When in doubt, write a benchmark and profile the code (don't trust your intuition)
 
 ### Debugging Patterns
+
 - Use `tracing` for structured, leveled logging throughout the codebase
 - Implement metrics (via prometheus) for performance-critical operations
 - Add comprehensive context to errors for better debugging
 - Write a failing test case for a suspected bug before claiming it is a bug
 
 ### Safety Guidelines
+
 - Minimize unsafe blocks with clear `// SAFETY:` comments
 - Prefer safe abstractions over raw unsafe code
 - Enable overflow checks in all profiles (already configured)

@@ -2,11 +2,8 @@
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
-use futures::{channel::mpsc, SinkExt};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    sync::Mutex,
-};
+use commonware_utils::{channel::mpsc, sync::Mutex};
+use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{error, warn};
 
 /// Relay is a mock for distributing artifacts between applications.
@@ -16,6 +13,7 @@ pub struct Relay<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Relay<D, P> {
+    /// Creates a new relay.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
@@ -23,10 +21,17 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         }
     }
 
+    /// Deregisters all recipients without clearing the payloads.
+    pub fn deregister_all(&self) {
+        let mut recipients = self.recipients.lock();
+        recipients.clear();
+    }
+
+    /// Registers a new recipient that receives all broadcasts.
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         {
-            let mut recipients = self.recipients.lock().unwrap();
+            let mut recipients = self.recipients.lock();
             match recipients.entry(public_key.clone()) {
                 Entry::Vacant(vacant) => {
                     vacant.insert(vec![sender]);
@@ -40,10 +45,12 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         receiver
     }
 
-    pub async fn broadcast(&self, sender: &P, payload: (D, Bytes)) {
+    /// Broadcasts a payload to all registered recipients.
+    pub fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
+        // Send to all recipients
         let channels = {
             let mut channels = Vec::new();
-            let recipients = self.recipients.lock().unwrap();
+            let recipients = self.recipients.lock();
             for (public_key, channel) in recipients.iter() {
                 if public_key == sender {
                     continue;
@@ -53,8 +60,8 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
             channels
         };
         for (recipient, listeners) in channels {
-            for mut listener in listeners {
-                if let Err(e) = listener.send((payload.0, payload.1.clone())).await {
+            for listener in listeners {
+                if let Err(e) = listener.send((payload, data.clone())) {
                     error!(?e, ?recipient, "failed to send message to recipient");
                 }
             }

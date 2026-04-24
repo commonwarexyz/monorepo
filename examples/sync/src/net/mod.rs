@@ -1,9 +1,9 @@
-use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_runtime::{Buf, BufMut};
 use std::mem::size_of;
 
 /// Maximum message size in bytes (10MB).
-pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
 
 pub mod request_id;
 pub use request_id::RequestId;
@@ -100,7 +100,7 @@ impl Read for ErrorResponse {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let error_code = ErrorCode::read(buf)?;
-        let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
+        let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE as usize)?;
         let message = String::from_utf8(message_bytes)
             .map_err(|_| Error::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
         Ok(Self {
@@ -149,18 +149,20 @@ mod tests {
         let requester = Generator::new();
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(10).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(10),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(request.validate().is_ok());
 
         // Invalid start_loc
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(100).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(100),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(matches!(
             request.validate(),
@@ -170,9 +172,10 @@ mod tests {
         // start_loc beyond size
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(150).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(150),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(matches!(
             request.validate(),

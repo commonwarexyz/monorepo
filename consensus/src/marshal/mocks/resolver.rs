@@ -1,7 +1,5 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use commonware_utils::sync::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
 pub struct Resolver<K, V> {
@@ -18,10 +16,10 @@ impl<K: Eq + std::hash::Hash, V> Default for Resolver<K, V> {
 
 impl<K: Eq + std::hash::Hash, V: Clone> Resolver<K, V> {
     pub fn get(&self, key: K) -> V {
-        self.data.lock().unwrap().get(&key).unwrap().clone()
+        self.data.lock().get(&key).unwrap().clone()
     }
 
     pub fn put(&self, key: K, value: V) {
-        self.data.lock().unwrap().insert(key, value);
+        self.data.lock().insert(key, value);
     }
 }

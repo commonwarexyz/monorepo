@@ -3,41 +3,34 @@ use crate::{
     journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
+use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Buf, BufMut, Metrics, Storage};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
-/// Location of a record in `Journal`.
-struct Location {
-    offset: u32,
-    len: u32,
-}
-
 /// Record stored in the `Cache`.
-struct Record<V: Codec> {
+struct Record<V: CodecShared> {
     index: u64,
     value: V,
 }
 
-impl<V: Codec> Record<V> {
+impl<V: CodecShared> Record<V> {
     /// Create a new `Record`.
     const fn new(index: u64, value: V) -> Self {
         Self { index, value }
     }
 }
 
-impl<V: Codec> Write for Record<V> {
+impl<V: CodecShared> Write for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
         self.value.write(buf);
     }
 }
 
-impl<V: Codec> Read for Record<V> {
+impl<V: CodecShared> Read for Record<V> {
     type Cfg = V::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -47,14 +40,14 @@ impl<V: Codec> Read for Record<V> {
     }
 }
 
-impl<V: Codec> EncodeSize for Record<V> {
+impl<V: CodecShared> EncodeSize for Record<V> {
     fn encode_size(&self) -> usize {
         UInt(self.index).encode_size() + self.value.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Codec> arbitrary::Arbitrary<'_> for Record<V>
+impl<V: CodecShared> arbitrary::Arbitrary<'_> for Record<V>
 where
     V: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -64,14 +57,14 @@ where
 }
 
 /// Implementation of `Cache` storage.
-pub struct Cache<E: Storage + Metrics, V: Codec> {
+pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     items_per_blob: u64,
     journal: Journal<E, Record<V>>,
     pending: BTreeSet<u64>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
-    indices: BTreeMap<u64, Location>,
+    indices: BTreeMap<u64, u64>,
     intervals: RMap,
 
     items_tracked: Gauge,
@@ -80,7 +73,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
@@ -98,7 +91,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
         )
@@ -113,10 +106,10 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (_, offset, len, data) = result?;
+                let (_, offset, _, data) = result?;
 
                 // Store index
-                indices.insert(data.index, Location { offset, len });
+                indices.insert(data.index, offset);
 
                 // Store index in intervals
                 intervals.insert(data.index);
@@ -160,17 +153,14 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.gets.inc();
 
         // Get index location
-        let location = match self.indices.get(&index) {
-            Some(offset) => offset,
+        let offset = match self.indices.get(&index) {
+            Some(offset) => *offset,
             None => return Ok(None),
         };
 
         // Fetch item from disk
         let section = self.section(index);
-        let record = self
-            .journal
-            .get_exact(section, location.offset, location.len)
-            .await?;
+        let record = self.journal.get(section, offset).await?;
         Ok(Some(record.value))
     }
 
@@ -270,10 +260,10 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         // Store item in journal
         let record = Record::new(index, value);
         let section = self.section(index);
-        let (offset, len) = self.journal.append(section, record).await?;
+        let (offset, _) = self.journal.append(section, &record).await?;
 
         // Store index
-        self.indices.insert(index, Location { offset, len });
+        self.indices.insert(index, offset);
 
         // Add index to intervals
         self.intervals.insert(index);
@@ -306,26 +296,9 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.sync().await
     }
 
-    /// Close the [Cache].
-    ///
-    /// Any pending writes will be synced prior to closing.
-    pub async fn close(self) -> Result<(), Error> {
-        self.journal.close().await.map_err(Error::Journal)
-    }
-
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
-    }
-}
-
-impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
-    type Key = u64;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(*key).await
     }
 }
 
@@ -336,5 +309,25 @@ mod conformance {
 
     commonware_conformance::conformance_tests! {
         CodecConformance<Record<u64>>,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::deterministic::Context;
+
+    type TestCache = Cache<Context, u64>;
+
+    fn is_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    fn assert_cache_futures_are_send(cache: &TestCache, key: &u64) {
+        is_send(cache.get(*key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_cache_destroy_is_send(cache: TestCache) {
+        is_send(cache.destroy());
     }
 }

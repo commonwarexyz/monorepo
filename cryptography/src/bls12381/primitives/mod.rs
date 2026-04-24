@@ -8,39 +8,40 @@
 //! * <https://github.com/celo-org/celo-threshold-bls-rs>: Operations over the BLS12-381 scalar field, GJKR99, and Desmedt97.
 //! * <https://github.com/filecoin-project/blstrs> + <https://github.com/MystenLabs/fastcrypto>: Implementing operations over
 //!   the BLS12-381 scalar field with <https://github.com/supranational/blst>.
+//! * <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs>: Parallel MSM using tile-based Pippenger.
 //!
 //! # Example
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, variant::MinSig, sharing::Mode},
+//!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, N3f1};
 //! use rand::rngs::OsRng;
 //!
 //! // Configure number of players
 //! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (sharing, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), n);
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = b"demo";
 //! let message = b"hello world";
-//! let partials: Vec<_> = shares.iter().map(|s| partial_sign_message::<MinSig>(s, namespace, message)).collect();
+//! let partials: Vec<_> = shares.iter().map(|s| threshold::sign_message::<MinSig>(s, namespace, message)).collect();
 //!
 //! // Verify partial signatures
 //! for p in &partials {
-//!     partial_verify_message::<MinSig>(&sharing, namespace, message, p).expect("signature should be valid");
+//!     threshold::verify_message::<MinSig>(&sharing, namespace, message, p).expect("signature should be valid");
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover::<MinSig, _>(&sharing, &partials).unwrap();
+//! let threshold_sig = threshold::recover::<MinSig, _, N3f1>(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = sharing.public();
-//! verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
+//! ops::verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
 pub mod group;

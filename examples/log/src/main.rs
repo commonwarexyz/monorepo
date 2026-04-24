@@ -49,14 +49,14 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
-    simplex,
+    simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
-use commonware_p2p::{authenticated::discovery, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU32};
-use governor::Quota;
+use commonware_p2p::{authenticated::discovery, Manager as _};
+use commonware_parallel::Sequential;
+use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics, Quota, Runner};
+use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -136,7 +136,7 @@ fn main() {
             let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
-            bootstrapper_identities.push((verifier, bootstrapper_address));
+            bootstrapper_identities.push((verifier, bootstrapper_address.into()));
         }
     }
 
@@ -169,7 +169,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.update(0, validators.clone()).await;
+        oracle.track(0, validators.clone()).await;
 
         // Register consensus channels
         //
@@ -193,38 +193,40 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
+        let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
+            .expect("private key must be in participants");
         let (application, scheme, reporter, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
+                scheme,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                private_key: signer.clone(),
             },
         );
 
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,
+            elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
             reporter: reporter.clone(),
-            namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
             epoch: Epoch::zero(),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
-            notarization_timeout: Duration::from_secs(2),
-            nullify_retry: Duration::from_secs(10),
+            certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
-            fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-            buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+            strategy: Sequential,
+            forwarding: simplex::ForwardingPolicy::Disabled,
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 

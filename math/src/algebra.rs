@@ -4,8 +4,10 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
+    iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
@@ -58,6 +60,13 @@ fn monoid_exp<T: Clone>(
     acc
 }
 
+/// Return `shift, shift * base, shift * base^2, ...`.
+///
+/// Use `powers(R::one(), base)` if you just want the standard powers.
+pub fn powers<R: Ring>(shift: R, base: &R) -> impl Iterator<Item = R> + '_ {
+    iter::successors(Some(shift), move |state: &R| Some(state.clone() * base))
+}
+
 /// A basic trait we expect algebraic data structures to implement.
 ///
 /// Types implementing this trait need to support:
@@ -84,6 +93,17 @@ pub trait Object: Clone + Debug + PartialEq + Eq + Send + Sync {}
 /// There are other combinations of borrowing that could be chosen, but these
 /// should be efficiently implementable, even for a "heavier" struct, e.g.
 /// a vector of values.
+///
+/// # Properties
+///
+/// Implementations are expected to form a commutative group under addition:
+///
+/// - `+=` and `-=` agree with `+` and `-`,
+/// - addition satisfies `a + b = b + a` and `(a + b) + c = a + (b + c)`,
+/// - [`Additive::zero`] satisfies `0 + a = a`,
+/// - negation satisfies `a + (-a) = 0` and `a - b = a + (-b)`,
+/// - [`Additive::scale`] satisfies `a.scale(&[]) = 0`,
+///   `a.scale(&[1]) = a`, and `a.scale(m + n) = a.scale(m) + a.scale(n)`.
 ///
 /// # Usage
 ///
@@ -144,6 +164,14 @@ pub trait Additive:
 /// As with [`Additive`], the borrowing scheme is chosen to keep implementations
 /// efficient even for heavier structures.
 ///
+/// # Properties
+///
+/// Implementations are expected to have a commutative, associative
+/// multiplication:
+///
+/// - `*=` agrees with `*`,
+/// - multiplication satisfies `a * b = b * a` and `(a * b) * c = a * (b * c)`.
+///
 /// # Usage
 ///
 /// ```
@@ -176,6 +204,16 @@ pub trait Multiplicative:
 /// 1. `T *= &R`,
 /// 2. `T * &R`
 ///
+/// # Properties
+///
+/// Implementations are expected to behave like a right `R`-module action:
+///
+/// - `*=` agrees with `*`,
+/// - scalar multiplication satisfies `(a + b) * x = a * x + b * x`,
+/// - [`Space::msm`] satisfies `msm(points, scalars) = sum_i points[i] * scalars[i]`,
+/// - when `R: Multiplicative`, `((a * x) * y) = a * (x * y)`,
+/// - when `R: Ring`, `a * 1 = a` and `a * 0 = 0`.
+///
 ///
 /// # Usage
 ///
@@ -200,7 +238,7 @@ pub trait Space<R>:
     /// that they have the same length.
     ///
     /// For empty slices, the result should be [`Additive::zero`];
-    fn msm(points: &[Self], scalars: &[R], _concurrency: usize) -> Self {
+    fn msm(points: &[Self], scalars: &[R], _strategy: &impl ParStrategy) -> Self {
         msm_naive(points, scalars)
     }
 }
@@ -226,6 +264,16 @@ impl<R: Additive + Multiplicative> Space<R> for R {}
 ///
 /// This combines [`Additive`] and [`Multiplicative`], and introduces a
 /// neutral element for multiplication, [`Ring::one`].
+///
+/// # Properties
+///
+/// Implementations are expected to be commutative rings:
+///
+/// - [`Additive`] and [`Multiplicative`] laws both hold,
+/// - [`Ring::one`] satisfies `1 * a = a`,
+/// - multiplication satisfies `(a + b) * c = a * c + b * c`,
+/// - [`Ring::exp`] satisfies `a.exp(&[]) = 1`,
+///   `a.exp(&[1]) = a`, and `a.exp(m + n) = a.exp(m) * a.exp(n)`.
 pub trait Ring: Additive + Multiplicative {
     /// The neutral element for multiplication.
     ///
@@ -248,6 +296,14 @@ pub trait Ring: Additive + Multiplicative {
 ///
 /// This inherits from [`Ring`], and requires the existence of multiplicative
 /// inverses as well.
+///
+/// # Properties
+///
+/// Implementations are expected to satisfy the usual field inverse laws:
+///
+/// - all [`Ring`] laws hold,
+/// - `0.inv() = 0`,
+/// - for any nonzero `a`, `a * a.inv() = 1`.
 pub trait Field: Ring {
     /// The multiplicative inverse of an element.
     ///
@@ -256,6 +312,52 @@ pub trait Field: Ring {
     /// For any other element `x`, this should return an element `y` such that
     /// `x * y` is equal to [`Ring::one`].
     fn inv(&self) -> Self;
+}
+
+/// A [`Field`] which supports operations allowing for efficient NTTs.
+///
+/// Fields implementing this trait must have characteristic not equal to 2
+/// (so that 2 is invertible), and must have a multiplicative group with
+/// sufficiently large 2-adic order.
+///
+/// # Properties
+///
+/// Implementations are expected to satisfy the NTT-specific laws checked by
+/// the property tests:
+///
+/// - `root_of_unity(lg)` returns `None` only when `lg > MAX_LG_ROOT_ORDER`,
+/// - otherwise, `root_of_unity(lg)^(2^lg) = 1` and, for `lg > 0`, `root_of_unity(lg)^(2^lg - 1) != 1`,
+/// - `coset_shift()` and `coset_shift_inv()` satisfy `coset_shift() * coset_shift_inv() = 1`,
+/// - `div_2(a)` satisfies `div_2(a) * (1 + 1) = a`.
+pub trait FieldNTT: Field {
+    /// The maximum (lg) of the power of two root of unity this fields supports.
+    const MAX_LG_ROOT_ORDER: u8;
+
+    /// A root of unity of order `2^lg`.
+    ///
+    /// In other words, for `r = root_of_unity(lg)`, `k = 2^lg` should be the
+    /// smallest power such that `r^k = 1`.
+    ///
+    /// This function should return `None` only for `lg > MAX_LG_ROOT_ORDER`.
+    fn root_of_unity(lg: u8) -> Option<Self>;
+
+    /// An element which is not a power of a root of unity.
+    ///
+    /// In other words, for any `lg`, `k`, this element should not equal
+    /// `Self::root_of_unity(lg)^k`.
+    fn coset_shift() -> Self;
+
+    fn coset_shift_inv() -> Self {
+        Self::coset_shift().inv()
+    }
+
+    /// Return the result of dividing this element by `2`.
+    ///
+    /// This is equivalent to `self * (1 + 1)^-1`, but is usually implementable
+    /// in a more efficient way.
+    fn div_2(&self) -> Self {
+        (Self::one() + &Self::one()).inv() * self
+    }
 }
 
 /// A group suitable for use in cryptography.
@@ -280,6 +382,12 @@ pub trait CryptoGroup: Space<Self::Scalar> {
 ///
 /// Advanced protocols use this capability to create new generator elements
 /// whose discrete logarithm relative to other points is unknown.
+///
+/// # Properties
+///
+/// - equal `(domain_separator, message)` pairs satisfy
+///   `hash_to_group(dst0, m0) = hash_to_group(dst1, m1)` whenever
+///   `(dst0, m0) = (dst1, m1)`.
 pub trait HashToGroup: CryptoGroup {
     /// Hash a domain separator, and a message, returning a group element.
     ///
@@ -316,318 +424,402 @@ pub trait Random {
     fn random(rng: impl CryptoRngCore) -> Self;
 }
 
-#[cfg(any(feature = "test_strategies", test))]
+#[cfg(any(test, feature = "arbitrary"))]
 pub mod test_suites {
+    //! A collection of property tests for algebraic types.
+    //!
+    //! Provides pre-canned test suites that verify algebraic laws hold for a given type.
+    //! For example, [`fuzz_additive`] checks:
+    //!
+    //! - `+=` is consistent with `+`
+    //! - Addition is commutative
+    //! - Addition is associative
+    //! - Zero is the neutral element
+    //! - Negation is the additive inverse
+    //!
+    //! These functions take `&mut Unstructured` so users can run the harness themselves.
+    //!
+    //! # Example
+    //!
+    //! ```
+    //! # use commonware_math::algebra::test_suites::*;
+    //! # use commonware_math::fields::goldilocks::F;
+    //! commonware_invariants::minifuzz::test(|u| fuzz_field::<F>(u));
+    //! ```
     use super::*;
-    use proptest::{
-        prelude::*,
-        test_runner::{Config, TestRunner},
-    };
+    use arbitrary::{Arbitrary, Unstructured};
 
-    // This alias exists because I got tired of typing this out so many times.
-    type TestResult = Result<(), TestCaseError>;
-
-    fn run_proptest<T: Debug>(
-        file: &'static str,
-        strat: &impl Strategy<Value = T>,
-        test: impl Fn(T) -> TestResult,
-    ) {
-        let config = Config::default().clone_with_source_file(file);
-        TestRunner::new(config).run(strat, test).unwrap()
-    }
-
-    fn check_add_assign<T: Additive>((a, b): (T, T)) -> TestResult {
+    fn check_add_assign<T: Additive>(a: T, b: T) {
         let mut acc = a.clone();
         acc += &b;
-        prop_assert_eq!(acc, a + &b, "+= does not match +");
-        Ok(())
+        assert_eq!(acc, a + &b, "+= does not match +");
     }
 
-    fn check_add_commutes<T: Additive>((a, b): (T, T)) -> TestResult {
-        prop_assert_eq!(a.clone() + &b, b + &a, "+ not commutative");
-        Ok(())
+    fn check_add_commutes<T: Additive>(a: T, b: T) {
+        assert_eq!(a.clone() + &b, b + &a, "+ not commutative");
     }
 
-    fn check_add_associates<T: Additive>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!(
-            (a.clone() + &b) + &c,
-            a.clone() + &(b + &c),
-            "+ not associative"
-        );
-        Ok(())
+    fn check_add_associates<T: Additive>(a: T, b: T, c: T) {
+        assert_eq!((a.clone() + &b) + &c, a + &(b + &c), "+ not associative");
     }
 
-    fn check_add_zero<T: Additive>(a: T) -> TestResult {
-        prop_assert_eq!(T::zero() + &a, a, "a + 0 != a");
-        Ok(())
+    fn check_add_zero<T: Additive>(a: T) {
+        assert_eq!(T::zero() + &a, a, "a + 0 != a");
     }
 
-    fn check_add_neg_self<T: Additive>(a: T) -> TestResult {
+    fn check_add_neg_self<T: Additive>(a: T) {
         let neg_a = -a.clone();
-        prop_assert_eq!(T::zero(), a + &neg_a, "a - a != 0");
-        Ok(())
+        assert_eq!(T::zero(), a + &neg_a, "a - a != 0");
     }
 
-    fn check_sub_vs_add_neg<T: Additive>((a, b): (T, T)) -> TestResult {
-        prop_assert_eq!(a.clone() - &b, a.clone() + &-b, "a - b != a + (-b)");
-        Ok(())
+    fn check_sub_vs_add_neg<T: Additive>(a: T, b: T) {
+        assert_eq!(a.clone() - &b, a + &-b, "a - b != a + (-b)");
     }
 
-    fn check_sub_assign<T: Additive>((a, b): (T, T)) -> TestResult {
+    fn check_sub_assign<T: Additive>(a: T, b: T) {
         let mut acc = a.clone();
         acc -= &b;
-        prop_assert_eq!(acc, a - &b, "-= different from -");
+        assert_eq!(acc, a - &b, "-= different from -");
+    }
+
+    /// Fuzz the [`Additive`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    pub fn fuzz_additive<T: Additive + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let a: T = u.arbitrary()?;
+        let b: T = u.arbitrary()?;
+        let c: T = u.arbitrary()?;
+        check_add_assign(a.clone(), b.clone());
+        check_add_commutes(a.clone(), b.clone());
+        check_add_associates(a.clone(), b.clone(), c);
+        check_add_zero(a.clone());
+        check_add_neg_self(a.clone());
+        check_sub_vs_add_neg(a.clone(), b.clone());
+        check_sub_assign(a, b);
         Ok(())
     }
 
-    /// Run the test suite for the [`Additive`] trait.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_additive<T: Additive>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        let strat2 = &(strat, strat);
-        let strat3 = &(strat, strat, strat);
-
-        run_proptest(file, strat2, check_add_assign);
-        run_proptest(file, strat2, check_add_commutes);
-        run_proptest(file, strat3, check_add_associates);
-        run_proptest(file, strat, check_add_zero);
-        run_proptest(file, strat, check_add_neg_self);
-        run_proptest(file, strat2, check_sub_vs_add_neg);
-        run_proptest(file, strat2, check_sub_assign);
-    }
-
-    fn check_mul_assign<T: Multiplicative>((a, b): (T, T)) -> TestResult {
+    fn check_mul_assign<T: Multiplicative>(a: T, b: T) {
         let mut acc = a.clone();
         acc *= &b;
-        prop_assert_eq!(acc, a * &b, "*= different from *");
-        Ok(())
+        assert_eq!(acc, a * &b, "*= different from *");
     }
 
-    fn check_mul_commutes<T: Multiplicative>((a, b): (T, T)) -> TestResult {
-        prop_assert_eq!(a.clone() * &b, b * &a, "* not commutative");
-        Ok(())
+    fn check_mul_commutes<T: Multiplicative>(a: T, b: T) {
+        assert_eq!(a.clone() * &b, b * &a, "* not commutative");
     }
 
-    fn check_mul_associative<T: Multiplicative>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!((a.clone() * &b) * &c, a * &(b * &c), "* not associative");
-        Ok(())
+    fn check_mul_associative<T: Multiplicative>(a: T, b: T, c: T) {
+        assert_eq!((a.clone() * &b) * &c, a * &(b * &c), "* not associative");
     }
 
-    /// Run the test suite for the [`Multiplicative`] trait.
+    /// Fuzz the [`Multiplicative`] trait properties.
     ///
-    /// Use `file!()` for the first argument.
-    pub fn test_multiplicative<T: Multiplicative>(
-        file: &'static str,
-        strat: &impl Strategy<Value = T>,
-    ) {
-        let strat2 = &(strat, strat);
-        let strat3 = &(strat, strat, strat);
-
-        run_proptest(file, strat2, check_mul_assign);
-        run_proptest(file, strat2, check_mul_commutes);
-        run_proptest(file, strat3, check_mul_associative);
-    }
-
-    fn check_mul_one<T: Ring>(a: T) -> TestResult {
-        prop_assert_eq!(T::one() * &a, a, "a * 1 != a");
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    pub fn fuzz_multiplicative<T: Multiplicative + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let a: T = u.arbitrary()?;
+        let b: T = u.arbitrary()?;
+        let c: T = u.arbitrary()?;
+        check_mul_assign(a.clone(), b.clone());
+        check_mul_commutes(a.clone(), b.clone());
+        check_mul_associative(a, b, c);
         Ok(())
     }
 
-    fn check_mul_distributes<T: Ring>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!(
+    fn check_mul_one<T: Ring>(a: T) {
+        assert_eq!(T::one() * &a, a, "a * 1 != a");
+    }
+
+    fn check_mul_distributes<T: Ring>(a: T, b: T, c: T) {
+        assert_eq!(
             (a.clone() + &b) * &c,
             a * &c + &(b * &c),
             "(a + b) * c != a * c + b * c"
         );
+    }
+
+    /// Fuzz the [`Ring`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`Additive`] and [`Multiplicative`] properties.
+    pub fn fuzz_ring<T: Ring + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_additive::<T>(u)?;
+        fuzz_multiplicative::<T>(u)?;
+        let a: T = u.arbitrary()?;
+        let b: T = u.arbitrary()?;
+        let c: T = u.arbitrary()?;
+        check_mul_one(a.clone());
+        check_mul_distributes(a, b, c);
         Ok(())
     }
 
-    /// Run the test suite for the [`Ring`] trait.
-    ///
-    /// This will also run [`test_additive`] and [`test_multiplicative`].
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_ring<T: Ring>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        test_additive(file, strat);
-        test_multiplicative(file, strat);
-
-        let strat3 = &(strat, strat, strat);
-
-        run_proptest(file, strat, check_mul_one);
-        run_proptest(file, strat3, check_mul_distributes);
-    }
-
-    fn check_inv<T: Field>(a: T) -> TestResult {
+    fn check_inv<T: Field>(a: T) {
         if a == T::zero() {
-            prop_assert_eq!(T::zero(), a.inv(), "0.inv() != 0");
+            assert_eq!(T::zero(), a.inv(), "0.inv() != 0");
         } else {
-            prop_assert_eq!(a.inv() * &a, T::one(), "a * a.inv() != 1");
+            assert_eq!(a.inv() * &a, T::one(), "a * a.inv() != 1");
         }
+    }
+
+    /// Fuzz the [`Field`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`Ring`] properties.
+    pub fn fuzz_field<T: Field + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_ring::<T>(u)?;
+        let a: T = u.arbitrary()?;
+        check_inv(a);
         Ok(())
     }
 
-    /// Run the test suite for the [`Field`] trait.
-    ///
-    /// This will also run [`test_ring`].
-    ///
-    /// Ue `file!()` for the first argument.
-    pub fn test_field<T: Field>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        test_ring(file, strat);
-
-        run_proptest(file, strat, check_inv);
+    fn check_scale_distributes<R, K: Space<R>>(a: K, b: K, x: R) {
+        assert_eq!((a.clone() + &b) * &x, a * &x + &(b * &x));
     }
 
-    fn check_scale_distributes<R, K: Space<R>>((a, b, x): (K, K, R)) -> TestResult {
-        prop_assert_eq!((a.clone() + &b) * &x, a * &x + &(b * &x));
-        Ok(())
-    }
-
-    fn check_scale_assign<R, K: Space<R>>((a, b): (K, R)) -> TestResult {
+    fn check_scale_assign<R, K: Space<R>>(a: K, b: R) {
         let mut acc = a.clone();
         acc *= &b;
-        prop_assert_eq!(acc, a * &b);
-        Ok(())
+        assert_eq!(acc, a * &b);
     }
 
-    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R], conc: usize) -> TestResult {
-        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars, conc));
-        Ok(())
-    }
-
-    /// Run tests for [`Space`], assuming nothing about the scalar `R`.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_space<R: Debug, K: Space<R>>(
-        file: &'static str,
-        r_strat: &impl Strategy<Value = R>,
-        k_strat: &impl Strategy<Value = K>,
-    ) {
-        run_proptest(file, &(k_strat, k_strat, r_strat), check_scale_distributes);
-        run_proptest(file, &(k_strat, r_strat), check_scale_assign);
-        run_proptest(
-            file,
-            &(0..Config::default().max_default_size_range).prop_flat_map(|len| {
-                (
-                    prop::collection::vec(k_strat, len),
-                    prop::collection::vec(r_strat, len),
-                    1usize..=4,
-                )
-            }),
-            |(points, scalars, conc)| check_msm_eq_naive(&points, &scalars, conc),
+    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) {
+        use commonware_parallel::Sequential;
+        assert_eq!(
+            msm_naive(points, scalars),
+            K::msm(points, scalars, &Sequential)
         );
     }
 
-    fn check_scale_compat<R: Multiplicative, K: Space<R>>((a, b, c): (K, R, R)) -> TestResult {
-        prop_assert_eq!((a.clone() * &b) * &c, a * &(b * &c));
+    /// Fuzz the [`Space`] trait properties, assuming nothing about the scalar `R`.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    pub fn fuzz_space<R: Debug + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let a: K = u.arbitrary()?;
+        let b: K = u.arbitrary()?;
+        let x: R = u.arbitrary()?;
+        check_scale_distributes(a.clone(), b, x);
+        let c: R = u.arbitrary()?;
+        check_scale_assign(a, c);
+        let len: usize = u.int_in_range(0..=16)?;
+        let points: Vec<K> = (0..len)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        let scalars: Vec<R> = (0..len)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        check_msm_eq_naive(&points, &scalars);
         Ok(())
     }
 
-    /// Run tests for [`Space`], assuming `R` is [`Multiplicative`].
-    ///
-    /// This will also run [`test_space`], but check additional compatibility
-    /// properties with `R` having multiplication.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_space_multiplicative<R: Multiplicative, K: Space<R>>(
-        file: &'static str,
-        r_strat: &impl Strategy<Value = R>,
-        k_strat: &impl Strategy<Value = K>,
-    ) {
-        test_space(file, r_strat, k_strat);
-        run_proptest(file, &(k_strat, r_strat, r_strat), check_scale_compat);
+    fn check_scale_compat<R: Multiplicative, K: Space<R>>(a: K, b: R, c: R) {
+        assert_eq!((a.clone() * &b) * &c, a * &(b * &c));
     }
 
-    fn check_scale_one<R: Ring, K: Space<R>>(a: K) -> TestResult {
-        prop_assert_eq!(a.clone(), a * &R::one());
+    /// Fuzz the [`Space`] trait properties, assuming `R` is [`Multiplicative`].
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks base [`Space`] properties plus compatibility with multiplication.
+    pub fn fuzz_space_multiplicative<
+        R: Multiplicative + for<'a> Arbitrary<'a>,
+        K: Space<R> + for<'a> Arbitrary<'a>,
+    >(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_space::<R, K>(u)?;
+        let a: K = u.arbitrary()?;
+        let b: R = u.arbitrary()?;
+        let c: R = u.arbitrary()?;
+        check_scale_compat(a, b, c);
         Ok(())
     }
 
-    fn check_scale_zero<R: Ring, K: Space<R>>(a: K) -> TestResult {
-        prop_assert_eq!(K::zero(), a * &R::zero());
+    fn check_scale_one<R: Ring, K: Space<R>>(a: K) {
+        assert_eq!(a.clone(), a * &R::one());
+    }
+
+    fn check_scale_zero<R: Ring, K: Space<R>>(a: K) {
+        assert_eq!(K::zero(), a * &R::zero());
+    }
+
+    /// Fuzz the [`Space`] trait properties, assuming `R` is a [`Ring`].
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`fuzz_space_multiplicative`] properties plus compatibility
+    /// with [`Ring::one()`] and [`Additive::zero()`].
+    pub fn fuzz_space_ring<R: Ring + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_space_multiplicative::<R, K>(u)?;
+        let a: K = u.arbitrary()?;
+        check_scale_one::<R, K>(a.clone());
+        check_scale_zero::<R, K>(a);
         Ok(())
     }
 
-    /// Run tests for [`Space`] assuming that `R` is a [`Ring`].
-    ///
-    /// This also runs the tests in [`test_space_multiplicative`].
-    ///
-    /// This additionally checks compatibility with [`Ring::one()`] and
-    /// [`Additive::zero()`].
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_space_ring<R: Ring, K: Space<R>>(
-        file: &'static str,
-        r_strat: &impl Strategy<Value = R>,
-        k_strat: &impl Strategy<Value = K>,
-    ) {
-        test_space_multiplicative(file, r_strat, k_strat);
-
-        run_proptest(file, k_strat, check_scale_one);
-        run_proptest(file, k_strat, check_scale_zero);
-    }
-
-    fn check_hash_to_group<G: HashToGroup>(data: [[u8; 4]; 4]) -> TestResult {
+    fn check_hash_to_group<G: HashToGroup>(data: [[u8; 4]; 4]) {
         let (dst0, m0, dst1, m1) = (&data[0], &data[1], &data[2], &data[3]);
-        prop_assert_eq!(
+        assert_eq!(
             (dst0, m0) == (dst1, m1),
             G::hash_to_group(dst0, m0) == G::hash_to_group(dst1, m1)
         );
+    }
+
+    /// Fuzz the [`HashToGroup`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that the hash function is deterministic.
+    /// This doesn't check any properties related to [`CryptoGroup`].
+    pub fn fuzz_hash_to_group<G: HashToGroup>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let data: [[u8; 4]; 4] = u.arbitrary()?;
+        check_hash_to_group::<G>(data);
         Ok(())
     }
 
-    /// Run tests for [`HashToGroup`].
+    fn check_root_of_unity_order<T: FieldNTT>(lg: u8) {
+        if lg > T::MAX_LG_ROOT_ORDER {
+            assert!(
+                T::root_of_unity(lg).is_none(),
+                "root_of_unity should be None for lg > MAX"
+            );
+            return;
+        }
+        let root = T::root_of_unity(lg).expect("root_of_unity should be Some for lg <= MAX");
+
+        let mut order = Vec::new();
+        let mut remaining = lg;
+        while remaining >= 64 {
+            order.push(0u64);
+            remaining -= 64;
+        }
+        order.push(1u64 << remaining);
+
+        assert_eq!(root.exp(&order), T::one(), "root^(2^lg) should equal 1");
+        if lg > 0 {
+            let last = order.len() - 1;
+            order[0] = order[0].wrapping_sub(1);
+            for i in 0..last {
+                if order[i] == u64::MAX {
+                    order[i + 1] = order[i + 1].wrapping_sub(1);
+                }
+            }
+            assert_ne!(
+                root.exp(&order),
+                T::one(),
+                "root^(2^lg - 1) should not equal 1"
+            );
+        }
+    }
+
+    fn check_div_2<T: FieldNTT>(a: T) {
+        let two = T::one() + &T::one();
+        assert_eq!(a.div_2() * &two, a, "div_2(a) * 2 should equal a");
+    }
+
+    fn check_coset_shift_inv<T: FieldNTT>() {
+        assert_eq!(
+            T::coset_shift() * &T::coset_shift_inv(),
+            T::one(),
+            "coset_shift * coset_shift_inv should equal 1"
+        );
+    }
+
+    /// Run the test suite for the [`FieldNTT`] trait.
     ///
-    /// This doesn't run any tests related to [`CryptoGroup`], just the hash
-    /// to group functionality itself.
-    pub fn test_hash_to_group<G: HashToGroup>(file: &'static str) {
-        run_proptest(file, &any::<[[u8; 4]; 4]>(), check_hash_to_group::<G>);
+    /// This will also run [`fuzz_field`].
+    pub fn fuzz_field_ntt<T: FieldNTT + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_field::<T>(u)?;
+
+        // Biased choice towards div_2 checks
+        match u.int_in_range(0u8..=9)? {
+            0 => {
+                check_coset_shift_inv::<T>();
+            }
+            1 => {
+                let lg = u.int_in_range(0..=T::MAX_LG_ROOT_ORDER + 1)?;
+                check_root_of_unity_order::<T>(lg);
+            }
+            _ => {
+                check_div_2(T::arbitrary(u)?);
+            }
+        }
+        Ok(())
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::fields::goldilocks::F;
-    use proptest::prelude::*;
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz {
+        use super::*;
+        use crate::fields::goldilocks::F;
+        use arbitrary::{Arbitrary, Unstructured};
+        use commonware_parallel::Sequential;
 
-    proptest! {
-        #[test]
-        fn test_exp_one(x: F) {
-            assert_eq!(x.exp(&[1]), x);
+        #[derive(Debug, Arbitrary)]
+        pub enum Plan {
+            ExpOne(F),
+            ExpZero(F),
+            Exp(F, u32, u32),
+            PowersMatchesExp(F, F, u16),
+            ScaleOne(F),
+            ScaleZero(F),
+            Scale(F, u32, u32),
+            Msm2([F; 2], [F; 2]),
+        }
+
+        impl Plan {
+            pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+                match self {
+                    Self::ExpOne(x) => {
+                        assert_eq!(x.exp(&[1]), x);
+                    }
+                    Self::ExpZero(x) => {
+                        assert_eq!(x.exp(&[]), F::one());
+                    }
+                    Self::Exp(x, a, b) => {
+                        let a = u64::from(a);
+                        let b = u64::from(b);
+                        assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
+                    }
+                    Self::PowersMatchesExp(shift, base, index) => {
+                        let pow_i = powers(shift, &base)
+                            .take(usize::from(index) + 1)
+                            .last()
+                            .expect("len=index+1 guarantees at least one item");
+                        assert_eq!(pow_i, shift * base.exp(&[u64::from(index)]));
+                    }
+                    Self::ScaleOne(x) => {
+                        assert_eq!(x.scale(&[1]), x);
+                    }
+                    Self::ScaleZero(x) => {
+                        assert_eq!(x.scale(&[]), F::zero());
+                    }
+                    Self::Scale(x, a, b) => {
+                        let a = u64::from(a);
+                        let b = u64::from(b);
+                        assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
+                    }
+                    Self::Msm2(a, b) => {
+                        assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
+                    }
+                }
+                Ok(())
+            }
         }
 
         #[test]
-        fn test_exp_zero(x: F) {
-            assert_eq!(x.exp(&[]), F::one());
-        }
-
-        #[test]
-        fn test_exp(x: F, a: u32, b: u32) {
-            let a = u64::from(a);
-            let b = u64::from(b);
-            assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
-        }
-
-        #[test]
-        fn test_scale_one(x: F) {
-            assert_eq!(x.scale(&[1]), x);
-        }
-
-        #[test]
-        fn test_scale_zero(x: F) {
-            assert_eq!(x.scale(&[]), F::zero());
-        }
-
-        #[test]
-        fn test_scale(x: F, a: u32, b: u32) {
-            let a = u64::from(a);
-            let b = u64::from(b);
-            assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
-        }
-
-        #[test]
-        fn test_msm_2(a: [F; 2], b: [F; 2]) {
-            assert_eq!(F::msm(&a, &b, 1), a[0] * b[0] + a[1] * b[1]);
+        fn test_fuzz() {
+            commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
         }
     }
-}
+});

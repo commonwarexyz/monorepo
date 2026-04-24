@@ -2,10 +2,7 @@ use crate::{Error, Originator};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
 
 /// Messages that can be sent to a [Mailbox].
 pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
@@ -38,9 +35,8 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P
 
     async fn send(&mut self, recipients: Recipients<P>, request: R) -> Result<Vec<P>, Error> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(Message::Send {
+        self.sender
+            .send_lossy(Message::Send {
                 request,
                 recipients,
                 responder: tx,
@@ -50,6 +46,6 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P
     }
 
     async fn cancel(&mut self, commitment: R::Commitment) {
-        let _ = self.sender.send(Message::Cancel { commitment }).await;
+        self.sender.send_lossy(Message::Cancel { commitment }).await;
     }
 }

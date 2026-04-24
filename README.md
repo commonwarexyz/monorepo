@@ -22,6 +22,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [math](./math/README.md): Create and manipulate mathematical objects.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
+* [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
@@ -47,9 +48,35 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
+* [invariants](./invariants/README.md): Define and exercise invariants.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
+* [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
+
+## Stability
+
+All public primitives (and primitive dialects) in the Commonware Library are annotated with a stability level:
+
+| Level        | Index | Description                                                                              |
+|--------------|-------|------------------------------------------------------------------------------------------|
+| **ALPHA**    | 0     | Breaking changes expected. No migration path provided.                                   |
+| **BETA**     | 1     | Wire and storage formats stable. Breaking changes include a migration path.              |
+| **GAMMA**    | 2     | API stable. Extensively tested and fuzzed.                                               |
+| **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
+| **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
+
+_Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future)._
+
+Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
+
+```bash
+# Generate docs for only code with stability >= BETA (level 1)
+RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stability_BETA -A rustdoc::broken_intra_doc_links" cargo doc --open
+
+# Check if your application only uses commonware APIs with stability >= BETA
+RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
+```
 
 ## Licensing
 
@@ -60,6 +87,28 @@ This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) a
 We encourage external contributors to submit issues and pull requests to the Commonware Library. To learn more, please refer to our [contributing guidelines](./CONTRIBUTING.md).
 
 All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/projects/2). If something in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3) looks particularly useful, leave a comment so we can prioritize it!
+
+## MCP Support (for LLMs)
+
+Make your LLM more effective by connecting to the [Commonware Library MCP server](https://mcp.commonware.xyz). Learn more [here](https://commonware.xyz/mcp).
+
+### Claude Code
+
+```bash
+claude mcp add --transport http commonware-library https://mcp.commonware.xyz
+```
+
+### Cursor
+
+```json
+{
+  "mcpServers": {
+    "commonware-library": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}
+```
 
 ## Support
 

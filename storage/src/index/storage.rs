@@ -12,12 +12,12 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 /// Again optimizing for the common case, we store the first value directly in the [Record] to avoid
 /// indirection (heap jumping).
 #[derive(PartialEq, Eq)]
-pub(super) struct Record<V: Eq> {
+pub(super) struct Record<V: Eq + Send + Sync> {
     pub(super) value: V,
     pub(super) next: Option<Box<Self>>,
 }
 
-pub(super) trait IndexEntry<V: Eq> {
+pub(super) trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
     fn get(&self) -> &V;
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
@@ -33,7 +33,7 @@ const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 
 /// Phases of the [Cursor] during iteration.
 #[derive(PartialEq, Eq)]
-enum Phase<V: Eq> {
+enum Phase<V: Eq + Send + Sync> {
     /// Before iteration starts.
     Initial,
 
@@ -57,7 +57,7 @@ enum Phase<V: Eq> {
 }
 
 /// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
-pub(super) struct Cursor<'a, V: Eq, E: IndexEntry<V>> {
+pub(super) struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
     // The current phase of the cursor.
     phase: Phase<V>,
 
@@ -78,7 +78,7 @@ pub(super) struct Cursor<'a, V: Eq, E: IndexEntry<V>> {
     pruned: &'a Counter,
 }
 
-impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
+impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
     /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
     /// iteration.
     pub(super) const fn new(
@@ -111,21 +111,21 @@ impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
         self.past_pushed_list = next.next.is_some();
 
         // Add `next` to the tail of `past`.
-        if self.past_tail.is_none() {
-            self.past = Some(next);
-            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
-        } else {
+        if let Some(past_tail) = self.past_tail {
             // SAFETY: `past_tail` is always either `None` or points to a valid `Record`
             // within the `self.past` linked list. We only enter this branch when `past_tail`
             // is `Some`, meaning it was previously set to point to an owned node. The
             // assertion verifies the invariant that `past_tail.next` is `None` before we
             // append to it.
             unsafe {
-                assert!((*self.past_tail.unwrap()).next.is_none());
-                (*self.past_tail.unwrap()).next = Some(next);
-                let tail_next = (*self.past_tail.unwrap()).next.as_mut().unwrap();
+                assert!((*past_tail).next.is_none());
+                (*past_tail).next = Some(next);
+                let tail_next = (*past_tail).next.as_mut().unwrap();
                 self.past_tail = Some(&mut **tail_next as *mut Record<V>);
             }
+        } else {
+            self.past = Some(next);
+            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
         }
     }
 
@@ -143,7 +143,7 @@ impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
     }
 }
 
-impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
+impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -278,10 +278,7 @@ impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
 
     /// Removes anything in the cursor that satisfies the predicate.
     fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        loop {
-            let Some(old) = self.next() else {
-                break;
-            };
+        while let Some(old) = self.next() {
             if predicate(old) {
                 self.delete();
             }
@@ -294,12 +291,23 @@ impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
 // races can occur. The `where` clause ensures all generic parameters are also [Send].
 unsafe impl<'a, V, E> Send for Cursor<'a, V, E>
 where
-    V: Eq + Send,
-    E: IndexEntry<V> + Send,
+    V: Eq + Send + Sync,
+    E: IndexEntry<V>,
 {
 }
 
-impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
+// SAFETY: [Sync] is safe because the raw pointer `past_tail` only ever points to heap memory
+// owned by `self.past`. Since `past_tail` is never dereferenced through shared references in
+// a way that could cause data races, and the `where` clause ensures all generic parameters
+// are also [Sync], it is safe to share references to [Cursor] across threads.
+unsafe impl<'a, V, E> Sync for Cursor<'a, V, E>
+where
+    V: Eq + Send + Sync,
+    E: IndexEntry<V>,
+{
+}
+
+impl<V: Eq + Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
@@ -346,11 +354,11 @@ impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
 }
 
 /// An immutable iterator over the values associated with a translated key.
-pub struct ImmutableCursor<'a, V: Eq> {
+pub struct ImmutableCursor<'a, V: Eq + Send + Sync> {
     current: Option<&'a Record<V>>,
 }
 
-impl<'a, V: Eq> ImmutableCursor<'a, V> {
+impl<'a, V: Eq + Send + Sync> ImmutableCursor<'a, V> {
     /// Creates a new [ImmutableCursor] from a [Record].
     pub(super) const fn new(record: &'a Record<V>) -> Self {
         Self {
@@ -359,7 +367,7 @@ impl<'a, V: Eq> ImmutableCursor<'a, V> {
     }
 }
 
-impl<'a, V: Eq> Iterator for ImmutableCursor<'a, V> {
+impl<'a, V: Eq + Send + Sync> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {

@@ -4,18 +4,21 @@ members = [
     "codec",
     "coding",
     "collector",
-    "conformance/macros",
     "conformance",
+    "conformance/macros",
     "consensus",
     "cryptography",
     "deployer",
     "macros",
+    "macros/impl",
     "math",
     "p2p",
+    "parallel",
     "resolver",
     "runtime",
     "storage",
     "stream",
+    "invariants",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -32,6 +35,7 @@ members = [
     "collector/fuzz",
     "consensus/fuzz",
     "cryptography/fuzz",
+    "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
     "stream/fuzz",
@@ -41,22 +45,28 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.63"
+version = "2026.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
+rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
+warnings = "deny"
 
 [workspace.lints.clippy]
 missing-const-for-fn = "warn"
 use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
+disallowed_types = "deny"
+disallowed_macros = "deny"
+disallowed_methods = "deny"
 undocumented_unsafe_blocks = "deny"
+unused-async = "warn"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
 suspicious_op_assign_impl = "allow"
@@ -64,11 +74,11 @@ suspicious_op_assign_impl = "allow"
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
-async-lock = "3.4.0"
-aws-config = "1.8.10"
-aws-sdk-ec2 = "1.187.0"
+aws-config = "1.8.12"
+aws-lc-rs = "1.15.2"
+aws-sdk-ec2 = "1.200.0"
+aws-sdk-s3 = "1.91.0"
 axum = "0.8.1"
-bimap = "0.6.3"
 blake3 = { version = "1.8.2", default-features = false }
 blst = { version = "0.3.13", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
@@ -77,27 +87,33 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-broadcast = { version = "0.0.63", path = "broadcast" }
-commonware-codec = { version = "0.0.63", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.63", path = "coding" }
-commonware-collector = { version = "0.0.63", path = "collector" }
-commonware-conformance = { version = "0.0.63", path = "conformance" }
-commonware-conformance-macros = { version = "0.0.63", path = "conformance/macros" }
-commonware-consensus = { version = "0.0.63", path = "consensus" }
-commonware-cryptography = { version = "0.0.63", path = "cryptography", default-features = false }
-commonware-deployer = { version = "0.0.63", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.63", path = "macros" }
-commonware-math = { version = "0.0.63", path = "math", default-features = false }
-commonware-p2p = { version = "0.0.63", path = "p2p" }
-commonware-resolver = { version = "0.0.63", path = "resolver" }
-commonware-runtime = { version = "0.0.63", path = "runtime" }
-commonware-storage = { version = "0.0.63", path = "storage", default-features = false }
-commonware-stream = { version = "0.0.63", path = "stream" }
-commonware-utils = { version = "0.0.63", path = "utils", default-features = false }
+commonware-broadcast = { version = "2026.4.0", path = "broadcast" }
+commonware-codec = { version = "2026.4.0", path = "codec", default-features = false }
+commonware-coding = { version = "2026.4.0", path = "coding" }
+commonware-collector = { version = "2026.4.0", path = "collector" }
+commonware-conformance = { version = "2026.4.0", path = "conformance" }
+commonware-conformance-macros = { version = "2026.4.0", path = "conformance/macros" }
+commonware-consensus = { version = "2026.4.0", path = "consensus" }
+commonware-cryptography = { version = "2026.4.0", path = "cryptography", default-features = false }
+commonware-deployer = { version = "2026.4.0", path = "deployer", default-features = false }
+commonware-invariants = { version = "2026.4.0", path = "invariants" }
+commonware-macros = { version = "2026.4.0", path = "macros", default-features = false }
+commonware-macros-impl = { version = "2026.4.0", path = "macros/impl" }
+commonware-math = { version = "2026.4.0", path = "math", default-features = false }
+commonware-p2p = { version = "2026.4.0", path = "p2p" }
+commonware-parallel = { version = "2026.4.0", path = "parallel", default-features = false }
+commonware-resolver = { version = "2026.4.0", path = "resolver" }
+commonware-runtime = { version = "2026.4.0", path = "runtime" }
+commonware-storage = { version = "2026.4.0", path = "storage", default-features = false }
+commonware-stream = { version = "2026.4.0", path = "stream" }
+commonware-utils = { version = "2026.4.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
-crc32fast = "1.5.0"
+crc = "3.4.0"
+crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
+crossbeam-queue = "0.3.12"
 crossterm = "0.29.0"
+ctutils = "0.3.1"
 ecdsa = { version = "0.16.9", default-features = false }
 ed25519-consensus = { version = "2.1.0", default-features = false }
 ed25519-zebra = "4.1.0"
@@ -113,11 +129,12 @@ libfuzzer-sys = "0.4.9"
 num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
-num-traits = "0.2.19"
+num-traits = { version = "0.2.19", default-features = false }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
 p256 = { version = "0.13.2", default-features = false }
+parking_lot = "0.12.5"
 paste = "1.0.15"
 pin-project = "1.1.10"
 proc-macro-crate = "3.4.0"
@@ -143,7 +160,7 @@ sha2 = { version = "0.10.8", default-features = false }
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }
-tokio = "1.43.0"
+tokio = "1.50.0"
 toml = "0.9.8"
 tracing = "0.1.41"
 tracing-opentelemetry = "0.32.0"

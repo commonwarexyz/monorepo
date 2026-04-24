@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Handler, Mailbox, Message},
+    ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     Config,
 };
 use crate::{
@@ -15,61 +15,61 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{
-    utils::{requester, StaticManager},
-    Blocker, Receiver, Sender,
-};
+use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{ordered::Quorum, sequence::U64};
-use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
-use rand::{CryptoRng, Rng};
+use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc},
+    ordered::Quorum,
+    sequence::U64,
+};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
+    T: Strategy,
 > {
     context: ContextCell<E>,
     scheme: S,
     blocker: Option<B>,
+    strategy: T,
 
     epoch: Epoch,
-    namespace: Vec<u8>,
     mailbox_size: usize,
     fetch_timeout: Duration,
-    fetch_rate_per_peer: Quota,
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<Certificate<S, D>>,
+    mailbox_receiver: mpsc::Receiver<MailboxMessage<S, D>>,
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-    > Actor<E, S, B, D>
+        T: Strategy,
+    > Actor<E, S, B, D, T>
 {
-    pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
+                strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
 
                 state: State::new(cfg.fetch_concurrent),
 
@@ -85,7 +85,7 @@ impl<
         sender: impl Sender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
+        spawn_cell!(self.context, self.run(voter, sender, receiver))
     }
 
     async fn run(
@@ -107,17 +107,14 @@ impl<
         let (resolver_engine, mut resolver) = p2p::Engine::new(
             self.context.with_label("resolver"),
             p2p::Config {
-                manager: StaticManager::new(self.epoch.get(), participants),
+                peer_provider: StaticProvider::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
                 consumer: handler.clone(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    me,
-                    rate_limit: self.fetch_rate_per_peer,
-                    initial: self.fetch_timeout / 2,
-                    timeout: self.fetch_timeout,
-                },
+                me,
+                initial: self.fetch_timeout / 2,
+                timeout: self.fetch_timeout,
                 fetch_retry_timeout: self.fetch_timeout,
                 priority_requests: true,
                 priority_responses: false,
@@ -133,17 +130,22 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            mailbox = self.mailbox_receiver.next() => {
-                let Some(message) = mailbox else {
-                    break;
-                };
-                self.state.handle(message, &mut resolver).await;
+            Some(message) = self.mailbox_receiver.recv() else break => {
+                match message {
+                    MailboxMessage::Certificate(certificate) => {
+                        // Certificates from mailbox have no associated request view
+                        self.state.handle(certificate, None, &mut resolver).await;
+                    }
+                    MailboxMessage::Certified { view, success } => {
+                        self.state
+                            .handle_certified(view, success, &mut resolver)
+                            .await;
+                    }
+                }
             },
-            handler = handler_rx.next() => {
-                let Some(message) = handler else {
-                    break;
-                };
-                self.handle_resolver(message, &mut voter, &mut resolver).await;
+            Some(message) = handler_rx.recv() else break => {
+                self.handle_resolver(message, &mut voter, &mut resolver)
+                    .await;
             },
         }
     }
@@ -157,6 +159,7 @@ impl<
         // Validate message
         match incoming {
             Certificate::Notarization(notarization) => {
+                let notarization_view = notarization.view();
                 if notarization.view() < view {
                     debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
@@ -169,11 +172,18 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if self.state.is_failed(notarization_view) {
+                    debug!(
+                        %notarization_view,
+                        "rejecting notarization for view with failed certification"
+                    );
+                    return None;
+                }
+                if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
-                debug!(%view, received = %notarization.view(), "received notarization for request");
+                debug!(%view, received = %notarization_view, "received notarization for request");
                 Some(Certificate::Notarization(notarization))
             }
             Certificate::Finalization(finalization) => {
@@ -189,7 +199,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -209,7 +219,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }
@@ -222,12 +232,12 @@ impl<
     /// Handles a message from the [p2p::Engine].
     async fn handle_resolver(
         &mut self,
-        message: Message,
+        message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
         resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
     ) {
         match message {
-            Message::Deliver {
+            HandlerMessage::Deliver {
                 view,
                 data,
                 response,
@@ -236,26 +246,26 @@ impl<
                 let Some(parsed) = self.validate(view, data) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
-                    let _ = response.send(false);
+                    response.send_lossy(false);
                     return;
                 };
-                let _ = response.send(true);
+                response.send_lossy(true);
 
                 // Notify voter as soon as possible
                 voter.resolved(parsed.clone()).await;
 
-                // Process message
-                self.state.handle(parsed, resolver).await;
+                // Process message with the request view for tracking
+                self.state.handle(parsed, Some(view), resolver).await;
             }
-            Message::Produce { view, response } => {
+            HandlerMessage::Produce { view, response } => {
                 // Produce message for view
-                let Some(voter) = self.state.get(view) else {
+                let Some(certificate) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically
                     // send an error response to the caller (so they don't need to wait
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(voter.encode().into());
+                response.send_lossy(certificate.encode());
             }
         }
     }

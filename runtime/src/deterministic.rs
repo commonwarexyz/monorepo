@@ -18,6 +18,12 @@
 //! need to enable this feature. It is commonly used when testing consensus with external execution environments
 //! that use their own runtime (but are deterministic over some set of inputs).**
 //!
+//! # Metrics
+//!
+//! This runtime enforces metrics are unique and well-formed:
+//! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
+//! - Metric names must be unique (panics on duplicate registration)
+//!
 //! # Example
 //!
 //! ```rust
@@ -36,55 +42,69 @@
 //! });
 //! ```
 
+pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
     },
     storage::{
-        audited::Storage as AuditedStorage, memory::Storage as MemStorage,
-        metered::Storage as MeteredStorage,
+        audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
+        memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
     utils::{
+        add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker,
+        Panicker, Registry, ScopeGuard,
     },
-    Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
+    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+use commonware_codec::Encode;
 use commonware_macros::select;
-use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
+use commonware_parallel::ThreadPool;
+use commonware_utils::{
+    hex,
+    sync::{Mutex, RwLock},
+    time::SYSTEM_TIME_PRECISION,
+    SystemTimeExt,
+};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::BoxFuture,
+    future::Either,
     task::{waker, ArcWake},
-    Future, FutureExt,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use prometheus_client::{
-    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry},
+    registry::{Metric, Registry as PrometheusRegistry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand_core::CryptoRngCore;
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap},
+    borrow::Cow,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info_span, trace, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
 struct Metrics {
@@ -97,7 +117,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut Registry) -> Self {
+    pub fn init(registry: &mut PrometheusRegistry) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),
@@ -158,7 +178,7 @@ impl Auditor {
     where
         F: FnOnce(&mut Sha256),
     {
-        let mut digest = self.digest.lock().unwrap();
+        let mut digest = self.digest.lock();
 
         let mut hasher = Sha256::new();
         hasher.update(digest.as_ref());
@@ -173,48 +193,99 @@ impl Auditor {
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
     pub fn state(&self) -> String {
-        let hash = self.digest.lock().unwrap();
+        let hash = self.digest.lock();
         hex(hash.as_ref())
     }
 }
 
+/// A dynamic RNG that can safely be sent between threads.
+pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+
 /// Configuration for the `deterministic` runtime.
-#[derive(Clone)]
 pub struct Config {
-    /// Seed for the random number generator.
-    seed: u64,
+    /// Random number generator.
+    rng: BoxDynRng,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
     cycle: Duration,
+
+    /// Time the runtime starts at.
+    start_time: SystemTime,
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
+
+    /// Configuration for deterministic storage fault injection.
+    /// Defaults to no faults being injected.
+    storage_fault_cfg: FaultConfig,
+
+    /// Buffer pool configuration for network I/O.
+    network_buffer_pool_cfg: BufferPoolConfig,
+
+    /// Buffer pool configuration for storage I/O.
+    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Config {
     /// Returns a new [Config] with default values.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under Miri
+                let network_buffer_pool_cfg = BufferPoolConfig::for_network()
+                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_thread_cache_disabled();
+                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
+                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_thread_cache_disabled();
+            } else {
+                let network_buffer_pool_cfg =
+                    BufferPoolConfig::for_network().with_thread_cache_disabled();
+                let storage_buffer_pool_cfg =
+                    BufferPoolConfig::for_storage().with_thread_cache_disabled();
+            }
+        }
+
         Self {
-            seed: 42,
+            rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
+            start_time: UNIX_EPOCH,
             timeout: None,
             catch_panics: false,
+            storage_fault_cfg: FaultConfig::default(),
+            network_buffer_pool_cfg,
+            storage_buffer_pool_cfg,
         }
     }
 
     // Setters
     /// See [Config]
-    pub const fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+    pub fn with_seed(self, seed: u64) -> Self {
+        self.with_rng(Box::new(StdRng::seed_from_u64(seed)))
+    }
+
+    /// Provide the config with a dynamic RNG directly.
+    ///
+    /// This can be useful for, e.g. fuzzing, where beyond just having randomness,
+    /// you might want to control specific bytes of the RNG. By taking in a dynamic
+    /// RNG object, any behavior is possible.
+    pub fn with_rng(mut self, rng: BoxDynRng) -> Self {
+        self.rng = rng;
         self
     }
+
     /// See [Config]
     pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
+        self
+    }
+    /// See [Config]
+    pub const fn with_start_time(mut self, start_time: SystemTime) -> Self {
+        self.start_time = start_time;
         self
     }
     /// See [Config]
@@ -227,15 +298,35 @@ impl Config {
         self.catch_panics = catch_panics;
         self
     }
+    /// See [Config]
+    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.network_buffer_pool_cfg = cfg;
+        self
+    }
+    /// See [Config]
+    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.storage_buffer_pool_cfg = cfg;
+        self
+    }
+
+    /// Configure storage fault injection.
+    ///
+    /// When set, the runtime will inject deterministic storage errors based on
+    /// the provided configuration. Faults are drawn from the shared RNG, ensuring
+    /// reproducible failure patterns for a given seed.
+    pub const fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
+        self.storage_fault_cfg = faults;
+        self
+    }
 
     // Getters
     /// See [Config]
-    pub const fn seed(&self) -> u64 {
-        self.seed
-    }
-    /// See [Config]
     pub const fn cycle(&self) -> Duration {
         self.cycle
+    }
+    /// See [Config]
+    pub const fn start_time(&self) -> SystemTime {
+        self.start_time
     }
     /// See [Config]
     pub const fn timeout(&self) -> Option<Duration> {
@@ -244,6 +335,14 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn network_buffer_pool_config(&self) -> &BufferPoolConfig {
+        &self.network_buffer_pool_cfg
+    }
+    /// See [Config]
+    pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
+        &self.storage_buffer_pool_cfg
     }
 
     /// Assert that the configuration is valid.
@@ -256,6 +355,10 @@ impl Config {
             self.cycle >= SYSTEM_TIME_PRECISION,
             "cycle duration must be greater than or equal to system time precision"
         );
+        assert!(
+            self.start_time >= UNIX_EPOCH,
+            "start time must be greater than or equal to unix epoch"
+        );
     }
 }
 
@@ -265,19 +368,24 @@ impl Default for Config {
     }
 }
 
+/// A (prefixed_name, attributes) pair identifying a unique metric registration.
+type MetricKey = (String, Vec<(String, String)>);
+
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
+    registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
 }
 
 impl Executor {
@@ -289,7 +397,7 @@ impl Executor {
         #[cfg(feature = "external")]
         std::thread::sleep(self.cycle);
 
-        let mut time = self.time.lock().unwrap();
+        let mut time = self.time.lock();
         *time = time
             .checked_add(self.cycle)
             .expect("executor time overflowed");
@@ -309,7 +417,7 @@ impl Executor {
 
         let mut skip_until = None;
         {
-            let sleeping = self.sleeping.lock().unwrap();
+            let sleeping = self.sleeping.lock();
             if let Some(next) = sleeping.peek() {
                 if next.time > current {
                     skip_until = Some(next.time);
@@ -318,7 +426,7 @@ impl Executor {
         }
 
         skip_until.map_or(current, |deadline| {
-            let mut time = self.time.lock().unwrap();
+            let mut time = self.time.lock();
             *time = deadline;
             let now = *time;
             trace!(now = now.epoch_millis(), "time skipped");
@@ -328,7 +436,7 @@ impl Executor {
 
     /// Wake any sleepers whose deadlines have elapsed.
     fn wake_ready_sleepers(&self, current: SystemTime) {
-        let mut sleeping = self.sleeping.lock().unwrap();
+        let mut sleeping = self.sleeping.lock();
         while let Some(next) = sleeping.peek() {
             if next.time <= current {
                 let sleeper = sleeping.pop().unwrap();
@@ -358,10 +466,13 @@ pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
+    network_buffer_pool_cfg: BufferPoolConfig,
+    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Checkpoint {
@@ -409,11 +520,7 @@ impl Runner {
     /// Initialize a new `deterministic` runtime with the default configuration
     /// and the provided seed.
     pub fn seeded(seed: u64) -> Self {
-        let cfg = Config {
-            seed,
-            ..Config::default()
-        };
-        Self::new(cfg)
+        Self::new(Config::default().with_seed(seed))
     }
 
     /// Initialize a new `deterministic` runtime with the default configuration
@@ -441,6 +548,8 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
+        let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
+        let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
         let mut root = Box::pin(panicked.interrupt(f(context)));
 
         // Register the root task
@@ -451,10 +560,9 @@ impl Runner {
         let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
-                let current = executor.time.lock().unwrap();
+                let current = executor.time.lock();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
-                        // Drop the lock before panicking to avoid mutex poisoning.
                         drop(current);
                         panic!("runtime timeout");
                     }
@@ -466,7 +574,7 @@ impl Runner {
 
             // Shuffle tasks (if more than one)
             if queue.len() > 1 {
-                let mut rng = executor.rng.lock().unwrap();
+                let mut rng = executor.rng.lock();
                 queue.shuffle(&mut *rng);
             }
 
@@ -515,7 +623,7 @@ impl Runner {
                     }
                     Mode::Work(future) => {
                         // Get the future (if it still exists)
-                        let mut fut_opt = future.lock().unwrap();
+                        let mut fut_opt = future.lock();
                         let Some(fut) = fut_opt.as_mut() else {
                             trace!(id, "skipping already complete task");
 
@@ -563,13 +671,13 @@ impl Runner {
         // reference to executor until after we have dropped
         // all tasks (as they may attempt to upgrade their weak
         // reference to the executor during drop).
-        executor.sleeping.lock().unwrap().clear(); // included in tasks
+        executor.sleeping.lock().clear(); // included in tasks
         let tasks = executor.tasks.clear();
         for task in tasks {
             let Mode::Work(future) = &task.mode else {
                 continue;
             };
-            *future.lock().unwrap() = None;
+            *future.lock() = None;
         }
 
         // Drop the root task to release any Context references it may still hold.
@@ -601,7 +709,10 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            dns: executor.dns,
             catch_panics: executor.panicker.catch(),
+            network_buffer_pool_cfg,
+            storage_buffer_pool_cfg,
         };
 
         (output, checkpoint)
@@ -682,7 +793,7 @@ impl Tasks {
 
     /// Increment the task counter and return the old value.
     fn increment(&self) -> u128 {
-        let mut counter = self.counter.lock().unwrap();
+        let mut counter = self.counter.lock();
         let old = *counter;
         *counter = counter.checked_add(1).expect("task counter overflow");
         old
@@ -719,7 +830,7 @@ impl Tasks {
     /// Register a new task to be executed.
     fn register(&self, id: u128, task: Arc<Task>) {
         // Track as running until completion
-        self.running.lock().unwrap().insert(id, task);
+        self.running.lock().insert(id, task);
 
         // Add to ready
         self.queue(id);
@@ -727,20 +838,20 @@ impl Tasks {
 
     /// Enqueue an already registered task to be executed.
     fn queue(&self, id: u128) {
-        let mut ready = self.ready.lock().unwrap();
+        let mut ready = self.ready.lock();
         ready.push(id);
     }
 
     /// Drain all ready tasks.
     fn drain(&self) -> Vec<u128> {
-        let mut queue = self.ready.lock().unwrap();
+        let mut queue = self.ready.lock();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
     /// The number of ready tasks.
     fn ready(&self) -> usize {
-        self.ready.lock().unwrap().len()
+        self.ready.lock().len()
     }
 
     /// Lookup a task.
@@ -748,23 +859,23 @@ impl Tasks {
     /// We must return cloned here because we cannot hold the running lock while polling a task (will
     /// deadlock if [Self::register_work] is called).
     fn get(&self, id: u128) -> Option<Arc<Task>> {
-        let running = self.running.lock().unwrap();
+        let running = self.running.lock();
         running.get(&id).cloned()
     }
 
     /// Remove a task.
     fn remove(&self, id: u128) {
-        self.running.lock().unwrap().remove(&id);
+        self.running.lock().remove(&id);
     }
 
     /// Clear all tasks.
     fn clear(&self) -> Vec<Arc<Task>> {
         // Clear ready
-        self.ready.lock().unwrap().clear();
+        self.ready.lock().clear();
 
         // Clear running tasks
         let running: BTreeMap<u128, Arc<Task>> = {
-            let mut running = self.running.lock().unwrap();
+            let mut running = self.running.lock();
             take(&mut *running)
         };
         running.into_values().collect()
@@ -772,19 +883,23 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
+type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
 pub struct Context {
     name: String,
+    attributes: Vec<(String, String)>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -792,13 +907,17 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            attributes: self.attributes.clone(),
+            scope: self.scope.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
 
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -806,20 +925,45 @@ impl Clone for Context {
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let start_time = UNIX_EPOCH;
+        let start_time = cfg.start_time;
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let auditor = Arc::new(Auditor::default());
+
+        // Create shared RNG (used by both executor and storage)
+        let rng = Arc::new(Mutex::new(cfg.rng));
+
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            cfg.network_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            cfg.storage_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
+        // Create storage fault config (default to disabled if None)
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
         let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            AuditedStorage::new(
+                FaultyStorage::new(
+                    MemStorage::new(storage_buffer_pool.clone()),
+                    rng.clone(),
+                    storage_fault_config,
+                ),
+                auditor.clone(),
+            ),
             runtime_registry,
         );
+
+        // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
@@ -828,27 +972,33 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
             auditor,
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng,
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            dns: Mutex::new(HashMap::new()),
         });
 
         (
             Self {
                 name: String::new(),
+                attributes: Vec::new(),
+                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                network_buffer_pool,
+                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -868,14 +1018,24 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
         let network =
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
+
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            checkpoint.network_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            checkpoint.storage_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
@@ -887,9 +1047,11 @@ impl Context {
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
+            dns: checkpoint.dns,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -899,12 +1061,16 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                attributes: Vec::new(),
+                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
+                network_buffer_pool,
+                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -925,6 +1091,45 @@ impl Context {
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
     }
+
+    /// Compute a [Sha256] digest of all storage contents.
+    pub fn storage_audit(&self) -> Digest {
+        self.storage.inner().inner().inner().audit()
+    }
+
+    /// Access the storage fault configuration.
+    ///
+    /// Changes to the returned [`FaultConfig`] take effect immediately for
+    /// subsequent storage operations. This allows dynamically enabling or
+    /// disabling fault injection during a test.
+    pub fn storage_fault_config(&self) -> Arc<RwLock<FaultConfig>> {
+        self.storage.inner().inner().config()
+    }
+
+    /// Register a DNS mapping for a hostname.
+    ///
+    /// If `addrs` is `None`, the mapping is removed.
+    /// If `addrs` is `Some`, the mapping is added or updated.
+    pub fn resolver_register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+        // Update the auditor
+        let executor = self.executor();
+        let host = host.into();
+        executor.auditor.event(b"resolver_register", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(addrs.encode());
+        });
+
+        // Update the DNS mapping
+        let mut dns = executor.dns.lock();
+        match addrs {
+            Some(addrs) => {
+                dns.insert(host, addrs);
+            }
+            None => {
+                dns.remove(&host);
+            }
+        }
+    }
 }
 
 impl crate::Spawner for Context {
@@ -935,11 +1140,6 @@ impl crate::Spawner for Context {
 
     fn shared(mut self, blocking: bool) -> Self {
         self.execution = Execution::Shared(blocking);
-        self
-    }
-
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
         self
     }
 
@@ -954,9 +1154,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -965,12 +1165,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future: BoxFuture<'_, T> = if is_instrumented {
-            f(self)
-                .instrument(info_span!(parent: None, "task", name = %label.name()))
-                .boxed()
+        let future = if traced {
+            let span = info_span!(parent: None, "task", name = %label.name());
+            for (key, value) in &self.attributes {
+                span.set_attribute(key.clone(), value.clone());
+            }
+            Either::Left(f(self).instrument(span))
         } else {
-            f(self).boxed()
+            Either::Right(f(self))
         };
         let (f, handle) = Handle::init(
             future,
@@ -994,7 +1196,7 @@ impl crate::Spawner for Context {
             hasher.update(value.to_be_bytes());
         });
         let stop_resolved = {
-            let mut shutdown = executor.shutdown.lock().unwrap();
+            let mut shutdown = executor.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -1008,22 +1210,51 @@ impl crate::Spawner for Context {
                 result.map_err(|_| Error::Closed)?;
                 Ok(())
             },
-            _ = timeout_future => {
-                Err(Error::Timeout)
-            }
+            _ = timeout_future => Err(Error::Timeout),
         }
     }
 
     fn stopped(&self) -> Signal {
         let executor = self.executor();
         executor.auditor.event(b"stopped", |_| {});
-        let stopped = executor.shutdown.lock().unwrap().stopped();
+        let stopped = executor.shutdown.lock().stopped();
         stopped
     }
 }
 
+impl crate::ThreadPooler for Context {
+    fn create_thread_pool(
+        &self,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
+        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+
+        if rayon::current_thread_index().is_none() {
+            builder = builder.use_current_thread()
+        }
+
+        builder
+            .spawn_handler(move |thread| {
+                self.with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .map(Arc::new)
+    }
+}
+
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(label);
+
+        // Construct the full label name
         let name = {
             let prefix = self.name.clone();
             if prefix.is_empty() {
@@ -1042,8 +1273,50 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn label(&self) -> String {
-        self.name.clone()
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(key);
+
+        // Add the attribute to the list of attributes
+        let mut attributes = self.attributes.clone();
+        assert!(
+            add_attribute(&mut attributes, key, value),
+            "duplicate attribute key: {key}"
+        );
+        Self {
+            attributes,
+            ..self.clone()
+        }
+    }
+
+    fn with_scope(&self) -> Self {
+        let executor = self.executor();
+        executor.auditor.event(b"with_scope", |_| {});
+
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        let weak = self.executor.clone();
+        let scope_id = executor.registry.lock().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            if let Some(exec) = weak.upgrade() {
+                exec.registry.lock().remove_scope(id);
+            }
+        }));
+        Self {
+            scope: Some(guard),
+            ..self.clone()
+        }
+    }
+
+    fn with_span(&self) -> Self {
+        Self {
+            traced: true,
+            ..self.clone()
+        }
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
@@ -1051,11 +1324,15 @@ impl crate::Metrics for Context {
         let name = name.into();
         let help = help.into();
 
-        // Register metric
+        // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
+            for (k, v) in &self.attributes {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
         });
         let prefixed_name = {
             let prefix = &self.name;
@@ -1065,19 +1342,33 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric);
+
+        // Check for duplicate registration (O(1) lookup)
+        let metric_key = (prefixed_name.clone(), self.attributes.clone());
+        let is_new = executor.registered_metrics.lock().insert(metric_key);
+        assert!(
+            is_new,
+            "duplicate metric: {} with attributes {:?}",
+            prefixed_name, self.attributes
+        );
+
+        // Route to the appropriate registry (root or scoped)
+        let mut registry = executor.registry.lock();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
+        sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
+        let encoded = executor.registry.lock().encode();
+        encoded
     }
 }
 
@@ -1126,14 +1417,14 @@ impl Future for Sleeper {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let executor = self.executor();
         {
-            let current_time = *executor.time.lock().unwrap();
+            let current_time = *executor.time.lock();
             if current_time >= self.time {
                 return Poll::Ready(());
             }
         }
         if !self.registered {
             self.registered = true;
-            executor.sleeping.lock().unwrap().push(Alarm {
+            executor.sleeping.lock().push(Alarm {
                 time: self.time,
                 waker: cx.waker().clone(),
             });
@@ -1144,7 +1435,7 @@ impl Future for Sleeper {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.executor().time.lock().unwrap()
+        *self.executor().time.lock()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -1204,13 +1495,13 @@ where
 
         // Only allow the task to progress once the sampled delay has elapsed.
         let executor = this.executor.upgrade().expect("executor already dropped");
-        let current_time = *executor.time.lock().unwrap();
+        let current_time = *executor.time.lock();
         if current_time < *this.target {
             // Register exactly once with the deterministic sleeper queue so the executor
             // wakes us once the clock reaches the scheduled target time.
             if !*this.registered {
                 *this.registered = true;
-                executor.sleeping.lock().unwrap().push(Alarm {
+                executor.sleeping.lock().push(Alarm {
                     time: *this.target,
                     waker: cx.waker().clone(),
                 });
@@ -1251,7 +1542,6 @@ impl Pacer for Context {
             .executor()
             .time
             .lock()
-            .unwrap()
             .checked_add(latency)
             .expect("overflow when setting wake time");
 
@@ -1291,13 +1581,30 @@ impl crate::Network for Context {
     }
 }
 
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Get the record
+        let executor = self.executor();
+        let dns = executor.dns.lock();
+        let result = dns.get(host).cloned();
+        drop(dns);
+
+        // Update the auditor
+        executor.auditor.event(b"resolve", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(result.encode());
+        });
+        result.ok_or_else(|| Error::ResolveFailed(host.to_string()))
+    }
+}
+
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        let result = executor.rng.lock().unwrap().next_u32();
+        let result = executor.rng.lock().next_u32();
         result
     }
 
@@ -1306,7 +1613,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        let result = executor.rng.lock().unwrap().next_u64();
+        let result = executor.rng.lock().next_u64();
         result
     }
 
@@ -1315,7 +1622,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        executor.rng.lock().unwrap().fill_bytes(dest);
+        executor.rng.lock().fill_bytes(dest);
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
@@ -1323,7 +1630,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        let result = executor.rng.lock().unwrap().try_fill_bytes(dest);
+        let result = executor.rng.lock().try_fill_bytes(dest);
         result
     }
 }
@@ -1333,8 +1640,13 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
-        self.storage.open(partition, name).await
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -1346,6 +1658,16 @@ impl crate::Storage for Context {
     }
 }
 
+impl crate::BufferPooler for Context {
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
+        &self.network_buffer_pool
+    }
+
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
+        &self.storage_buffer_pool
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1353,13 +1675,41 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
+    #[cfg(feature = "external")]
+    use commonware_utils::channel::mpsc;
+    use commonware_utils::channel::oneshot;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
+    #[cfg(not(feature = "external"))]
+    use futures::stream::StreamExt as _;
     #[cfg(feature = "external")]
-    use futures::{channel::mpsc, SinkExt, StreamExt};
-    use futures::{channel::oneshot, task::noop_waker};
+    use futures::StreamExt;
+    use futures::{stream::FuturesUnordered, task::noop_waker};
+
+    async fn task(i: usize) -> usize {
+        for _ in 0..5 {
+            reschedule().await;
+        }
+        i
+    }
+
+    fn run_tasks(tasks: usize, runner: deterministic::Runner) -> (String, Vec<usize>) {
+        runner.start(|context| async move {
+            let mut handles = FuturesUnordered::new();
+            for i in 0..=tasks - 1 {
+                handles.push(context.clone().spawn(move |_| task(i)));
+            }
+
+            let mut outputs = Vec::new();
+            while let Some(result) = handles.next().await {
+                outputs.push(result.unwrap());
+            }
+            assert_eq!(outputs.len(), tasks);
+            (context.auditor().state(), outputs)
+        })
+    }
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1477,7 +1827,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(Vec::from(data), 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1490,8 +1840,8 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read.as_ref(), data);
+            let read = blob.read_at(0, data.len()).await.unwrap();
+            assert_eq!(read.coalesce(), data);
         });
     }
 
@@ -1517,13 +1867,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
-        let data = Vec::from("Hello, world!");
+        let data = b"Hello, world!";
 
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
         });
 
         // Recover the runtime
@@ -1533,6 +1883,68 @@ mod tests {
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_dns_mappings_persist() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let host = "example.com";
+        let addrs = vec![
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
+        ];
+
+        // Register DNS mapping and recover the runtime
+        let (state, checkpoint) = executor.start_and_recover({
+            let addrs = addrs.clone();
+            |context| async move {
+                context.resolver_register(host, Some(addrs));
+                context.auditor().state()
+            }
+        });
+
+        // Verify auditor state is the same
+        assert_eq!(state, checkpoint.auditor.state());
+
+        // Check that DNS mappings persist after recovery
+        let executor = Runner::from(checkpoint);
+        executor.start(move |context| async move {
+            let resolved = context.resolve(host).await.unwrap();
+            assert_eq!(resolved, addrs);
+        });
+    }
+
+    #[test]
+    fn test_recover_time_persists() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let duration_to_sleep = Duration::from_secs(10);
+
+        // Sleep for some time and recover the runtime
+        let (time_before_recovery, checkpoint) = executor.start_and_recover(|context| async move {
+            context.sleep(duration_to_sleep).await;
+            context.current()
+        });
+
+        // Check that the time advanced correctly before recovery
+        assert_eq!(
+            time_before_recovery.duration_since(UNIX_EPOCH).unwrap(),
+            duration_to_sleep
+        );
+
+        // Check that the time persists after recovery
+        let executor2 = Runner::from(checkpoint);
+        executor2.start(move |context| async move {
+            assert_eq!(context.current(), time_before_recovery);
+
+            // Advance time further
+            context.sleep(duration_to_sleep).await;
+            assert_eq!(
+                context.current().duration_since(UNIX_EPOCH).unwrap(),
+                duration_to_sleep * 2
+            );
         });
     }
 
@@ -1564,6 +1976,32 @@ mod tests {
                 Duration::ZERO
             );
         });
+    }
+
+    #[test]
+    fn test_start_time() {
+        // Initialize runtime with default config
+        let executor_default = deterministic::Runner::default();
+        executor_default.start(|context| async move {
+            assert_eq!(context.current(), UNIX_EPOCH);
+        });
+
+        // Initialize runtime with custom start time
+        let start_time = UNIX_EPOCH + Duration::from_secs(100);
+        let cfg = Config::default().with_start_time(start_time);
+        let executor = deterministic::Runner::new(cfg);
+
+        executor.start(move |context| async move {
+            // Check that the time matches the custom start time
+            assert_eq!(context.current(), start_time);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "start time must be greater than or equal to unix epoch")]
+    fn test_bad_start_time() {
+        let cfg = Config::default().with_start_time(UNIX_EPOCH - Duration::from_secs(1));
+        deterministic::Runner::new(cfg);
     }
 
     #[cfg(not(feature = "external"))]
@@ -1631,7 +2069,7 @@ mod tests {
             let start_sim = context.current();
             let (first_tx, first_rx) = oneshot::channel();
             let (second_tx, second_rx) = oneshot::channel();
-            let (mut results_tx, mut results_rx) = mpsc::channel(2);
+            let (results_tx, mut results_rx) = mpsc::channel(2);
 
             // Create a thread that waits for 1 second
             let first_wait = Duration::from_secs(1);
@@ -1648,7 +2086,7 @@ mod tests {
 
             // Wait for a delay sampled before the external send occurs
             let first = context.clone().spawn({
-                let mut results_tx = results_tx.clone();
+                let results_tx = results_tx.clone();
                 move |context| async move {
                     first_rx.pace(&context, Duration::ZERO).await.unwrap();
                     let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
@@ -1676,7 +2114,7 @@ mod tests {
             // Ensure order is correct
             let mut results = Vec::new();
             for _ in 0..2 {
-                results.push(results_rx.next().await.unwrap());
+                results.push(results_rx.recv().await.unwrap());
             }
             assert_eq!(results, vec![1, 2]);
         });
@@ -1726,5 +2164,219 @@ mod tests {
                 .expect("missing runtime_iterations_total metric");
             assert!(iterations > 500);
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_invalid_first_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("1invalid");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
+    fn test_metrics_label_invalid_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("invalid-label");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "using runtime label is not allowed")]
+    fn test_metrics_label_reserved_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label(METRICS_PREFIX);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate attribute key: epoch")]
+    fn test_metrics_duplicate_attribute_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let _ = context
+                .with_label("test")
+                .with_attribute("epoch", "old")
+                .with_attribute("epoch", "new");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_injection_and_recovery() {
+        // Phase 1: Run with 100% sync failure rate
+        let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
+            sync_rate: Some(1.0),
+            ..Default::default()
+        });
+
+        let (result, checkpoint) =
+            deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
+                let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
+                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.sync().await // This should fail due to fault injection
+            });
+
+        // Verify sync failed
+        assert!(result.is_err());
+
+        // Phase 2: Recover and disable faults explicitly
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            // Explicitly disable faults for recovery verification
+            *ctx.storage_fault_config().write() = FaultConfig::default();
+
+            // Data was not synced, so blob should be empty (unsynced writes are lost)
+            let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
+            assert_eq!(len, 0, "unsynced data should be lost after recovery");
+
+            // Now we can write and sync successfully
+            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+
+            // Verify data persisted
+            let read_buf = blob.read_at(0, 9).await.unwrap();
+            assert_eq!(read_buf.coalesce(), b"recovered");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_dynamic_config() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
+
+            // Initially no faults - sync should succeed
+            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.sync().await.expect("initial sync should succeed");
+
+            // Enable sync faults dynamically
+            let storage_fault_cfg = ctx.storage_fault_config();
+            storage_fault_cfg.write().sync_rate = Some(1.0);
+
+            // Now sync should fail
+            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            let result = blob.sync().await;
+            assert!(result.is_err(), "sync should fail with faults enabled");
+
+            // Disable faults
+            storage_fault_cfg.write().sync_rate = Some(0.0);
+
+            // Sync should succeed again
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_determinism() {
+        // Run the same sequence twice with the same seed
+        fn run_with_seed(seed: u64) -> Vec<bool> {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_fault_config(FaultConfig {
+                    open_rate: Some(0.5),
+                    ..Default::default()
+                });
+
+            let runner = deterministic::Runner::new(cfg);
+            runner.start(|ctx| async move {
+                let mut results = Vec::new();
+                for i in 0..20 {
+                    let name = format!("blob{i}");
+                    let result = ctx.open("test_determinism", name.as_bytes()).await;
+                    results.push(result.is_ok());
+                }
+                results
+            })
+        }
+
+        let results1 = run_with_seed(12345);
+        let results2 = run_with_seed(12345);
+        assert_eq!(
+            results1, results2,
+            "same seed should produce same failure pattern"
+        );
+
+        let results3 = run_with_seed(99999);
+        assert_ne!(
+            results1, results3,
+            "different seeds should produce different patterns"
+        );
+    }
+
+    #[test]
+    fn test_storage_fault_determinism_multi_task() {
+        // Run the same multi-task sequence twice with the same seed.
+        // This tests that task shuffling + fault decisions interleave deterministically.
+        fn run_with_seed(seed: u64) -> Vec<u32> {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_fault_config(FaultConfig {
+                    open_rate: Some(0.5),
+                    write_rate: Some(0.3),
+                    sync_rate: Some(0.2),
+                    ..Default::default()
+                });
+
+            let runner = deterministic::Runner::new(cfg);
+            runner.start(|ctx| async move {
+                // Spawn multiple tasks that do storage operations
+                let mut handles = Vec::new();
+                for i in 0..5 {
+                    let ctx = ctx.clone();
+                    handles.push(ctx.spawn(move |ctx| async move {
+                        let mut successes = 0u32;
+                        for j in 0..4 {
+                            let name = format!("task{i}_blob{j}");
+                            if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
+                                successes += 1;
+                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                    successes += 1;
+                                }
+                                if blob.sync().await.is_ok() {
+                                    successes += 1;
+                                }
+                            }
+                        }
+                        successes
+                    }));
+                }
+
+                // Collect results from all tasks
+                let mut results = Vec::new();
+                for handle in handles {
+                    results.push(handle.await.unwrap());
+                }
+                results
+            })
+        }
+
+        let results1 = run_with_seed(42);
+        let results2 = run_with_seed(42);
+        assert_eq!(
+            results1, results2,
+            "same seed should produce same multi-task pattern"
+        );
+
+        let results3 = run_with_seed(99999);
+        assert_ne!(
+            results1, results3,
+            "different seeds should produce different patterns"
+        );
     }
 }

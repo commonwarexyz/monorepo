@@ -1,30 +1,51 @@
-use crate::{mmr::Location, qmdb::sync::Journal};
+use crate::{
+    merkle::{Family, Location},
+    qmdb::sync::Journal,
+    translator::Translator,
+};
 use commonware_cryptography::Digest;
-use std::{future::Future, ops::Range};
+use commonware_utils::range::NonEmptyRange;
+use std::future::Future;
 
-/// A database that can be synced
-pub trait Database: Sized {
-    type Op;
-    type Journal: Journal<Op = Self::Op>;
-    type Config;
+pub trait Config {
+    type JournalConfig;
+    fn journal_config(&self) -> Self::JournalConfig;
+}
+
+impl<T: Translator, J: Clone> Config for crate::qmdb::any::Config<T, J> {
+    type JournalConfig = J;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.journal_config.clone()
+    }
+}
+
+impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
+    type JournalConfig = C;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.log.clone()
+    }
+}
+
+impl<J: Clone> Config for crate::qmdb::keyless::Config<J> {
+    type JournalConfig = J;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.log.clone()
+    }
+}
+
+pub trait Database: Sized + Send {
+    type Family: Family;
+    type Op: Send;
+    type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
+    type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + Clone;
+        + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
-
-    /// Create/open a journal for syncing the given range.
-    ///
-    /// The implementation must:
-    /// - Reuse any on-disk data whose logical locations lie within the range.
-    /// - Discard/ignore any data outside the range.
-    /// - Report `size()` equal to the next location to be filled.
-    fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -32,24 +53,26 @@ pub trait Database: Sized {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
+        range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error>>;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Returns whether persisted local state already matches the requested sync target.
+    ///
+    /// Databases can override this to let the sync engine finish immediately when an
+    /// on-disk database already reflects the target. Implementations may verify only
+    /// that persisted tree size and root match; the merkle pruning boundary is not
+    /// re-checked. Callers are responsible for keeping their local pruning point at or
+    /// below `target.range.start()`; pruning past it can cause a later
+    /// [`Self::from_sync_result`] rebuild to fail.
+    fn has_local_target_state(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
+    ) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
-
-    /// Resize an existing journal to a new range.
-    ///
-    /// The implementation must:
-    /// - If current `size() <= range.start`: close the journal and return a newly prepared one
-    ///   (equivalent to `create_journal`).
-    /// - Else: prune/discard data outside the range.
-    /// - Report `size()` as the next location to be set by the sync engine.
-    fn resize_journal(
-        journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>>;
 }

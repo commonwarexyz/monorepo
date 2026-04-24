@@ -124,13 +124,6 @@ fn fuzz_fill_and_format(byte_val: u8) {
     assert_eq!(debug_str.len(), 64); // 32 bytes * 2 hex chars each
 }
 
-// Test empty method
-fn fuzz_empty() {
-    let empty_digest = OurSha256::EMPTY;
-    let manual_empty = OurSha256::new().finalize();
-    assert_eq!(empty_digest, manual_empty);
-}
-
 // Test Zeroize implementation
 fn fuzz_zeroize() {
     let mut digest = OurSha256::fill(0xFF);
@@ -144,7 +137,7 @@ fn fuzz_zeroize() {
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 9 {
+    match input.case_selector % 8 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -152,8 +145,7 @@ fn fuzz(input: FuzzInput) {
         4 => fuzz_encode_decode(&input.data),
         5 => fuzz_default_clone(),
         6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
-        7 => fuzz_empty(),
-        8 => fuzz_zeroize(),
+        7 => fuzz_zeroize(),
         _ => unreachable!(),
     }
 }

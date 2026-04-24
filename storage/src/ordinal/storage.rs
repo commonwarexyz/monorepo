@@ -1,18 +1,19 @@
 use super::{Config, Error};
-use crate::rmap::RMap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use crate::{rmap::RMap, Context, Persistable};
+use commonware_codec::{
+    CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Clock, Error as RError, Metrics, Storage,
+    Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
-use commonware_utils::{bitmap::BitMap, hex};
+use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
-    mem::take,
 };
 use tracing::{debug, warn};
 
@@ -25,17 +26,17 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(&value.encode());
+        let crc = Crc32::checksum(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(&self.value.encode())
+        self.crc == Crc32::checksum(&self.value.encode())
     }
 }
 
 impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + u32::SIZE;
+    const SIZE: usize = V::SIZE + crc32::Digest::SIZE;
 }
 
 impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
@@ -68,7 +69,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
+pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -79,8 +80,10 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // RMap for interval tracking
     intervals: RMap,
 
-    // Pending index entries to be synced, grouped by section
-    pending: BTreeSet<u64>,
+    // Pending sections to be synced. The async mutex serializes
+    // concurrent sync calls so a second sync cannot return before
+    // the first has finished flushing.
+    pending: AsyncMutex<BTreeSet<u64>>,
 
     // Metrics
     puts: Counter,
@@ -92,7 +95,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -142,8 +145,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             }
 
             debug!(blob = index, len, "found index blob");
-            let wrapped_blob = Write::new(blob, len, config.write_buffer);
-            blobs.insert(index, wrapped_blob);
+            blobs.insert(index, (blob, len));
         }
 
         // Initialize intervals by scanning existing records
@@ -154,7 +156,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (section, blob) in &blobs {
+        for (section, (blob, size)) in &blobs {
             // Skip if bits are provided and the section is not in the bits
             if let Some(bits) = &bits {
                 if !bits.contains_key(section) {
@@ -164,13 +166,13 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             }
 
             // Initialize read buffer
-            let size = blob.size().await;
-            let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
+            let mut replay_blob =
+                ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
             let items_per_blob = config.items_per_blob.get();
-            while offset < size {
+            while offset < *size {
                 // Calculate index for this record
                 let index = section * items_per_blob + (offset / Record::<V>::SIZE as u64);
 
@@ -193,14 +195,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
-                let mut record_buf = vec![0u8; Record::<V>::SIZE];
-                replay_blob
-                    .read_exact(&mut record_buf, Record::<V>::SIZE)
-                    .await?;
+                let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) {
+                if let Ok(record) = Record::<V>::read(&mut record_buf) {
                     if record.is_valid() {
                         items += 1;
                         intervals.insert(index);
@@ -221,6 +220,17 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             "rebuilt intervals"
         );
 
+        // Wrap blobs in write buffers
+        let blobs = blobs
+            .into_iter()
+            .map(|(index, (blob, len))| {
+                (
+                    index,
+                    Write::from_pooler(&context, blob, len, config.write_buffer),
+                )
+            })
+            .collect();
+
         // Initialize metrics
         let puts = Counter::default();
         let gets = Counter::default();
@@ -238,7 +248,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             config,
             blobs,
             intervals,
-            pending: BTreeSet::new(),
+            pending: AsyncMutex::new(BTreeSet::new()),
             puts,
             gets,
             has,
@@ -260,7 +270,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 .context
                 .open(&self.config.partition, &section.to_be_bytes())
                 .await?;
-            entry.insert(Write::new(blob, len, self.config.write_buffer));
+            entry.insert(Write::from_pooler(
+                &self.context,
+                blob,
+                len,
+                self.config.write_buffer,
+            ));
             debug!(section, "created blob");
         }
 
@@ -268,8 +283,8 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(record.encode(), offset).await?;
-        self.pending.insert(section);
+        blob.write_at(offset, record.encode_mut()).await?;
+        self.pending.lock().await.insert(section);
 
         // Add to intervals
         self.intervals.insert(index);
@@ -291,9 +306,8 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = vec![0u8; Record::<V>::SIZE];
-        let read_buf = blob.read_at(read_buf, offset).await?;
-        let record = Record::<V>::read(&mut read_buf.as_ref())?;
+        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
+        let record = Record::<V>::read(&mut read_buf)?;
 
         // If record is valid, return it
         if record.is_valid() {
@@ -318,6 +332,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Get an iterator over all ranges in the [Ordinal].
     pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
+    /// Get an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
     }
 
     /// Retrieve the first index in the [Ordinal].
@@ -373,34 +392,34 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
+        self.pending
+            .lock()
+            .await
+            .retain(|&section| section >= min_section);
 
         Ok(())
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Sync all modified blobs
-        let mut futures = Vec::with_capacity(self.pending.len());
-        for &section in &self.pending {
-            futures.push(self.blobs.get(&section).unwrap().sync());
+        // Hold the lock across the entire flush so a concurrent sync
+        // cannot return before durability is established.
+        let mut pending = self.pending.lock().await;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut futures = Vec::with_capacity(pending.len());
+        for section in pending.iter() {
+            futures.push(self.blobs.get(section).unwrap().sync());
         }
         try_join_all(futures).await?;
 
-        // Clear pending sections
-        self.pending.clear();
+        // Clear pending sections.
+        pending.clear();
 
-        Ok(())
-    }
-
-    /// Sync all pending entries and [Blob]s.
-    pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
-        for (_, blob) in take(&mut self.blobs) {
-            blob.sync().await?;
-        }
         Ok(())
     }
 
@@ -424,28 +443,14 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store for Ordinal<E, V> {
-    type Key = u64;
-    type Value = V;
+impl<E: BufferPooler + Context, V: CodecFixedShared> Persistable for Ordinal<E, V> {
     type Error = Error;
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(*key).await
+    async fn commit(&self) -> Result<(), Self::Error> {
+        self.sync().await
     }
-}
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
-    for Ordinal<E, V>
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.put(key, value).await
-    }
-}
-
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
-    for Ordinal<E, V>
-{
-    async fn commit(&mut self) -> Result<(), Self::Error> {
+    async fn sync(&self) -> Result<(), Self::Error> {
         self.sync().await
     }
 
@@ -461,5 +466,26 @@ mod conformance {
 
     commonware_conformance::conformance_tests! {
         CodecConformance<Record<u32>>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::deterministic::Context;
+
+    type TestOrdinal = Ordinal<Context, u64>;
+
+    fn is_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    fn assert_ordinal_futures_are_send(ordinal: &mut TestOrdinal, key: u64) {
+        is_send(ordinal.get(key));
+        is_send(ordinal.put(key, 0u64));
+    }
+
+    #[allow(dead_code)]
+    fn assert_ordinal_destroy_is_send(ordinal: TestOrdinal) {
+        is_send(ordinal.destroy());
     }
 }

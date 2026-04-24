@@ -1,4 +1,5 @@
 //! Local network setup.
+use crate::dkg::MAX_SUPPORTED_MODE;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
@@ -12,7 +13,7 @@ use commonware_math::algebra::Random;
 use commonware_utils::{
     from_hex, hex,
     ordered::{Map, Set},
-    quorum, TryCollect, NZU32,
+    Faults, N3f1, TryCollect, NZU32,
 };
 use rand::{
     rngs::{OsRng, StdRng},
@@ -55,7 +56,7 @@ impl ParticipantConfig {
             let bytes = from_hex(raw).expect("invalid hex string");
             Output::<MinSig, PublicKey>::decode_cfg(
                 &mut bytes.as_slice(),
-                &NZU32!(max_participants_per_round),
+                &(NZU32!(max_participants_per_round), MAX_SUPPORTED_MODE),
             )
             .expect("failed to decode polynomial")
         })
@@ -186,7 +187,7 @@ fn generate_identities(
         .collect::<Vec<_>>();
 
     // Generate consensus key
-    let threshold = quorum(num_participants_per_epoch);
+    let threshold = N3f1::quorum(num_participants_per_epoch);
     let all_participants: Set<PublicKey> = peer_signers
         .iter()
         .map(|s| s.public_key())
@@ -195,7 +196,7 @@ fn generate_identities(
     let (output, shares) = if is_dkg {
         (None, Map::default())
     } else {
-        let (output, shares) = deal(
+        let (output, shares) = deal::<MinSig, _, N3f1>(
             OsRng,
             Default::default(),
             all_participants

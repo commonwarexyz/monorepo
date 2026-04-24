@@ -6,7 +6,7 @@ published-time: "2025-11-04T00:00:00Z"
 modified-time: "2025-11-04T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
-url: "https://commonware.xyz/blogs/zoda.html"
+url: "https://commonware.xyz/blogs/zoda"
 image: "https://commonware.xyz/imgs/zoda-card.png"
 katex: true
 ---
@@ -144,6 +144,7 @@ once more.
 ![Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers](/imgs/zoda-002.png)
 
 The cost of this scheme is now:
+
 - $m \cdot \frac{D}{n}$ for the leader,
 - $(m - 1) \cdot \frac{D}{n}$ for each follower,
 - $\frac{m^2}{n} \cdot D$ in total.
@@ -209,6 +210,7 @@ Proceeding with different data is very bad, so we want to avoid this.
 
 Something we can do is to check that re-encoding the data produces what the leader claimed.
 If encoding is:
+
 - _deterministic_, producing, always, the same result,
 - _injective_, with different data producing different results,
 then this works out.

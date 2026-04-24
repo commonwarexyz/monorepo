@@ -2,13 +2,13 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-use commonware_stream::{dial, listen, Config, Receiver, Sender};
+use commonware_stream::encrypted::{dial, listen, Config, Receiver, Sender};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
 
 static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
-const MAX_MESSAGE_SIZE: usize = 1023 * 1024; // 64KB buffer
+const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
 struct TransportPair {
     dialer_sender: Sender<mocks::Sink>,
@@ -80,7 +80,7 @@ thread_local! {
 }
 
 fn fuzz(data: &[u8]) {
-    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE {
+    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE as usize {
         return;
     }
 
@@ -92,10 +92,10 @@ fn fuzz(data: &[u8]) {
         };
 
         for chunk in data.chunks(1024) {
-            block_on(transport.dialer_sender.send(chunk)).unwrap();
+            block_on(transport.dialer_sender.send(chunk.to_vec())).unwrap();
 
             let received = block_on(transport.listener_receiver.recv()).unwrap();
-            assert_eq!(&received[..], chunk, "Data corruption detected");
+            assert_eq!(received.coalesce(), chunk, "Data corruption detected");
         }
     });
 }

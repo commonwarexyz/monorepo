@@ -1,5 +1,4 @@
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
@@ -7,22 +6,22 @@ use commonware_p2p::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Blocker, Channel, Manager, Receiver, Recipients, Sender,
+    Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     deterministic::{self, Context},
-    Clock, Handle, Metrics, Runner,
+    Clock, Handle, IoBuf, Metrics, Quota, Runner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect, NZU32,
+    NZUsize, TryCollect, NZU32,
 };
-use governor::Quota;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     sync::Arc,
     time::Duration,
 };
@@ -37,7 +36,7 @@ pub struct Topology {
     /// Base port for peer addressing.
     pub base_port: u16,
     /// Number of tracked peer sets.
-    pub tracked_peer_sets: usize,
+    pub tracked_peer_sets: NonZeroUsize,
     /// Map from public key to peer ID.
     pub pk_to_id: HashMap<ed25519::PublicKey, PeerId>,
 }
@@ -55,9 +54,9 @@ pub struct PeerCtx {
 const MAX_OPERATIONS: usize = 30;
 const MAX_PEERS: usize = 8;
 const MIN_PEERS: usize = 4;
-const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
+const MAX_MSG_SIZE: u32 = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
-const TRACKED_PEER_SETS: usize = 5;
+const TRACKED_PEER_SETS: NonZeroUsize = NZUsize!(5);
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
@@ -228,7 +227,7 @@ impl NetworkScheme for Discovery {
         let bootstrappers = if peer.id > 0 {
             vec![(
                 peer.topo.peers[0].public_key.clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.topo.base_port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.topo.base_port).into(),
             )]
         } else {
             Vec::new()
@@ -250,11 +249,11 @@ impl NetworkScheme for Discovery {
 
         // Create the network and oracle for controlling it
         let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("fuzzed-discovery-network"), config);
+            discovery::Network::new(context.with_label("fuzzed_discovery_network"), config);
 
         // Pre-register some peer subsets to seed the network
         // Each index gets a randomized subset of 3 peers
-        for index in 0..peer.topo.tracked_peer_sets {
+        for index in 0..peer.topo.tracked_peer_sets.get() {
             let mut addrs = peer_pks.clone();
             addrs.shuffle(&mut context);
             let subset: Set<_> = addrs[..3]
@@ -262,7 +261,7 @@ impl NetworkScheme for Discovery {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.update(index as u64, subset).await;
+            oracle.track(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -291,7 +290,7 @@ impl NetworkScheme for Discovery {
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.update(index, peer_pks).await;
+        let _ = oracle.track(index, peer_pks).await;
     }
 }
 
@@ -315,11 +314,11 @@ impl NetworkScheme for Lookup {
             MAX_MSG_SIZE,
         );
         config.allow_private_ips = true; // Required for localhost testing
-        config.tracked_peer_sets = 2 * peer.topo.tracked_peer_sets;
+        config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());
 
         // Create the network and oracle
         let (mut network, mut oracle) =
-            LookupNetwork::new(context.with_label("fuzzed-lookup-network"), config);
+            LookupNetwork::new(context.with_label("fuzzed_lookup_network"), config);
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
@@ -327,25 +326,22 @@ impl NetworkScheme for Lookup {
             .topo
             .peers
             .iter()
-            .map(|p| (p.public_key.clone(), p.address))
+            .map(|p| (p.public_key.clone(), p.address.into()))
             .collect();
 
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..TRACKED_PEER_SETS
-        for index in 0..peer.topo.tracked_peer_sets {
+        for index in 0..peer.topo.tracked_peer_sets.get() {
             oracle
-                .update(
+                .track(
                     index as u64,
-                    peer_list
-                        .clone()
-                        .try_into()
-                        .expect("public keys are unique"),
+                    Map::<_, Address>::try_from(peer_list.clone()).expect("public keys are unique"),
                 )
                 .await;
         }
 
         // Register randomized subsets of 3 peers for indices TRACKED_PEER_SETS..2*TRACKED_PEER_SETS
-        for index in peer.topo.tracked_peer_sets..(peer.topo.tracked_peer_sets * 2) {
+        for index in peer.topo.tracked_peer_sets.get()..(peer.topo.tracked_peer_sets.get() * 2) {
             let mut peers = peer_list.clone();
             peers.shuffle(&mut context);
             let subset: Map<_, _> = peers[..3]
@@ -353,7 +349,7 @@ impl NetworkScheme for Lookup {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.update(index as u64, subset).await;
+            oracle.track(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -377,15 +373,15 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Map<_, _> = peer_ids
+        let peer_list: Map<_, Address> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
-                (p.public_key.clone(), p.address)
+                (p.public_key.clone(), p.address.into())
             })
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.update(index, peer_list).await;
+        let _ = oracle.track(index, peer_list).await;
     }
 }
 
@@ -452,7 +448,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             };
 
             // Create network instance for this peer
-            let peer_context = context.with_label(&format!("peer-{id}"));
+            let peer_context = context.with_label(&format!("peer_{id}"));
             let network = N::create_network(peer_context, &peer_ctx).await;
 
             // Create and store peer state
@@ -466,7 +462,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
         // Track expected messages: (to_idx, from_idx) -> queue of messages
         // Messages are sent with the same priority, ensuring FIFO delivery per sender-receiver pair
-        let mut expected_msgs: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
+        let mut expected_msgs: HashMap<(u8, u8), VecDeque<IoBuf>> = HashMap::new();
 
         // Track which receivers have pending messages from which senders
         // Receiver index -> set of sender indices that have pending messages for this receiver
@@ -483,12 +479,12 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let from_idx = (from_idx as usize) % peers.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
+                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];
                     context.fill(&mut bytes[..]);
-                    let message = Bytes::from(bytes);
+                    let message = IoBuf::from(bytes);
 
                     // Select random recipients (excluding sender)
                     let mut available: Vec<_> = (0..peers.len())
@@ -573,7 +569,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                 };
 
                                 // Find message in expected queue
-                                if let Some(pos) = queue.iter().position(|m| m == &message) {
+                                if let Some(pos) = queue.iter().position(|m| *m == message) {
                                     // Remove all messages up to and including this one
                                     // Messages before it were implicitly dropped, this one is received
                                     for _ in 0..=pos {
@@ -639,9 +635,9 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let blocker_idx = (peer_idx as usize) % peers.len();
                     let blocked_idx = (target_idx as usize) % peers.len();
 
-                    // Block the target peer on the blocker's oracle
                     let blocked_pk = peers[blocked_idx].info.public_key.clone();
-                    let _ = peers[blocker_idx].network.oracle.block(blocked_pk).await;
+                    #[allow(clippy::disallowed_methods, reason = "fuzz harness without tracing")]
+                    peers[blocker_idx].network.oracle.block(blocked_pk).await;
                 }
             }
         }

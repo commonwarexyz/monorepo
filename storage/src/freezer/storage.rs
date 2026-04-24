@@ -1,14 +1,17 @@
 use super::{Config, Error, Identifier};
-use crate::journal::segmented::variable::{Config as JournalConfig, Journal};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
+use crate::{
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    },
+    Context,
+};
+use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_cryptography::{crc32, Crc32, Hasher};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, IoBuf};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
-use std::{
-    cmp::Ordering, collections::BTreeSet, marker::PhantomData, num::NonZeroUsize, ops::Deref,
-};
+use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
@@ -22,14 +25,15 @@ const RESIZE_THRESHOLD: u64 = 50;
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
-pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
+pub struct Cursor([u8; u64::SIZE + u64::SIZE + u32::SIZE]);
 
 impl Cursor {
     /// Create a new [Cursor].
-    fn new(section: u64, offset: u32) -> Self {
-        let mut buf = [0u8; u64::SIZE + u32::SIZE];
+    fn new(section: u64, offset: u64, size: u32) -> Self {
+        let mut buf = [0u8; u64::SIZE + u64::SIZE + u32::SIZE];
         buf[..u64::SIZE].copy_from_slice(&section.to_be_bytes());
-        buf[u64::SIZE..].copy_from_slice(&offset.to_be_bytes());
+        buf[u64::SIZE..u64::SIZE + u64::SIZE].copy_from_slice(&offset.to_be_bytes());
+        buf[u64::SIZE + u64::SIZE..].copy_from_slice(&size.to_be_bytes());
         Self(buf)
     }
 
@@ -39,8 +43,13 @@ impl Cursor {
     }
 
     /// Get the offset of the cursor.
-    fn offset(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
+    fn offset(&self) -> u64 {
+        u64::from_be_bytes(self.0[u64::SIZE..u64::SIZE + u64::SIZE].try_into().unwrap())
+    }
+
+    /// Get the size of the value.
+    fn size(&self) -> u32 {
+        u32::from_be_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
     }
 }
 
@@ -48,7 +57,7 @@ impl Read for Cursor {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        <[u8; u64::SIZE + u32::SIZE]>::read(buf).map(Self)
+        <[u8; u64::SIZE + u64::SIZE + u32::SIZE]>::read(buf).map(Self)
     }
 }
 
@@ -59,7 +68,7 @@ impl CodecWrite for Cursor {
 }
 
 impl FixedSize for Cursor {
-    const SIZE: usize = u64::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl Span for Cursor {}
@@ -83,9 +92,10 @@ impl std::fmt::Debug for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Cursor(section={}, offset={})",
+            "Cursor(section={}, offset={}, size={})",
             self.section(),
-            self.offset()
+            self.offset(),
+            self.size()
         )
     }
 }
@@ -94,9 +104,10 @@ impl std::fmt::Display for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Cursor(section={}, offset={})",
+            "Cursor(section={}, offset={}, size={})",
             self.section(),
-            self.offset()
+            self.offset(),
+            self.size()
         )
     }
 }
@@ -112,8 +123,8 @@ pub struct Checkpoint {
     epoch: u64,
     /// The section of the last committed operation.
     section: u64,
-    /// The size of the journal in the last committed section.
-    size: u64,
+    /// The size of the oversized index journal in the last committed section.
+    oversized_size: u64,
     /// The size of the table.
     table_size: u32,
 }
@@ -125,7 +136,7 @@ impl Checkpoint {
             table_size,
             epoch: 0,
             section: 0,
-            size: 0,
+            oversized_size: 0,
         }
     }
 }
@@ -135,12 +146,12 @@ impl Read for Checkpoint {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
-        let size = u64::read(buf)?;
+        let oversized_size = u64::read(buf)?;
         let table_size = u32::read(buf)?;
         Ok(Self {
             epoch,
             section,
-            size,
+            oversized_size,
             table_size,
         })
     }
@@ -150,7 +161,7 @@ impl CodecWrite for Checkpoint {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.section.write(buf);
-        self.size.write(buf);
+        self.oversized_size.write(buf);
         self.table_size.write(buf);
     }
 }
@@ -170,11 +181,11 @@ struct Entry {
     epoch: u64,
     // Section in which this slot was written
     section: u64,
-    // Offset in the section where this slot was written
-    offset: u32,
+    // Position in the key index for this section
+    position: u64,
     // Number of items added to this entry since last resize
     added: u8,
-    // CRC of (epoch | section | offset | added)
+    // CRC of (epoch | section | position | added)
     crc: u32,
 }
 
@@ -183,46 +194,63 @@ impl Entry {
     const FULL_SIZE: usize = Self::SIZE * 2;
 
     /// Compute a checksum for [Entry].
-    fn compute_crc(epoch: u64, section: u64, offset: u32, added: u8) -> u32 {
-        let mut hasher = crc32fast::Hasher::new();
+    fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
+        let mut hasher = Crc32::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
-        hasher.update(&offset.to_be_bytes());
+        hasher.update(&position.to_be_bytes());
         hasher.update(&added.to_be_bytes());
-        hasher.finalize()
+        hasher.finalize().as_u32()
     }
 
     /// Create a new [Entry].
-    fn new(epoch: u64, section: u64, offset: u32, added: u8) -> Self {
+    fn new(epoch: u64, section: u64, position: u64, added: u8) -> Self {
         Self {
             epoch,
             section,
-            offset,
+            position,
             added,
-            crc: Self::compute_crc(epoch, section, offset, added),
+            crc: Self::compute_crc(epoch, section, position, added),
+        }
+    }
+
+    /// Create a new empty [Entry].
+    const fn new_empty() -> Self {
+        Self {
+            epoch: 0,
+            section: 0,
+            position: 0,
+            added: 0,
+            crc: 0,
         }
     }
 
     /// Check if this entry is empty (all zeros).
     const fn is_empty(&self) -> bool {
-        self.section == 0 && self.offset == 0 && self.crc == 0
+        self.epoch == 0
+            && self.section == 0
+            && self.position == 0
+            && self.added == 0
+            && self.crc == 0
     }
 
     /// Check if this entry is valid.
+    ///
+    /// An empty entry does not have a valid checksum and is treated as invalid by this function.
     fn is_valid(&self) -> bool {
-        Self::compute_crc(self.epoch, self.section, self.offset, self.added) == self.crc
+        Self::compute_crc(self.epoch, self.section, self.position, self.added) == self.crc
     }
 }
 
 impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE + u8::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + crc32::Digest::SIZE;
 }
 
 impl CodecWrite for Entry {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.section.write(buf);
-        self.offset.write(buf);
+        self.position.write(buf);
         self.added.write(buf);
         self.crc.write(buf);
     }
@@ -233,76 +261,132 @@ impl Read for Entry {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
-        let offset = u32::read(buf)?;
+        let position = u64::read(buf)?;
         let added = u8::read(buf)?;
         let crc = u32::read(buf)?;
 
         Ok(Self {
             epoch,
             section,
-            offset,
+            position,
             added,
             crc,
         })
     }
 }
 
-/// A key-value pair stored in the [Journal].
-struct Record<K: Array, V: Codec> {
+/// Sentinel value indicating no next entry in the collision chain.
+const NO_NEXT_SECTION: u64 = u64::MAX;
+const NO_NEXT_POSITION: u64 = u64::MAX;
+
+/// Key entry stored in the segmented/fixed key index journal.
+///
+/// All fields are fixed size, enabling efficient collision chain traversal
+/// without reading large values.
+///
+/// The `next` pointer uses sentinel values (u64::MAX, u64::MAX) to indicate
+/// "no next entry" instead of Option, ensuring fixed-size encoding.
+#[derive(Debug, Clone, PartialEq)]
+struct Record<K: Array> {
+    /// The key for this entry.
     key: K,
-    value: V,
-    next: Option<(u64, u32)>,
+    /// Pointer to next entry in collision chain (section, position in key index).
+    /// Uses (u64::MAX, u64::MAX) as sentinel for "no next".
+    next_section: u64,
+    next_position: u64,
+    /// Byte offset in value journal (same section).
+    value_offset: u64,
+    /// Size of value data in the value journal.
+    value_size: u32,
 }
 
-impl<K: Array, V: Codec> Record<K, V> {
+impl<K: Array> Record<K> {
     /// Create a new [Record].
-    const fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
-        Self { key, value, next }
+    fn new(key: K, next: Option<(u64, u64)>, value_offset: u64, value_size: u32) -> Self {
+        let (next_section, next_position) = next.unwrap_or((NO_NEXT_SECTION, NO_NEXT_POSITION));
+        Self {
+            key,
+            next_section,
+            next_position,
+            value_offset,
+            value_size,
+        }
+    }
+
+    /// Get the next entry in the collision chain, if any.
+    const fn next(&self) -> Option<(u64, u64)> {
+        if self.next_section == NO_NEXT_SECTION && self.next_position == NO_NEXT_POSITION {
+            None
+        } else {
+            Some((self.next_section, self.next_position))
+        }
     }
 }
 
-impl<K: Array, V: Codec> CodecWrite for Record<K, V> {
+impl<K: Array> CodecWrite for Record<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
-        self.value.write(buf);
-        self.next.write(buf);
+        self.next_section.write(buf);
+        self.next_position.write(buf);
+        self.value_offset.write(buf);
+        self.value_size.write(buf);
     }
 }
 
-impl<K: Array, V: Codec> Read for Record<K, V> {
-    type Cfg = V::Cfg;
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+impl<K: Array> Read for Record<K> {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        let next = Option::<(u64, u32)>::read_cfg(buf, &((), ()))?;
+        let next_section = u64::read(buf)?;
+        let next_position = u64::read(buf)?;
+        let value_offset = u64::read(buf)?;
+        let value_size = u32::read(buf)?;
 
-        Ok(Self { key, value, next })
+        Ok(Self {
+            key,
+            next_section,
+            next_position,
+            value_offset,
+            value_size,
+        })
     }
 }
 
-impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.value.encode_size() + self.next.encode_size()
+impl<K: Array> FixedSize for Record<K> {
+    // key + next_section + next_position + value_offset + value_size
+    const SIZE: usize = K::SIZE + u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
+}
+
+impl<K: Array> OversizedRecord for Record<K> {
+    fn value_location(&self) -> (u64, u32) {
+        (self.value_offset, self.value_size)
+    }
+
+    fn with_location(mut self, offset: u64, size: u32) -> Self {
+        self.value_offset = offset;
+        self.value_size = size;
+        self
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: Codec> arbitrary::Arbitrary<'_> for Record<K, V>
+impl<K: Array> arbitrary::Arbitrary<'_> for Record<K>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
-    V: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             key: K::arbitrary(u)?,
-            value: V::arbitrary(u)?,
-            next: Option::<(u64, u32)>::arbitrary(u)?,
+            next_section: u64::arbitrary(u)?,
+            next_position: u64::arbitrary(u)?,
+            value_offset: u64::arbitrary(u)?,
+            value_size: u32::arbitrary(u)?,
         })
     }
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -313,12 +397,14 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_resize_frequency: u8,
     table_resize_chunk_size: u32,
 
-    // Table blob that maps slots to journal chain heads
+    // Table blob that maps slots to key index chain heads
     table: E::Blob,
 
-    // Variable journal for storing entries
-    journal: Journal<E, Record<K, V>>,
-    journal_target_size: u64,
+    // Combined key index + value storage with crash recovery
+    oversized: Oversized<E, Record<K>, V>,
+
+    // Target size for value blob sections
+    blob_target_size: u64,
 
     // Current section for new writes
     current_section: u64,
@@ -335,12 +421,9 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     unnecessary_reads: Counter,
     unnecessary_writes: Counter,
     resizes: Counter,
-
-    // Phantom data to satisfy the compiler about generic types
-    _phantom: PhantomData<(K, V)>,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -348,21 +431,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Parse table entries from a buffer.
-    fn parse_entries(buf: &[u8]) -> Result<(Entry, Entry), Error> {
-        let mut buf1 = &buf[0..Entry::SIZE];
-        let entry1 = Entry::read(&mut buf1)?;
-        let mut buf2 = &buf[Entry::SIZE..Entry::FULL_SIZE];
-        let entry2 = Entry::read(&mut buf2)?;
+    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
+        let entry1 = Entry::read(&mut buf)?;
+        let entry2 = Entry::read(&mut buf)?;
         Ok((entry1, entry2))
     }
 
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let buf = vec![0u8; Entry::FULL_SIZE];
-        let read_buf = blob.read_at(buf, offset).await?;
+        let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
-        Self::parse_entries(read_buf.as_ref())
+        Self::parse_entries(read_buf)
     }
 
     /// Recover a single table entry and update tracking.
@@ -386,9 +466,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 entry_epoch = entry.epoch,
                 "found invalid table entry"
             );
-            *entry = Entry::new(0, 0, 0, 0);
+            *entry = Entry::new_empty();
             let zero_buf = vec![0u8; Entry::SIZE];
-            blob.write_at(zero_buf, entry_offset).await?;
+            blob.write_at(entry_offset, zero_buf).await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
             // Only track max epoch if we're discovering it (not validating against a known epoch)
@@ -408,6 +488,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// - max_section: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
+        pooler: &impl BufferPooler,
         blob: &E::Blob,
         table_size: u32,
         table_resize_frequency: u8,
@@ -416,7 +497,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
+        let mut reader =
+            buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
@@ -426,10 +508,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
-            // Read both entries from the buffer
-            let mut buf = [0u8; Entry::FULL_SIZE];
-            reader.read_exact(&mut buf, Entry::FULL_SIZE).await?;
-            let (mut entry1, mut entry2) = Self::parse_entries(&buf)?;
+            // Read both entries from the buffer.
+            let entry_buf = reader.read(Entry::FULL_SIZE).await?;
+            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
             let entry1_cleared = Self::recover_entry(
@@ -488,20 +569,20 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Read the latest valid entry from two table slots.
-    fn read_latest_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
+    fn read_latest_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u64, u8)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
         ) {
             (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
-                Ordering::Greater => Some((entry1.section, entry1.offset, entry1.added)),
-                Ordering::Less => Some((entry2.section, entry2.offset, entry2.added)),
+                Ordering::Greater => Some((entry1.section, entry1.position, entry1.added)),
+                Ordering::Less => Some((entry2.section, entry2.position, entry2.added)),
                 Ordering::Equal => {
                     unreachable!("two valid entries with the same epoch")
                 }
             },
-            (true, false) => Some((entry1.section, entry1.offset, entry1.added)),
-            (false, true) => Some((entry2.section, entry2.offset, entry2.added)),
+            (true, false) => Some((entry1.section, entry1.position, entry1.added)),
+            (false, true) => Some((entry2.section, entry2.position, entry2.added)),
             (false, false) => None,
         }
     }
@@ -522,7 +603,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(update.encode(), table_offset + start)
+            .write_at(table_offset + start, update.encode_mut())
             .await
             .map_err(Error::Runtime)
     }
@@ -553,15 +634,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // Initialize variable journal with a separate partition
-        let journal_config = JournalConfig {
-            partition: config.journal_partition,
-            compression: config.journal_compression,
+        // Initialize oversized journal (handles crash recovery)
+        let oversized_cfg = OversizedConfig {
+            index_partition: config.key_partition.clone(),
+            value_partition: config.value_partition.clone(),
+            index_page_cache: config.key_page_cache.clone(),
+            index_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
+            compression: config.value_compression,
             codec_config: config.codec_config,
-            write_buffer: config.journal_write_buffer,
-            buffer_pool: config.journal_buffer_pool,
         };
-        let mut journal = Journal::init(context.with_label("journal"), journal_config).await?;
+        let mut oversized: Oversized<E, Record<K>, V> =
+            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -580,7 +664,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             (0, Some(checkpoint)) => {
                 assert_eq!(checkpoint.epoch, 0);
                 assert_eq!(checkpoint.section, 0);
-                assert_eq!(checkpoint.size, 0);
+                assert_eq!(checkpoint.oversized_size, 0);
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
@@ -594,9 +678,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind the journal to the committed section and offset
-                journal.rewind(checkpoint.section, checkpoint.size).await?;
-                journal.sync(checkpoint.section).await?;
+                // Rewind oversized to the committed section and key size
+                oversized
+                    .rewind(checkpoint.section, checkpoint.oversized_size)
+                    .await?;
+
+                // Sync oversized
+                oversized.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
@@ -609,6 +697,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
+                    &context,
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
@@ -633,6 +722,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
+                    &context,
                     &table,
                     table_size,
                     config.table_resize_frequency,
@@ -646,11 +736,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
+                // Get sizes from oversized (crash recovery already ran during init)
+                let oversized_size = oversized.size(max_section).await?;
+
                 (
                     Checkpoint {
                         epoch: max_epoch,
                         section: max_section,
-                        size: journal.size(max_section).await?,
+                        oversized_size,
                         table_size,
                     },
                     resizable,
@@ -690,8 +783,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
-            journal,
-            journal_target_size: config.journal_target_size,
+            oversized,
+            blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
@@ -702,7 +795,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             unnecessary_reads,
             unnecessary_writes,
             resizes,
-            _phantom: PhantomData,
         })
     }
 
@@ -718,7 +810,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ///
     /// To determine the appropriate entry, we AND the key's hash with the current table size.
     fn table_index(&self, key: &K) -> u32 {
-        let hash = crc32fast::hash(key.as_ref());
+        let hash = Crc32::checksum(key.as_ref());
         hash & (self.table_size - 1)
     }
 
@@ -727,15 +819,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.resizable as u64 >= self.table_resize_threshold
     }
 
-    /// Determine which journal section to write to based on current journal size.
+    /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
-        // Get the current section size
-        let size = self.journal.size(self.current_section).await?;
+        // Get the current value blob section size
+        let value_size = self.oversized.value_size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if size >= self.journal_target_size {
+        if value_size >= self.blob_target_size {
             self.current_section += 1;
-            debug!(size, section = self.current_section, "updated section");
+            debug!(
+                size = value_size,
+                section = self.current_section,
+                "updated section"
+            );
         }
 
         Ok(())
@@ -754,15 +850,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
         let head = Self::read_latest_entry(&entry1, &entry2);
 
-        // Create new head of the chain
-        let entry = Record::new(
+        // Create key entry with pointer to previous head (value location set by oversized.append)
+        let key_entry = Record::new(
             key,
-            value,
-            head.map(|(section, offset, _)| (section, offset)),
+            head.map(|(section, position, _)| (section, position)),
+            0,
+            0,
         );
 
-        // Append entry to the variable journal
-        let (offset, _) = self.journal.append(self.current_section, entry).await?;
+        // Write value and key entry (glob first, then index)
+        let (position, value_offset, value_size) = self
+            .oversized
+            .append(self.current_section, key_entry, &value)
+            .await?;
 
         // Update the number of items added to the entry.
         //
@@ -777,7 +877,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Update the old position
         self.modified_sections.insert(self.current_section);
-        let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
+        let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
         Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
@@ -794,20 +894,23 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 //
                 // The entries are still identical to the old ones, so we don't need to read them again.
                 let new_table_index = self.table_size + table_index;
-                let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
+                let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
                 Self::update_head(&self.table, new_table_index, &entry1, &entry2, new_entry)
                     .await?;
             }
         }
 
-        Ok(Cursor::new(self.current_section, offset))
+        Ok(Cursor::new(self.current_section, value_offset, value_size))
     }
 
     /// Get the value for a given [Cursor].
     async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
-        let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
+        let value = self
+            .oversized
+            .get_value(cursor.section(), cursor.offset(), cursor.size())
+            .await?;
 
-        Ok(entry.value)
+        Ok(value)
     }
 
     /// Get the first value for a given key.
@@ -817,29 +920,33 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let Some((mut section, mut offset, _)) = Self::read_latest_entry(&entry1, &entry2) else {
+        let Some((mut section, mut position, _)) = Self::read_latest_entry(&entry1, &entry2) else {
             return Ok(None);
         };
 
         // Follow the linked list chain to find the first matching key
         loop {
-            // Get the entry from the variable journal
-            let entry = self.journal.get(section, offset).await?;
+            // Get the key entry from the fixed key index (efficient, good cache locality)
+            let key_entry = self.oversized.get(section, position).await?;
 
             // Check if this key matches
-            if entry.key.as_ref() == key.as_ref() {
-                return Ok(Some(entry.value));
+            if key_entry.key.as_ref() == key.as_ref() {
+                let value = self
+                    .oversized
+                    .get_value(section, key_entry.value_offset, key_entry.value_size)
+                    .await?;
+                return Ok(Some(value));
             }
 
             // Increment unnecessary reads
             self.unnecessary_reads.inc();
 
             // Follow the chain
-            let Some(next) = entry.next else {
+            let Some(next) = key_entry.next() else {
                 break; // End of chain
             };
             section = next.0;
-            offset = next.1;
+            position = next.1;
         }
 
         Ok(None)
@@ -887,9 +994,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Continue a resize operation by processing the next chunk of entries.
     ///
-    /// This function processes `table_resize_chunk_size` entries at a time,
-    /// allowing the resize to be spread across multiple sync operations to
-    /// avoid latency spikes.
+    /// This function processes `table_resize_chunk_size` entries at a time, allowing the resize to
+    /// be spread across multiple sync operations to avoid latency spikes.
     async fn advance_resize(&mut self) -> Result<(), Error> {
         // Compute the range to update
         let current_index = self.resize_progress.unwrap();
@@ -900,38 +1006,38 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let read_buf = vec![0u8; chunk_bytes];
-        let read_buf: Vec<u8> = self.table.read_at(read_buf, read_offset).await?.into();
+        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
 
         // Process each entry in the chunk
         let mut writes = Vec::with_capacity(chunk_bytes);
-        for i in 0..chunk_size {
-            // Get the entry
-            let entry_offset = i as usize * Entry::FULL_SIZE;
-            let entry_end = entry_offset + Entry::FULL_SIZE;
-            let entry_buf = &read_buf[entry_offset..entry_end];
-
-            // Parse the two slots
-            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
+        for _ in 0..chunk_size {
+            // Parse the next two slots directly from the read stream.
+            let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
 
             // Get the current head
-            let (section, offset, added) =
-                Self::read_latest_entry(&entry1, &entry2).unwrap_or((0, 0, 0));
+            let head = Self::read_latest_entry(&entry1, &entry2);
 
-            // If the entry was over the threshold, decrement the resizable entries
-            if added >= self.table_resize_frequency {
-                self.resizable -= 1;
-            }
+            // Get the reset entry (may be empty)
+            let reset_entry = match head {
+                Some((section, position, added)) => {
+                    // If the entry was at or over the threshold, decrement the resizable entries.
+                    if added >= self.table_resize_frequency {
+                        self.resizable -= 1;
+                    }
+                    Entry::new(self.next_epoch, section, position, 0)
+                }
+                None => Entry::new_empty(),
+            };
 
             // Rewrite the entries
-            let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
-        // Put the writes into the table
-        let old_write = self.table.write_at(writes.clone(), read_offset);
+        // Put the writes into the table.
+        let writes = IoBuf::from(writes);
+        let old_write = self.table.write_at(read_offset, writes.clone());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
-        let new_write = self.table.write_at(writes, new_offset);
+        let new_write = self.table.write_at(new_offset, writes);
         try_join(old_write, new_write).await?;
 
         // Update progress
@@ -961,13 +1067,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
+    //
+    // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified journal sections
-        let mut updates = Vec::with_capacity(self.modified_sections.len());
-        for section in &self.modified_sections {
-            updates.push(self.journal.sync(*section));
-        }
-        try_join_all(updates).await?;
+        // Sync all modified sections for oversized journal
+        let syncs: Vec<_> = self
+            .modified_sections
+            .iter()
+            .map(|section| self.oversized.sync(*section))
+            .collect();
+        try_join_all(syncs).await?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)
@@ -985,10 +1094,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
+        // Get size from oversized
+        let oversized_size = self.oversized.size(self.current_section).await?;
+
         Ok(Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
-            size: self.journal.size(self.current_section).await?,
+            oversized_size,
             table_size: self.table_size,
         })
     }
@@ -1003,15 +1115,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Sync any pending updates before closing
         let checkpoint = self.sync().await?;
 
-        self.journal.close().await?;
-        self.table.sync().await?;
         Ok(checkpoint)
     }
 
     /// Close and remove any underlying blobs created by the [Freezer].
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy the journal (removes all journal sections)
-        self.journal.destroy().await?;
+        // Destroy oversized journal
+        self.oversized.destroy().await?;
 
         // Destroy the table
         drop(self.table);
@@ -1038,36 +1148,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::Store for Freezer<E, K, V> {
-    type Key = K;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(Identifier::Key(key)).await
-    }
-}
-
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreMut for Freezer<E, K, V> {
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.put(key, value).await?;
-        Ok(())
-    }
-}
-
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersistable
-    for Freezer<E, K, V>
-{
-    async fn commit(&mut self) -> Result<(), Self::Error> {
-        self.sync().await?;
-        Ok(())
-    }
-
-    async fn destroy(self) -> Result<(), Self::Error> {
-        self.destroy().await
-    }
-}
-
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
@@ -1078,6 +1158,159 @@ mod conformance {
         CodecConformance<Cursor>,
         CodecConformance<Checkpoint>,
         CodecConformance<Entry>,
-        CodecConformance<Record<U64, U64>>
+        CodecConformance<Record<U64>>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::DecodeExt;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Metrics, Runner, Storage,
+    };
+    use commonware_utils::{
+        sequence::{FixedBytes, U64},
+        NZUsize, NZU16,
+    };
+
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
+
+    type TestFreezer = Freezer<Context, U64, u64>;
+
+    fn is_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    fn assert_freezer_futures_are_send(freezer: &mut TestFreezer, key: U64) {
+        is_send(freezer.get(Identifier::Key(&key)));
+        is_send(freezer.put(key, 0u64));
+    }
+
+    #[allow(dead_code)]
+    fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
+        is_send(freezer.destroy());
+    }
+
+    #[test_traced]
+    fn issue_2966_regression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                // Use 4 entries but only insert to 2, leaving 2 empty
+                table_initial_size: 4,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Insert only 2 keys to different entries. With table_size=4, entries 2 and 3
+            // should remain empty.
+            freezer.put(test_key("key0"), 0).await.unwrap();
+            freezer.put(test_key("key2"), 1).await.unwrap();
+            freezer.close().await.unwrap();
+
+            let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
+            let table_data = blob.read_at(0, size as usize).await.unwrap().coalesce();
+
+            // Verify resize happened (table doubled from 4 to 8)
+            let num_entries = size as usize / Entry::FULL_SIZE;
+            assert_eq!(num_entries, 8);
+
+            // Count entries where both slots are truly empty. The bug would cause empty
+            // entries to have one slot with epoch != 0 and valid CRC.
+            let mut both_empty_count = 0;
+            for entry_idx in 0..num_entries {
+                let offset = entry_idx * Entry::FULL_SIZE;
+                let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
+                let (slot0, slot1) =
+                    Freezer::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
+                if slot0.is_empty() && slot1.is_empty() {
+                    both_empty_count += 1;
+                }
+            }
+            // 2 keys in 4 entries = 2 empty. After resize to 8, those become 4 empty.
+            assert_eq!(both_empty_count, 4);
+        });
+    }
+
+    #[test_traced]
+    fn issue_2955_regression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 4,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Create freezer with data
+            let checkpoint = {
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                freezer.put(test_key("key0"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
+            };
+
+            // Corrupt the CRC in both slots of the table entry
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                let entry_data = blob.read_at(0, Entry::FULL_SIZE).await.unwrap();
+                let mut corrupted = entry_data.coalesce();
+                // Corrupt CRC of first slot (last 4 bytes of first slot)
+                corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
+                // Corrupt CRC of second slot (last 4 bytes of second slot)
+                corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
+                blob.write_at(0, corrupted).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            // Reopen to trigger recovery. The bug would set both cleared entries to
+            // Entry::new(0,0,0,0) which has is_empty()=false and is_valid()=true.
+            // read_latest_entry would then see two "valid" entries with epoch=0 and
+            // panic on unreachable!().
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                context.with_label("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            drop(freezer);
+        });
     }
 }

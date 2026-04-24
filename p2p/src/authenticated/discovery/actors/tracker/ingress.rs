@@ -1,36 +1,38 @@
 use super::Reservation;
-use crate::authenticated::{
-    discovery::{
-        actors::{peer, tracker::Metadata},
-        types,
+use crate::{
+    authenticated::{
+        dialing::Dialable,
+        discovery::{
+            actors::{peer, tracker::Metadata},
+            types,
+        },
+        mailbox::UnboundedMailbox,
+        Mailbox,
     },
-    mailbox::UnboundedMailbox,
-    Mailbox,
+    PeerSetSubscription, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::Set;
-use futures::channel::{mpsc, oneshot};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc, oneshot};
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register { index: u64, peers: Set<C> },
+    Register { index: u64, peers: TrackedPeers<C> },
 
     // ---------- Used by peer set provider ----------
-    /// Fetch the peer set at a given index.
+    /// Fetch primary and secondary peers for a given ID.
     PeerSet {
         /// The index of the peer set to fetch.
         index: u64,
-        /// One-shot channel to send the peer set.
-        responder: oneshot::Sender<Option<Set<C>>>,
+        /// One-shot channel to send the tracked peers.
+        responder: oneshot::Sender<Option<TrackedPeers<C>>>,
     },
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
         /// One-shot channel to send the subscription receiver.
-        #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Set<C>, Set<C>)>>,
+        responder: oneshot::Sender<PeerSetSubscription<C>>,
     },
 
     // ---------- Used by blocker ----------
@@ -39,9 +41,11 @@ pub enum Message<C: PublicKey> {
     Block { public_key: C },
 
     // ---------- Used by peer ----------
-    /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [types::Payload::Peers] message (containing solely the local node's information) should be
-    /// sent to the peer.
+    /// Notify the tracker that a peer has been successfully connected.
+    ///
+    /// The tracker responds with the greeting info that must be sent to the peer
+    /// before any other messages. If the peer is not eligible, the channel is dropped
+    /// (signaling termination).
     Connect {
         /// The public key of the peer.
         public_key: C,
@@ -49,8 +53,8 @@ pub enum Message<C: PublicKey> {
         /// `true` if we are the dialer, `false` if we are the listener.
         dialer: bool,
 
-        /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        /// One-shot channel to return the greeting info. Dropped if peer is not eligible.
+        responder: oneshot::Sender<types::Info<C>>,
     },
 
     /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
@@ -85,8 +89,8 @@ pub enum Message<C: PublicKey> {
     // ---------- Used by dialer ----------
     /// Request a list of dialable peers.
     Dialable {
-        /// One-shot channel to send the list of dialable peers.
-        responder: oneshot::Sender<Vec<C>>,
+        /// One-shot channel to send the dialable peers and next query deadline.
+        responder: oneshot::Sender<Dialable<C>>,
     },
 
     /// Request a reservation for a particular peer to dial.
@@ -103,12 +107,12 @@ pub enum Message<C: PublicKey> {
     },
 
     // ---------- Used by listener ----------
-    /// Check if we should listen to a peer.
-    Listenable {
+    /// Check if a peer is acceptable (can accept an incoming connection from them).
+    Acceptable {
         /// The public key of the peer to check.
         public_key: C,
 
-        /// The sender to respond with the listenable status.
+        /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
     },
 
@@ -134,87 +138,101 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
-    /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Connect {
-            public_key,
-            dialer,
-            peer,
-        })
-        .unwrap();
+    /// Send a `Connect` message to the tracker and receive the greeting info.
+    ///
+    /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
+    /// dropped (peer not eligible or tracker shut down).
+    pub async fn connect(&mut self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
+        self.0
+            .request(|responder| Message::Connect {
+                public_key,
+                dialer,
+                responder,
+            })
+            .await
     }
 
     /// Send a `Construct` message to the tracker.
     pub fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Construct { public_key, peer }).unwrap();
+        self.0.send_lossy(Message::Construct { public_key, peer });
     }
 
     /// Send a `BitVec` message to the tracker.
     pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::BitVec { bit_vec, peer }).unwrap();
+        self.0.send_lossy(Message::BitVec { bit_vec, peer });
     }
 
     /// Send a `Peers` message to the tracker.
     pub fn peers(&mut self, peers: Vec<types::Info<C>>) {
-        self.send(Message::Peers { peers }).unwrap();
+        self.0.send_lossy(Message::Peers { peers });
     }
 
-    /// Send a `Block` message to the tracker.
-    pub async fn dialable(&mut self) -> Vec<C> {
-        let (sender, receiver) = oneshot::channel();
-        self.send(Message::Dialable { responder: sender }).unwrap();
-        receiver.await.unwrap()
+    /// Request dialable peers from the tracker.
+    ///
+    /// Returns an empty response if the tracker is shut down.
+    pub async fn dialable(&mut self) -> Dialable<C> {
+        self.0
+            .request_or_default(|responder| Message::Dialable { responder })
+            .await
     }
 
     /// Send a `Dial` message to the tracker.
+    ///
+    /// Returns `None` if the tracker is shut down.
     pub async fn dial(&mut self, public_key: C) -> Option<Reservation<C>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Dial {
-            public_key,
-            reservation: tx,
-        })
-        .unwrap();
-        rx.await.unwrap()
+        self.0
+            .request(|reservation| Message::Dial {
+                public_key,
+                reservation,
+            })
+            .await
+            .flatten()
     }
 
-    /// Send a `Listenable` message to the tracker.
-    pub async fn listenable(&mut self, public_key: C) -> bool {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Listenable {
-            public_key,
-            responder: tx,
-        })
-        .unwrap();
-        rx.await.unwrap()
+    /// Send an `Acceptable` message to the tracker.
+    ///
+    /// Returns `false` if the tracker is shut down.
+    pub async fn acceptable(&mut self, public_key: C) -> bool {
+        self.0
+            .request_or(
+                |responder| Message::Acceptable {
+                    public_key,
+                    responder,
+                },
+                false,
+            )
+            .await
     }
 
     /// Send a `Listen` message to the tracker.
+    ///
+    /// Returns `None` if the tracker is shut down.
     pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Listen {
-            public_key,
-            reservation: tx,
-        })
-        .unwrap();
-        rx.await.unwrap()
+        self.0
+            .request(|reservation| Message::Listen {
+                public_key,
+                reservation,
+            })
+            .await
+            .flatten()
     }
 }
 
 /// Allows releasing reservations
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(crate) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
     /// Release a reservation.
     pub fn release(&mut self, metadata: Metadata<C>) {
-        let _ = self.sender.send(Message::Release { metadata });
+        self.sender.0.send_lossy(Message::Release { metadata });
     }
 }
 
@@ -233,44 +251,41 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::Manager for Oracle<C> {
+impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
-    type Peers = Set<C>;
 
-    /// Register a set of authorized peers at a given index.
-    ///
-    /// These peer sets are used to construct a bit vector (sorted by public key)
-    /// to share knowledge about dialable IPs. If a peer does not yet have an index
-    /// associated with a bit vector, the discovery message will be dropped.
-    ///
-    /// # Parameters
-    ///
-    /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Must be monotonically increasing, per the rules of [Set].
-    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    async fn update(&mut self, index: u64, peers: Self::Peers) {
-        let _ = self.sender.send(Message::Register { index, peers });
-    }
-
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
-        let (sender, receiver) = oneshot::channel();
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
         self.sender
-            .send(Message::PeerSet {
+            .0
+            .request(|responder| Message::PeerSet {
                 index: id,
-                responder: sender,
+                responder,
             })
-            .unwrap();
-        receiver.await.unwrap()
+            .await
+            .flatten()
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        let (sender, receiver) = oneshot::channel();
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         self.sender
-            .send(Message::Subscribe { responder: sender })
-            .unwrap();
-        receiver.await.unwrap()
+            .0
+            .request(|responder| Message::Subscribe { responder })
+            .await
+            .unwrap_or_else(|| {
+                let (_, rx) = mpsc::unbounded_channel();
+                rx
+            })
+    }
+}
+
+impl<C: PublicKey> crate::Manager for Oracle<C> {
+    async fn track<R>(&mut self, index: u64, peers: R)
+    where
+        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+    {
+        self.sender.0.send_lossy(Message::Register {
+            index,
+            peers: peers.into(),
+        });
     }
 }
 
@@ -278,6 +293,6 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
     async fn block(&mut self, public_key: Self::PublicKey) {
-        let _ = self.sender.send(Message::Block { public_key });
+        self.sender.0.send_lossy(Message::Block { public_key });
     }
 }

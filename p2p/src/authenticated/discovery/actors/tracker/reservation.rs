@@ -4,6 +4,7 @@ use commonware_cryptography::PublicKey;
 
 /// Reservation for a peer in the network. This is used to ensure that the peer is reserved only
 /// once, and that the reservation is released when the peer connection fails or is closed.
+#[derive(Debug)]
 pub struct Reservation<P: PublicKey> {
     /// Metadata about the reservation.
     metadata: Metadata<P>,

@@ -6,11 +6,14 @@ use crate::{
     Signer as _,
 };
 use commonware_math::algebra::Random;
-use commonware_utils::{ordered::BiMap, TryCollect as _};
+use commonware_utils::{
+    ordered::{Map, Set},
+    TryCollect as _,
+};
 use rand::{CryptoRng, RngCore};
 
 /// Generates ed25519 identity participants.
-pub fn participants<R>(rng: &mut R, n: u32) -> BiMap<PublicKey, PrivateKey>
+pub fn participants<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
 where
     R: RngCore + CryptoRng,
 {
@@ -27,9 +30,10 @@ where
 /// Builds ed25519 identities alongside a caller-provided ed25519 certificate scheme wrapper.
 pub fn fixture<S, R>(
     rng: &mut R,
+    namespace: &[u8],
     n: u32,
-    signer: impl Fn(commonware_utils::ordered::Set<PublicKey>, PrivateKey) -> Option<S>,
-    verifier: impl Fn(commonware_utils::ordered::Set<PublicKey>) -> S,
+    signer: impl Fn(&[u8], Set<PublicKey>, PrivateKey) -> Option<S>,
+    verifier: impl Fn(&[u8], Set<PublicKey>) -> S,
 ) -> Fixture<S>
 where
     R: RngCore + CryptoRng,
@@ -54,9 +58,12 @@ where
     let schemes = private_keys
         .iter()
         .cloned()
-        .map(|sk| signer(participants.clone(), sk).expect("scheme signer must be a participant"))
+        .map(|sk| {
+            signer(namespace, participants.clone(), sk)
+                .expect("scheme signer must be a participant")
+        })
         .collect();
-    let verifier = verifier(participants);
+    let verifier = verifier(namespace, participants);
 
     Fixture {
         participants: participants_vec,

@@ -41,6 +41,11 @@
 //! RUSTFLAGS="--cfg generate_conformance_tests" cargo test
 //! ```
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 pub use commonware_conformance_macros::conformance_tests;
 #[doc(hidden)]
 pub use commonware_macros;

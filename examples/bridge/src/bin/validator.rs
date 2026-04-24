@@ -4,22 +4,23 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, Engine},
+    simplex::{self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
-        sharing::Sharing,
+        sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
     ed25519, Sha256, Signer as _,
 };
-use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
-use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
-use governor::Quota;
+use commonware_p2p::{authenticated, Manager as _};
+use commonware_runtime::{
+    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
+};
+use commonware_stream::encrypted::{dial, Config as StreamConfig};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -104,7 +105,7 @@ fn main() {
             let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
-            bootstrapper_identities.push((verifier, bootstrapper_address));
+            bootstrapper_identities.push((verifier, bootstrapper_address.into()));
         }
     }
 
@@ -118,9 +119,11 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Sharing<MinSig> =
-        Sharing::decode_cfg(identity.as_ref(), &NZU32!(validators.len() as u32))
-            .expect("Identity not well-formed");
+    let identity: Sharing<MinSig> = Sharing::decode_cfg(
+        identity.as_ref(),
+        &(NZU32!(validators.len() as u32), ModeVersion::v0()),
+    )
+    .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
@@ -195,7 +198,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.update(0, validators.clone()).await;
+        oracle.track(0, validators.clone()).await;
 
         // Register consensus channels
         //
@@ -218,18 +221,20 @@ fn main() {
         );
 
         // Initialize application
+        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
-                namespace: consensus_namespace.clone(),
-                identity,
-                other_public,
                 hasher: Sha256::default(),
+                this_network,
+                other_network,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                share,
             },
         );
 
@@ -238,6 +243,7 @@ fn main() {
             context.with_label("engine"),
             simplex::Config {
                 scheme,
+                elector: RoundRobin::<Sha256>::default(),
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
@@ -245,18 +251,18 @@ fn main() {
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: Epoch::zero(),
-                namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                strategy,
+                forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );
 

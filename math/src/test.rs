@@ -53,16 +53,16 @@ impl From<u8> for F {
 
 impl Object for F {}
 
-impl<'a> Add<&'a F> for F {
+impl<'a> Add<&'a Self> for F {
     type Output = Self;
 
-    fn add(self, rhs: &'a F) -> Self::Output {
+    fn add(self, rhs: &'a Self) -> Self::Output {
         Self((self.0 + rhs.0) % P)
     }
 }
 
-impl<'a> AddAssign<&'a F> for F {
-    fn add_assign(&mut self, rhs: &'a F) {
+impl<'a> AddAssign<&'a Self> for F {
+    fn add_assign(&mut self, rhs: &'a Self) {
         *self = *self + rhs;
     }
 }
@@ -75,7 +75,7 @@ impl Neg for F {
     }
 }
 
-impl<'a> Sub<&'a F> for F {
+impl<'a> Sub<&'a Self> for F {
     type Output = Self;
 
     fn sub(self, rhs: &'a Self) -> Self::Output {
@@ -83,8 +83,8 @@ impl<'a> Sub<&'a F> for F {
     }
 }
 
-impl<'a> SubAssign<&'a F> for F {
-    fn sub_assign(&mut self, rhs: &'a F) {
+impl<'a> SubAssign<&'a Self> for F {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         *self = *self - rhs;
     }
 }
@@ -95,16 +95,16 @@ impl Additive for F {
     }
 }
 
-impl<'a> Mul<&'a F> for F {
+impl<'a> Mul<&'a Self> for F {
     type Output = Self;
 
-    fn mul(self, rhs: &'a F) -> Self::Output {
+    fn mul(self, rhs: &'a Self) -> Self::Output {
         Self(mul_mod(self.0, rhs.0, P))
     }
 }
 
-impl<'a> MulAssign<&'a F> for F {
-    fn mul_assign(&mut self, rhs: &'a F) {
+impl<'a> MulAssign<&'a Self> for F {
+    fn mul_assign(&mut self, rhs: &'a Self) {
         *self = *self * rhs;
     }
 }
@@ -123,7 +123,7 @@ impl Field for F {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let byte = u.arbitrary::<u8>()? % P;
@@ -170,16 +170,16 @@ impl Read for G {
 
 impl Object for G {}
 
-impl<'a> Add<&'a G> for G {
+impl<'a> Add<&'a Self> for G {
     type Output = Self;
 
-    fn add(self, rhs: &'a G) -> Self::Output {
+    fn add(self, rhs: &'a Self) -> Self::Output {
         Self(mul_mod(self.0, rhs.0, Q))
     }
 }
 
-impl<'a> AddAssign<&'a G> for G {
-    fn add_assign(&mut self, rhs: &'a G) {
+impl<'a> AddAssign<&'a Self> for G {
+    fn add_assign(&mut self, rhs: &'a Self) {
         *self = *self + rhs;
     }
 }
@@ -192,16 +192,16 @@ impl Neg for G {
     }
 }
 
-impl<'a> Sub<&'a G> for G {
+impl<'a> Sub<&'a Self> for G {
     type Output = Self;
 
-    fn sub(self, rhs: &'a G) -> Self::Output {
+    fn sub(self, rhs: &'a Self) -> Self::Output {
         self + &-*rhs
     }
 }
 
-impl<'a> SubAssign<&'a G> for G {
-    fn sub_assign(&mut self, rhs: &'a G) {
+impl<'a> SubAssign<&'a Self> for G {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         *self = *self - rhs;
     }
 }
@@ -236,64 +236,63 @@ impl CryptoGroup for G {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for G {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(G::generator() * &u.arbitrary::<F>()?)
+        Ok(Self::generator() * &u.arbitrary::<F>()?)
     }
 }
+
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz {
+        use super::*;
+        use crate::algebra::test_suites;
+        use arbitrary::{Arbitrary, Unstructured};
+        use commonware_codec::Encode as _;
+
+        #[derive(Debug, Arbitrary)]
+        pub enum Plan {
+            FCodec(F),
+            GCodec(G),
+            FuzzField,
+            FuzzSpace,
+        }
+
+        impl Plan {
+            pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+                match self {
+                    Self::FCodec(x) => {
+                        assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
+                    }
+                    Self::GCodec(x) => {
+                        assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+                    }
+                    Self::FuzzField => {
+                        test_suites::fuzz_field::<F>(u)?;
+                    }
+                    Self::FuzzSpace => {
+                        test_suites::fuzz_space::<F, G>(u)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn test_fuzz() {
+            use commonware_invariants::minifuzz;
+            minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+        }
+    }
+});
 
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::algebra;
-    use commonware_codec::Encode;
-    use proptest::prelude::*;
-
-    impl Arbitrary for F {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<u8>().prop_map_into().boxed()
-        }
-    }
-
-    impl Arbitrary for G {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<F>().prop_map(|x| G::generator() * &x).boxed()
-        }
-    }
-
-    #[test]
-    fn test_field() {
-        algebra::test_suites::test_field(file!(), &F::arbitrary());
-    }
-
-    #[test]
-    fn test_group() {
-        algebra::test_suites::test_space(file!(), &F::arbitrary(), &G::arbitrary());
-    }
-
-    proptest! {
-        #[test]
-        fn test_f_codec(x: F) {
-            assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
-        }
-
-        #[test]
-        fn test_g_codec(x: G) {
-            assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
-        }
-    }
-
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::*;
+        use super::super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

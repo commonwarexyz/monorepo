@@ -1,11 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU16, NonZeroUsize},
+};
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -40,7 +43,7 @@ fn vec_to_key(v: &[u8]) -> FixedBytes<32> {
     FixedBytes::<32>::new(buf)
 }
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(555);
+const PAGE_SIZE: NonZeroU16 = NZU16!(393);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
 
 fn fuzz(input: FuzzInput) {
@@ -48,12 +51,14 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            journal_partition: "fuzz_journal".into(),
-            journal_compression: None,
-            journal_write_buffer: NZUsize!(1024 * 1024),
-            journal_target_size: 10 * 1024 * 1024,
-            journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            table_partition: "fuzz_table".into(),
+            key_partition: "fuzz-key".into(),
+            key_write_buffer: NZUsize!(1024 * 1024),
+            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "fuzz-value".into(),
+            value_compression: None,
+            value_write_buffer: NZUsize!(1024 * 1024),
+            value_target_size: 10 * 1024 * 1024,
+            table_partition: "fuzz-table".into(),
             table_initial_size: 256,
             table_resize_frequency: 4,
             table_resize_chunk_size: 128,

@@ -108,11 +108,11 @@ mod tests {
     fn test_u32() {
         let value = 42u32;
         let array = U32::new(value);
-        assert_eq!(value, U32::decode(array.as_ref()).unwrap().into());
-        assert_eq!(value, U32::from(array.0).into());
+        assert_eq!(value, u32::from(U32::decode(array.as_ref()).unwrap()));
+        assert_eq!(value, u32::from(U32::from(array.0)));
 
         let vec = array.to_vec();
-        assert_eq!(value, U32::decode(vec.as_ref()).unwrap().into());
+        assert_eq!(value, u32::from(U32::decode(vec.as_ref()).unwrap()));
     }
 
     #[test]

@@ -8,10 +8,10 @@ use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Hasher, Signer,
 };
-use commonware_utils::{acknowledgement::Exact, Acknowledgement};
-use futures::{
+use commonware_utils::{
+    acknowledgement::Exact,
     channel::{mpsc, oneshot},
-    SinkExt,
+    Acknowledgement,
 };
 use tracing::error;
 

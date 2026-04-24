@@ -10,7 +10,7 @@ const WRITE_BUFFER: usize = 1024;
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Partition for [Ordinal] store benchmarks.
-pub const PARTITION: &str = "ordinal_bench_partition";
+pub const PARTITION: &str = "ordinal-bench-partition";
 
 /// Configuration constants for [Ordinal] store.
 const ITEMS_PER_BLOB: u64 = 10000;

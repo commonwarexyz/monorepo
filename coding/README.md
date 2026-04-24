@@ -7,4 +7,4 @@ Encode data to enable recovery from a subset of fragments.
 
 ## Status
 
-`commonware-coding` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

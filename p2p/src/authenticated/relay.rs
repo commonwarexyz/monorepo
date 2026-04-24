@@ -1,4 +1,5 @@
-use futures::{channel::mpsc, SinkExt as _};
+use commonware_macros::select;
+use commonware_utils::channel::mpsc::{self, error::TrySendError};
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
@@ -12,50 +13,69 @@ impl<T> Relay<T> {
     }
 
     /// Sends the given `message` to the appropriate channel based on `priority`.
-    pub async fn send(&mut self, message: T, priority: bool) -> Result<(), mpsc::SendError> {
-        let sender = if priority {
-            &mut self.high
-        } else {
-            &mut self.low
-        };
-        sender.send(message).await
+    ///
+    /// Uses non-blocking `try_send` to avoid blocking the caller when the
+    /// channel buffer is full. Returns an error if the channel is full or
+    /// disconnected.
+    pub fn send(&self, message: T, priority: bool) -> Result<(), TrySendError<T>> {
+        let sender = if priority { &self.high } else { &self.low };
+        sender.try_send(message)
+    }
+}
+
+/// Message received from one of the prioritized relay channels.
+pub enum Prioritized<C, D> {
+    /// Control message received from the control channel.
+    Control(C),
+    /// Data message received from either the high- or low-priority data channel.
+    Data(D),
+    /// One of the relay channels closed before yielding a message.
+    Closed,
+}
+
+/// Awaits a message from control, high, or low priority receivers.
+pub async fn recv_prioritized<C, D>(
+    control: &mut mpsc::Receiver<C>,
+    high: &mut mpsc::Receiver<D>,
+    low: &mut mpsc::Receiver<D>,
+) -> Prioritized<C, D> {
+    select! {
+        msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
+        msg = high.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
+        msg = low.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner};
 
     #[test]
     fn test_relay_content_priority() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let (low_sender, mut low_receiver) = mpsc::channel(1);
-            let (high_sender, mut high_receiver) = mpsc::channel(1);
-            let mut relay = Relay::new(low_sender, high_sender);
+        let (low_sender, mut low_receiver) = mpsc::channel(1);
+        let (high_sender, mut high_receiver) = mpsc::channel(1);
+        let relay = Relay::new(low_sender, high_sender);
 
-            // Send a high priority message
-            let data = 123;
-            relay.send(data, true).await.unwrap();
-            match high_receiver.try_next() {
-                Ok(Some(received_data)) => {
-                    assert_eq!(data, received_data);
-                }
-                _ => panic!("Expected high priority message"),
+        // Send a high priority message
+        let data = 123;
+        relay.send(data, true).unwrap();
+        match high_receiver.try_recv() {
+            Ok(received_data) => {
+                assert_eq!(data, received_data);
             }
-            assert!(low_receiver.try_next().is_err());
+            _ => panic!("Expected high priority message"),
+        }
+        assert!(low_receiver.try_recv().is_err());
 
-            // Send a low priority message
-            let data = 456;
-            relay.send(data, false).await.unwrap();
-            match low_receiver.try_next() {
-                Ok(Some(received_data)) => {
-                    assert_eq!(data, received_data);
-                }
-                _ => panic!("Expected high priority message"),
+        // Send a low priority message
+        let data = 456;
+        relay.send(data, false).unwrap();
+        match low_receiver.try_recv() {
+            Ok(received_data) => {
+                assert_eq!(data, received_data);
             }
-            assert!(high_receiver.try_next().is_err());
-        });
+            _ => panic!("Expected low priority message"),
+        }
+        assert!(high_receiver.try_recv().is_err());
     }
 }

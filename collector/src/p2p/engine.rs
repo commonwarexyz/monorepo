@@ -11,21 +11,21 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
 };
-use commonware_utils::futures::Pool;
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc, oneshot},
+    futures::Pool,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<E, B, Rq, Rs, P, M, H>
 where
-    E: Clock + Spawner,
+    E: BufferPooler + Clock + Spawner,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -57,7 +57,7 @@ where
 
 impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
 where
-    E: Clock + Spawner + Metrics,
+    E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -113,7 +113,7 @@ where
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(requests, responses).await)
+        spawn_cell!(self.context, self.run(requests, responses))
     }
 
     async fn run(
@@ -122,68 +122,73 @@ where
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
+        let (mut req_tx, mut req_rx) = wrap(
+            self.request_codec,
+            self.context.network_buffer_pool().clone(),
+            requests.0,
+            requests.1,
+        );
+        let (mut res_tx, mut res_rx) = wrap(
+            self.response_codec,
+            self.context.network_buffer_pool().clone(),
+            responses.0,
+            responses.1,
+        );
 
         // Create futures pool
-        let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
+        let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            command = self.mailbox.next() => {
-                if let Some(command) = command {
-                    match command {
-                        Message::Send { request, recipients, responder } => {
-                            // Track commitment (if not already tracked)
-                            let commitment = request.commitment();
-                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                                self.outstanding.inc();
-                                (HashSet::new(), HashSet::new())
-                            });
+            Some(command) = self.mailbox.recv() else continue => {
+                match command {
+                    Message::Send {
+                        request,
+                        recipients,
+                        responder,
+                    } => {
+                        // Track commitment (if not already tracked)
+                        let commitment = request.commitment();
+                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                            self.outstanding.inc();
+                            (HashSet::new(), HashSet::new())
+                        });
 
-                            // Send the request to recipients
-                            match req_tx.send(
-                                recipients,
-                                request,
-                                self.priority_request
-                            ).await {
-                                Ok(recipients) => {
-                                    entry.0.extend(recipients.iter().cloned());
-                                    let _ = responder.send(Ok(recipients));
-                                }
-                                Err(err) => {
-                                    error!(?err, ?commitment, "failed to send message");
-                                    let _ = responder.send(Err(Error::SendFailed(err.into())));
-                                }
+                        // Send the request to recipients
+                        match req_tx
+                            .send(recipients, request, self.priority_request)
+                            .await
+                        {
+                            Ok(recipients) => {
+                                entry.0.extend(recipients.iter().cloned());
+                                responder.send_lossy(Ok(recipients));
                             }
-                        },
-                        Message::Cancel { commitment } => {
-                            if self.tracked.remove(&commitment).is_none() {
-                                debug!(?commitment, "ignoring removal of unknown commitment");
+                            Err(err) => {
+                                error!(?err, ?commitment, "failed to send message");
+                                responder.send_lossy(Err(Error::SendFailed(err.into())));
                             }
-                            let _ = self.outstanding.try_set(self.tracked.len());
                         }
+                    }
+                    Message::Cancel { commitment } => {
+                        if self.tracked.remove(&commitment).is_none() {
+                            debug!(?commitment, "ignoring removal of unknown commitment");
+                        }
+                        let _ = self.outstanding.try_set(self.tracked.len());
                     }
                 }
             },
 
             // Response from a handler
-            ready = processed.next_completed() => {
-                // Error handling
-                let Ok((peer, reply)) = ready else {
-                    continue;
-                };
+            Ok((peer, reply)) = processed.next_completed() else continue => {
                 self.responses.inc();
 
                 // Send the response
-                let _ = res_tx.send(
-                    Recipients::One(peer),
-                    reply,
-                    self.priority_response
-                ).await;
+                let _ = res_tx
+                    .send(Recipients::One(peer), reply, self.priority_response)
+                    .await;
             },
 
             // Request from an originator
@@ -201,8 +206,7 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        warn!(?err, ?peer, "blocking peer");
-                        self.blocker.block(peer).await;
+                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid request");
                         continue;
                     }
                 };
@@ -210,9 +214,7 @@ where
                 // Handle the request
                 let (tx, rx) = oneshot::channel();
                 self.handler.process(peer.clone(), msg, tx).await;
-                processed.push(async move {
-                    Ok((peer, rx.await?))
-                });
+                processed.push(async move { Ok((peer, rx.await?)) });
             },
 
             // Response from a handler
@@ -228,8 +230,7 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        warn!(?err, ?peer, "blocking peer");
-                        self.blocker.block(peer).await;
+                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid response");
                         continue;
                     }
                 };

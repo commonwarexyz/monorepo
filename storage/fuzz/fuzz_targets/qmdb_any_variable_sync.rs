@@ -2,20 +2,25 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
-    mmr::{self, hasher::Standard, MAX_LOCATION},
+    journal::contiguous::variable::Config as VConfig,
+    merkle::{
+        hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily,
+        Location,
+    },
     qmdb::{
-        any::{unordered::variable::Any, VariableConfig as Config},
-        store::CleanStore as _,
+        any::{unordered::variable::Db, VariableConfig as Config},
         verify_proof,
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use mmr::location::Location;
-use std::{collections::HashMap, num::NonZeroU64};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU16, NonZeroU64},
+};
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -39,21 +44,19 @@ enum Operation {
     },
     GetMetadata,
     Proof {
-        start_loc: Location,
+        start_loc: u64,
         max_ops: NonZeroU64,
     },
     HistoricalProof {
         size: u64,
-        start_loc: Location,
+        start_loc: u64,
         max_ops: NonZeroU64,
     },
     Sync,
     InactivityFloorLoc,
     OpCount,
     Root,
-    SimulateFailure {
-        sync_log: bool,
-    },
+    SimulateFailure,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -89,16 +92,14 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             5 => Ok(Operation::GetMetadata),
             6 => {
-                let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
-                let start_loc = Location::new(start_loc).unwrap();
+                let start_loc = u.arbitrary::<u64>()?;
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::Proof { start_loc, max_ops })
             }
             7 => {
                 let size = u.arbitrary()?;
-                let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
-                let start_loc = Location::new(start_loc).unwrap();
+                let start_loc = u.arbitrary::<u64>()?;
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::HistoricalProof {
@@ -111,10 +112,7 @@ impl<'a> Arbitrary<'a> for Operation {
             9 => Ok(Operation::InactivityFloorLoc),
             10 => Ok(Operation::OpCount),
             11 => Ok(Operation::Root),
-            12 | 13 => {
-                let sync_log: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure { sync_log })
-            }
+            12 | 13 => Ok(Operation::SimulateFailure {}),
             _ => unreachable!(),
         }
     }
@@ -135,70 +133,78 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-const PAGE_SIZE: usize = 128;
+const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn test_config(
+    test_name: &str,
+    pooler: &impl BufferPooler,
+) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}_log"),
-        log_items_per_blob: NZU64!(3),
-        log_write_buffer: NZUsize!(1024),
-        log_compression: None,
-        log_codec_config: ((0..=100000).into(), ()),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("{test_name}-merkle"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: VConfig {
+            partition: format!("{test_name}-log"),
+            items_per_section: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            compression: None,
+            codec_config: ((), ((0..=100000).into(), ())),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
     }
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
+    let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
-        let mut db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("qmdb_any_variable_fuzz_test"),
-        )
-        .await
-        .expect("Failed to init source db");
+        let hasher = Standard::<Sha256>::new();
+        let cfg = test_config(&test_name, &context);
+        let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
+            .await
+            .expect("Failed to init source db");
+        let mut restarts = 0usize;
 
-        let mut historical_roots: HashMap<
-            Location,
+        let mut historical_roots: BTreeMap<
+            Location<F>,
             <Sha256 as commonware_cryptography::Hasher>::Digest,
-        > = HashMap::new();
+        > = BTreeMap::new();
 
-        let mut has_uncommitted = false;
+        let mut pending_writes: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
 
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.update(Key::new(*key), value_bytes.to_vec())
-                        .await
-                        .expect("Update should not fail");
-                    has_uncommitted = true;
+                    pending_writes.push((Key::new(*key), Some(value_bytes.to_vec())));
                 }
 
                 Operation::Delete { key } => {
-                    db.delete(Key::new(*key))
-                        .await
-                        .expect("Delete should not fail");
-                    has_uncommitted = true;
+                    pending_writes.push((Key::new(*key), None));
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    db.commit(metadata_bytes.clone())
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
+                    db.apply_batch(merkleized)
                         .await
-                        .expect("Commit should not fail");
-                    historical_roots.insert(db.op_count(), db.root());
-                    has_uncommitted = false;
+                        .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
                 }
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
+                    db.prune(db.sync_boundary())
                         .await
                         .expect("Prune should not fail");
                 }
@@ -212,17 +218,24 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
-                    let op_count = db.op_count();
-                    let oldest_retained_loc = db.inactivity_floor_loc();
-                    if op_count > 0 && !has_uncommitted {
-                        if *start_loc < oldest_retained_loc || *start_loc >= *op_count {
-                            continue;
-                        }
-
-                        db.sync().await.expect("Sync should not fail");
-                        if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
+                    // proof requires commit
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
+                        .await
+                        .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
+                    let op_count = db.bounds().await.end;
+                    let oldest_retained_loc = db.sync_boundary();
+                    if start_loc >= oldest_retained_loc && start_loc < op_count {
+                        if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
                             let root = db.root();
-                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
+                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root));
                         }
                     }
                 }
@@ -232,60 +245,111 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        let op_count = Location::new(*size % *op_count).unwrap() + 1;
+                    // historical proof verification requires a root captured at a commit point.
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
+                        .await
+                        .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let op_count = {
+                        let idx = (*size as usize) % historical_roots.len();
+                        *historical_roots
+                            .keys()
+                            .nth(idx)
+                            .expect("historical roots should contain at least one key")
+                    };
+                    let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
 
-                        if *start_loc >= op_count || op_count > max_ops.get() {
-                            continue;
-                        }
+                    if start_loc >= op_count || op_count > max_ops.get() {
+                        continue;
+                    }
 
-                        if let Ok((proof, log)) =
-                            db.historical_proof(op_count, *start_loc, *max_ops).await
-                        {
-                            if let Some(root) = historical_roots.get(&op_count) {
-                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
-                            }
-                        }
+                    if let Ok((proof, log)) =
+                        db.historical_proof(op_count, start_loc, *max_ops).await
+                    {
+                        let root = historical_roots
+                            .get(&op_count)
+                            .expect("historical root missing for known commit point");
+                        assert!(verify_proof(&hasher, &proof, start_loc, &log, root));
                     }
                 }
 
                 Operation::Sync => {
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
+                        .await
+                        .expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
                     db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.inactivity_floor_loc();
+                    let _ = db.sync_boundary();
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    let _ = db.bounds().await.end;
                 }
 
                 Operation::Root => {
-                    if !has_uncommitted {
-                        let _ = db.root();
+                    // root requires commit
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
                     }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
+                        .await
+                        .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let _ = db.root();
                 }
 
-                Operation::SimulateFailure { sync_log } => {
-                    db.simulate_failure(*sync_log)
-                        .await
-                        .expect("Simulate failure should not fail");
+                Operation::SimulateFailure => {
+                    // Simulate unclean shutdown by dropping the db without committing
+                    pending_writes.clear();
+                    historical_roots.clear();
+                    drop(db);
 
-                    db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
-                        context.clone(),
-                        test_config("src"),
+                    let cfg = test_config(&test_name, &context);
+                    db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init source db");
-                    has_uncommitted = false;
+                    restarts += 1;
                 }
             }
         }
 
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized)
+            .await
+            .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
+}
+
+fn fuzz(input: FuzzInput) {
+    fuzz_family::<mmr::Family>(&input, "qmdb-any-variable-fuzz-mmr");
+    fuzz_family::<mmb::Family>(&input, "qmdb-any-variable-fuzz-mmb");
 }
 
 fuzz_target!(|input: FuzzInput| {

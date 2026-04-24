@@ -14,11 +14,16 @@ documentation = "https://docs.rs/commonware-runtime"
 workspace = true
 
 [dependencies]
-async-lock.workspace = true
+arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 cfg-if.workspace = true
-commonware-macros.workspace = true
+commonware-codec.workspace = true
+commonware-conformance = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-macros = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+crossbeam-queue.workspace = true
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
@@ -27,6 +32,7 @@ opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
@@ -48,14 +54,41 @@ opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
 
+[dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+rand = { workspace = true, features = ["small_rng"] }
+serde_json.workspace = true
+
 [features]
 default = []
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"dep:commonware-conformance",
+]
 external = [ "pin-project" ]
 test-utils = []
-iouring-storage = [ "io-uring" ]
+iouring = [ "iouring-network", "iouring-storage" ]
 iouring-network = [ "io-uring" ]
+iouring-storage = [ "io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "storage"
+harness = false
+path = "src/storage/benches/main.rs"
+
+[[bench]]
+name = "buffer_paged"
+harness = false
+path = "src/utils/buffer/benches/bench.rs"
+
+[[bench]]
+name = "buffer_pool"
+harness = false
+path = "src/iobuf/benches/bench.rs"

@@ -58,12 +58,10 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Recipients, Sender as _,
+        Blocker, Manager as _, Recipients, Sender as _,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZU32;
-    use futures::StreamExt;
-    use governor::Quota;
+    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_utils::{ordered::Set, NZUsize, NZU32};
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -85,12 +83,18 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey>,
+        Oracle<PublicKey, deterministic::Context>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         )>,
     ) {
         let (network, oracle) = Network::new(
@@ -98,7 +102,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();
@@ -111,17 +115,21 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let mut control = oracle.control(peer.clone());
+            let control = oracle.control(peer.clone());
             let (sender1, receiver1) = control.register(0, TEST_QUOTA).await.unwrap();
             let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
+        oracle
+            .manager()
+            .track(0, Set::from_iter_dedup(peers.clone()))
+            .await;
 
         (oracle, schemes, peers, connections)
     }
 
     async fn add_link(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         link: Link,
         peers: &[PublicKey],
         from: usize,
@@ -138,13 +146,19 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    async fn setup_and_spawn_engine(
+    fn setup_and_spawn_engine(
         context: &deterministic::Context,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,
@@ -193,8 +207,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
@@ -209,8 +222,7 @@ mod tests {
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
                 handler,
-            )
-            .await;
+            );
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
@@ -221,13 +233,13 @@ mod tests {
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify peer 2 received the request
-            let processed = handler_out.next().await.unwrap();
+            let processed = handler_out.recv().await.unwrap();
             assert_eq!(processed.origin, peers[0]);
             assert_eq!(processed.request, request);
             assert!(processed.responded);
 
             // Verify peer 1's monitor collected the response
-            let collected = mon_out.next().await.unwrap();
+            let collected = mon_out.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
             assert_eq!(collected.response.id, 1);
             assert_eq!(collected.response.result, 2);
@@ -260,8 +272,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
@@ -276,8 +287,7 @@ mod tests {
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
                 handler,
-            )
-            .await;
+            );
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
@@ -293,12 +303,12 @@ mod tests {
 
             // Wait a bit and verify no response collected
             select! {
-                _ = mon_out.next() => {
+                _ = mon_out.recv() => {
                     panic!("Should not receive any monitor events");
                 },
                 _ = context.sleep(Duration::from_millis(5_000)) => {
                     // Expected: no events
-                }
+                },
             }
         });
     }
@@ -329,8 +339,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -345,8 +354,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Setup peer 3
             let scheme3 = schemes.next().unwrap();
@@ -361,8 +369,7 @@ mod tests {
                 (req_conn3, res_conn3),
                 MockMonitor::dummy(),
                 handler3,
-            )
-            .await;
+            );
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
@@ -380,7 +387,7 @@ mod tests {
             let mut peer3_responded = false;
 
             for _ in 0..2 {
-                let collected = mon_out1.next().await.unwrap();
+                let collected = mon_out1.recv().await.unwrap();
                 assert_eq!(collected.response.id, 3);
                 assert_eq!(collected.response.result, 6);
                 responses_collected += 1;
@@ -423,8 +430,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -439,8 +445,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send the same request multiple times
             let request = Request { id: 5, data: 5 };
@@ -453,19 +458,19 @@ mod tests {
             }
 
             // Should only receive one response
-            let collected = mon_out1.next().await.unwrap();
+            let collected = mon_out1.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
             assert_eq!(collected.response.id, 5);
             assert_eq!(collected.count, 1);
 
             // Wait and verify no more responses
             select! {
-                _ = mon_out1.next() => {
+                _ = mon_out1.recv() => {
                     panic!("Should not receive duplicate responses");
                 },
                 _ = context.sleep(Duration::from_millis(5_000)) => {
                     // Expected: no more responses
-                }
+                },
             }
         });
     }
@@ -495,8 +500,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -513,8 +517,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send multiple concurrent requests
             let request1 = Request { id: 10, data: 10 };
@@ -532,7 +535,7 @@ mod tests {
             let mut response10_received = false;
             let mut response20_received = false;
             for _ in 0..2 {
-                let collected = mon_out1.next().await.unwrap();
+                let collected = mon_out1.recv().await.unwrap();
                 assert_eq!(collected.handler, peers[1]);
                 assert_eq!(collected.count, 1);
                 match collected.response.id {
@@ -578,8 +581,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2 with handler that doesn't respond
             let scheme2 = schemes.next().unwrap();
@@ -594,8 +596,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send request
             let request = Request { id: 100, data: 100 };
@@ -606,19 +607,19 @@ mod tests {
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify handler received request but didn't respond
-            let processed = handler_out2.next().await.unwrap();
+            let processed = handler_out2.recv().await.unwrap();
             assert_eq!(processed.origin, peers[0]);
             assert_eq!(processed.request, request);
             assert!(!processed.responded);
 
             // Verify no response collected
             select! {
-                _ = mon_out1.next() => {
+                _ = mon_out1.recv() => {
                     panic!("Should not receive any monitor events");
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no events
-                }
+                },
             }
         });
     }
@@ -644,8 +645,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
@@ -657,12 +657,12 @@ mod tests {
 
             // Verify no responses collected
             select! {
-                _ = mon_out.next() => {
+                _ = mon_out.recv() => {
                     panic!("Should not receive any monitor events");
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no events
-                }
+                },
             }
         });
     }
@@ -780,8 +780,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2 (legitimate responder)
             let scheme2 = schemes.next().unwrap();
@@ -796,14 +795,13 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Setup peer 3 (will respond with same commitment as peer 2's request)
             let conn3 = connections.next().unwrap();
             let mut res_conn3 = conn3.1;
 
-            // Send request from peer 1 to peer 2 (this gets tracked)
+            // Send request from peer 1 to peer 2 (collector records the in-flight request)
             let request_to_peer2 = Request { id: 42, data: 42 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
@@ -817,7 +815,7 @@ mod tests {
                 .0
                 .send(
                     Recipients::One(peers[0].clone()),
-                    response_to_peer1.encode().into(),
+                    response_to_peer1.encode(),
                     true,
                 )
                 .await
@@ -827,7 +825,7 @@ mod tests {
             context.sleep(Duration::from_millis(1_000)).await;
 
             // Should only receive one response (from peer 2, not peer 3)
-            let collected = mon_out1.next().await.unwrap();
+            let collected = mon_out1.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]); // Response from peer 2
             assert_eq!(collected.response.id, 42);
             assert_eq!(collected.response.result, 84); // 42 * 2 (default mock behavior)
@@ -835,13 +833,145 @@ mod tests {
 
             // Verify no additional responses (peer 3's response should be ignored)
             select! {
-                _ = mon_out1.next() => {
+                _ = mon_out1.recv() => {
                     panic!("Should not receive response from unknown peer");
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no more events
-                }
+                },
             }
         });
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn spawn_engines_with_handles(
+        context: deterministic::Context,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        schemes: Vec<PrivateKey>,
+        connections: Vec<(
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+        )>,
+    ) -> (
+        Vec<Mailbox<PublicKey, Request>>,
+        Vec<commonware_runtime::Handle<()>>,
+    ) {
+        let engine_context = context.with_label("engine");
+        let mut mailboxes = Vec::new();
+        let mut handles = Vec::new();
+
+        for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
+            let ctx = engine_context.with_label(&format!("peer_{idx}"));
+            let (mon, _) = MockMonitor::new();
+            let (handler, _) = MockHandler::new(true);
+            let (engine, mailbox) = Engine::new(
+                ctx,
+                Config {
+                    blocker: oracle.control(scheme.public_key()),
+                    monitor: mon,
+                    handler,
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+            handles.push(engine.start(conn.0, conn.1));
+            mailboxes.push(mailbox);
+        }
+
+        (mailboxes, handles)
+    }
+
+    #[test_traced]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (mut mailboxes, handles) =
+                spawn_engines_with_handles(context.clone(), &oracle, schemes, connections);
+
+            // Abort all engines immediately
+            for handle in handles {
+                handle.abort();
+            }
+
+            // All operations should not panic after shutdown
+
+            // Send should not panic (returns error)
+            let request = Request { id: 1, data: 1 };
+            let result = mailboxes[0]
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await;
+            assert!(result.is_err(), "send after shutdown should return error");
+
+            // Cancel should not panic
+            mailboxes[0].cancel(request.commitment()).await;
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (mut mailboxes, handles) =
+                spawn_engines_with_handles(context.clone(), &oracle, schemes, connections);
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the engine prefix
+            let running_before = count_running_tasks(&context, "engine");
+            assert!(
+                running_before > 0,
+                "at least one engine task should be running"
+            );
+
+            // Verify network is functional - send a request and expect a response
+            let request = Request { id: 1, data: 1 };
+            let recipients = mailboxes[0]
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await
+                .expect("send failed");
+            assert_eq!(recipients, vec![peers[1].clone()]);
+
+            // Abort all engines
+            for handle in handles {
+                handle.abort();
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all engine tasks are stopped
+            let running_after = count_running_tasks(&context, "engine");
+            assert_eq!(
+                running_after, 0,
+                "all engine tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

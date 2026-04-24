@@ -1,8 +1,8 @@
 //! Persistent storage for DKG protocol state.
 //!
-//! Stores epoch state and per-epoch messages (dealer broadcasts, player acks, logs)
-//! using append-only journals for crash recovery. In-memory BTreeMaps provide fast
-//! lookups while the journal ensures durability.
+//! Stores epoch state using key-value metadata storage and per-epoch messages
+//! (dealer broadcasts, player acks, logs) using append-only journals for crash recovery.
+//! In-memory BTreeMaps provide fast lookups while storage ensures durability.
 //!
 //! # Warning
 //!
@@ -11,34 +11,41 @@
 //! - This key material should be stored securely (e.g., encrypted at rest)
 //! - Old shares should be securely deleted after successful resharing
 
+use crate::dkg::ModeVersion;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
+            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
         primitives::{group::Share, variant::Variant},
     },
     transcript::{Summary, Transcript},
-    PublicKey, Signer,
+    BatchVerifier, PublicKey, Signer,
 };
-use commonware_runtime::{buffer::PoolRef, Metrics, Storage as RuntimeStorage};
-use commonware_storage::journal::{
-    contiguous::variable::{Config as CVConfig, Journal as CVJournal},
-    segmented::variable::{Config as SVConfig, Journal as SVJournal},
+use commonware_parallel::Strategy;
+use commonware_runtime::{
+    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_storage::{
+    journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
+    metadata::{Config as MetadataConfig, Metadata},
+};
+use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
+use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1 << 12);
-const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
+// Configure 32MB page cache
+const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
+const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
+
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 
@@ -61,7 +68,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Epoch<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
         self.rng_seed.write(buf);
         self.output.write(buf);
@@ -70,12 +77,9 @@ impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             round: ReadExt::read(buf)?,
             rng_seed: ReadExt::read(buf)?,
@@ -107,7 +111,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Event<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Write for Event<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
+    fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Dealing(x0, x1, x2) => {
                 0u8.write(buf);
@@ -132,10 +136,7 @@ impl<V: Variant, P: PublicKey> Write for Event<V, P> {
 impl<V: Variant, P: PublicKey> Read for Event<V, P> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Dealing(
@@ -169,11 +170,11 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 
 /// DKG persistent storage.
 ///
-/// Wraps journaled storage for epoch state and protocol messages,
-/// with in-memory BTreeMaps for fast lookups. The journal ensures
-/// durability while the maps provide O(log n) access.
-pub struct Storage<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
-    states: CVJournal<E, Epoch<V, P>>,
+/// Wraps metadata storage for epoch state and journaled storage for protocol messages,
+/// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
+/// the position/epoch confusion that can occur with position-based journals.
+pub struct Storage<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
+    states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
     // In-memory state
@@ -181,25 +182,28 @@ pub struct Storage<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
+impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey>
+    Storage<E, V, P>
+{
     /// Initialize storage, creating partitions if needed.
-    /// Replays journals to populate in-memory caches.
-    pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
-        let buffer_pool = PoolRef::new(PAGE_SIZE, POOL_CAPACITY);
+    /// Replays metadata and journals to populate in-memory caches.
+    pub async fn init(
+        context: E,
+        partition_prefix: &str,
+        max_read_size: NonZeroU32,
+        max_supported_mode: ModeVersion,
+    ) -> Self {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
-        let states = CVJournal::init(
+        let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
-            CVConfig {
+            MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
-                compression: None,
-                codec_config: max_read_size,
-                buffer_pool: buffer_pool.clone(),
-                write_buffer: WRITE_BUFFER,
-                items_per_section: NZU64!(1),
+                codec_config: (max_read_size, max_supported_mode),
             },
         )
         .await
-        .expect("should be able to init dkg_states journal");
+        .expect("should be able to init dkg_states metadata");
 
         let msgs = SVJournal::init(
             context.with_label("msgs"),
@@ -207,28 +211,18 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
                 partition: format!("{partition_prefix}_msgs"),
                 compression: None,
                 codec_config: max_read_size,
-                buffer_pool,
+                page_cache,
                 write_buffer: WRITE_BUFFER,
             },
         )
         .await
         .expect("should be able to init dkg_msgs journal");
 
-        // Replay states to get current epoch
-        let current = {
-            let size = states.size();
-            if size == 0 {
-                None
-            } else {
-                Some((
-                    EpochNum::new(size - 1),
-                    states
-                        .read(size - 1)
-                        .await
-                        .expect("should be able to read epoch"),
-                ))
-            }
-        };
+        // Find the current epoch by looking for the highest key in metadata
+        let current = states.keys().max().map(|&epoch_num| {
+            let state = states.get(&epoch_num).expect("key must exist").clone();
+            (EpochNum::new(epoch_num), state)
+        });
 
         // Replay msgs to populate epoch caches
         let mut epochs = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
@@ -349,7 +343,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         self.msgs
             .append(
                 section,
-                Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
+                &Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
             )
             .await
             .expect("should be able to write to msgs");
@@ -376,7 +370,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, Event::Ack(player.clone(), ack.clone()))
+            .append(section, &Event::Ack(player.clone(), ack.clone()))
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -400,7 +394,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, Event::Log(dealer.clone(), log.clone()))
+            .append(section, &Event::Log(dealer.clone(), log.clone()))
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -413,35 +407,38 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         true
     }
 
-    /// Persists new epoch state, advancing to the next epoch.
-    pub async fn append_epoch(&mut self, state: Epoch<V, P>) {
-        // Persist to journal
-        self.states
-            .append(state.clone())
-            .await
-            .expect("should be able to write to state");
+    /// Persists epoch state.
+    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) {
+        // Persist to metadata using epoch number as key
+        let epoch_key = epoch.get();
+        if self.states.put(epoch_key, state.clone()).is_some() {
+            warn!(%epoch, "overwriting existing epoch state");
+        }
         self.states
             .sync()
             .await
             .expect("should be able to sync state");
 
-        // Update in-memory state first (clone before moving to journal)
-        let size = self.states.size();
-        let epoch = EpochNum::new(size - 1);
+        // Update in-memory state
         self.current = Some((epoch, state));
     }
 
     /// Removes all data from epochs older than `min`.
     pub async fn prune(&mut self, min: EpochNum) {
-        let section = min.get();
+        let min_epoch = min.get();
+
+        // Prune msgs journal
         self.msgs
-            .prune(section)
+            .prune(min_epoch)
             .await
             .expect("should be able to prune msgs");
+
+        // Prune states metadata - remove all epochs < min
+        self.states.retain(|&epoch_key, _| epoch_key >= min_epoch);
         self.states
-            .prune(section)
+            .sync()
             .await
-            .expect("should be able to prune states");
+            .expect("should be able to sync states after prune");
 
         // Remove old epoch caches
         self.epochs.retain(|&epoch, _| epoch >= min);
@@ -449,7 +446,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
     /// Create a Dealer for the given epoch, replaying any stored acks.
     /// Returns None if we've already submitted a log this epoch.
-    pub fn create_dealer<C: Signer<PublicKey = P>>(
+    pub fn create_dealer<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
@@ -463,7 +460,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         }
 
         // Start a new dealer
-        let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start(
+        let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start::<M>(
             Transcript::resume(rng_seed).noise(b"dealer-rng"),
             round_info,
             signer,
@@ -487,24 +484,25 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         Some(Dealer::new(Some(crypto_dealer), pub_msg, unsent))
     }
 
-    /// Create a Player for the given epoch, replaying any stored dealer messages.
-    pub fn create_player<C: Signer<PublicKey = P>>(
+    /// Create a Player for the given epoch by resuming from persisted state.
+    pub fn create_player<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
         round_info: Info<V, P>,
     ) -> Option<Player<V, C>> {
-        let crypto_player =
-            CryptoPlayer::new(round_info, signer).expect("should be able to create player");
-        let mut player = Player::new(crypto_player);
-
-        // Replay persisted dealer messages
-        for (dealer, pub_msg, priv_msg) in self.dealings(epoch) {
-            player.replay(dealer.clone(), pub_msg, priv_msg);
-            debug!(?epoch, ?dealer, "replayed committed dealer message");
+        let logs = self.logs(epoch);
+        let dealings = self.dealings(epoch);
+        let (crypto_player, acks) = CryptoPlayer::resume::<M>(round_info, signer, &logs, dealings)
+            .expect("should be able to resume player");
+        for dealer in acks.keys() {
+            debug!(?epoch, ?dealer, "restored committed dealer message");
         }
 
-        Some(player)
+        Some(Player {
+            player: crypto_player,
+            acks,
+        })
     }
 }
 
@@ -534,15 +532,15 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E: RuntimeStorage + Metrics>(
+    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) {
+    ) -> bool {
         if !self.unsent.contains_key(&player) {
-            return;
+            return false;
         }
         if let Some(ref mut dealer) = self.dealer {
             if dealer
@@ -551,12 +549,14 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
             {
                 self.unsent.remove(&player);
                 storage.append_ack(epoch, player, ack).await;
+                return true;
             }
         }
+        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
-    pub fn finalize(&mut self) {
+    pub fn finalize<M: Faults>(&mut self) {
         if self.finalized.is_some() {
             return;
         }
@@ -564,7 +564,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         // Even after the finalized_log is taken, we won't attempt to finalize again
         // because the dealer will be None.
         if let Some(dealer) = self.dealer.take() {
-            let log = dealer.finalize();
+            let log = dealer.finalize::<M>();
             self.finalized = Some(log);
         }
     }
@@ -601,17 +601,10 @@ pub struct Player<V: Variant, C: Signer> {
 }
 
 impl<V: Variant, C: Signer> Player<V, C> {
-    pub const fn new(player: CryptoPlayer<V, C>) -> Self {
-        Self {
-            player,
-            acks: BTreeMap::new(),
-        }
-    }
-
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: RuntimeStorage + Metrics>(
+    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics, M: Faults>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -627,7 +620,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         // Otherwise generate a new ack
         if let Some(ack) =
             self.player
-                .dealer_message(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+                .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
         {
             storage
                 .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
@@ -638,26 +631,247 @@ impl<V: Variant, C: Signer> Player<V, C> {
         None
     }
 
-    /// Replay an already-persisted dealer message (updates in-memory state only).
-    fn replay(&mut self, dealer: C::PublicKey, pub_msg: DealerPubMsg<V>, priv_msg: DealerPrivMsg) {
-        if self.acks.contains_key(&dealer) {
-            return;
-        }
-        if let Some(ack) = self
-            .player
-            .dealer_message(dealer.clone(), pub_msg, priv_msg)
-        {
-            self.acks.insert(dealer, ack);
-        }
-    }
-
     /// Finalize the player's participation in the DKG round.
-    pub fn finalize(
+    pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
         self,
-        logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
-        threshold: usize,
+        rng: &mut impl CryptoRngCore,
+        logs: Logs<V, C::PublicKey, M>,
+        strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
-        self.player.finalize(logs, threshold)
+        self.player.finalize::<M, B>(rng, logs, strategy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::Encode;
+    use commonware_consensus::types::Epoch;
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::Info,
+            primitives::{group::Scalar, sharing::Mode, variant::MinPk},
+        },
+        ed25519, Signer,
+    };
+    use commonware_macros::test_traced;
+    use commonware_math::algebra::{Random, Ring};
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1};
+
+    const TEST_NAMESPACE: &[u8] = b"test_dkg";
+
+    fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
+        (0..n)
+            .map(|i| {
+                let mut rng = test_rng_seeded(i as u64);
+                ed25519::PrivateKey::random(&mut rng)
+            })
+            .collect()
+    }
+
+    fn create_round_info(signers: &[ed25519::PrivateKey]) -> Info<MinPk, ed25519::PublicKey> {
+        let players = Set::from_iter_dedup(signers.iter().map(|s| s.public_key()));
+        let dealers = players.clone();
+        Info::new::<N3f1>(
+            TEST_NAMESPACE,
+            0,
+            None,
+            Mode::NonZeroCounter,
+            dealers,
+            players,
+        )
+        .expect("valid info")
+    }
+
+    #[test_traced]
+    fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = create_test_signers(4);
+            let round_info = create_round_info(&signers);
+
+            let mut storage = Storage::<_, MinPk, _>::init(
+                context.with_label("storage"),
+                "test",
+                NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
+            )
+            .await;
+
+            let dealer_signer = signers[0].clone();
+            let mut rng = test_rng();
+            let (crypto_dealer, pub_msg, priv_msgs) =
+                CryptoDealer::<MinPk, _>::start::<N3f1>(&mut rng, round_info, dealer_signer, None)
+                    .expect("valid dealer");
+
+            let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+            let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg, unsent);
+
+            let unknown_player = {
+                let mut rng = test_rng_seeded(100);
+                ed25519::PrivateKey::random(&mut rng).public_key()
+            };
+            let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())
+                .expect("valid ack");
+
+            let result = dealer
+                .handle(&mut storage, Epoch::zero(), unknown_player, fake_ack)
+                .await;
+
+            assert!(
+                !result,
+                "handle should return false when player not in unsent"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_dealer_handle_returns_false_when_crypto_dealer_is_none() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = create_test_signers(4);
+            let round_info = create_round_info(&signers);
+
+            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+                context.with_label("storage"),
+                "test",
+                NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
+            )
+            .await;
+
+            let dealer_signer = signers[0].clone();
+            let mut rng = test_rng();
+            let (_crypto_dealer, pub_msg, priv_msgs) =
+                CryptoDealer::<MinPk, _>::start::<N3f1>(&mut rng, round_info, dealer_signer, None)
+                    .expect("valid dealer");
+
+            let player = signers[1].public_key();
+            let mut unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+            unsent.insert(player.clone(), DealerPrivMsg::new(Scalar::one()));
+
+            let mut dealer = Dealer::<MinPk, ed25519::PrivateKey>::new(None, pub_msg, unsent);
+
+            let sig = signers[1].sign(b"ns", b"msg");
+            let fake_ack: PlayerAck<ed25519::PublicKey> =
+                PlayerAck::read(&mut sig.encode().as_ref()).expect("valid ack");
+
+            let result = dealer
+                .handle(&mut storage, Epoch::zero(), player, fake_ack)
+                .await;
+
+            assert!(
+                !result,
+                "handle should return false when crypto dealer is None"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_dealer_handle_returns_true_for_valid_ack() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = create_test_signers(4);
+            let round_info = create_round_info(&signers);
+
+            let mut storage = Storage::<_, MinPk, _>::init(
+                context.with_label("storage"),
+                "test",
+                NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
+            )
+            .await;
+
+            let dealer_signer = signers[0].clone();
+            let mut rng = test_rng();
+            let (crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::<MinPk, _>::start::<N3f1>(
+                &mut rng,
+                round_info.clone(),
+                dealer_signer.clone(),
+                None,
+            )
+            .expect("valid dealer");
+
+            let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+            let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg.clone(), unsent);
+
+            let player_signer = signers[1].clone();
+            let player_pk = player_signer.public_key();
+            let player_priv_msg = dealer
+                .shares_to_distribute()
+                .find(|(p, _, _)| *p == player_pk)
+                .map(|(_, _, priv_msg)| priv_msg)
+                .expect("player should have a share");
+
+            let mut crypto_player =
+                CryptoPlayer::new(round_info, player_signer).expect("valid player");
+            let ack = crypto_player
+                .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
+                .expect("valid ack");
+
+            let result = dealer
+                .handle(&mut storage, Epoch::zero(), player_pk, ack)
+                .await;
+
+            assert!(result, "handle should return true for valid ack");
+        });
+    }
+
+    #[test_traced]
+    fn test_dealer_handle_returns_false_for_duplicate_ack() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = create_test_signers(4);
+            let round_info = create_round_info(&signers);
+
+            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+                context.with_label("storage"),
+                "test",
+                NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
+            )
+            .await;
+
+            let dealer_signer = signers[0].clone();
+            let mut rng = test_rng();
+            let (crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::<MinPk, _>::start::<N3f1>(
+                &mut rng,
+                round_info.clone(),
+                dealer_signer.clone(),
+                None,
+            )
+            .expect("valid dealer");
+
+            let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+            let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg.clone(), unsent);
+
+            let player_signer = signers[1].clone();
+            let player_pk = player_signer.public_key();
+            let player_priv_msg = dealer
+                .shares_to_distribute()
+                .find(|(p, _, _)| *p == player_pk)
+                .map(|(_, _, priv_msg)| priv_msg)
+                .expect("player should have a share");
+
+            let mut crypto_player =
+                CryptoPlayer::new(round_info, player_signer).expect("valid player");
+            let ack = crypto_player
+                .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
+                .expect("valid ack");
+
+            // First ack should succeed
+            let result = dealer
+                .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())
+                .await;
+            assert!(result, "first ack should succeed");
+
+            // Second ack from same player should fail (player removed from unsent)
+            let result = dealer
+                .handle(&mut storage, Epoch::zero(), player_pk, ack)
+                .await;
+            assert!(!result, "duplicate ack should return false");
+        });
     }
 }

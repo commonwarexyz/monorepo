@@ -1,6 +1,59 @@
 use commonware_utils::Array;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Peer {
+    pub peer: String,
+}
+
+impl Peer {
+    pub fn new(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum TimeoutReason {
+    Inactivity,
+    LeaderNullify,
+    LeaderTimeout,
+    CertificationTimeout,
+    MissingProposal,
+    IgnoredProposal,
+    InvalidProposal,
+    FailedCertification,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Timeout {
+    pub leader: String,
+    pub reason: TimeoutReason,
+}
+
+impl Timeout {
+    pub fn new(leader: &impl Array, reason: TimeoutReason) -> Self {
+        Self {
+            leader: leader.to_string(),
+            reason,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Leader {
+    pub leader: String,
+}
+
+impl Leader {
+    pub fn new(leader: &impl Array) -> Self {
+        Self {
+            leader: leader.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum MessageType {
     Notarize,

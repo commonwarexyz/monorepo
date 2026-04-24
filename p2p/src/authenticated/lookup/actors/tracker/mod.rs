@@ -2,12 +2,11 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use governor::Quota;
-use std::{collections::HashSet, net::IpAddr};
+use std::{collections::HashSet, net::IpAddr, num::NonZeroUsize, time::Duration};
 
 pub mod actor;
 mod directory;
-mod ingress;
+pub(crate) mod ingress;
 mod metadata;
 mod metrics;
 mod record;
@@ -21,8 +20,11 @@ pub use reservation::Reservation;
 #[derive(Clone, Debug)]
 pub struct Config<C: Signer> {
     pub crypto: C,
-    pub tracked_peer_sets: usize,
-    pub allowed_connection_rate_per_peer: Quota,
+    pub tracked_peer_sets: NonZeroUsize,
+    pub peer_connection_cooldown: Duration,
     pub allow_private_ips: bool,
+    pub allow_dns: bool,
+    pub bypass_ip_check: bool,
     pub listener: Mailbox<HashSet<IpAddr>>,
+    pub block_duration: Duration,
 }

@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the [Bytes] must fit within a [u32].
 
-use crate::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
+use crate::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 use bytes::{Buf, BufMut, Bytes};
 
 impl Write for Bytes {
@@ -12,12 +12,23 @@ impl Write for Bytes {
         self.len().write(buf);
         buf.put_slice(self);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+        buf.push(self.clone());
+    }
 }
 
 impl EncodeSize for Bytes {
     #[inline]
     fn encode_size(&self) -> usize {
         self.len().encode_size() + self.len()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.len().encode_size()
     }
 }
 
@@ -36,8 +47,6 @@ impl Read for Bytes {
 mod tests {
     use super::*;
     use crate::{Decode, Encode};
-    #[cfg(not(feature = "std"))]
-    use alloc::vec;
     use bytes::Bytes;
 
     #[test]

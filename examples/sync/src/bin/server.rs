@@ -1,25 +1,28 @@
-//! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::qmdb::any::unordered::fixed::Any] database.
+//! Server that serves operations and proofs to clients attempting to sync an
+//! `any`, `current`, `immutable`, or `keyless` database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
-    Storage, StreamOf,
+    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
+    Spawner, Storage, StreamOf,
 };
-use commonware_storage::qmdb::sync::Target;
+use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any::{self},
-    crate_version,
+    any, crate_version, current,
     databases::{DatabaseType, Syncable},
-    immutable::{self},
+    immutable, keyless,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::DurationExt;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_utils::{
+    channel::mpsc,
+    non_empty_range,
+    sync::{AsyncRwLock, Mutex},
+    DurationExt,
+};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -57,8 +60,8 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async mutex.
-    database: RwLock<DB>,
+    /// The database wrapped in async rwlock.
+    database: AsyncRwLock<DB>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -66,7 +69,7 @@ struct State<DB> {
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: RwLock<SystemTime>,
+    last_operation_time: Mutex<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -75,11 +78,11 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: RwLock::new(database),
+            database: AsyncRwLock::new(database),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: RwLock::new(SystemTime::now()),
+            last_operation_time: Mutex::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -103,13 +106,20 @@ async fn maybe_add_operations<DB, E>(
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: Storage + Clock + Metrics + RngCore,
 {
-    let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
-        *last_time = now;
+    let should_add = {
+        let mut last_time = state.last_operation_time.lock();
+        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
+            *last_time = now;
+            true
+        } else {
+            false
+        }
+    };
+    if should_add {
         // Generate new operations
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, context.next_u64());
@@ -117,10 +127,11 @@ where
         // Add operations to database and get the new root
         let root = {
             let mut database = state.database.write().await;
-            if let Err(err) = DB::add_operations(&mut *database, new_operations).await {
+            if let Err(err) = database.add_operations(new_operations).await {
                 error!(?err, "failed to add operations to database");
+                return Err(err.into());
             }
-            DB::root(&*database)
+            database.root()
         };
         state.ops_counter.inc_by(new_operations_len as u64);
         let root_hex = root
@@ -144,20 +155,24 @@ async fn handle_get_sync_target<DB>(
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound, upper_bound) = {
+    let (root, sync_boundary, size) = {
         let database = state.database.read().await;
-        (database.root(), database.lower_bound(), database.op_count())
+        (
+            database.root(),
+            database.sync_boundary().await,
+            database.size().await,
+        )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            range: lower_bound..upper_bound,
+            range: non_empty_range!(sync_boundary, size),
         },
     };
 
@@ -171,7 +186,7 @@ async fn handle_get_operations<DB>(
     request: wire::GetOperationsRequest,
 ) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
     request.validate()?;
@@ -179,10 +194,10 @@ where
     let database = state.database.read().await;
 
     // Check if we have enough operations
-    let db_size = database.op_count();
+    let db_size = database.size().await;
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
-            "start_loc >= database size ({}) >= ({})",
+            "start_loc ({}) >= database size ({})",
             request.start_loc, db_size
         )));
     }
@@ -206,12 +221,26 @@ where
         .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
-    drop(database);
-
     let (proof, operations) = result.map_err(|err| {
         warn!(?err, "failed to generate historical proof");
         Error::Database(err)
     })?;
+
+    // Optionally fetch pinned nodes
+    let pinned_nodes = if request.include_pinned_nodes {
+        let nodes = database
+            .pinned_nodes_at(request.start_loc)
+            .await
+            .map_err(|err| {
+                warn!(?err, "failed to get pinned nodes");
+                Error::Database(err)
+            })?;
+        Some(nodes)
+    } else {
+        None
+    };
+
+    drop(database);
 
     debug!(
         request_id = request.request_id,
@@ -224,6 +253,7 @@ where
         request_id: request.request_id,
         proof,
         operations,
+        pinned_nodes,
     })
 }
 
@@ -233,7 +263,7 @@ async fn handle_message<DB>(
     message: wire::Message<DB::Operation, Key>,
 ) -> wire::Message<DB::Operation, Key>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     let request_id = message.request_id();
     match message {
@@ -276,90 +306,109 @@ where
     }
 }
 
+/// Receive loop: reads frames from the stream, dispatches handlers, and exits
+/// when the stream closes. Runs as a dedicated task so that `recv_frame` is
+/// never cancelled by `select!` (cancelling a partially-read frame corrupts
+/// the stream).
+async fn recv_loop<DB, E>(
+    context: E,
+    state: Arc<State<DB>>,
+    mut stream: StreamOf<E>,
+    response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
+    client_addr: SocketAddr,
+) where
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
+    E: Metrics + Network + Spawner,
+{
+    loop {
+        let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
+            Ok(data) => data,
+            Err(err) => {
+                debug!(?err, client_addr = %client_addr, "client disconnected");
+                return;
+            }
+        };
+
+        let message = match wire::Message::decode(message_data.coalesce()) {
+            Ok(msg) => msg,
+            Err(err) => {
+                warn!(client_addr = %client_addr, ?err, "failed to parse message");
+                state.error_counter.inc();
+                continue;
+            }
+        };
+
+        context.with_label("request_handler").spawn({
+            let state = state.clone();
+            let response_sender = response_sender.clone();
+            move |_| async move {
+                let response = handle_message::<DB>(&state, message).await;
+                if let Err(err) = response_sender.send(response).await {
+                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
+                }
+            }
+        });
+    }
+}
+
 /// Handle a client connection with concurrent request processing.
+///
+/// Splits into a recv task and a send loop. The recv task reads frames from the
+/// stream without cancellation (avoiding BufReader corruption from `select!`
+/// dropping an in-progress `recv_frame`). The send loop reads responses from
+/// the handler channel and writes them to the sink.
 async fn handle_client<DB, E>(
     context: E,
     state: Arc<State<DB>>,
     mut sink: SinkOf<E>,
-    mut stream: StreamOf<E>,
+    stream: StreamOf<E>,
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
 
-    // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
-    select_loop! {
-        context,
-        on_stopped => {
-            debug!("context shutdown, closing client connection");
-        },
-        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-            match incoming {
-                Ok(message_data) => {
-                    // Parse the message.
-                    let message = match wire::Message::decode(&message_data[..]) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(client_addr = %client_addr, ?err, "failed to parse message");
-                            state.error_counter.inc();
-                            continue;
-                        }
-                    };
 
-                    // Start a new task to handle the message.
-                    // The response will be sent on `response_sender`.
-                    context.with_label("request-handler").spawn({
-                        let state = state.clone();
-                        let mut response_sender = response_sender.clone();
-                        move |_| async move {
-                            let response = handle_message::<DB>(&state, message).await;
-                            if let Err(err) = response_sender.send(response).await {
-                                warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
-                            }
-                        }
-                    });
-                }
-                Err(err) => {
-                    info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            }
-        },
+    // Spawn a dedicated recv task so recv_frame is never cancelled.
+    let recv_handle = context.with_label("recv").spawn({
+        let state = state.clone();
+        let response_sender = response_sender.clone();
+        move |context| recv_loop::<DB, E>(context, state, stream, response_sender, client_addr)
+    });
 
-        outgoing = response_receiver.next() => {
-            if let Some(response) = outgoing {
-                // We have a response to send to the client.
-                let response_data = response.encode().to_vec();
-                if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-                    info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            } else {
-                // Channel closed
-                return Ok(());
-            }
+    // Drop our copy so the channel closes when the recv task's senders are all dropped.
+    drop(response_sender);
+
+    // Send loop: forward responses to the client.
+    while let Some(response) = response_receiver.recv().await {
+        let response_data = response.encode();
+        if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
+            info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+            state.error_counter.inc();
+            break;
         }
     }
 
+    recv_handle.abort();
     Ok(())
 }
 
 /// Initialize and display database state with initial operations.
 async fn initialize_database<DB, E>(
-    database: &mut DB,
+    mut database: DB,
     config: &Config,
     context: &mut E,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<DB, Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: RngCore,
 {
     info!("starting {} database", DB::name());
@@ -370,10 +419,7 @@ where
         operations_len = initial_ops.len(),
         "creating initial operations"
     );
-    DB::add_operations(database, initial_ops).await?;
-
-    // Commit the database to ensure operations are persisted
-    database.commit().await?;
+    database.add_operations(initial_ops).await?;
 
     // Display database state
     let root = database.root();
@@ -383,29 +429,31 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = ?database.op_count(),
+        size = ?database.size().await,
+        sync_boundary = ?database.sync_boundary().await,
         root = %root_hex,
         "{} database ready",
         DB::name()
     );
 
-    Ok(())
+    Ok(database)
 }
 
 /// Run a generic server with the given database.
 async fn run_helper<DB, E>(
     mut context: E,
     config: Config,
-    mut database: DB,
+    database: DB,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());
 
-    initialize_database(&mut database, &config, &mut context).await?;
+    let database = initialize_database(database, &config, &mut context).await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
@@ -448,7 +496,7 @@ where
                     error!(?err, "❌ failed to accept client");
                 }
             }
-        }
+        },
     }
 
     Ok(())
@@ -457,11 +505,22 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = any::create_config();
+    let db_config = any::create_config(&context);
     let database = any::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
+/// Run the Current database server.
+async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = current::create_config(&context);
+    let database = current::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -469,11 +528,22 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = immutable::create_config();
+    let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
+/// Run the Keyless database server.
+async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = keyless::create_config(&context);
+    let database = keyless::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -487,8 +557,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|immutable")
-                .help("Database type to use. Must be `any` or `immutable`.")
+                .value_name("any|current|immutable|keyless")
+                .help("Database type to use. Must be `any`, `current`, `immutable`, or `keyless`.")
                 .default_value("any"),
         )
         .arg(
@@ -619,7 +689,9 @@ fn main() {
         // Run the appropriate server based on database type
         let result = match config.database_type {
             DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Current => run_current(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
+            DatabaseType::Keyless => run_keyless(context, config).await,
         };
 
         if let Err(err) = result {

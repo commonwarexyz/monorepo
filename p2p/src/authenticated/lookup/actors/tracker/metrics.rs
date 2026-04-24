@@ -9,13 +9,16 @@ pub struct Metrics {
     /// Does not include self, despite having a record for it.
     pub tracked: Gauge,
 
-    /// The total number of blocked peers.
-    pub blocked: Gauge,
+    /// Blocked peers (value = expiry time as epoch millis).
+    pub blocked: Family<metrics::Peer, Gauge>,
 
     /// The total number of outstanding reservations.
     pub reserved: Gauge,
 
-    /// A count of the number of rate-limited connection events for each peer.
+    /// Unix timestamp in milliseconds when each connected peer became active.
+    pub connected: Family<metrics::Peer, Gauge>,
+
+    /// A count of the number of rate-limited reservation events for each peer.
     pub limits: Family<metrics::Peer, Counter>,
 
     /// A count of the number of updates for each peer.
@@ -33,7 +36,7 @@ impl Metrics {
         );
         context.register(
             "blocked",
-            "Total number of blocked peers",
+            "Blocked peers (value = expiry time as epoch millis)",
             metrics.blocked.clone(),
         );
         context.register(
@@ -42,8 +45,13 @@ impl Metrics {
             metrics.reserved.clone(),
         );
         context.register(
+            "connected",
+            "Unix timestamp in milliseconds when each connected peer became active",
+            metrics.connected.clone(),
+        );
+        context.register(
             "limits",
-            "Count of the number of rate-limited connection events for each peer",
+            "Count of the number of rate-limited reservation events for each peer",
             metrics.limits.clone(),
         );
         context.register(

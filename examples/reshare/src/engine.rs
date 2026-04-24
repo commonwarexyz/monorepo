@@ -2,38 +2,48 @@
 
 use crate::{
     application::{Application, Block, EpochProvider, Provider},
-    dkg::{self, UpdateCallBack},
+    dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::marshaled::Marshaled,
-    marshal::{self, ingress::handler},
-    simplex::{scheme::Scheme, types::Finalization},
-    types::ViewDelta,
+    marshal::{
+        self,
+        core::Actor as MarshalActor,
+        resolver::handler,
+        standard::{Deferred, Standard},
+    },
+    simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
+    types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
         dkg::Output,
         primitives::{group, variant::Variant},
     },
-    Hasher, Signer,
+    ed25519::Batch,
+    BatchVerifier, Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
-use futures::{channel::mpsc, future::try_join_all};
-use governor::clock::Clock as GClock;
-use rand::{CryptoRng, Rng};
-use std::{num::NonZero, time::Instant};
+use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
+use futures::future::try_join_all;
+use rand_core::CryptoRngCore;
+use std::{
+    marker::PhantomData,
+    num::{NonZero, NonZeroU16},
+    time::Instant,
+};
 use tracing::{error, info, warn};
 
-const MAILBOX_SIZE: usize = 10;
+const MAILBOX_SIZE: usize = 1024;
 const DEQUE_SIZE: usize = 10;
 const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -41,20 +51,22 @@ const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
 const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
 const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
-const FREEZER_JOURNAL_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-const FREEZER_JOURNAL_COMPRESSION: Option<u8> = Some(3);
+const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
-const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
+const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
+const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
+const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 
-pub struct Config<C, P, B, V>
+pub struct Config<C, P, B, V, T>
 where
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
+    T: Strategy,
 {
     pub signer: C,
     pub manager: P,
@@ -65,32 +77,37 @@ where
     pub peer_config: PeerConfig<C::PublicKey>,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
+    pub strategy: T,
 }
 
-pub struct Engine<E, C, P, B, H, V, S>
+pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    L: Elector<S>,
+    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    config: Config<C, P, B, V>,
+    config: Config<C, P, B, V, T>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
+    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>, P>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     #[allow(clippy::type_complexity)]
-    marshal: marshal::Actor<
+    marshal: MarshalActor<
         E,
-        Block<H, C, V>,
+        Standard<Block<H, C, V>>,
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
+        FixedEpocher,
+        T,
     >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
@@ -99,29 +116,34 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
+        Deferred<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
+        L,
+        T,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
 }
 
-impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
+impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    L: Elector<S>,
+    T: Strategy,
+    Batch: BatchVerifier<PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
-        let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
+    pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
-        let (dkg, dkg_mailbox) = dkg::Actor::init(
+        let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.with_label("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
@@ -129,9 +151,9 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
+                max_supported_mode: MAX_SUPPORTED_MODE,
             },
-        )
-        .await;
+        );
 
         let (buffer, buffered_mailbox) = buffered::Engine::new(
             context.with_label("buffer"),
@@ -141,6 +163,7 @@ where
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,
+                peer_provider: config.manager.clone(),
             },
         );
 
@@ -160,13 +183,17 @@ where
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                freezer_key_page_cache: page_cache.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalizations-by-height-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -174,7 +201,9 @@ where
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_write_buffer: WRITE_BUFFER,
+                ordinal_write_buffer: WRITE_BUFFER,
             },
         )
         .await
@@ -197,32 +226,47 @@ where
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                freezer_key_page_cache: page_cache.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalized_blocks-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: num_participants,
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_write_buffer: WRITE_BUFFER,
+                ordinal_write_buffer: WRITE_BUFFER,
             },
         )
         .await
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let provider = Provider::new(config.signer.clone());
-        let (marshal, marshal_mailbox) = marshal::Actor::init(
+        // Create the certificate verifier from the initial output (if available).
+        // This allows epoch-independent certificate verification after the DKG is complete.
+        let certificate_verifier = config.output.as_ref().and_then(|output| {
+            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+        });
+        let provider = Provider::new(
+            consensus_namespace.clone(),
+            config.signer.clone(),
+            certificate_verifier,
+        );
+        let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
                 provider: provider.clone(),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -230,22 +274,24 @@ where
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
-                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
-                buffer_pool: buffer_pool.clone(),
+                page_cache: page_cache.clone(),
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                key_write_buffer: WRITE_BUFFER,
+                value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
+                max_pending_acks: MAX_PENDING_ACKS,
+                strategy: config.strategy.clone(),
             },
         )
         .await;
 
-        let application = Marshaled::new(
+        let application = Deferred::new(
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
-            BLOCKS_PER_EPOCH,
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
@@ -255,10 +301,11 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
-                namespace: consensus_namespace,
+                strategy: config.strategy.clone(),
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
+                _phantom: PhantomData,
             },
         );
 
@@ -298,13 +345,9 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
-            mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
+            mpsc::Receiver<handler::Message<H::Digest>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
@@ -316,11 +359,9 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                orchestrator,
                 marshal,
                 callback
             )
-            .await
         )
     }
 
@@ -347,13 +388,9 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
-            mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
+            mpsc::Receiver<handler::Message<H::Digest>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
@@ -368,9 +405,7 @@ where
         let marshal_handle = self
             .marshal
             .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
-        let orchestrator_handle =
-            self.orchestrator
-                .start(votes, certificates, resolver, orchestrator);
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

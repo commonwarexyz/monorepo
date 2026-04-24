@@ -1,34 +1,149 @@
+use crate::{
+    journal::contiguous::Contiguous,
+    merkle::{Family, Location},
+};
+use commonware_utils::range::NonEmptyRange;
 use std::future::Future;
 
 /// Journal of operations used by a [super::Database]
-pub trait Journal {
+pub trait Journal<F: Family>: Sized + Send {
+    /// The context of the journal
+    type Context;
+
+    /// The configuration of the journal
+    type Config;
+
     /// The type of operations in the journal
-    type Op;
+    type Op: Send;
 
     /// The error type returned by the journal
-    type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error>;
+    type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
+
+    /// Create/open a journal for syncing the given range.
+    ///
+    /// The implementation must:
+    /// - Reuse any on-disk data whose logical locations lie within the range.
+    /// - Discard/ignore any data outside the range.
+    /// - Report `size()` equal to the next location to be filled.
+    fn new(
+        context: Self::Context,
+        config: Self::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+
+    /// Discard all operations before the given location.
+    ///
+    /// If current `size() <= start`, initialize as empty at the given location.
+    /// Otherwise prune data before the given location.
+    fn resize(
+        &mut self,
+        start: Location<F>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Persist the journal.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Get the number of operations in the journal
-    fn size(&self) -> impl Future<Output = u64>;
+    fn size(&self) -> impl Future<Output = u64> + Send;
 
     /// Append an operation to the journal
-    fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
+    fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
+impl<F, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Metrics,
-    V: commonware_codec::Codec,
+    F: Family,
+    E: crate::Context,
+    V: commonware_codec::CodecShared,
 {
+    type Context = E;
+    type Config = crate::journal::contiguous::variable::Config<V::Cfg>;
     type Op = V;
     type Error = crate::journal::Error;
 
+    async fn new(
+        context: Self::Context,
+        config: Self::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<Self, Self::Error> {
+        Self::init_sync(context, config.clone(), *range.start()..*range.end()).await
+    }
+
+    async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
+        if Contiguous::size(self).await <= *start {
+            self.clear_to_size(*start).await
+        } else {
+            self.prune(*start).await.map(|_| ())
+        }
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Self::sync(self).await
+    }
+
     async fn size(&self) -> u64 {
-        Self::size(self)
+        Contiguous::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, op).await?;
-        Ok(())
+        Self::append(self, &op).await.map(|_| ())
+    }
+}
+
+impl<F, E, A> Journal<F> for crate::journal::contiguous::fixed::Journal<E, A>
+where
+    F: Family,
+    E: crate::Context,
+    A: commonware_codec::CodecFixedShared,
+{
+    type Context = E;
+    type Config = crate::journal::contiguous::fixed::Config;
+    type Op = A;
+    type Error = crate::journal::Error;
+
+    async fn new(
+        context: Self::Context,
+        config: Self::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<Self, Self::Error> {
+        let journal = Self::init(context, config).await?;
+        let size = Contiguous::size(&journal).await;
+
+        // Fresh journal already aligned with the sync start - nothing to do.
+        if size == 0 && *range.start() == 0 {
+            return Ok(journal);
+        }
+
+        if size > *range.end() {
+            return Err(crate::journal::Error::ItemOutOfRange(size));
+        }
+
+        if size <= *range.start() {
+            journal.clear_to_size(*range.start()).await?;
+        } else {
+            journal.prune(*range.start()).await?;
+        }
+
+        Ok(journal)
+    }
+
+    async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
+        if Contiguous::size(self).await <= *start {
+            self.clear_to_size(*start).await
+        } else {
+            self.prune(*start).await.map(|_| ())
+        }
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Self::sync(self).await
+    }
+
+    async fn size(&self) -> u64 {
+        Contiguous::size(self).await
+    }
+
+    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+        Self::append(self, &op).await.map(|_| ())
     }
 }

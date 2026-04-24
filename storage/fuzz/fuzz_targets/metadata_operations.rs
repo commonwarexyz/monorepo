@@ -14,7 +14,6 @@ enum MetadataOperation {
     Remove { key: u64 },
     Clear,
     Sync,
-    Close,
     Destroy,
     Keys { prefix: Option<Vec<u8>> },
     RemovePrefix { prefix: Vec<u8> },
@@ -36,7 +35,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            partition: "metadata_operations_fuzz_test".to_string(),
+            partition: "metadata-operations-fuzz-test".into(),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
@@ -67,10 +66,6 @@ fn fuzz(input: FuzzInput) {
                 }
                 MetadataOperation::Sync => {
                     metadata.sync().await.unwrap();
-                }
-                MetadataOperation::Close => {
-                    metadata.close().await.unwrap();
-                    return;
                 }
                 MetadataOperation::Destroy => {
                     metadata.destroy().await.unwrap();

@@ -1,9 +1,7 @@
 use crate::types::Epoch;
 use commonware_cryptography::certificate;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use commonware_utils::sync::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 /// A mock [`certificate::Provider`] that allows registering different schemes per epoch.
 ///
@@ -25,7 +23,7 @@ impl<S: certificate::Scheme> Provider<S> {
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
     pub fn register(&self, epoch: Epoch, scheme: S) -> bool {
-        let mut schemes = self.schemes.lock().unwrap();
+        let mut schemes = self.schemes.lock();
         schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
 }
@@ -41,7 +39,7 @@ impl<S: certificate::Scheme> certificate::Provider for Provider<S> {
     type Scheme = S;
 
     fn scoped(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
-        let schemes = self.schemes.lock().unwrap();
+        let schemes = self.schemes.lock();
         schemes.get(&epoch).cloned()
     }
 }
