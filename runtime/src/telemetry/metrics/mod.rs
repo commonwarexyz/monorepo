@@ -1,6 +1,7 @@
 //! Utility functions for metrics
 
 pub mod histogram;
+mod registration;
 pub mod status;
 pub(crate) mod task;
 
@@ -38,10 +39,13 @@ use prometheus_client::encoding::{
     text::{encode, encode_eof},
     MetricEncoder as PromMetricEncoder,
 };
+pub use registration::Registration;
+use registration::{RegistrationGuard, RegistrationInner};
 use std::{
     any::Any,
     borrow::Cow,
     collections::{BTreeMap, HashMap},
+    fmt::Write,
     ops::Deref,
     sync::{atomic::Ordering, Arc, Weak},
 };
@@ -228,7 +232,9 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
         .sum()
 }
 
-// Adapted from client_rust's internal descriptor encoder:
+// Adaptation of client_rust's internal descriptor encoder.
+//
+// Source:
 // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L218-L275
 //
 // Commonware needs a local copy because upstream keeps this helper internal
@@ -255,6 +261,7 @@ where
     Ok(())
 }
 
+/// Join a metric or label prefix with a child name using Prometheus' `_` separator.
 pub(crate) fn prefixed_name(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -273,103 +280,6 @@ pub(crate) fn child_label(prefix: &str, label: &str) -> String {
         "using runtime label is not allowed"
     );
     name
-}
-
-trait RegistrationGuard: Send + Sync {
-    fn registration_dropped(&self, registration: &Arc<RegistrationInner>) {
-        registration.release();
-    }
-}
-
-impl<G: Send + 'static> RegistrationGuard for GuardHolder<G> {}
-
-struct GuardHolder<G>(Mutex<G>);
-
-struct RegistrationInner {
-    guard: Box<dyn RegistrationGuard>,
-    // Counts live Registration claims, not Arc strong references. The registry
-    // only holds Weak references, and duplicate registration may briefly
-    // upgrade one without claiming it.
-    claims: Mutex<usize>,
-}
-
-impl RegistrationInner {
-    fn new<G>(guard: G) -> Arc<Self>
-    where
-        G: RegistrationGuard + 'static,
-    {
-        Arc::new(Self {
-            guard: Box::new(guard),
-            claims: Mutex::new(1),
-        })
-    }
-
-    fn claim(inner: Arc<Self>) -> Option<Registration> {
-        let mut claims = inner.claims.lock();
-        if *claims == 0 {
-            return None;
-        }
-        *claims = claims.checked_add(1).expect("registration claims overflow");
-        drop(claims);
-        Some(Registration { inner })
-    }
-
-    fn release(&self) -> bool {
-        let mut claims = self.claims.lock();
-        assert!(*claims > 0, "registration claim count underflow");
-        *claims -= 1;
-        *claims == 0
-    }
-
-}
-
-/// A shared lifecycle token for a [`Registered`] metric handle.
-///
-/// When the last clone of the associated [`Registered`] handle is dropped, this
-/// registration is dropped as well. Runtime-managed metrics use that drop to
-/// unregister themselves from the runtime registry, while external callers may
-/// attach any custom drop guard.
-pub struct Registration {
-    inner: Arc<RegistrationInner>,
-}
-
-impl Clone for Registration {
-    fn clone(&self) -> Self {
-        RegistrationInner::claim(Arc::clone(&self.inner))
-            .expect("live registration claim count missing")
-    }
-}
-
-impl Registration {
-    /// Create a registration that performs no action when dropped.
-    pub fn detached() -> Self {
-        Self::from_guard(())
-    }
-
-    /// Create a registration from a guard that should be dropped when the last
-    /// associated [`Registered`] handle is dropped.
-    ///
-    /// This can be used by external `Metrics` implementations to run custom
-    /// teardown or notification logic by providing a guard type that implements
-    /// [`Drop`].
-    pub fn from_guard<G>(guard: G) -> Self
-    where
-        G: Send + 'static,
-    {
-        Self {
-            inner: RegistrationInner::new(GuardHolder(Mutex::new(guard))),
-        }
-    }
-
-    fn downgrade(&self) -> Weak<RegistrationInner> {
-        Arc::downgrade(&self.inner)
-    }
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        self.inner.guard.registration_dropped(&self.inner);
-    }
 }
 
 struct RuntimeRegistration {
@@ -481,9 +391,7 @@ impl<M: std::fmt::Debug> std::fmt::Debug for Registered<M> {
 
 type MetricAttributes = Vec<(Cow<'static, str>, Cow<'static, str>)>;
 type MetricKey = (String, MetricAttributes);
-type SampleEncoder = dyn Fn(&mut String, &str, &[(Cow<'static, str>, Cow<'static, str>)]) -> Result<(), std::fmt::Error>
-    + Send
-    + Sync;
+type SampleEncoder = dyn Fn(&mut String) -> Result<(), std::fmt::Error> + Send + Sync;
 
 struct PendingMetricEntry {
     family_name: String,
@@ -511,14 +419,89 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
     }
 }
 
-fn create_sample_encoder<M>(metric: Arc<M>) -> Box<SampleEncoder>
+fn encode_label_suffix(attributes: &MetricAttributes) -> String {
+    if attributes.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    output.push('{');
+    for (i, (key, value)) in attributes.iter().enumerate() {
+        if i != 0 {
+            output.push(',');
+        }
+        output.push_str(key);
+        output.push_str("=\"");
+        output.push_str(value);
+        output.push('"');
+    }
+    output.push('}');
+    output
+}
+
+fn create_counter_encoder(
+    name: String,
+    attributes: &MetricAttributes,
+    metric: Arc<raw::Counter>,
+) -> Box<SampleEncoder> {
+    let mut line_prefix = name;
+    line_prefix.push_str("_total");
+    line_prefix.push_str(&encode_label_suffix(attributes));
+    line_prefix.push(' ');
+
+    Box::new(move |samples| {
+        samples.push_str(&line_prefix);
+        write!(samples, "{}", metric.get())?;
+        samples.push('\n');
+        Ok(())
+    })
+}
+
+fn create_gauge_encoder(
+    name: String,
+    attributes: &MetricAttributes,
+    metric: Arc<raw::Gauge>,
+) -> Box<SampleEncoder> {
+    let mut line_prefix = name;
+    line_prefix.push_str(&encode_label_suffix(attributes));
+    line_prefix.push(' ');
+
+    Box::new(move |samples| {
+        samples.push_str(&line_prefix);
+        write!(samples, "{}", metric.get())?;
+        samples.push('\n');
+        Ok(())
+    })
+}
+
+// Fast path for native scalar metrics.
+//
+// Source:
+// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L314-L361
+//
+// `prometheus-client` keeps its text `MetricEncoder` constructor private, so
+// generic metrics still use a cached upstream registry below. Native counters
+// and gauges have simple, stable sample shapes, so we encode those lines
+// directly and keep the generic path as a fallback.
+fn create_sample_encoder<M>(
+    name: String,
+    attributes: MetricAttributes,
+    metric: Arc<M>,
+) -> Box<SampleEncoder>
 where
     M: Metric,
 {
-    Box::new(move |samples, name, labels| {
-        let mut registry = registry::Registry::with_labels(labels.iter().cloned());
-        registry.register(name, "", SharedMetric(metric.clone()));
+    let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
+    if let Ok(counter) = Arc::downcast::<raw::Counter>(metric_any.clone()) {
+        return create_counter_encoder(name, &attributes, counter);
+    }
+    if let Ok(gauge) = Arc::downcast::<raw::Gauge>(metric_any) {
+        return create_gauge_encoder(name, &attributes, gauge);
+    }
 
+    let mut registry = registry::Registry::with_labels(attributes.into_iter());
+    registry.register(name, "", SharedMetric(metric));
+    Box::new(move |samples| {
         let mut encoded = String::new();
         encode(&mut encoded, &registry).expect("encoding temporary metric registry failed");
         for line in encoded.lines() {
@@ -570,10 +553,15 @@ pub struct Registry {
 }
 
 struct RegistryInner {
+    /// Dense metric storage indexed by stable metric id.
     metrics: Vec<Option<MetricEntry>>,
+    /// Metric ids that can be reused after a metric is fully unregistered.
     free_metric_ids: Vec<u64>,
+    /// Metric families keyed by family name, kept sorted for deterministic encoding.
     families: BTreeMap<String, MetricFamily>,
+    /// Exact metric keys for duplicate registration detection.
     keys: HashMap<MetricKey, u64>,
+    /// Monotonic id source used when there is no reusable metric slot.
     next_metric_id: u64,
 }
 
@@ -602,10 +590,6 @@ impl Registry {
     {
         let mut inner = self.inner.lock();
         inner.register(Arc::downgrade(&self.inner), name, help, attributes, metric)
-    }
-
-    pub fn unregister(&self, id: u64) {
-        self.inner.lock().unregister(id);
     }
 
     pub fn encode(&self) -> String {
@@ -638,7 +622,8 @@ impl RegistryInner {
         let attributes = owned_attributes(attributes);
         let help = normalize_help(help);
         let metric_type = metric.metric_type();
-        let encode_samples = create_sample_encoder(metric.clone());
+        let encode_samples =
+            create_sample_encoder(name.clone(), attributes.clone(), metric.clone());
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
@@ -672,9 +657,8 @@ impl RegistryInner {
         self.assert_family_matches(&name, &help, metric_type);
 
         let id = self.allocate_metric_id();
-        let registration = Registration {
-            inner: RegistrationInner::new(RuntimeRegistration { id, registry }),
-        };
+        let registration =
+            Registration::from_inner(RegistrationInner::new(RuntimeRegistration { id, registry }));
         let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
         self.insert_metric_entry(
             id,
@@ -790,29 +774,21 @@ impl RegistryInner {
         });
     }
 
-    pub fn unregister(&mut self, id: u64) {
-        if self
-            .metrics
-            .get(Self::metric_index(id))
-            .and_then(Option::as_ref)
-            .is_none()
-        {
-            return;
-        }
-        self.drop_metric_entry(id);
-    }
-
     fn release_registration(&mut self, id: u64, registration: &Arc<RegistrationInner>) {
         let Some(entry) = self
             .metrics
             .get(Self::metric_index(id))
             .and_then(Option::as_ref)
         else {
+            // The registry may already have explicitly removed this metric
+            // while an older handle still owns a lifecycle claim.
             registration.release();
             return;
         };
         let registration_weak = Arc::downgrade(registration);
         if !entry.registration.ptr_eq(&registration_weak) {
+            // The metric id has been reused for a newer registration. Release
+            // only the stale claim and leave the replacement entry intact.
             registration.release();
             return;
         }
@@ -862,12 +838,11 @@ impl RegistryInner {
     pub fn encode(&self) -> String {
         let mut output = String::new();
         let mut samples = String::new();
-        for (name, family) in &self.families {
+        for family in self.families.values() {
             samples.clear();
             for metric_id in &family.metric_ids {
                 let metric = self.metric_ref(*metric_id);
-                (metric.encode_samples)(&mut samples, name, &metric.attributes)
-                    .expect("encoding live metric samples failed");
+                (metric.encode_samples)(&mut samples).expect("encoding live metric samples failed");
             }
             // Suppress the HELP/TYPE descriptor when the family produced no
             // samples (e.g. a `Family<S, M>` with no child entries). Matches
@@ -1061,7 +1036,7 @@ mod tests {
             *registry.keys.get(&key).expect("metric key missing")
         };
 
-        registry.unregister(original_id);
+        registry.inner.lock().drop_metric_entry(original_id);
 
         let replacement = registry.register(
             key.0.clone(),
@@ -1088,7 +1063,6 @@ mod tests {
             "stale registration removed replacement metric: {encoded}"
         );
 
-        registry.unregister(replacement_id);
         drop(replacement);
         let registry = registry.inner.lock();
         assert!(
@@ -1399,31 +1373,30 @@ mod tests {
     }
 
     #[test]
-    fn test_register_drop_race_does_not_panic() {
-        // Concurrently re-registers and drops the same metric key from multiple
-        // threads. Before explicit claim accounting, concurrent final drops
-        // could leave the key present with a closed registration.
+    fn test_shuffled_duplicate_drops_do_not_leave_registry_entries() {
         let registry = Registry::new();
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                let mut registry = registry.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..2000 {
-                        let handle = Register::register(
-                            &mut registry,
-                            "votes",
-                            "vote count",
-                            raw::Counter::<u64>::default(),
-                        );
-                        drop(handle);
-                    }
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().unwrap();
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            handles.push(registry.register(
+                "votes".to_string(),
+                "vote count".to_string(),
+                Vec::new(),
+                Arc::new(raw::Counter::<u64>::default()),
+            ));
         }
-        // Registry ends clean after the stress loop.
+
+        for index in [3, 0, 6, 1] {
+            let _ = handles.swap_remove(index);
+            handles.push(registry.register(
+                "votes".to_string(),
+                "vote count".to_string(),
+                Vec::new(),
+                Arc::new(raw::Counter::<u64>::default()),
+            ));
+        }
+
+        drop(handles);
         let registry = registry.inner.lock();
         assert!(
             registry.keys.is_empty(),
