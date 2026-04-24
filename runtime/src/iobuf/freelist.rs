@@ -234,7 +234,7 @@ impl Freelist {
                 .into_iter()
                 .chain(entries)
             {
-                // Park first, then stage the bit for the later per-word publish.
+                // Park first, then stage the bit for the later per-word insert.
                 self.park(slot, buffer);
                 let (word_index, mask) = self.slot_word(slot);
                 masks[word_index] |= mask;
@@ -269,7 +269,7 @@ impl Freelist {
         }
     }
 
-    /// Takes any one free slot from the global freelist.
+    /// Takes any one available slot from the global freelist.
     ///
     /// On success, ownership of the returned slot is transferred to the caller.
     ///
@@ -279,22 +279,21 @@ impl Freelist {
     /// bits from the same word can both succeed.
     #[inline]
     pub fn take(&self) -> Option<(u32, AlignedBuffer)> {
-        let thread_id = SlotBitmapProbe::thread_id();
-        let start_word = thread_id & self.word_mask;
-        let bit_offset = ((thread_id >> self.word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32;
+        // Capture this thread's probe state once so the inner loop does not
+        // repeatedly touch thread-local storage.
+        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
 
         for scanned in 0..self.words.len() {
-            let word_index = (start_word + scanned) & self.word_mask;
+            let word_index = probe.word_index(scanned);
             let word_ref = &self.words[word_index];
-            // This load only finds candidate bits. The `fetch_and` below is the
-            // operation that claims a bit and acquires the matching parked
-            // buffer.
+            // This relaxed load only chooses candidate bits. The Acquire
+            // `fetch_and` below claims the bit if it is still present.
             let mut word = word_ref.load(Ordering::Relaxed);
 
             while word != 0 {
                 // Probe a thread-specific bit order inside the chosen word so
                 // colliding threads do not all stampede bit 0 first.
-                let bit = SlotBitmapProbe::select_set_bit(word, bit_offset);
+                let bit = probe.select_set_bit(word);
                 let mask = 1u64 << bit;
                 let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
                 if observed & mask != 0 {
@@ -315,32 +314,33 @@ impl Freelist {
         None
     }
 
-    /// Takes up to `max` free slots from the global freelist.
+    /// Takes up to `max` available slots from the global freelist.
     ///
-    /// Ownership of each claimed slot is transferred to `put_entry`.
+    /// Ownership of each claimed slot is transferred to `on_entry`.
     ///
-    /// `put_entry` receives each claimed `(slot, buffer)` pair. This avoids
+    /// `on_entry` receives each claimed `(slot, buffer)` pair. This avoids
     /// internal allocation and lets callers fill an existing spill/refill
-    /// buffer directly. `put_entry` must not panic: for batch claims, bits are
-    /// cleared before buffers are handed to the callback, so a panic could strand
-    /// already-claimed slots outside the freelist.
+    /// buffer directly. `on_entry` **must not panic**: for batch claims, bits
+    /// are cleared before buffers are handed to the callback, so a panic could
+    /// strand already-claimed slots outside the freelist.
     ///
     /// For `max > 1`, the implementation tries to claim several bits from the
     /// same word in a single atomic `fetch_and`, which amortizes the shared
     /// synchronization cost across the batch.
     #[inline]
-    pub fn take_batch(&self, max: usize, mut put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
+    pub fn take_batch(&self, max: usize, mut on_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
         if max == 1 {
+            // Keep single-slot takes on the cheaper path.
             let Some((slot, buffer)) = self.take() else {
                 return 0;
             };
-            put_entry(slot, buffer);
+            on_entry(slot, buffer);
             return 1;
         }
 
-        let thread_id = SlotBitmapProbe::thread_id();
-        let start_word = thread_id & self.word_mask;
-        let bit_offset = ((thread_id >> self.word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32;
+        // Capture this thread's probe state once so the inner loop does not
+        // repeatedly touch thread-local storage.
+        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
         let mut filled = 0;
 
         for scanned in 0..self.words.len() {
@@ -348,30 +348,29 @@ impl Freelist {
                 break;
             }
 
-            let word_index = (start_word + scanned) & self.word_mask;
+            let word_index = probe.word_index(scanned);
             let word_ref = &self.words[word_index];
-            // As in `take`, this relaxed load only chooses candidate bits. The
-            // Acquire `fetch_and` below claims whichever candidates are still
-            // present.
+            // This relaxed load only chooses candidate bits. The Acquire
+            // `fetch_and` below claims whichever candidates are still present.
             let mut word = word_ref.load(Ordering::Relaxed);
 
             while word != 0 && filled < max {
                 // Stage several candidate bits from the current word, then try
                 // to clear all of them with one atomic operation.
-                let claim = SlotBitmapProbe::select_set_bits(word, bit_offset, max - filled);
+                let claim = probe.select_set_bits(word, max - filled);
                 let observed = word_ref.fetch_and(!claim, Ordering::Acquire);
                 // `claim` is speculative. Intersect it with the observed word
                 // to keep only the bits this thread actually cleared.
                 let mut claimed = observed & claim;
 
                 while claimed != 0 {
-                    let bit = SlotBitmapProbe::select_set_bit(claimed, bit_offset);
+                    let bit = claimed.trailing_zeros() as usize;
                     let slot = self.slot_index(word_index, bit);
-                    // These bits were cleared by the Acquire `fetch_and`
-                    // above, so each corresponding parked buffer is now owned
-                    // by this caller.
-                    put_entry(slot, self.unpark(slot));
-                    claimed &= !(1u64 << bit);
+                    // These bits were cleared by the Acquire `fetch_and` above,
+                    // so each corresponding parked buffer is now owned by this
+                    // caller.
+                    on_entry(slot, self.unpark(slot));
+                    claimed &= claimed - 1;
                     filled += 1;
                 }
 
@@ -381,6 +380,14 @@ impl Freelist {
         }
 
         filled
+    }
+
+    /// Drops every currently available buffer from the global freelist.
+    ///
+    /// Returns the number of drained slots.
+    #[inline]
+    pub fn drain(&self) -> usize {
+        self.take_batch(usize::MAX, |_, _| {})
     }
 
     /// Parks a buffer in the storage cell for a slot outside the freelist.
@@ -426,18 +433,22 @@ impl Drop for Freelist {
         // buffer in its parking cell. Drain them explicitly so the underlying
         // aligned allocations are released before the raw storage backing the
         // freelist itself goes away.
-        while let Some((_, buffer)) = self.take() {
-            drop(buffer);
-        }
+        self.drain();
     }
 }
 
-/// Helper facade for per-thread probe state and per-word bit selection.
+/// Per-call probe state for choosing bitmap words and bits.
 ///
 /// Keeping this logic in one place makes the claim path easier to read and
 /// keeps the freelist API focused on putting and taking slots.
-struct SlotBitmapProbe;
+struct SlotBitmapProbe {
+    start_word: usize,
+    word_mask: usize,
+    bit_offset: u32,
+}
 
+// Monotonic source for per-thread probe ids. These ids only spread starting
+// points across bitmap words, they do not synchronize buffer ownership.
 static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl SlotBitmapProbe {
@@ -445,36 +456,66 @@ impl SlotBitmapProbe {
         // Assign each thread a stable numeric id on first touch so its home
         // word selection is deterministic instead of depending on thread-local
         // storage layout.
+        //
         // Relaxed ordering is enough: these ids only spread probes out and do
         // not synchronize access to buffers.
         static TLS_SLOT_BITMAP_THREAD_ID: usize =
             NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[inline]
-    fn thread_id() -> usize {
-        Self::TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| *thread_id)
+    /// Builds probe state for the current thread and freelist layout.
+    ///
+    /// The thread's stable id chooses both its home word and its preferred bit
+    /// offset inside each word.
+    #[inline(always)]
+    fn new(word_mask: usize, word_shift: u32) -> Self {
+        let thread_id = Self::TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| *thread_id);
+        Self {
+            // Low id bits choose the first bitmap word this thread probes.
+            // With a power-of-two word count, masking is equivalent to modulo
+            // but avoids a division on the hot path.
+            start_word: thread_id & word_mask,
+            word_mask,
+            // The same stable id also rotates bit selection within each word.
+            // Drop the low bits already used for the word index so adjacent
+            // home words do not necessarily start at the same bit.
+            bit_offset: ((thread_id >> word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32,
+        }
     }
 
-    #[inline]
-    fn select_set_bit(word: u64, bit_offset: u32) -> usize {
-        debug_assert_ne!(word, 0);
+    /// Returns the word index to inspect after `scanned` words.
+    #[inline(always)]
+    const fn word_index(&self, scanned: usize) -> usize {
+        (self.start_word + scanned) & self.word_mask
+    }
+
+    /// Selects one set bit from `word` using a rotated probe order.
+    ///
+    /// This probe's bit offset becomes the first position checked. The returned
+    /// index is in the original, unrotated word.
+    #[inline(always)]
+    fn select_set_bit(&self, word: u64) -> usize {
+        assert_ne!(word, 0);
         // Rotate the word so the thread's preferred probe offset becomes bit 0,
         // select the first set bit in that rotated view, then rotate the answer
         // back into the original word numbering.
-        let rotated = word.rotate_right(bit_offset);
-        ((rotated.trailing_zeros() + bit_offset) & (SLOT_BITMAP_WORD_BITS as u32 - 1)) as usize
+        let rotated = word.rotate_right(self.bit_offset);
+        ((rotated.trailing_zeros() + self.bit_offset) & (SLOT_BITMAP_WORD_BITS as u32 - 1)) as usize
     }
 
+    /// Selects up to `limit` set bits from `word` using a rotated probe order.
+    ///
+    /// The returned mask is in the original, unrotated word and can be used
+    /// directly in a `fetch_and`.
     #[inline]
-    fn select_set_bits(word: u64, bit_offset: u32, limit: usize) -> u64 {
-        debug_assert_ne!(word, 0);
-        debug_assert!(limit > 0);
+    fn select_set_bits(&self, word: u64, limit: usize) -> u64 {
+        assert_ne!(word, 0);
+        assert!(limit > 0);
 
         // Gather up to `limit` set bits using the same rotated probe order as
         // `select_set_bit`. The result is rotated back so callers can apply it
         // directly as a mask against the original word.
-        let mut remaining = word.rotate_right(bit_offset);
+        let mut remaining = word.rotate_right(self.bit_offset);
         let mut selected = 0u64;
         let mut taken = 0;
 
@@ -486,7 +527,7 @@ impl SlotBitmapProbe {
             taken += 1;
         }
 
-        selected.rotate_left(bit_offset)
+        selected.rotate_left(self.bit_offset)
     }
 }
 
@@ -499,11 +540,6 @@ pub(super) mod tests {
         Arc, Barrier,
     };
 
-    /// Returns the current number of free slots.
-    ///
-    /// This count is intentionally derived on demand rather than maintained on
-    /// the hot path, because a contended global length counter would add an
-    /// extra atomic read-modify-write to every `put` and `take`.
     pub fn len(freelist: &Freelist) -> usize {
         freelist
             .words
@@ -651,6 +687,17 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn test_freelist_drain_returns_all_available_slots() {
+        let set = Freelist::new(NZU32!(4), NZUsize!(4));
+        for slot in [0u32, 2, 3] {
+            set.put(slot, AlignedBuffer::new(64, 64));
+        }
+
+        assert_eq!(set.drain(), 3);
+        assert_eq!(len(&set), 0);
+    }
+
+    #[test]
     fn test_freelist_take_batch_handles_zero_single_and_partial_fill() {
         // Put fewer slots than the largest requested batch to cover exact,
         // partial, and empty refill behavior in one setup.
@@ -669,7 +716,7 @@ pub(super) mod tests {
         );
         assert!(taken.is_empty());
 
-        // `max == 1` intentionally uses the single-slot `take` path.
+        // `max == 1` should still claim exactly one slot.
         assert_eq!(
             set.take_batch(1, |slot, buffer| taken.push((slot, buffer))),
             1
@@ -711,7 +758,7 @@ pub(super) mod tests {
     #[test]
     fn test_freelist_take_batch_breaks_after_filling_target_in_home_word() {
         let set = Freelist::new(NZU32!(16), NZUsize!(8));
-        let start_word = SlotBitmapProbe::thread_id() & set.word_mask;
+        let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
         let slot0 = set.slot_index(start_word, 0);
         let slot1 = set.slot_index(start_word, 1);
 
@@ -741,7 +788,7 @@ pub(super) mod tests {
     #[test]
     fn test_freelist_take_batch_stops_mid_word_when_limit_is_reached() {
         let set = Freelist::new(NZU32!(24), NZUsize!(8));
-        let start_word = SlotBitmapProbe::thread_id() & set.word_mask;
+        let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
         // Put three slots in the same word so the batch claim has to stop after
         // clearing only the requested number of bits.
         let slots = [
@@ -783,10 +830,21 @@ pub(super) mod tests {
         // are not present in the original word.
         let word = (1u64 << 1) | (1u64 << 5) | (1u64 << 9) | (1u64 << 20);
 
-        assert_eq!(SlotBitmapProbe::select_set_bit(word, 0), 1);
-        assert_eq!(SlotBitmapProbe::select_set_bit(word, 6), 9);
+        let probe_0 = SlotBitmapProbe {
+            start_word: 0,
+            word_mask: 0,
+            bit_offset: 0,
+        };
+        let probe_6 = SlotBitmapProbe {
+            start_word: 0,
+            word_mask: 0,
+            bit_offset: 6,
+        };
 
-        let selected = SlotBitmapProbe::select_set_bits(word, 6, 2);
+        assert_eq!(probe_0.select_set_bit(word), 1);
+        assert_eq!(probe_6.select_set_bit(word), 9);
+
+        let selected = probe_6.select_set_bits(word, 2);
         // Starting after bit 6, the first two set bits are 9 and 20.
         assert_eq!(selected.count_ones(), 2);
         assert_eq!(selected & !word, 0);

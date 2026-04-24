@@ -68,12 +68,12 @@ use std::{
     },
 };
 
-/// Minimum thread-cache size required before refill/spill starts batching.
+/// Minimum thread-local cache capacity required before refill/spill batches.
 ///
 /// Below this threshold TLS still provides same-thread locality, but batching
 /// would degrade to single-buffer moves and add policy complexity without
 /// amortizing shared-queue traffic.
-const MIN_THREAD_CACHE_BATCHING_CAPACITY: usize = 4;
+const MIN_TLS_BATCH_CAPACITY: usize = 4;
 
 /// Error returned when buffer pool allocation fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,16 +530,16 @@ impl SizeClass {
         self.global.put_batch(entries);
     }
 
-    /// Removes a tracked buffer from the global freelist.
-    #[inline]
-    fn take_global(&self) -> Option<(u32, AlignedBuffer)> {
-        self.global.take()
-    }
-
     /// Removes up to `max` tracked buffers from the global freelist.
     #[inline]
     fn take_global_batch(&self, max: usize, put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
         self.global.take_batch(max, put_entry)
+    }
+
+    /// Drains all tracked buffers currently available in the global freelist.
+    #[inline]
+    fn drain_global(&self) -> usize {
+        self.global.drain()
     }
 
     /// Atomically reserves capacity to create one new tracked buffer.
@@ -612,7 +612,7 @@ impl TlsSizeClassCache {
             return;
         }
 
-        if self.capacity < MIN_THREAD_CACHE_BATCHING_CAPACITY {
+        if self.capacity < MIN_TLS_BATCH_CAPACITY {
             entry.class.put_global(entry.slot, entry.buffer);
             return;
         }
