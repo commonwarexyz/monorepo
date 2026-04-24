@@ -319,20 +319,11 @@ impl<M> Clone for Registered<M> {
 }
 
 impl<M> Registered<M> {
-    /// Create a detached metric handle that does not unregister from any runtime registry.
-    ///
-    /// This is intended for `Metrics` implementations outside `commonware-runtime`
-    /// that need to return a [`Registered`] handle without exposing the metric in
-    /// a runtime-managed registry. If you need custom drop behavior, use
-    /// [`Registered::with_registration`].
-    pub fn detached(metric: M) -> Self {
-        Self::with_registration(metric, Registration::detached())
-    }
-
     /// Create a metric handle with an explicit lifecycle registration.
     ///
-    /// The provided [`Registration`] is dropped when the last clone of this
-    /// handle is dropped.
+    /// The provided [`Registration`] controls what happens when the last clone
+    /// of this handle is dropped. Use [`Registration::from(())`] for a raw
+    /// handle that is not exposed by a runtime registry.
     pub fn with_registration(metric: M, registration: Registration) -> Self {
         Self {
             metric: Arc::new(metric),
@@ -1089,18 +1080,6 @@ mod tests {
             "families left behind: {:?}",
             registry.families
         );
-    }
-
-    #[test]
-    fn test_registered_detached_creates_detached_handle() {
-        let registered = Registered::detached(raw::Counter::<u64>::default());
-        let clone = registered.clone();
-
-        registered.inc_by(2);
-        drop(registered);
-        clone.inc();
-
-        assert_eq!(clone.get(), 3);
     }
 
     #[test]

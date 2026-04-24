@@ -10,6 +10,8 @@ pub(crate) trait RegistrationGuard: Send + Sync + 'static {
     fn registration_dropped(&self, _registration: &RegistrationHandle) {}
 }
 
+impl RegistrationGuard for () {}
+
 impl<G: Send + 'static> RegistrationGuard for GuardHolder<G> {}
 
 struct GuardHolder<G>(Mutex<G>);
@@ -19,7 +21,7 @@ struct GuardHolder<G>(Mutex<G>);
 /// When the last clone of the associated [`Registered`](super::Registered)
 /// handle is dropped, this registration is dropped as well. Runtime-managed
 /// metrics use that drop to unregister themselves from the runtime registry,
-/// while external callers may attach any custom drop guard.
+/// while external callers may attach custom cleanup with [`Registration::from_guard`].
 pub struct Registration {
     pub(crate) guard: RegistrationHandle,
 }
@@ -47,26 +49,24 @@ impl Registration {
         }
     }
 
-    /// Create a registration that performs no action when dropped.
-    pub fn detached() -> Self {
-        Self::from_guard(())
+    pub(crate) fn downgrade(&self) -> WeakRegistrationHandle {
+        Arc::downgrade(&self.guard)
     }
 
     /// Create a registration from a guard that should be dropped when the last
     /// associated [`Registered`](super::Registered) handle is dropped.
-    ///
-    /// This can be used by external `Metrics` implementations to run custom
-    /// teardown or notification logic by providing a guard type that implements
-    /// [`Drop`].
     pub fn from_guard<G>(guard: G) -> Self
     where
         G: Send + 'static,
     {
         Self::from_registration_guard(GuardHolder(Mutex::new(guard)))
     }
+}
 
-    pub(crate) fn downgrade(&self) -> WeakRegistrationHandle {
-        Arc::downgrade(&self.guard)
+impl From<()> for Registration {
+    /// Create a registration token that performs no cleanup when dropped.
+    fn from(_: ()) -> Self {
+        Self::from_registration_guard(())
     }
 }
 
