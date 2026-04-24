@@ -19,11 +19,12 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 /// # Warning
 ///
-/// Concurrent mutable operations ([Self::write_at], [Self::resize], [Self::sync]) are not
-/// supported and require external synchronization from the caller. In particular, [Self::size]
-/// is a lock-free snapshot and may observe a stale value while another clone is mid-write;
-/// the common `write_at(size(), ...)` "append at end" pattern is only safe when the caller
-/// serializes `size()` and the following `write_at()` as a single critical section.
+/// Concurrent mutating operations ([Self::write_at], [Self::resize], [Self::sync]) are not
+/// supported and require external synchronization from the caller. In particular, [Self::size] is a
+/// lock-free snapshot and may observe a stale value while another clone is mid-write; the common
+/// `write_at(size(), ...)` "append at end" pattern is only safe when the caller serializes `size()`
+/// and the following `write_at()` as a single critical section.
+///
 ///
 /// # Example
 ///
@@ -62,8 +63,7 @@ pub struct Write<B: Blob> {
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
     buffer: Arc<AsyncRwLock<Buffer>>,
 
-    /// Lock-free snapshot of the tip's logical bounds so `size()` can be served without
-    /// taking the buffer lock.
+    /// Lock-free snapshot of the tip's logical bounds.
     tip: Arc<TipBounds>,
 }
 

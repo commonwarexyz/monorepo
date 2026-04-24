@@ -499,29 +499,10 @@ pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
     Sha256::hash(&rng.next_u32().to_be_bytes())
 }
 
-/// Pre-populate the database with `num_keys` unique keys, then commit and sync so that
-/// seed-phase buffered writes are flushed before the caller starts timing.
+/// Pre-populate the database with `num_keys` unique keys, then commit.
 pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     db: &mut C,
     num_keys: u64,
-) {
-    seed_db_inner(db, num_keys, true).await;
-}
-
-/// Like [`seed_db`], but skips the final `sync()` so freshly-seeded operations remain in the
-/// journal's in-memory append tip. Useful for benches that want to exercise the in-tip branch of
-/// `try_read_sync` during ancestor lookups.
-pub async fn seed_db_nosync<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    db: &mut C,
-    num_keys: u64,
-) {
-    seed_db_inner(db, num_keys, false).await;
-}
-
-async fn seed_db_inner<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    db: &mut C,
-    num_keys: u64,
-    sync_after: bool,
 ) {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.new_batch();
@@ -532,9 +513,6 @@ async fn seed_db_inner<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Dige
     let merkleized = batch.merkleize(db, None).await.unwrap();
     db.apply_batch(merkleized).await.unwrap();
     db.commit().await.unwrap();
-    if sync_after {
-        db.sync().await.unwrap();
-    }
 }
 
 /// Write `num_updates` random key updates into a batch.

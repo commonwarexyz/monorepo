@@ -6,9 +6,7 @@
 //! initialization time is not included in the benchmark. The page cache is large enough to hold the
 //! entire active key set to eliminate disk access delays from affecting the results.
 
-use crate::common::{
-    seed_db, seed_db_nosync, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE,
-};
+use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::Sha256;
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -344,18 +342,19 @@ fn cur_var_cfg(
 
 /// Single-batch benchmark: create batch, write updates, merkleize, read root.
 ///
-/// If `seed_nosync` is `true`, the setup skips the final `sync()` so ancestor lookups during
-/// merkleize hit the in-memory tip buffer rather than the page cache.
+/// If `seed_sync` is `true`, the seed database is fully synced before running the benchmark. A
+/// value of `false` will exercise the DB in a state where lookups during merkleize may be satisfied
+/// by the `Append` wrapper's tip buffer, which may be more reflective of a real application that
+/// calls only `commit()` for durability.
 async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     mut db: C,
     num_keys: u64,
     iters: u64,
-    seed_nosync: bool,
+    seed_sync: bool,
 ) -> Duration {
-    if seed_nosync {
-        seed_db_nosync(&mut db, num_keys).await;
-    } else {
-        seed_db(&mut db, num_keys).await;
+    seed_db(&mut db, num_keys).await;
+    if seed_sync {
+        db.sync().await.unwrap();
     }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
@@ -384,13 +383,12 @@ async fn run_chained_bench<
     mut db: C,
     num_keys: u64,
     iters: u64,
-    seed_nosync: bool,
+    seed_sync: bool,
     fork_child: Fn,
 ) -> Duration {
-    if seed_nosync {
-        seed_db_nosync(&mut db, num_keys).await;
-    } else {
-        seed_db(&mut db, num_keys).await;
+    seed_db(&mut db, num_keys).await;
+    if seed_sync {
+        db.sync().await.unwrap();
     }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
@@ -568,12 +566,12 @@ cfg_if::cfg_if! {
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for chained in [false, true] {
-        for seed_nosync in [false, true] {
+        for seed_sync in [false, true] {
             for num_keys in NUM_KEYS {
                 for &variant in VARIANTS {
                     c.bench_function(
                         &format!(
-                            "{}/variant={} keys={num_keys} ch={chained} ns={seed_nosync}",
+                            "{}/variant={} keys={num_keys} ch={chained} sync={seed_sync}",
                             module_path!(),
                             variant.name(),
                         ),
@@ -582,12 +580,12 @@ fn bench_merkleize(c: &mut Criterion) {
                                 let ctx = context::get::<Context>();
                                 dispatch_variant!(ctx, variant, |db| {
                                     if chained {
-                                        run_chained_bench(db, num_keys, iters, seed_nosync, |p| {
+                                        run_chained_bench(db, num_keys, iters, seed_sync, |p| {
                                             p.new_batch()
                                         })
                                         .await
                                     } else {
-                                        run_bench(db, num_keys, iters, seed_nosync).await
+                                        run_bench(db, num_keys, iters, seed_sync).await
                                     }
                                 })
                             });

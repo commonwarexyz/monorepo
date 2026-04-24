@@ -437,7 +437,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Recover bounds from metadata and/or blobs
         let (pruning_boundary, size, needs_metadata_update) =
-            Self::recover_bounds(&journal, items_per_blob, meta_pruning_boundary).await?;
+            Self::recover_bounds(&journal, items_per_blob, meta_pruning_boundary)?;
 
         // Persist metadata if needed
         if needs_metadata_update {
@@ -479,7 +479,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// - Otherwise, metadata is valid and we use it
     ///
     /// If `meta_pruning_boundary` is `None`, computes bounds purely from blobs.
-    async fn recover_bounds(
+    fn recover_bounds(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         meta_pruning_boundary: Option<u64>,
@@ -532,9 +532,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         // Validate oldest section before computing size.
-        Self::validate_oldest_section(inner, items_per_blob, pruning_boundary).await?;
+        Self::validate_oldest_section(inner, items_per_blob, pruning_boundary)?;
 
-        let size = Self::compute_size(inner, items_per_blob, pruning_boundary).await?;
+        let size = Self::compute_size(inner, items_per_blob, pruning_boundary)?;
         Ok((pruning_boundary, size, needs_update))
     }
 
@@ -542,7 +542,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Non-tail sections must be full from their logical start. The tail section
     /// (oldest == newest) can be partially filled.
-    async fn validate_oldest_section(
+    fn validate_oldest_section(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
@@ -576,7 +576,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Returns the total number of items ever appended (size), computed from the blobs.
-    async fn compute_size(
+    fn compute_size(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
