@@ -233,6 +233,13 @@ impl FreelistImplementation for Freelist {
 
     #[inline]
     fn take_batch(&self, out: &mut Vec<Entry>, max: usize) {
+        if max == 1 {
+            if let Some((slot, buffer)) = self.take() {
+                out.push(Entry { slot, buffer });
+            }
+            return;
+        }
+
         self.take_batch(max, |slot, buffer| {
             out.push(Entry { slot, buffer });
         });
@@ -240,6 +247,12 @@ impl FreelistImplementation for Freelist {
 
     #[inline]
     fn put_batch(&self, entries: &mut Vec<Entry>) {
+        if entries.len() == 1 {
+            let entry = entries.pop().unwrap();
+            self.put(entry.slot, entry.buffer);
+            return;
+        }
+
         self.put_batch(entries.drain(..).map(|entry| (entry.slot, entry.buffer)));
     }
 }

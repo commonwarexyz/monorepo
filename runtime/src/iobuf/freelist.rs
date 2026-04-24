@@ -229,15 +229,19 @@ impl Freelist {
 
         let word_count = self.words.len();
         if word_count <= INLINE_PUT_BATCH_MASKS {
-            let mut masks = [0u64; INLINE_PUT_BATCH_MASKS];
-            self.put_entries(
-                &mut masks[..word_count],
-                slot,
-                buffer,
-                next_slot,
-                next_buffer,
-                entries,
-            );
+            let mut masks = MaybeUninit::<[u64; INLINE_PUT_BATCH_MASKS]>::uninit();
+            // Only the active bitmap words need scratch space. Avoid clearing
+            // the whole inline array for small freelists.
+            //
+            // SAFETY: `word_count <= INLINE_PUT_BATCH_MASKS`, so the
+            // initialized prefix is in bounds. `u64` has no drop glue, and the
+            // uninitialized tail is never exposed.
+            let masks = unsafe {
+                let ptr = masks.as_mut_ptr().cast::<u64>();
+                ptr.write_bytes(0, word_count);
+                std::slice::from_raw_parts_mut(ptr, word_count)
+            };
+            self.put_entries(masks, slot, buffer, next_slot, next_buffer, entries);
         } else {
             // Very large freelists are uncommon, so keep the common case on the
             // stack and fall back to heap scratch only when the bitmap is wider
