@@ -94,8 +94,19 @@ mod tests {
         Blocker, Manager as _, Provider, TrackedPeers,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, ordered::Set, NZUsize, NZU32};
-    use std::{collections::HashMap, num::NonZeroU32, time::Duration};
+    use commonware_utils::{
+        channel::{fallible::FallibleExt, mpsc, oneshot},
+        non_empty_vec,
+        ordered::Set,
+        sync::Mutex,
+        NZUsize, NZU32,
+    };
+    use std::{
+        collections::HashMap,
+        num::NonZeroU32,
+        sync::Arc,
+        time::Duration,
+    };
 
     const MAILBOX_SIZE: usize = 1024;
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
@@ -201,7 +212,7 @@ mod tests {
             Sender<PublicKey, deterministic::Context>,
             Receiver<PublicKey>,
         ),
-        consumer: Consumer<Key, Bytes>,
+        consumer: impl crate::Consumer<Key = Key, Value = Bytes, Failure = ()>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
@@ -224,6 +235,55 @@ mod tests {
         engine.start(connection);
 
         mailbox
+    }
+
+    #[derive(Clone)]
+    struct BlockingConsumer {
+        sender: mpsc::UnboundedSender<Event<Key, Bytes>>,
+        started: mpsc::UnboundedSender<Key>,
+        gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl BlockingConsumer {
+        fn new(
+            gate: oneshot::Receiver<()>,
+        ) -> (
+            Self,
+            mpsc::UnboundedReceiver<Event<Key, Bytes>>,
+            mpsc::UnboundedReceiver<Key>,
+        ) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            let (started, started_receiver) = mpsc::unbounded_channel();
+            (
+                Self {
+                    sender,
+                    started,
+                    gate: Arc::new(Mutex::new(Some(gate))),
+                },
+                receiver,
+                started_receiver,
+            )
+        }
+    }
+
+    impl crate::Consumer for BlockingConsumer {
+        type Key = Key;
+        type Value = Bytes;
+        type Failure = ();
+
+        async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+            self.started.send_lossy(key.clone());
+            let gate = self.gate.lock().take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            self.sender.send_lossy(Event::Success(key, value));
+            true
+        }
+
+        async fn failed(&mut self, key: Self::Key, _failure: ()) {
+            self.sender.send_lossy(Event::Failed(key));
+        }
     }
 
     /// Tests that fetching a key from another peer succeeds when data is available.
@@ -276,6 +336,148 @@ mod tests {
                 }
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_pending_delivery_does_not_block_engine() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key1 = Key(1);
+            let key2 = Key(2);
+            let data1 = Bytes::from("data for key 1");
+            let data2 = Bytes::from("data for key 2");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), data1.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key2.clone(), data2.clone());
+
+            let (gate_sender, gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(gate_receiver);
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            mailbox1.fetch(key1.clone()).await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key1);
+
+            mailbox1.fetch(key2.clone()).await;
+            select! {
+                event = cons_out1.recv() => {
+                    match event.expect("consumer channel closed") {
+                        Event::Success(key_actual, value) => {
+                            assert_eq!(key_actual, key2);
+                            assert_eq!(value, data2);
+                        }
+                        Event::Failed(key) => panic!("Fetch failed unexpectedly for {key:?}"),
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("resolver engine blocked on pending delivery");
+                },
+            };
+
+            gate_sender.send(()).unwrap();
+            let event = cons_out1.recv().await.expect("consumer channel closed");
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key1);
+                    assert_eq!(value, data1);
+                }
+                Event::Failed(key) => panic!("Fetch failed unexpectedly for {key:?}"),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cancel_pending_delivery() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+            let (gate_sender, gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(gate_receiver);
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone()).await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key);
+
+            mailbox1.cancel(key.clone()).await;
+            let event = cons_out1.recv().await.expect("consumer channel closed");
+            match event {
+                Event::Failed(key_actual) => assert_eq!(key_actual, key),
+                Event::Success(_, _) => panic!("Fetch should have been canceled"),
+            }
+
+            assert!(gate_sender.send(()).is_err());
         });
     }
 
