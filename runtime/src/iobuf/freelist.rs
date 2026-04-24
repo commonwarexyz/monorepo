@@ -494,8 +494,7 @@ impl SlotBitmapProbe {
     /// This probe's bit offset becomes the first position checked. The returned
     /// index is in the original, unrotated word.
     #[inline(always)]
-    fn select_set_bit(&self, word: u64) -> usize {
-        assert_ne!(word, 0);
+    const fn select_set_bit(&self, word: u64) -> usize {
         // Rotate the word so the thread's preferred probe offset becomes bit 0,
         // select the first set bit in that rotated view, then rotate the answer
         // back into the original word numbering.
@@ -508,10 +507,7 @@ impl SlotBitmapProbe {
     /// The returned mask is in the original, unrotated word and can be used
     /// directly in a `fetch_and`.
     #[inline]
-    fn select_set_bits(&self, word: u64, limit: usize) -> u64 {
-        assert_ne!(word, 0);
-        assert!(limit > 0);
-
+    const fn select_set_bits(&self, word: u64, limit: usize) -> u64 {
         // Gather up to `limit` set bits using the same rotated probe order as
         // `select_set_bit`. The result is rotated back so callers can apply it
         // directly as a mask against the original word.

@@ -518,30 +518,6 @@ impl SizeClass {
         }
     }
 
-    /// Inserts a tracked buffer into the global freelist.
-    #[inline]
-    fn put_global(&self, slot: u32, buffer: AlignedBuffer) {
-        self.global.put(slot, buffer);
-    }
-
-    /// Inserts several tracked buffers into the global freelist.
-    #[inline]
-    fn put_global_batch(&self, entries: impl IntoIterator<Item = (u32, AlignedBuffer)>) {
-        self.global.put_batch(entries);
-    }
-
-    /// Removes up to `max` tracked buffers from the global freelist.
-    #[inline]
-    fn take_global_batch(&self, max: usize, put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
-        self.global.take_batch(max, put_entry)
-    }
-
-    /// Drains all tracked buffers currently available in the global freelist.
-    #[inline]
-    fn drain_global(&self) -> usize {
-        self.global.drain()
-    }
-
     /// Atomically reserves capacity to create one new tracked buffer.
     ///
     /// Returns the reserved slot id if the reservation succeeded, or `None` if
@@ -588,16 +564,57 @@ impl TlsSizeClassCache {
         }
     }
 
-    /// Returns the number of buffers currently in this local cache.
+    /// Removes and returns one reusable buffer.
+    ///
+    /// Local hits are served directly from the cache. On a local miss, small
+    /// caches take only the buffer being returned to the caller. Larger caches
+    /// batch-take from the global freelist, return the first claimed buffer,
+    /// and retain the rest locally for future allocations.
     #[inline]
-    const fn len(&self) -> usize {
-        self.entries.len()
-    }
+    fn pop(&mut self, class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
+        // Serve local hits without touching shared state.
+        if let Some(entry) = self.entries.pop() {
+            return Some(entry);
+        }
 
-    /// Removes and returns the most recently cached buffer, if any.
-    #[inline]
-    fn pop(&mut self) -> Option<TlsSizeClassCacheEntry> {
-        self.entries.pop()
+        // Tiny caches do not batch enough to justify the wider global
+        // claim. Keep their miss path equivalent to a single take.
+        if self.capacity < MIN_TLS_BATCH_CAPACITY {
+            return class
+                .global
+                .take()
+                .map(|(slot, buffer)| TlsSizeClassCacheEntry {
+                    buffer,
+                    class: class.clone(),
+                    slot,
+                });
+        }
+
+        // Refill larger caches to half capacity. That leaves room for future
+        // same-thread returns while still amortizing the global atomic scan
+        // over several future local pops.
+        let mut entry = None;
+        let take = self.capacity / 2;
+        class.global.take_batch(take, |slot, buffer| {
+            let cache_entry = TlsSizeClassCacheEntry {
+                buffer,
+                class: class.clone(),
+                slot,
+            };
+
+            if entry.is_none() {
+                // Hand the first claimed buffer to the allocation that missed
+                // locally. Additional claimed buffers refill the local cache.
+                entry = Some(cache_entry);
+            } else {
+                // The take count is derived from the target occupancy, so refill
+                // cannot overflow the local cache. Push directly to avoid the
+                // spill checks used by return-to-cache.
+                self.entries.push(cache_entry);
+            }
+        });
+
+        entry
     }
 
     /// Pushes an entry into the local cache, spilling to global if full.
@@ -606,21 +623,25 @@ impl TlsSizeClassCache {
     /// directly to the global freelist. Once the local cache is large enough
     /// to batch effectively, half the entries are drained to amortize global
     /// queue traffic across future returns.
+    #[inline]
     fn push(&mut self, entry: TlsSizeClassCacheEntry) {
+        // Preserve same-thread locality while the cache still has room.
         if self.entries.len() < self.capacity {
             self.entries.push(entry);
             return;
         }
 
+        // Very small caches cannot spill enough entries to amortize a batch
+        // insert, so overflow goes straight to the global freelist.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
-            entry.class.put_global(entry.slot, entry.buffer);
+            entry.class.global.put(entry.slot, entry.buffer);
             return;
         }
 
         // Spill half the cache to global to make room.
         let spill = self.entries.len().min(self.capacity / 2).max(1);
         let split = self.entries.len() - spill;
-        entry.class.put_global_batch(
+        entry.class.global.put_batch(
             self.entries
                 .drain(split..)
                 .map(|spilled| (spilled.slot, spilled.buffer)),
@@ -635,7 +656,7 @@ impl Drop for TlsSizeClassCache {
         let Some(entry) = self.entries.pop() else {
             return;
         };
-        entry.class.put_global_batch(
+        entry.class.global.put_batch(
             self.entries
                 .drain(..)
                 .map(|entry| (entry.slot, entry.buffer))
@@ -652,9 +673,9 @@ impl Drop for TlsSizeClassCache {
 /// the shared global freelist because `TlsSizeClassCache` drains itself in
 /// `Drop`.
 ///
-/// This type exists to keep the unsafe TLS access localized. All steady-state
-/// cache operations (`pop`, `push`, and `refill`) go through this facade rather
-/// than free functions over the `thread_local!` static.
+/// This type exists to keep the unsafe TLS access localized. Steady-state cache
+/// operations go through this facade rather than free functions over the
+/// `thread_local!` static.
 pub struct BufferPoolThreadCache;
 
 impl BufferPoolThreadCache {
@@ -685,29 +706,15 @@ impl BufferPoolThreadCache {
         });
     }
 
-    /// Pops a cached buffer from the current thread's local cache for the
-    /// given size class. Returns `None` if the local cache is empty.
-    #[inline]
-    fn pop(class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
-        if class.thread_cache_capacity == 0 {
-            return None;
-        }
-        Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
-            cache.pop()
-        })
-    }
-
     /// Returns a buffer to the current thread's local cache for the given
     /// size class, spilling to the global freelist if the cache is full.
     #[inline]
     pub(super) fn push(class: Arc<SizeClass>, slot: u32, buffer: AlignedBuffer) {
-        let class_id = class.class_id;
-        let thread_cache_capacity = class.thread_cache_capacity;
-        if thread_cache_capacity == 0 {
-            class.put_global(slot, buffer);
+        if class.thread_cache_capacity == 0 {
+            class.global.put(slot, buffer);
             return;
         }
-        Self::with_cache(class_id, thread_cache_capacity, |cache| {
+        Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
             cache.push(TlsSizeClassCacheEntry {
                 buffer,
                 class,
@@ -716,31 +723,28 @@ impl BufferPoolThreadCache {
         });
     }
 
-    /// Batch-refills the local cache from the global freelist.
+    /// Takes a buffer from the current thread's local cache for the given
+    /// size class, refilling from the global freelist if the cache is empty.
     ///
-    /// Pulls up to `target - 1` buffers from global into the local cache. For
-    /// small local bins, batching is disabled and this becomes a no-op. Called
-    /// after a global take succeeds, so the caller already holds one buffer and
-    /// we warm the cache for subsequent local hits when batching is enabled.
+    /// The local cache is checked first. On a local miss, the global freelist
+    /// is queried once. The first claimed buffer is returned to the caller, and
+    /// any additional claimed buffers are appended directly to the local cache.
     #[inline]
-    fn refill(class: &Arc<SizeClass>, target: usize) {
+    fn pop(class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
         if class.thread_cache_capacity == 0 {
-            return;
-        }
-        Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
-            let refill = target.saturating_sub(cache.len() + 1);
-            if refill == 0 {
-                return;
-            }
-
-            class.take_global_batch(refill, |slot, buffer| {
-                cache.push(TlsSizeClassCacheEntry {
+            return class
+                .global
+                .take()
+                .map(|(slot, buffer)| TlsSizeClassCacheEntry {
                     buffer,
                     class: class.clone(),
                     slot,
                 });
-            });
-        });
+        }
+
+        Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
+            cache.pop(class)
+        })
     }
 
     /// Accesses the current thread's local cache for `class_id`, creating it
@@ -781,10 +785,8 @@ pub(crate) struct BufferPoolInner {
 impl Drop for BufferPoolInner {
     fn drop(&mut self) {
         for class in &self.classes {
-            while let Some((_, buffer)) = class.take_global() {
-                class.created.fetch_sub(1, Ordering::Relaxed);
-                drop(buffer);
-            }
+            let drained = class.global.drain();
+            class.created.fetch_sub(drained, Ordering::Relaxed);
         }
     }
 }
@@ -803,25 +805,14 @@ impl BufferPoolInner {
     fn try_alloc(&self, class_index: usize, zero_on_new: bool) -> Option<Allocation> {
         let class = &self.classes[class_index];
 
-        // Fast path: reuse from thread-local cache (no atomics, no metrics).
+        // Reuse path: try the thread-local cache first, then the global
+        // freelist with batch refill when the local cache is large enough.
         if let Some(entry) = BufferPoolThreadCache::pop(class) {
             return Some(Allocation {
                 buffer: entry.buffer,
                 is_new: false,
                 class: entry.class,
                 slot: entry.slot,
-            });
-        }
-
-        // Medium path: refill from global freelist.
-        let target = (class.thread_cache_capacity / 2).max(1);
-        if let Some((slot, buffer)) = class.take_global() {
-            BufferPoolThreadCache::refill(class, target);
-            return Some(Allocation {
-                buffer,
-                is_new: false,
-                class: class.clone(),
-                slot,
             });
         }
 
@@ -1180,7 +1171,7 @@ mod tests {
             let bins = unsafe { &*bins.get() };
             bins.get(class.class_id)
                 .and_then(Option::as_ref)
-                .map_or(0, TlsSizeClassCache::len)
+                .map_or(0, |cache| cache.entries.len())
         })
     }
 
@@ -1782,7 +1773,7 @@ mod tests {
             .expect("class exists for page-sized buffer");
         let class = &pool.inner.classes[class_index];
 
-        assert!(class.thread_cache_capacity >= MIN_THREAD_CACHE_BATCHING_CAPACITY);
+        assert!(class.thread_cache_capacity >= MIN_TLS_BATCH_CAPACITY);
 
         // Drop enough distinct checked-out buffers to force an overflow from a
         // full local cache. Large bins should spill half the entries to global
@@ -1813,15 +1804,19 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_refill_stops_when_global_runs_empty() {
+    fn test_global_batch_alloc_stops_when_global_runs_empty() {
         let class = test_size_class(64, 64);
         let slot = class.try_reserve().expect("slot reservation");
 
-        // A short global freelist should refill only what exists, then stop.
-        class.put_global(slot, AlignedBuffer::new(class.size, class.alignment));
-        BufferPoolThreadCache::refill(&class, MIN_THREAD_CACHE_BATCHING_CAPACITY);
+        // A short global freelist should return the allocation and stop
+        // without filling the local cache to its batch target.
+        class
+            .global
+            .put(slot, AlignedBuffer::new(class.size, class.alignment));
+        let entry = BufferPoolThreadCache::pop(&class).expect("global allocation");
+        drop(entry.buffer);
 
-        assert_eq!(get_local_len(&class), 1);
+        assert_eq!(get_local_len(&class), 0);
         assert_eq!(get_global_len(&class), 0);
     }
 
@@ -1840,7 +1835,7 @@ mod tests {
             class,
             slot,
         });
-        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.entries.len(), 0);
         drop(cache);
     }
 
@@ -1863,12 +1858,12 @@ mod tests {
         let buffer1 = AlignedBuffer::new(64, 64);
         let ptr1 = buffer1.as_ptr();
 
-        class.put_global(slot0, buffer0);
-        class.put_global(slot1, buffer1);
+        class.global.put(slot0, buffer0);
+        class.global.put(slot1, buffer1);
 
         let popped = [
-            class.take_global().expect("first pop"),
-            class.take_global().expect("second pop"),
+            class.global.take().expect("first pop"),
+            class.global.take().expect("second pop"),
         ];
         let mut saw_slot0 = false;
         let mut saw_slot1 = false;
@@ -1889,7 +1884,7 @@ mod tests {
         }
         assert!(saw_slot0);
         assert!(saw_slot1);
-        assert!(class.take_global().is_none());
+        assert!(class.global.take().is_none());
     }
 
     #[test]
