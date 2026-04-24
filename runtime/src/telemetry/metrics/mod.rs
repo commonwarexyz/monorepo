@@ -36,7 +36,7 @@ pub mod raw {
 
 use commonware_utils::sync::Mutex;
 use prometheus_client::encoding::{
-    text::{encode, encode_eof},
+    text::{encode_eof, encode_registry},
     MetricEncoder as PromMetricEncoder,
 };
 pub use registration::Registration;
@@ -503,13 +503,19 @@ where
     registry.register(name, "", SharedMetric(metric));
     Box::new(move |samples| {
         let mut encoded = String::new();
-        encode(&mut encoded, &registry).expect("encoding temporary metric registry failed");
-        for line in encoded.lines() {
-            if line.starts_with('#') {
-                continue;
-            }
-            samples.push_str(line);
-            samples.push('\n');
+        encode_registry(&mut encoded, &registry).expect("encoding temporary metric registry failed");
+
+        let Some(after_help) = encoded.find('\n').map(|index| index + 1) else {
+            return Ok(());
+        };
+        let Some(after_type) = encoded[after_help..]
+            .find('\n')
+            .map(|index| after_help + index + 1)
+        else {
+            return Ok(());
+        };
+        if encoded.len() > after_type {
+            samples.push_str(&encoded[after_type..]);
         }
         Ok(())
     })
@@ -917,6 +923,7 @@ mod tests {
     use crate::{deterministic, Metrics, Runner, Spawner};
     use commonware_macros::test_traced;
     use futures::future;
+    use prometheus_client::encoding::text::encode;
     use std::sync::mpsc::{self, TryRecvError};
 
     #[test_traced]
