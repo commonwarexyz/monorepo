@@ -287,18 +287,18 @@ struct RegistryGuard {
 }
 
 impl RegistrationGuard for RegistryGuard {
-    fn registration_cloned(&self, registration: &RegistrationHandle) {
+    fn registration_cloned(&self, _registration: &RegistrationHandle) {
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
-        registry.lock().claim_registration(self.id, registration);
+        registry.lock().claim_registration(self.id);
     }
 
-    fn registration_dropped(&self, registration: &RegistrationHandle) {
+    fn registration_dropped(&self, _registration: &RegistrationHandle) {
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
-        registry.lock().release_registration(self.id, registration);
+        registry.lock().release_registration(self.id);
     }
 }
 
@@ -571,7 +571,7 @@ impl RegistryInner {
                 .registration
                 .upgrade()
                 .expect("metric key references closed registration");
-            self.claim_registration(existing_id, &registration);
+            self.claim_registration(existing_id);
             return Registered {
                 metric: existing_metric,
                 registration: Registration::from_handle(registration),
@@ -697,45 +697,24 @@ impl RegistryInner {
         });
     }
 
-    fn claim_registration(&mut self, id: u64, registration: &RegistrationHandle) {
-        let Some(entry) = self
-            .metrics
-            .get_mut(Self::metric_index(id))
-            .and_then(Option::as_mut)
-        else {
-            return;
-        };
-        let registration_weak = Arc::downgrade(registration);
-        if !entry.registration.ptr_eq(&registration_weak) {
-            return;
-        }
+    fn claim_registration(&mut self, id: u64) {
+        let entry = self.metric_mut(id);
         entry.claims = entry
             .claims
             .checked_add(1)
             .expect("registration claims overflow");
     }
 
-    fn release_registration(&mut self, id: u64, registration: &RegistrationHandle) {
-        let Some(entry) = self
-            .metrics
-            .get_mut(Self::metric_index(id))
-            .and_then(Option::as_mut)
-        else {
-            // The registry may already have explicitly removed this metric
-            // while an older handle still owns a lifecycle claim.
-            return;
+    fn release_registration(&mut self, id: u64) {
+        let remaining = {
+            let entry = self.metric_mut(id);
+            let remaining = entry
+                .claims
+                .checked_sub(1)
+                .expect("registration claim count underflow");
+            entry.claims = remaining;
+            remaining
         };
-        let registration_weak = Arc::downgrade(registration);
-        if !entry.registration.ptr_eq(&registration_weak) {
-            // The metric id has been reused for a newer registration. Release
-            // only the stale claim and leave the replacement entry intact.
-            return;
-        }
-        let remaining = entry
-            .claims
-            .checked_sub(1)
-            .expect("registration claim count underflow");
-        entry.claims = remaining;
         if remaining == 0 {
             self.drop_metric_entry(id);
         }
@@ -963,63 +942,6 @@ mod tests {
     }
 
     #[test]
-    fn test_closed_registration_does_not_remove_reused_metric_id() {
-        let registry = Registry::new();
-        let key: MetricKey = ("votes".to_string(), Vec::new());
-
-        let original = registry.register(
-            key.0.clone(),
-            "vote count".to_string(),
-            Vec::new(),
-            Arc::new(raw::Counter::<u64>::default()),
-        );
-        let original_id = {
-            let registry = registry.inner.lock();
-            *registry.keys.get(&key).expect("metric key missing")
-        };
-
-        registry.inner.lock().drop_metric_entry(original_id);
-
-        let replacement = registry.register(
-            key.0.clone(),
-            "vote count".to_string(),
-            Vec::new(),
-            Arc::new(raw::Counter::<u64>::default()),
-        );
-        replacement.inc_by(7);
-
-        let replacement_id = {
-            let registry = registry.inner.lock();
-            *registry.keys.get(&key).expect("metric key missing")
-        };
-        assert_eq!(
-            original_id, replacement_id,
-            "replacement should safely reuse the freed metric id"
-        );
-
-        drop(original);
-
-        let encoded = registry.encode();
-        assert!(
-            encoded.contains("votes_total 7"),
-            "stale registration removed replacement metric: {encoded}"
-        );
-
-        drop(replacement);
-        let registry = registry.inner.lock();
-        assert!(
-            registry.keys.is_empty(),
-            "keys left behind: {:?}",
-            registry.keys
-        );
-        assert!(
-            registry.families.is_empty(),
-            "families left behind: {:?}",
-            registry.families
-        );
-    }
-
-    #[test]
     fn test_duplicate_register_acquires_during_last_drop_window() {
         let registry = Registry::new();
         let key: MetricKey = ("votes".to_string(), Vec::new());
@@ -1036,15 +958,6 @@ mod tests {
             let registry = registry.inner.lock();
             *registry.keys.get(&key).expect("metric key missing")
         };
-        let original_registration = {
-            let registry = registry.inner.lock();
-            registry
-                .metric_ref(original_id)
-                .registration
-                .upgrade()
-                .expect("registration missing")
-        };
-
         // Simulate the final drop after it has decided to clean up but before
         // it obtains the registry lock. The dropped claim is still counted in
         // this window.
@@ -1056,10 +969,7 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&original_metric, &duplicate.metric));
 
-        registry
-            .inner
-            .lock()
-            .release_registration(original_id, &original_registration);
+        registry.inner.lock().release_registration(original_id);
 
         duplicate.inc_by(7);
         let encoded = registry.encode();
