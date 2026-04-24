@@ -7,7 +7,7 @@ use prometheus_client::{
     encoding::{EncodeMetric, MetricEncoder, NoLabelSet},
     metrics::{MetricType, TypedMetric},
 };
-use std::{iter::once, sync::Arc, time::SystemTime};
+use std::{fmt::Write, iter::once, sync::Arc, time::SystemTime};
 
 /// Native histogram metric.
 #[derive(Clone, Debug)]
@@ -55,6 +55,43 @@ impl Histogram {
     pub(crate) fn snapshot(&self) -> (f64, u64, Vec<(f64, u64)>) {
         let inner = self.inner.lock();
         (inner.sum, inner.count, inner.buckets.clone())
+    }
+
+    pub(crate) fn bucket_bounds(&self) -> Vec<f64> {
+        self.inner
+            .lock()
+            .buckets
+            .iter()
+            .map(|(upper_bound, _)| *upper_bound)
+            .collect()
+    }
+
+    pub(crate) fn encode_samples(
+        &self,
+        sum_prefix: &str,
+        count_prefix: &str,
+        bucket_prefixes: &[String],
+        samples: &mut String,
+    ) -> Result<(), std::fmt::Error> {
+        let inner = self.inner.lock();
+
+        samples.push_str(sum_prefix);
+        write!(samples, "{}", inner.sum)?;
+        samples.push('\n');
+
+        samples.push_str(count_prefix);
+        write!(samples, "{}", inner.count)?;
+        samples.push('\n');
+
+        let mut cumulative = 0;
+        for ((_, count), bucket_prefix) in inner.buckets.iter().zip(bucket_prefixes) {
+            cumulative += *count;
+            samples.push_str(bucket_prefix);
+            write!(samples, "{cumulative}")?;
+            samples.push('\n');
+        }
+
+        Ok(())
     }
 }
 

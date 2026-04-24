@@ -434,15 +434,7 @@ fn create_gauge_encoder(
     })
 }
 
-fn push_sample_prefix(samples: &mut String, name: &str, suffix: &str, labels: &str) {
-    samples.push_str(name);
-    samples.push('_');
-    samples.push_str(suffix);
-    samples.push_str(labels);
-    samples.push(' ');
-}
-
-fn push_histogram_bucket_labels(samples: &mut String, base: &str, upper_bound: f64) {
+fn encode_histogram_bucket_label_suffix(base: &str, upper_bound: f64) -> String {
     let label = if upper_bound == f64::MAX {
         "+Inf".to_string()
     } else if upper_bound.fract() == 0.0 {
@@ -450,16 +442,18 @@ fn push_histogram_bucket_labels(samples: &mut String, base: &str, upper_bound: f
     } else {
         upper_bound.to_string()
     };
+    let mut suffix = String::new();
     if base.is_empty() {
-        samples.push_str("{le=\"");
-        samples.push_str(&label);
-        samples.push_str("\"}");
+        suffix.push_str("{le=\"");
+        suffix.push_str(&label);
+        suffix.push_str("\"}");
     } else {
-        samples.push_str(&base[..base.len() - 1]);
-        samples.push_str(",le=\"");
-        samples.push_str(&label);
-        samples.push_str("\"}");
+        suffix.push_str(&base[..base.len() - 1]);
+        suffix.push_str(",le=\"");
+        suffix.push_str(&label);
+        suffix.push_str("\"}");
     }
+    suffix
 }
 
 fn create_histogram_encoder(
@@ -468,29 +462,29 @@ fn create_histogram_encoder(
     histogram: Arc<raw::Histogram>,
 ) -> Box<SampleEncoder> {
     let label_suffix = encode_label_suffix(attributes);
+    let mut sum_prefix = name.clone();
+    sum_prefix.push_str("_sum");
+    sum_prefix.push_str(&label_suffix);
+    sum_prefix.push(' ');
+
+    let mut count_prefix = name.clone();
+    count_prefix.push_str("_count");
+    count_prefix.push_str(&label_suffix);
+    count_prefix.push(' ');
+
+    let bucket_prefixes = histogram
+        .bucket_bounds()
+        .into_iter()
+        .map(|upper_bound| {
+            let mut prefix = name.clone();
+            prefix.push_str("_bucket");
+            prefix.push_str(&encode_histogram_bucket_label_suffix(&label_suffix, upper_bound));
+            prefix.push(' ');
+            prefix
+        })
+        .collect::<Vec<_>>();
     Box::new(move |samples| {
-        let (sum, count, buckets) = histogram.snapshot();
-
-        push_sample_prefix(samples, &name, "sum", &label_suffix);
-        write!(samples, "{sum}")?;
-        samples.push('\n');
-
-        push_sample_prefix(samples, &name, "count", &label_suffix);
-        write!(samples, "{count}")?;
-        samples.push('\n');
-
-        let mut cumulative = 0;
-        for (upper_bound, count) in buckets {
-            cumulative += count;
-            samples.push_str(&name);
-            samples.push_str("_bucket");
-            push_histogram_bucket_labels(samples, &label_suffix, upper_bound);
-            samples.push(' ');
-            write!(samples, "{cumulative}")?;
-            samples.push('\n');
-        }
-
-        Ok(())
+        histogram.encode_samples(&sum_prefix, &count_prefix, &bucket_prefixes, samples)
     })
 }
 
