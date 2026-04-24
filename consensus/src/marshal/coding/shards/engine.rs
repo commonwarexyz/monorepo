@@ -161,9 +161,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{HistogramExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, telemetry::metrics::HistogramExt as _, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,

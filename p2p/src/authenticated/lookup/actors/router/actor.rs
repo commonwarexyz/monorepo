@@ -14,9 +14,8 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::CounterFamily,
-    BufferPooler, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, telemetry::metrics::CounterFamily, BufferPooler, ContextCell, Handle, Metrics,
+    Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, ring},

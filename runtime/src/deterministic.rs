@@ -1270,11 +1270,7 @@ impl crate::Metrics for Context {
         )
     }
 
-    fn family<N, H, S, M>(
-        &self,
-        name: N,
-        help: H,
-    ) -> Registered<raw::Family<S, M>>
+    fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
     where
         N: Into<String>,
         H: Into<String>,
@@ -1286,7 +1282,9 @@ impl crate::Metrics for Context {
             + Sync
             + std::fmt::Debug
             + 'static,
-        M: crate::telemetry::metrics::FamilyValue + Default + crate::telemetry::metrics::EncodeMetric,
+        M: crate::telemetry::metrics::FamilyValue
+            + Default
+            + crate::telemetry::metrics::EncodeMetric,
     {
         let name = name.into();
         let help = help.into();

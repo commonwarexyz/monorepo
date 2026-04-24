@@ -39,16 +39,10 @@ impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
         let sequencer_heights = context.family("sequencer_heights", "Height per sequencer tracked");
         let acks = context.family("acks", "Number of acks processed by status");
         let nodes = context.family("nodes", "Number of nodes processed by status");
-        let verify = context.family(
-            "verify",
-            "Number of application verifications by status",
-        );
+        let verify = context.family("verify", "Number of application verifications by status");
         let certificates = context.counter("certificates", "Number of certificates produced");
         let propose = context.family("propose", "Number of propose attempts by status");
-        let rebroadcast = context.family(
-            "rebroadcast",
-            "Number of rebroadcast attempts by status",
-        );
+        let rebroadcast = context.family("rebroadcast", "Number of rebroadcast attempts by status");
         let verify_duration = context.histogram(
             "verify_duration",
             "Histogram of application verification durations",

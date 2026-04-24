@@ -31,10 +31,7 @@ impl<P: PublicKey> Metrics<P> {
         Self {
             peer: context.family("peer", "Number of broadcasts received by peer"),
             receive: context.family("receive", "Number of received messages by status"),
-            subscribe: context.family(
-                "subscribe",
-                "Number of `subscribe` requests by status",
-            ),
+            subscribe: context.family("subscribe", "Number of `subscribe` requests by status"),
             get: context.family("get", "Number of `get` requests by status"),
             waiters: context.gauge("waiters", "Number of digests being awaited"),
         }

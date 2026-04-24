@@ -2,18 +2,14 @@ use prometheus_client::{
     encoding::{EncodeMetric, MetricEncoder},
     metrics::{MetricType, TypedMetric},
 };
-use std::{
-    marker::PhantomData,
-    sync::{
-        atomic::Ordering,
-        Arc,
-    },
-};
-
-#[cfg(target_has_atomic = "64")]
-use std::sync::atomic::AtomicI64;
 #[cfg(not(target_has_atomic = "64"))]
 use std::sync::atomic::AtomicI32;
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::AtomicI64;
+use std::{
+    marker::PhantomData,
+    sync::{atomic::Ordering, Arc},
+};
 
 /// Native integer width used by [`Gauge`] on this target.
 ///

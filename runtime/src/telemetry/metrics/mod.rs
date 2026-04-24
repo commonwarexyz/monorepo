@@ -1,9 +1,9 @@
 //! Utility functions for metrics
 
-pub mod histogram;
 mod counter;
 mod family;
 mod gauge;
+pub mod histogram;
 mod registration;
 pub mod status;
 pub(crate) mod task;
@@ -12,6 +12,10 @@ pub(crate) mod task;
 pub(crate) const METRICS_PREFIX: &str = "runtime";
 
 pub use commonware_runtime_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
+pub use counter::{Counter as RawCounter, CounterValue};
+pub use family::{Family, FamilyValue};
+pub use gauge::{Gauge as RawGauge, GaugeValue};
+pub use histogram::HistogramExt;
 pub use prometheus_client::{
     collector, encoding,
     encoding::{
@@ -25,11 +29,6 @@ pub use prometheus_client::{
     registry,
     registry::Metric,
 };
-
-pub use counter::{Counter as RawCounter, CounterValue};
-pub use family::{Family, FamilyValue};
-pub use gauge::{Gauge as RawGauge, GaugeValue};
-pub use histogram::HistogramExt;
 
 /// Underlying metric types. Used when constructing a metric to pass to
 /// [`crate::Metrics::register`].
@@ -88,7 +87,6 @@ pub trait MetricsExt: crate::Metrics {
     {
         self.register(name, help, raw::Histogram::new(buckets))
     }
-
 }
 
 impl<T: crate::Metrics> MetricsExt for T {}
@@ -486,7 +484,10 @@ fn create_histogram_encoder(
         .map(|upper_bound| {
             let mut prefix = name.clone();
             prefix.push_str("_bucket");
-            prefix.push_str(&encode_histogram_bucket_label_suffix(&label_suffix, upper_bound));
+            prefix.push_str(&encode_histogram_bucket_label_suffix(
+                &label_suffix,
+                upper_bound,
+            ));
             prefix.push(' ');
             prefix
         })
@@ -502,14 +503,7 @@ fn create_family_encoder<S, M>(
     family: Arc<raw::Family<S, M>>,
 ) -> Box<SampleEncoder>
 where
-    S: Clone
-        + std::hash::Hash
-        + Eq
-        + EncodeLabelSetTrait
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
+    S: Clone + std::hash::Hash + Eq + EncodeLabelSetTrait + Send + Sync + std::fmt::Debug + 'static,
     M: FamilyValue + Default + EncodeMetric,
 {
     let label_suffix = encode_label_suffix(attributes);
@@ -556,7 +550,8 @@ where
         registry.register(name.as_str(), "", SharedMetric(metric.clone()));
 
         let mut encoded = String::new();
-        encode_registry(&mut encoded, &registry).expect("encoding temporary metric registry failed");
+        encode_registry(&mut encoded, &registry)
+            .expect("encoding temporary metric registry failed");
         samples.push_str(&encoded[descriptor_len.min(encoded.len())..]);
         Ok(())
     })
@@ -771,8 +766,7 @@ impl RegistryInner {
         let attributes = owned_attributes(attributes);
         let help = normalize_help(help);
         let metric_type = family.metric_type();
-        let encode_samples =
-            create_family_encoder(name.clone(), &attributes, family.clone());
+        let encode_samples = create_family_encoder(name.clone(), &attributes, family.clone());
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);

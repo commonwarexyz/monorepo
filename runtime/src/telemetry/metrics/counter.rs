@@ -2,18 +2,14 @@ use prometheus_client::{
     encoding::{EncodeMetric, MetricEncoder, NoLabelSet},
     metrics::{MetricType, TypedMetric},
 };
-use std::{
-    marker::PhantomData,
-    sync::{
-        atomic::Ordering,
-        Arc,
-    },
-};
-
-#[cfg(target_has_atomic = "64")]
-use std::sync::atomic::AtomicU64;
 #[cfg(not(target_has_atomic = "64"))]
 use std::sync::atomic::AtomicU32;
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::AtomicU64;
+use std::{
+    marker::PhantomData,
+    sync::{atomic::Ordering, Arc},
+};
 
 /// Native integer width used by [`Counter`] on this target.
 ///

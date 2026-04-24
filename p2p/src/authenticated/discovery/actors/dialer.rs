@@ -14,10 +14,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::CounterFamily,
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf,
+    spawn_cell, telemetry::metrics::CounterFamily, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use rand::seq::SliceRandom;

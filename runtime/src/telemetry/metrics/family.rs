@@ -90,14 +90,7 @@ where
 
 impl<S, M> Family<S, M>
 where
-    S: Clone
-        + std::hash::Hash
-        + Eq
-        + EncodeLabelSetTrait
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
+    S: Clone + std::hash::Hash + Eq + EncodeLabelSetTrait + Send + Sync + std::fmt::Debug + 'static,
     M: Default,
 {
     /// Access a metric with the given label set, creating it if one does not yet exist.
@@ -243,14 +236,7 @@ fn encode_combined_label_suffix(output: &mut String, base: &str, child: &str) {
 
 fn encode_family_label_suffix<S>(label_set: &S) -> String
 where
-    S: Clone
-        + std::hash::Hash
-        + Eq
-        + EncodeLabelSetTrait
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
+    S: Clone + std::hash::Hash + Eq + EncodeLabelSetTrait + Send + Sync + std::fmt::Debug + 'static,
 {
     // Source:
     // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L422-L560
