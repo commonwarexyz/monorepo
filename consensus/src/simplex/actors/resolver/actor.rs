@@ -47,7 +47,7 @@ pub struct Actor<
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<MailboxMessage<S, D>>,
+    mailbox_receiver: mpsc::UnboundedReceiver<MailboxMessage<S, D>>,
 }
 
 impl<
@@ -59,7 +59,7 @@ impl<
     > Actor<E, S, B, D, T>
 {
     pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 context: ContextCell::new(context),
@@ -101,7 +101,7 @@ impl<
             .and_then(|index| participants.key(index))
             .cloned();
 
-        let (handler_tx, mut handler_rx) = mpsc::channel(self.mailbox_size);
+        let (handler_tx, mut handler_rx) = mpsc::unbounded_channel();
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(

@@ -3,7 +3,7 @@ use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::{fallible::FallibleExt, mpsc, oneshot},
     sequence::U64,
 };
 
@@ -17,27 +17,25 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
 
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<MailboxMessage<S, D>>,
+    sender: mpsc::UnboundedSender<MailboxMessage<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<MailboxMessage<S, D>>) -> Self {
+    pub const fn new(sender: mpsc::UnboundedSender<MailboxMessage<S, D>>) -> Self {
         Self { sender }
     }
 
     /// Send a certificate.
     pub async fn updated(&mut self, certificate: Certificate<S, D>) {
         self.sender
-            .send_lossy(MailboxMessage::Certificate(certificate))
-            .await;
+            .send_lossy(MailboxMessage::Certificate(certificate));
     }
 
     /// Notify the resolver of a certification result.
     pub async fn certified(&mut self, view: View, success: bool) {
         self.sender
-            .send_lossy(MailboxMessage::Certified { view, success })
-            .await;
+            .send_lossy(MailboxMessage::Certified { view, success });
     }
 }
 
@@ -56,11 +54,11 @@ pub enum HandlerMessage {
 
 #[derive(Clone)]
 pub struct Handler {
-    sender: mpsc::Sender<HandlerMessage>,
+    sender: mpsc::UnboundedSender<HandlerMessage>,
 }
 
 impl Handler {
-    pub const fn new(sender: mpsc::Sender<HandlerMessage>) -> Self {
+    pub const fn new(sender: mpsc::UnboundedSender<HandlerMessage>) -> Self {
         Self { sender }
     }
 }
@@ -97,8 +95,7 @@ impl Producer for Handler {
             .send_lossy(HandlerMessage::Produce {
                 view: View::new(key.into()),
                 response,
-            })
-            .await;
+            });
         receiver
     }
 }

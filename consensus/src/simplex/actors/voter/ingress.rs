@@ -6,7 +6,7 @@ use crate::{
     types::View,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -23,36 +23,34 @@ pub enum Message<S: Scheme, D: Digest> {
 
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: mpsc::UnboundedSender<Message<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    pub const fn new(sender: mpsc::UnboundedSender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
     /// Send a leader's proposal.
     pub async fn proposal(&mut self, proposal: Proposal<D>) {
-        self.sender.send_lossy(Message::Proposal(proposal)).await;
+        self.sender.send_lossy(Message::Proposal(proposal));
     }
 
     /// Signal that the current view should timeout (if not already).
     pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
-        self.sender.send_lossy(Message::Timeout(view, reason)).await;
+        self.sender.send_lossy(Message::Timeout(view, reason));
     }
 
     /// Send a recovered certificate.
     pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
         self.sender
-            .send_lossy(Message::Verified(certificate, false))
-            .await;
+            .send_lossy(Message::Verified(certificate, false));
     }
 
     /// Send a resolved certificate.
     pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
         self.sender
-            .send_lossy(Message::Verified(certificate, true))
-            .await;
+            .send_lossy(Message::Verified(certificate, true));
     }
 }

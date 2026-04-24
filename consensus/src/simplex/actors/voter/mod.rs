@@ -36,7 +36,6 @@ pub struct Config<
 
     pub partition: String,
     pub epoch: Epoch,
-    pub mailbox_size: usize,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
@@ -183,8 +182,8 @@ mod tests {
         timeout_retry: Duration,
     ) -> (
         Mailbox<S, Sha256Digest>,
-        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
-        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        mpsc::UnboundedReceiver<batcher::Message<S, Sha256Digest>>,
+        mpsc::UnboundedReceiver<resolver::MailboxMessage<S, Sha256Digest>>,
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
         mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
     )
@@ -219,8 +218,8 @@ mod tests {
         should_certify: mocks::application::Certifier<Sha256Digest>,
     ) -> (
         Mailbox<S, Sha256Digest>,
-        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
-        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        mpsc::UnboundedReceiver<batcher::Message<S, Sha256Digest>>,
+        mpsc::UnboundedReceiver<resolver::MailboxMessage<S, Sha256Digest>>,
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
         mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
     )
@@ -260,7 +259,6 @@ mod tests {
             reporter: reporter.clone(),
             partition: format!("voter_test_{me}"),
             epoch: Epoch::new(333),
-            mailbox_size: 128,
             leader_timeout,
             certification_timeout,
             timeout_retry,
@@ -271,8 +269,8 @@ mod tests {
         };
         let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
 
-        let (resolver_sender, resolver_receiver) = mpsc::channel(8);
-        let (batcher_sender, batcher_receiver) = mpsc::channel(16);
+        let (resolver_sender, resolver_receiver) = mpsc::unbounded_channel();
+        let (batcher_sender, batcher_receiver) = mpsc::unbounded_channel();
 
         let (vote_sender, _) = oracle
             .control(me.clone())
@@ -304,7 +302,7 @@ mod tests {
     /// Helper to advance to a specific view by sending a finalization for the previous view.
     async fn advance_to_view<S: Scheme<Sha256Digest>>(
         mailbox: &mut Mailbox<S, Sha256Digest>,
-        batcher_receiver: &mut mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        batcher_receiver: &mut mpsc::UnboundedReceiver<batcher::Message<S, Sha256Digest>>,
         schemes: &[S],
         quorum: u32,
         target: View,
@@ -402,7 +400,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "test".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -414,11 +411,11 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
@@ -628,7 +625,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_actor_test_{me}"),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
@@ -640,11 +636,11 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(10);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
@@ -1265,7 +1261,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_certificate_verifies_proposal_test".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
@@ -1276,9 +1271,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
@@ -1451,7 +1446,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_leader".to_string(),
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
@@ -1463,9 +1457,9 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels
@@ -1646,7 +1640,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
@@ -1658,9 +1651,9 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
@@ -1735,7 +1728,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
@@ -1747,9 +1739,9 @@ mod tests {
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
@@ -1873,7 +1865,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                mailbox_size: 128,
                 // Long deadlines prove nullify comes from startup timeout hint, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
@@ -1888,8 +1879,8 @@ mod tests {
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.with_label("voter_initial"), cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -1928,8 +1919,8 @@ mod tests {
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -2271,7 +2262,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_verify_fail_test_{me}"),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 // Use long timeouts to prove nullify comes immediately, not from timeout
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
@@ -2284,9 +2274,9 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
@@ -2484,7 +2474,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_leader_nullify_fast_path_{me}"),
                 epoch,
-                mailbox_size: 128,
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
@@ -2496,9 +2485,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2686,7 +2675,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_drop_propose_test_{me}"),
                 epoch,
-                mailbox_size: 128,
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
@@ -2698,9 +2686,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2856,7 +2844,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_drop_verify_test_{me}"),
                 epoch,
-                mailbox_size: 128,
                 // Use long timeouts so a fast nullify proves we did not wait for timeout.
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
@@ -2868,9 +2855,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -3207,7 +3194,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_dropped_verify_after_participation_{me}"),
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(250),
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
@@ -3218,9 +3204,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(64);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -3496,7 +3482,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "no_recertification_after_replay".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
@@ -3507,8 +3492,8 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3628,7 +3613,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "no_recertification_after_replay".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
@@ -3639,8 +3623,8 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -3768,7 +3752,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
@@ -3778,8 +3761,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3926,7 +3909,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
@@ -3936,8 +3918,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4025,7 +4007,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
@@ -4036,8 +4017,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4193,7 +4174,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
@@ -4203,8 +4183,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4303,7 +4283,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
@@ -4313,8 +4292,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4470,7 +4449,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
@@ -4480,8 +4458,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4582,7 +4560,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
@@ -4593,8 +4570,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4747,7 +4724,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -4757,8 +4733,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4919,7 +4895,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -4929,8 +4904,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -5017,7 +4992,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -5028,8 +5002,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -5194,7 +5168,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch: target_epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
@@ -5204,8 +5177,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -5378,7 +5351,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "cert_cancel_test".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -5389,10 +5361,10 @@ mod tests {
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -5569,7 +5541,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "cert_after_nullification_test".to_string(),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -5580,10 +5551,10 @@ mod tests {
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -6407,7 +6378,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -6418,8 +6388,8 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter_cancel"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -6518,7 +6488,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition,
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -6529,8 +6498,8 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -7754,7 +7723,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -7764,8 +7732,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -7876,7 +7844,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -7887,8 +7854,8 @@ mod tests {
             };
             let (voter, _mailbox) =
                 Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8020,7 +7987,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -8030,8 +7996,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8135,7 +8101,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
@@ -8145,8 +8110,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8276,7 +8241,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
@@ -8286,8 +8250,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8399,7 +8363,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
@@ -8409,8 +8372,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8540,7 +8503,6 @@ mod tests {
                 reporter,
                 partition: format!("batcher_timeout_test_{activity_before_hint}_{me}"),
                 epoch: Epoch::new(333),
-                mailbox_size: 128,
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
@@ -8551,10 +8513,10 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, _resolver_receiver) = mpsc::unbounded_channel();
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -8709,10 +8671,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn voter_drains_mailbox_when_batcher_channel_is_full() {
+    fn voter_does_not_block_on_batcher_update() {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"voter_full_batcher_channel".to_vec();
+        let namespace = b"voter_batcher_update_no_block".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
             let Fixture {
@@ -8754,9 +8716,8 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter,
-                partition: format!("voter_full_batcher_channel_{me}"),
+                partition: format!("voter_batcher_update_no_block_{me}"),
                 epoch: Epoch::new(333),
-                mailbox_size: 1,
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_secs(5),
@@ -8767,10 +8728,10 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::unbounded_channel();
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1);
+            let (batcher_sender, mut batcher_receiver) = mpsc::unbounded_channel();
             let mut batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle

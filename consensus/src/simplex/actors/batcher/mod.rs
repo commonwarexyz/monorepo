@@ -29,7 +29,6 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub activity_timeout: ViewDelta,
     pub skip_timeout: ViewDelta,
     pub epoch: Epoch,
-    pub mailbox_size: usize,
     pub forwarding: ForwardingPolicy,
 }
 
@@ -240,14 +239,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -411,14 +409,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to.
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -574,14 +571,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -723,14 +719,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -906,13 +901,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentLeader,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1148,13 +1142,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1377,13 +1370,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1557,13 +1549,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1787,13 +1778,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1997,14 +1987,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2195,14 +2184,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2404,14 +2392,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2530,14 +2517,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2659,14 +2645,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(skip_timeout),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2806,13 +2791,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(skip_timeout),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -2931,13 +2915,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(skip_timeout),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3068,13 +3051,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3198,13 +3180,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3328,14 +3309,13 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3525,7 +3505,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(batcher_context.clone(), batcher_cfg);
@@ -3544,7 +3523,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3770,13 +3749,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3981,13 +3959,12 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle

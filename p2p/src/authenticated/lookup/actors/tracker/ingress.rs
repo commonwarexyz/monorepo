@@ -4,7 +4,6 @@ use crate::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
         mailbox::UnboundedMailbox,
-        Mailbox,
     },
     types::Address,
     AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
@@ -55,7 +54,7 @@ pub enum Message<C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message>,
+        peer: UnboundedMailbox<peer::Message>,
     },
 
     // ---------- Used by dialer ----------
@@ -114,7 +113,7 @@ pub enum Message<C: PublicKey> {
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
-    pub fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
+    pub fn connect(&mut self, public_key: C, peer: UnboundedMailbox<peer::Message>) {
         self.0.send_lossy(Message::Connect { public_key, peer });
     }
 

@@ -215,19 +215,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 // Kill if peer is not authorized
                 if !self.directory.eligible(&public_key) {
-                    peer.kill().await;
+                    peer.kill();
                     return;
                 }
 
                 if let Some(bit_vec) = self.directory.get_random_bit_vec() {
-                    let _ = peer.bit_vec(bit_vec).await;
+                    peer.bit_vec(bit_vec);
                 } else {
                     debug!("no peer sets available");
                 };
             }
             Message::BitVec { bit_vec, mut peer } => {
                 let Some(mut infos) = self.directory.infos(bit_vec) else {
-                    peer.kill().await;
+                    peer.kill();
                     return;
                 };
 
@@ -240,7 +240,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Send the info
                 if !infos.is_empty() {
-                    peer.peers(infos).await;
+                    peer.peers(infos);
                 }
             }
             Message::Peers { peers } => {
@@ -292,7 +292,6 @@ mod tests {
                 config::Bootstrapper,
                 types,
             },
-            Mailbox,
         },
         Ingress, Manager, Provider, TrackedPeers,
     };
@@ -301,6 +300,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
+    use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
     use futures::future::Either;
@@ -493,6 +493,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tracker_does_not_block_on_undrained_peer_control_mailbox() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|context| async move {
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
+
+            let (_, peer_pk) = new_signer_and_pk(1);
+            let (peer_mailbox, _peer_receiver): (UnboundedMailbox<peer::Message<PublicKey>>, _) =
+                UnboundedMailbox::new();
+
+            // The tracker must not stop servicing unrelated requests when it
+            // sends control to a peer whose receiver is not being drained.
+            mailbox.construct(peer_pk, peer_mailbox);
+
+            select! {
+                _ = mailbox.dialable() => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("tracker blocked on peer control mailbox");
+                },
+            }
+        });
+    }
+
+    #[test]
     fn test_connect_authorized_peer_receives_tracker_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -542,7 +566,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_with_boot);
 
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_receiver) = UnboundedMailbox::new();
             new_mailbox.construct(boot_pk.clone(), peer_mailbox.clone());
 
             match futures::future::select(
@@ -578,7 +602,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
+            let (peer_mailbox_pk1, mut peer_receiver_pk1) = UnboundedMailbox::new();
             let bit_vec_unknown_idx = types::BitVec {
                 index: 99,
                 bits: BitMap::ones(1),
@@ -615,7 +639,7 @@ mod tests {
             crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
+            let (peer_mailbox_pk1, mut peer_receiver_pk1) = UnboundedMailbox::new();
             mailbox.construct(pk1.clone(), peer_mailbox_pk1.clone());
 
             assert!(matches!(
@@ -651,7 +675,7 @@ mod tests {
             crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
+            let (peer_mailbox_pk1, mut peer_receiver_pk1) = UnboundedMailbox::new();
             mailbox.construct(pk1.clone(), peer_mailbox_pk1.clone());
             assert!(matches!(
                 peer_receiver_pk1.recv().await,
@@ -712,7 +736,7 @@ mod tests {
             oracle.track(1, set1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
+            let (peer_mailbox_s1, mut peer_receiver_s1) = UnboundedMailbox::new();
             mailbox.peers(vec![pk2_info.clone()]);
             context.sleep(Duration::from_millis(10)).await;
 
@@ -777,7 +801,7 @@ mod tests {
                 false,
             );
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
+            let (peer_mailbox_s1, mut peer_receiver_s1) = UnboundedMailbox::new();
             let _r1 = connect_to_peer(&mut mailbox, &pk1).await;
 
             // Connect to pk2
@@ -1070,7 +1094,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_receiver) = UnboundedMailbox::new();
             let invalid_bit_vec = types::BitVec {
                 index: 0,
                 bits: BitMap::ones(2),
@@ -1101,7 +1125,7 @@ mod tests {
             let (_peer2_s, peer2_pk) = new_signer_and_pk(2);
 
             // --- Initial Construct for unauthorized peer ---
-            let (peer_mailbox1, mut peer_receiver1) = Mailbox::new(1);
+            let (peer_mailbox1, mut peer_receiver1) = UnboundedMailbox::new();
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             assert!(
                 matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),
@@ -1196,7 +1220,7 @@ mod tests {
             );
 
             // Peer2 is in set1 (still active)
-            let (peer_mailbox2, mut peer_receiver2) = Mailbox::new(1);
+            let (peer_mailbox2, mut peer_receiver2) = UnboundedMailbox::new();
             let _r2 = connect_to_peer(&mut mailbox, &peer2_pk).await;
 
             // Run this several times since the bitvec given may have index 1 or 2.

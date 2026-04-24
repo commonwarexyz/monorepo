@@ -3,7 +3,7 @@ use crate::{
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -20,12 +20,12 @@ pub enum Message<S: Scheme, D: Digest> {
 
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: mpsc::UnboundedSender<Message<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    pub const fn new(sender: mpsc::UnboundedSender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
@@ -36,21 +36,17 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         leader: Participant,
         finalized: View,
         forwardable_proposal: Option<Proposal<D>>,
-    ) where
-        Message<S, D>: Send + 'static,
-    {
-        self.sender
-            .send_lossy(Message::Update {
-                current,
-                leader,
-                finalized,
-                forwardable_proposal,
-            })
-            .await;
+    ) {
+        self.sender.send_lossy(Message::Update {
+            current,
+            leader,
+            finalized,
+            forwardable_proposal,
+        });
     }
 
     /// Send a constructed vote.
     pub async fn constructed(&mut self, message: Vote<S, D>) {
-        self.sender.send_lossy(Message::Constructed(message)).await;
+        self.sender.send_lossy(Message::Constructed(message));
     }
 }

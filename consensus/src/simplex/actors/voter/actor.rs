@@ -117,7 +117,7 @@ pub struct Actor<
     page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mpsc::UnboundedReceiver<Message<S, D>>,
 
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
@@ -162,7 +162,7 @@ impl<
         );
 
         // Initialize store
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) = mpsc::unbounded_channel();
         let mailbox = Mailbox::new(mailbox_sender);
         let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(

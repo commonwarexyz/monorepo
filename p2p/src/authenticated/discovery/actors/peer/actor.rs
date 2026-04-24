@@ -9,7 +9,6 @@ use crate::authenticated::{
     },
     mailbox::UnboundedMailbox,
     relay::{recv_prioritized, Prioritized, Relay},
-    Mailbox,
 };
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
@@ -38,8 +37,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_bit_vec: u64,
     max_peers: usize,
 
-    mailbox: Mailbox<Message<C>>,
-    control: mpsc::Receiver<Message<C>>,
+    mailbox: UnboundedMailbox<Message<C>>,
+    control: mpsc::UnboundedReceiver<Message<C>>,
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
@@ -51,7 +50,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
+        let (control_sender, control_receiver) = UnboundedMailbox::new();
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
@@ -131,7 +130,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mpsc::Receiver<Message<C>>,
+        control: &mut mpsc::UnboundedReceiver<Message<C>>,
         pool: &commonware_runtime::BufferPool,
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,

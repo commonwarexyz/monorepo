@@ -7,7 +7,6 @@ use crate::{
             types,
         },
         mailbox::UnboundedMailbox,
-        Mailbox,
     },
     PeerSetSubscription, TrackedPeers,
 };
@@ -66,7 +65,7 @@ pub enum Message<C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peer: UnboundedMailbox<peer::Message<C>>,
     },
 
     /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
@@ -77,7 +76,7 @@ pub enum Message<C: PublicKey> {
         bit_vec: types::BitVec,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peer: UnboundedMailbox<peer::Message<C>>,
     },
 
     /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
@@ -153,12 +152,12 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `Construct` message to the tracker.
-    pub fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
+    pub fn construct(&mut self, public_key: C, peer: UnboundedMailbox<peer::Message<C>>) {
         self.0.send_lossy(Message::Construct { public_key, peer });
     }
 
     /// Send a `BitVec` message to the tracker.
-    pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
+    pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: UnboundedMailbox<peer::Message<C>>) {
         self.0.send_lossy(Message::BitVec { bit_vec, peer });
     }
 

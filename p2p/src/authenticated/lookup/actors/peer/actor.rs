@@ -1,9 +1,9 @@
 use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
     data::EncodedData,
+    mailbox::UnboundedMailbox,
     lookup::{channels::Channels, metrics, types},
     relay::{recv_prioritized, Prioritized, Relay},
-    Mailbox,
 };
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
@@ -28,7 +28,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     ping_frequency: Duration,
     send_batch_size: usize,
 
-    control: mpsc::Receiver<Message>,
+    control: mpsc::UnboundedReceiver<Message>,
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
@@ -40,8 +40,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
+    pub fn new(context: E, cfg: Config) -> (Self, UnboundedMailbox<Message>, Relay<EncodedData>) {
+        let (control_sender, control_receiver) = UnboundedMailbox::new();
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
@@ -97,7 +97,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mpsc::Receiver<Message>,
+        control: &mut mpsc::UnboundedReceiver<Message>,
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
@@ -339,7 +339,7 @@ mod tests {
         deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
+    use commonware_utils::NZUsize;
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         num::NonZeroU32,
@@ -562,7 +562,7 @@ mod tests {
                 send_batch_size: NZUsize!(2),
                 ..default_peer_config()
             };
-            let (peer_actor, peer_mailbox, relay) =
+            let (peer_actor, mut peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
 
             let mut channels = create_channels(&context);
@@ -606,7 +606,7 @@ mod tests {
             assert_eq!(second.message, IoBuf::from(b"second"));
             assert_eq!(sends.load(Ordering::Relaxed), 1);
 
-            peer_mailbox.0.send_lossy(Message::Kill).await;
+            peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
             assert!(
                 matches!(result, Err(Error::PeerKilled(_))),

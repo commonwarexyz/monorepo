@@ -48,7 +48,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
-    mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
+    mailboxes: HashMap<C::PublicKey, UnboundedMailbox<peer::Message>>,
 
     /// Subscribers to peer set updates.
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
@@ -143,7 +143,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // or whose addresses changed.
                 for peer in reset_peers {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
-                        mailbox.kill().await;
+                        mailbox.kill();
                     }
                 }
 
@@ -172,7 +172,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                     // Kill the existing connection since it was established to the old address.
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                        peer.kill().await;
+                        peer.kill();
                     }
                 }
 
@@ -206,7 +206,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 // Kill if peer is not eligible (not in a peer set)
                 if !self.directory.eligible(&public_key) {
-                    peer.kill().await;
+                    peer.kill();
                     return;
                 }
 
@@ -242,7 +242,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Kill the peer if we're connected to it.
                 if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                    peer.kill().await;
+                    peer.kill();
                 }
 
                 // Send the updated listenable IPs to the listener.
@@ -273,6 +273,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
+    use commonware_macros::select;
     use commonware_runtime::{
         deterministic::{self},
         Clock, Runner,
@@ -339,7 +340,7 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_receiver) = UnboundedMailbox::new();
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox);
@@ -347,6 +348,30 @@ mod tests {
                 matches!(peer_receiver.recv().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
             );
+        });
+    }
+
+    #[test]
+    fn test_tracker_does_not_block_on_undrained_peer_control_mailbox() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
+
+            let (_, peer_pk) = new_signer_and_pk(1);
+            let (peer_mailbox, _peer_receiver): (UnboundedMailbox<peer::Message>, _) =
+                UnboundedMailbox::new();
+
+            // The tracker must not stop servicing unrelated requests when it
+            // sends control to a peer whose receiver is not being drained.
+            mailbox.connect(peer_pk, peer_mailbox);
+
+            select! {
+                _ = mailbox.dialable() => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("tracker blocked on peer control mailbox");
+                },
+            }
         });
     }
 
@@ -779,7 +804,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = UnboundedMailbox::new();
             mailbox.connect(peer_pk.clone(), peer_mailbox);
 
             // 3) Block it → should see exactly one Kill
@@ -845,7 +870,7 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = UnboundedMailbox::new();
             mailbox.connect(my_pk.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
@@ -1069,7 +1094,7 @@ mod tests {
             let reservation = mailbox.listen(pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = UnboundedMailbox::new();
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Update address - should kill the connection
@@ -1111,7 +1136,7 @@ mod tests {
             let reservation = mailbox.listen(pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = UnboundedMailbox::new();
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Register new peer set with same peer at address B
@@ -1167,13 +1192,13 @@ mod tests {
             // Establish connection to pk_tracked
             let reservation = mailbox.listen(pk_tracked.clone()).await;
             assert!(reservation.is_some());
-            let (tracked_mailbox, mut tracked_rx) = Mailbox::new(1);
+            let (tracked_mailbox, mut tracked_rx) = UnboundedMailbox::new();
             mailbox.connect(pk_tracked.clone(), tracked_mailbox);
 
             // Establish connection to pk_unchanged
             let reservation = mailbox.listen(pk_unchanged.clone()).await;
             assert!(reservation.is_some());
-            let (unchanged_mailbox, mut unchanged_rx) = Mailbox::new(1);
+            let (unchanged_mailbox, mut unchanged_rx) = UnboundedMailbox::new();
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
             // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers

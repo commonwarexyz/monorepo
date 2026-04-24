@@ -68,7 +68,7 @@ where
     forwarding: ForwardingPolicy,
     epoch: Epoch,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mpsc::UnboundedReceiver<Message<S, D>>,
 
     added: Counter,
     verified: Counter,
@@ -137,7 +137,7 @@ where
         );
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 context: ContextCell::new(context),
@@ -367,10 +367,8 @@ where
                 }
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
-                    // Local votes may arrive before the detached view update
-                    // that made them current.
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, true) {
+                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                         continue;
                     }
 

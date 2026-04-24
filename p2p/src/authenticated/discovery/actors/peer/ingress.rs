@@ -1,6 +1,6 @@
-use crate::authenticated::{discovery::types, Mailbox};
+use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::fallible::AsyncFallibleExt;
+use commonware_utils::channel::fallible::FallibleExt;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -15,16 +15,16 @@ pub enum Message<C: PublicKey> {
     Kill,
 }
 
-impl<C: PublicKey> Mailbox<Message<C>> {
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec) {
-        self.0.send_lossy(Message::BitVec(bit_vec)).await;
+impl<C: PublicKey> UnboundedMailbox<Message<C>> {
+    pub fn bit_vec(&mut self, bit_vec: types::BitVec) {
+        self.0.send_lossy(Message::BitVec(bit_vec));
     }
 
-    pub async fn peers(&mut self, peers: Vec<types::Info<C>>) {
-        self.0.send_lossy(Message::Peers(peers)).await;
+    pub fn peers(&mut self, peers: Vec<types::Info<C>>) {
+        self.0.send_lossy(Message::Peers(peers));
     }
 
-    pub async fn kill(&mut self) {
-        self.0.send_lossy(Message::Kill).await;
+    pub fn kill(&mut self) {
+        self.0.send_lossy(Message::Kill);
     }
 }

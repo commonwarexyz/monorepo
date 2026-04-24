@@ -35,7 +35,7 @@ pub enum Prioritized<C, D> {
 
 /// Awaits a message from control, high, or low priority receivers.
 pub async fn recv_prioritized<C, D>(
-    control: &mut mpsc::Receiver<C>,
+    control: &mut mpsc::UnboundedReceiver<C>,
     high: &mut mpsc::Receiver<D>,
     low: &mut mpsc::Receiver<D>,
 ) -> Prioritized<C, D> {
