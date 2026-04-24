@@ -706,18 +706,15 @@ impl RegistryInner {
     }
 
     fn release_registration(&mut self, id: u64) {
-        let remaining = {
-            let entry = self.metric_mut(id);
-            let remaining = entry
-                .claims
-                .checked_sub(1)
-                .expect("registration claim count underflow");
-            entry.claims = remaining;
-            remaining
-        };
-        if remaining == 0 {
-            self.drop_metric_entry(id);
+        let entry = self.metric_mut(id);
+        entry.claims = entry
+            .claims
+            .checked_sub(1)
+            .expect("registration claim count underflow");
+        if entry.claims > 0 {
+            return;
         }
+        self.drop_metric_entry(id);
     }
 
     fn drop_metric_entry(&mut self, id: u64) {
