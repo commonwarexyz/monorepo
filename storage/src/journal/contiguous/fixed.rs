@@ -333,7 +333,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         if let (Some(oldest), Some(newest)) = (journal.oldest_section(), journal.newest_section()) {
             let first_to_check = start_section.max(oldest + 1);
             for section in first_to_check..newest {
-                let len = journal.section_len(section).await?;
+                let len = journal.section_len(section)?;
                 if len < items_per_blob {
                     return Err(Error::Corruption(format!(
                         "section {section} incomplete: expected {items_per_blob} items, got {len}"
@@ -555,7 +555,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(()); // Tail section, can be partial
         }
 
-        let oldest_len = inner.section_len(oldest).await?;
+        let oldest_len = inner.section_len(oldest)?;
         let oldest_start = oldest * items_per_blob;
 
         let expected = if pruning_boundary > oldest_start {
@@ -590,13 +590,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         if oldest == newest {
             // Single section: count from pruning boundary
-            let tail_len = inner.section_len(newest).await?;
+            let tail_len = inner.section_len(newest)?;
             return Ok(pruning_boundary + tail_len);
         }
 
         // Multiple sections: sum actual item counts
-        let oldest_len = inner.section_len(oldest).await?;
-        let tail_len = inner.section_len(newest).await?;
+        let oldest_len = inner.section_len(oldest)?;
+        let tail_len = inner.section_len(newest)?;
 
         // Middle sections are assumed full
         let middle_sections = newest - oldest - 1;

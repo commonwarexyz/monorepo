@@ -509,9 +509,9 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
 }
 
 /// Like [`seed_db`], but skips the final `sync()` so freshly-seeded operations remain in the
-/// journal's in-memory append tip. Useful for benches that want to exercise the in-tip branch
-/// of `try_read_sync` during ancestor lookups.
-pub async fn seed_db_unsynced<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+/// journal's in-memory append tip. Useful for benches that want to exercise the in-tip branch of
+/// `try_read_sync` during ancestor lookups.
+pub async fn seed_db_nosync<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     db: &mut C,
     num_keys: u64,
 ) {

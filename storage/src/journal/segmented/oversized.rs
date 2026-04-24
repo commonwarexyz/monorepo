@@ -142,12 +142,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         let sections: Vec<u64> = self.index.sections().collect();
 
         for section in sections {
-            let index_size = self.index.size(section).await?;
+            let index_size = self.index.size(section)?;
             if index_size == 0 {
                 continue;
             }
 
-            let glob_size = match self.values.size(section).await {
+            let glob_size = match self.values.size(section) {
                 Ok(size) => size,
                 Err(Error::AlreadyPrunedToSection(oldest)) => {
                     // This shouldn't happen in normal operation: prune() prunes the index
@@ -416,8 +416,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Get index size for checkpoint.
     ///
     /// The value size can be derived from the last entry's location when needed.
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.index.size(section).await
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.index.size(section)
     }
 
     /// Get the value size for a section, derived from the last entry's location.
@@ -2992,7 +2992,7 @@ mod tests {
                 .expect("rewind to zero index_size must not fail");
 
             assert_eq!(oversized.last(0).await.unwrap(), None);
-            assert_eq!(oversized.size(0).await.unwrap(), 0);
+            assert_eq!(oversized.size(0).unwrap(), 0);
             assert_eq!(oversized.value_size(0).await.unwrap(), 0);
 
             oversized.destroy().await.expect("Failed to destroy");

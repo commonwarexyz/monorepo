@@ -639,8 +639,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.
-    #[allow(clippy::unused_async)]
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
         self.manager.size(section)
     }
 
@@ -1022,7 +1021,7 @@ mod tests {
             }
 
             // Test size on pruned section
-            match journal.size(1).await {
+            match journal.size(1) {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -1049,7 +1048,7 @@ mod tests {
             assert!(journal.get(3, 0).await.is_ok());
             assert!(journal.get(4, 0).await.is_ok());
             assert!(journal.get(5, 0).await.is_ok());
-            assert!(journal.size(3).await.is_ok());
+            assert!(journal.size(3).is_ok());
             assert!(journal.sync(4).await.is_ok());
 
             // Append to section at threshold should work
@@ -1645,41 +1644,41 @@ mod tests {
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Check size of non-existent section
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 1
             journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
             journal.append(1, &43i32).await.unwrap();
-            let new_size = journal.size(1).await.unwrap();
+            let new_size = journal.size(1).unwrap();
             assert!(new_size > size);
 
             // Check size of different section - should still be 0
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 2
             journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1 and 2
             journal.rewind(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0);
 
             // Check size of section 2 - should be 0
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             assert_eq!(size, 0);
         });
     }
@@ -1700,41 +1699,41 @@ mod tests {
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Check size of non-existent section
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 1
             journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
             journal.append(1, &43i32).await.unwrap();
-            let new_size = journal.size(1).await.unwrap();
+            let new_size = journal.size(1).unwrap();
             assert!(new_size > size);
 
             // Check size of different section - should still be 0
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 2
             journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1
             journal.rewind_section(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0);
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             assert!(size > 0);
         });
     }
@@ -1821,25 +1820,22 @@ mod tests {
 
             // Verify all sections exist
             for section in 1u64..=10 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert!(size > 0, "section {section} should have data");
             }
 
             // Rewind to section 5 (should remove sections 6-10)
-            journal
-                .rewind(5, journal.size(5).await.unwrap())
-                .await
-                .unwrap();
+            journal.rewind(5, journal.size(5).unwrap()).await.unwrap();
 
             // Verify sections 1-5 still exist with correct data
             for section in 1u64..=5 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert!(size > 0, "section {section} should still have data");
             }
 
             // Verify sections 6-10 are removed (size should be 0)
             for section in 6u64..=10 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
@@ -1881,7 +1877,7 @@ mod tests {
             for i in 0..5 {
                 journal.append(1, &i).await.unwrap();
                 journal.sync(1).await.unwrap();
-                sizes.push(journal.size(1).await.unwrap());
+                sizes.push(journal.size(1).unwrap());
             }
 
             // Rewind to keep only first 3 items
@@ -1889,7 +1885,7 @@ mod tests {
             journal.rewind(1, target_size).await.unwrap();
 
             // Verify size is correct
-            let new_size = journal.size(1).await.unwrap();
+            let new_size = journal.size(1).unwrap();
             assert_eq!(new_size, target_size);
 
             // Verify first 3 items via replay
@@ -1935,7 +1931,7 @@ mod tests {
 
             // Verify sections 5, 6, 7 are removed
             for section in 5u64..=7 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
@@ -1973,7 +1969,7 @@ mod tests {
             journal.sync_all().await.unwrap();
 
             // Rewind to section 2
-            let size = journal.size(2).await.unwrap();
+            let size = journal.size(2).unwrap();
             journal.rewind(2, size).await.unwrap();
             journal.sync_all().await.unwrap();
             drop(journal);
@@ -1985,13 +1981,13 @@ mod tests {
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert!(size > 0, "section {section} should have data after restart");
             }
 
             // Verify sections 3-5 are gone
             for section in 3u64..=5 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert_eq!(size, 0, "section {section} should be gone after restart");
             }
 
@@ -2036,12 +2032,12 @@ mod tests {
             journal.rewind(1, 0).await.unwrap();
 
             // Verify section 1 exists but is empty
-            let size = journal.size(1).await.unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0, "section 1 should be empty");
 
             // Verify sections 2, 3 are completely removed
             for section in 2u64..=3 {
-                let size = journal.size(section).await.unwrap();
+                let size = journal.size(section).unwrap();
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
@@ -2078,7 +2074,7 @@ mod tests {
                 journal.append(1, &i).await.unwrap();
             }
             journal.sync(1).await.unwrap();
-            let valid_logical_size = journal.size(1).await.unwrap();
+            let valid_logical_size = journal.size(1).unwrap();
             drop(journal);
 
             // Get the physical blob size before corruption
@@ -2360,9 +2356,9 @@ mod tests {
             journal.sync_all().await.expect("Failed to sync");
 
             // Verify section sizes
-            assert!(journal.size(1).await.unwrap() > 0);
-            assert_eq!(journal.size(2).await.unwrap(), 0);
-            assert!(journal.size(3).await.unwrap() > 0);
+            assert!(journal.size(1).unwrap() > 0);
+            assert_eq!(journal.size(2).unwrap(), 0);
+            assert!(journal.size(3).unwrap() > 0);
 
             // Drop and reopen to test replay
             drop(journal);

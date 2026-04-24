@@ -173,8 +173,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     }
 
     /// Get the current size of a section (including buffered data).
-    #[allow(clippy::unused_async)]
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
         self.manager.size(section)
     }
 
