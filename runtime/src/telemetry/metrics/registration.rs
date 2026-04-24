@@ -1,16 +1,5 @@
 use commonware_utils::sync::Mutex;
-use std::sync::{Arc, Weak};
-
-pub(crate) type RegistrationHandle = Arc<dyn RegistrationGuard>;
-pub(crate) type WeakRegistrationHandle = Weak<dyn RegistrationGuard>;
-
-pub(crate) trait RegistrationGuard: Send + Sync + 'static {
-    fn registration_dropped(&self) {}
-}
-
-impl RegistrationGuard for () {}
-
-impl<G: Send + 'static> RegistrationGuard for GuardHolder<G> {}
+use std::sync::Arc;
 
 struct GuardHolder<G>(Mutex<G>);
 
@@ -21,37 +10,25 @@ struct GuardHolder<G>(Mutex<G>);
 /// metrics use that drop to unregister themselves from the runtime registry,
 /// while external callers may attach custom cleanup with [`Registration::from_guard`].
 pub struct Registration {
-    inner: Arc<RegistrationInner>,
-}
-
-struct RegistrationInner {
-    guard: RegistrationHandle,
+    _guard: Arc<dyn Send + Sync>,
 }
 
 impl Clone for Registration {
     fn clone(&self) -> Self {
         Self {
-            inner: Arc::clone(&self.inner),
+            _guard: Arc::clone(&self._guard),
         }
     }
 }
 
 impl Registration {
-    pub(crate) fn from_handle(handle: RegistrationHandle) -> Self {
-        Self {
-            inner: Arc::new(RegistrationInner { guard: handle }),
-        }
-    }
-
     pub(crate) fn from_registration_guard<G>(guard: G) -> Self
     where
-        G: RegistrationGuard,
+        G: Send + Sync + 'static,
     {
-        Self::from_handle(Arc::new(guard))
-    }
-
-    pub(crate) fn downgrade(&self) -> WeakRegistrationHandle {
-        Arc::downgrade(&self.inner.guard)
+        Self {
+            _guard: Arc::new(guard),
+        }
     }
 
     /// Create a registration from a guard that should be dropped when the last
@@ -68,11 +45,5 @@ impl From<()> for Registration {
     /// Create a registration token that performs no cleanup when dropped.
     fn from(_: ()) -> Self {
         Self::from_registration_guard(())
-    }
-}
-
-impl Drop for RegistrationInner {
-    fn drop(&mut self) {
-        self.guard.registration_dropped();
     }
 }

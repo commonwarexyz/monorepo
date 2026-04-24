@@ -40,7 +40,6 @@ use prometheus_client::encoding::{
     MetricEncoder as PromMetricEncoder,
 };
 pub use registration::Registration;
-use registration::{RegistrationGuard, WeakRegistrationHandle};
 use std::{
     any::Any,
     borrow::Cow,
@@ -286,8 +285,8 @@ struct RegistryGuard {
     registry: Weak<Mutex<RegistryInner>>,
 }
 
-impl RegistrationGuard for RegistryGuard {
-    fn registration_dropped(&self) {
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
@@ -384,7 +383,6 @@ struct PendingMetricEntry {
     attributes: MetricAttributes,
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
-    registration: WeakRegistrationHandle,
 }
 
 pub(crate) struct SharedMetric<M>(pub(crate) Arc<M>);
@@ -450,8 +448,6 @@ struct MetricEntry {
     attributes: MetricAttributes,
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
-    /// Weak handle to the lifecycle token owned by the outstanding [`Registered<_>`].
-    registration: WeakRegistrationHandle,
     claims: usize,
     family_index: usize,
 }
@@ -560,14 +556,13 @@ impl RegistryInner {
                         key.0, key.1
                     )
                 });
-            let registration = entry
-                .registration
-                .upgrade()
-                .expect("metric key references closed registration");
             self.claim_registration(existing_id);
             return Registered {
                 metric: existing_metric,
-                registration: Registration::from_handle(registration),
+                registration: Registration::from_registration_guard(RegistryGuard {
+                    id: existing_id,
+                    registry,
+                }),
             };
         }
         self.assert_family_matches(&name, &help, metric_type);
@@ -584,7 +579,6 @@ impl RegistryInner {
                 attributes,
                 encode_samples,
                 metric_any,
-                registration: registration.downgrade(),
             },
         );
         Registered {
@@ -659,7 +653,6 @@ impl RegistryInner {
             attributes,
             encode_samples,
             metric_any,
-            registration,
         } = entry;
         self.keys
             .insert((family_name.clone(), attributes.clone()), id);
@@ -684,7 +677,6 @@ impl RegistryInner {
             attributes,
             encode_samples,
             metric_any,
-            registration,
             claims: 1,
             family_index,
         });
