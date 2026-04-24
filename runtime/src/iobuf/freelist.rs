@@ -227,49 +227,95 @@ impl Freelist {
             return;
         };
 
-        let put_entries = |masks: &mut [u64]| {
-            // Masks are staged by word after parking the buffers. The later
-            // Release `fetch_or` makes every staged slot in that word available.
-            let mut stage = |slot, buffer| {
-                // Park first, then stage the bit for the later per-word insert.
-                self.park(slot, buffer);
-                let (word_index, mask) = self.slot_word(slot);
-                masks[word_index] |= mask;
-            };
-
-            stage(slot, buffer);
-            stage(next_slot, next_buffer);
-            for (slot, buffer) in entries {
-                stage(slot, buffer);
-            }
-
-            for (word_index, &mask) in masks.iter().enumerate() {
-                if mask == 0 {
-                    continue;
-                }
-
-                // One Release operation makes every parked buffer represented
-                // by this word mask.
-                let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
-                assert_eq!(
-                    previous & mask,
-                    0,
-                    "returned slot batch must not already contain a free slot"
-                );
-            }
-        };
-
         let word_count = self.words.len();
         if word_count <= INLINE_PUT_BATCH_MASKS {
             let mut masks = [0u64; INLINE_PUT_BATCH_MASKS];
-            put_entries(&mut masks[..word_count]);
+            self.put_entries(
+                &mut masks[..word_count],
+                slot,
+                buffer,
+                next_slot,
+                next_buffer,
+                entries,
+            );
         } else {
             // Very large freelists are uncommon, so keep the common case on the
             // stack and fall back to heap scratch only when the bitmap is wider
             // than the fixed inline staging area.
             let mut masks = vec![0u64; word_count];
-            put_entries(masks.as_mut_slice());
+            self.put_entries(
+                masks.as_mut_slice(),
+                slot,
+                buffer,
+                next_slot,
+                next_buffer,
+                entries,
+            );
         }
+    }
+
+    /// Inserts a multi-entry batch using per-word scratch masks.
+    ///
+    /// `put_batch` peels the first two entries before calling this helper, so
+    /// this path only handles batches large enough to benefit from coalescing.
+    /// `masks` must contain exactly one zeroed entry per bitmap word. Each slot
+    /// is parked first and ORed into its word's scratch mask. Once all entries
+    /// are staged, one `Release` `fetch_or` per non-empty mask makes the
+    /// corresponding parked buffers available.
+    ///
+    /// The caller must own every slot, slots must be unique, and none of the
+    /// slots may already be available in this freelist. The iterator must not
+    /// panic after yielding an entry, because staged-but-not-inserted buffers
+    /// would no longer be owned by the caller and would not yet be reachable
+    /// through the bitmap.
+    #[inline(always)]
+    fn put_entries(
+        &self,
+        masks: &mut [u64],
+        slot: u32,
+        buffer: AlignedBuffer,
+        next_slot: u32,
+        next_buffer: AlignedBuffer,
+        entries: impl Iterator<Item = (u32, AlignedBuffer)>,
+    ) {
+        // Masks are staged by word after parking the buffers. The later
+        // Release `fetch_or` makes every staged slot in that word available.
+        self.stage_put(masks, slot, buffer);
+        self.stage_put(masks, next_slot, next_buffer);
+        for (slot, buffer) in entries {
+            self.stage_put(masks, slot, buffer);
+        }
+
+        for (word_index, &mask) in masks.iter().enumerate() {
+            if mask == 0 {
+                continue;
+            }
+
+            // One Release operation makes every parked buffer represented
+            // by this word mask.
+            let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
+            assert_eq!(
+                previous & mask,
+                0,
+                "returned slot batch must not already contain a free slot"
+            );
+        }
+    }
+
+    /// Parks one buffer and records its slot in the batch scratch mask.
+    ///
+    /// This helper intentionally does not touch the atomic bitmap. The caller
+    /// later inserts the accumulated mask for each word, so multiple slots that
+    /// map to the same bitmap word share a single `Release` operation. Parking
+    /// happens before the bit is staged, preserving the same order as `put`.
+    ///
+    /// `masks` must contain the scratch word for `slot`.
+    #[inline(always)]
+    fn stage_put(&self, masks: &mut [u64], slot: u32, buffer: AlignedBuffer) {
+        // Park first, then stage the bit for the later per-word insert.
+        self.park(slot, buffer);
+        let (word_index, mask) = self.slot_word(slot);
+        masks[word_index] |= mask;
     }
 
     /// Takes any one available slot from the global freelist.
