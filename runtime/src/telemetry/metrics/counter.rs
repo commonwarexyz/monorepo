@@ -25,6 +25,16 @@ type CounterAtomic = AtomicU64;
 type CounterAtomic = AtomicU32;
 
 /// Native counter metric.
+///
+/// Source:
+/// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/metrics/counter.rs#L43-L213
+///
+/// This mirrors the default upstream counter behavior: shared atomic storage,
+/// relaxed increments/loads, and `EncodeMetric` delegation to
+/// `MetricEncoder::encode_counter`. It is not a direct copy: upstream supports
+/// generic atomic backends, floating-point counters, const counters, and direct
+/// access to the inner atomic. The runtime only needs one concrete integer
+/// shape so registration can downcast it into a native fast path.
 #[derive(Debug)]
 pub struct Counter<N = CounterValue> {
     value: Arc<CounterAtomic>,

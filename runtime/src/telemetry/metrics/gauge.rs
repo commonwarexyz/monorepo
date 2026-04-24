@@ -25,6 +25,16 @@ type GaugeAtomic = AtomicI64;
 type GaugeAtomic = AtomicI32;
 
 /// Native gauge metric.
+///
+/// Source:
+/// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/metrics/gauge.rs#L43-L355
+///
+/// This mirrors the default upstream gauge behavior: shared atomic storage,
+/// relaxed arithmetic/swap operations, and `EncodeMetric` delegation to
+/// `MetricEncoder::encode_gauge`. It is not a direct copy: upstream supports
+/// generic atomic backends, unsigned and floating-point gauges, const gauges,
+/// and direct access to the inner atomic. The runtime keeps one concrete signed
+/// integer shape so registration can downcast it into a native fast path.
 #[derive(Debug)]
 pub struct Gauge<N = GaugeValue> {
     value: Arc<GaugeAtomic>,

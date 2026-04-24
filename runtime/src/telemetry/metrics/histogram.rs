@@ -9,6 +9,17 @@ use prometheus_client::{
 use std::{fmt::Write, iter::once, sync::Arc, time::SystemTime};
 
 /// Native histogram metric.
+///
+/// Sources:
+/// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/metrics/histogram.rs#L36-L183
+/// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L399-L466
+///
+/// This mirrors upstream histogram semantics: buckets include a final
+/// `+Inf` bucket, observations update sum/count and the first matching bucket,
+/// and generic `EncodeMetric` delegates to `MetricEncoder::encode_histogram`.
+/// It is not a direct copy: upstream uses an `RwLock` read guard and exposes
+/// bucket helpers/exemplar hooks, while this keeps the runtime's smaller API
+/// and adds a direct text sample encoder for registered native histograms.
 #[derive(Clone, Debug)]
 pub struct Histogram {
     inner: Arc<Mutex<Inner>>,

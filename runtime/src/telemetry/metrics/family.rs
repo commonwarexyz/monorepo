@@ -58,6 +58,18 @@ impl<S, M> Default for FamilyInner<S, M> {
 }
 
 /// Native runtime family optimized for counter and gauge scrape encoding.
+///
+/// Sources:
+/// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/metrics/family.rs#L102-L434
+/// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L422-L560
+///
+/// This preserves upstream family semantics: a label set maps to one child
+/// metric, missing children are created lazily, and generic `EncodeMetric`
+/// still encodes through `MetricEncoder::encode_family`. It is not a direct
+/// copy: upstream stores children in a `RwLock<HashMap<S, M>>` and returns read
+/// guards, while this stores entries in a reusable slot table, returns `Arc<M>`,
+/// caches the escaped label suffix at child creation, and exposes direct sample
+/// encoding for supported native child metric types.
 pub struct Family<S, M> {
     inner: Arc<Mutex<FamilyInner<S, M>>>,
 }
