@@ -237,10 +237,10 @@ impl Config {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under Miri
                 let network_buffer_pool_cfg = BufferPoolConfig::for_network()
-                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_max_per_class(commonware_utils::NZU32!(32))
                     .with_thread_cache_disabled();
                 let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
-                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_max_per_class(commonware_utils::NZU32!(32))
                     .with_thread_cache_disabled();
             } else {
                 let network_buffer_pool_cfg =

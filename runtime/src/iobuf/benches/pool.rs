@@ -41,7 +41,7 @@ use super::utils::{measure, Threading};
 use commonware_runtime::{
     tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU32};
 use criterion::Criterion;
 use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
@@ -212,11 +212,13 @@ fn bench_name(mode: Mode, metric: Metric, size: usize, threading: Threading) -> 
 }
 
 fn build_pool(size: usize, threads: usize) -> BufferPool {
+    let max_per_class =
+        u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(1024)
         .with_min_size(NZUsize!(size.max(1024)))
         .with_max_size(NZUsize!(size.max(1024)))
-        .with_max_per_class(NZUsize!(threads * 4))
+        .with_max_per_class(NZU32!(max_per_class))
         .with_parallelism(NZUsize!(threads))
         .with_prefill(true);
 

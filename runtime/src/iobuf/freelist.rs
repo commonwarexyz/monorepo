@@ -60,7 +60,7 @@ use crossbeam_utils::CachePadded;
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
@@ -110,16 +110,10 @@ impl Freelist {
     /// # Panics
     ///
     /// Panics if:
-    /// - `capacity` does not fit in u32 slot ids
     /// - `min_stripes` does not round to a representable power of two
     /// - rounded `min_stripes > capacity`
-    pub fn new(capacity: NonZeroUsize, min_stripes: NonZeroUsize) -> Self {
-        let capacity = capacity.get();
-        assert!(
-            capacity <= u32::MAX as usize,
-            "freelist capacity ({capacity}) must fit in u32 slot ids"
-        );
-
+    pub fn new(capacity: NonZeroU32, min_stripes: NonZeroUsize) -> Self {
+        let capacity = capacity.get() as usize;
         let min_stripes = min_stripes
             .get()
             .checked_next_power_of_two()
@@ -500,7 +494,7 @@ impl SlotBitmapProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU32};
     use std::sync::{
         atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
         Arc, Barrier,
@@ -510,7 +504,7 @@ mod tests {
     fn test_freelist_returns_each_slot_once() {
         // Use a non-power-of-two capacity to cover partial final words while
         // keeping the expected slot set easy to inspect.
-        let set = Freelist::new(NZUsize!(3), NZUsize!(1));
+        let set = Freelist::new(NZU32!(3), NZUsize!(1));
 
         for slot in 0..3 {
             set.put(slot, AlignedBuffer::new(64, 64));
@@ -548,17 +542,17 @@ mod tests {
         ];
 
         for (capacity, min_stripes, expected_words) in cases {
-            let set = Freelist::new(NZUsize!(capacity), NZUsize!(min_stripes));
+            let set = Freelist::new(NZU32!(capacity), NZUsize!(min_stripes));
             assert_eq!(set.num_words(), expected_words);
             assert!(set.num_words().is_power_of_two());
 
             // Validate the striped mapping and its inverse for every slot that
             // can actually be handed out by this freelist.
             for slot in 0..capacity {
-                let (word_index, mask) = set.slot_word(slot as u32);
+                let (word_index, mask) = set.slot_word(slot);
                 let bit = mask.trailing_zeros() as usize;
                 assert!(word_index < expected_words);
-                assert_eq!(set.slot_index(word_index, bit), slot as u32);
+                assert_eq!(set.slot_index(word_index, bit), slot);
             }
         }
     }
@@ -568,12 +562,12 @@ mod tests {
     fn test_freelist_requires_capacity_to_cover_minimum_stripes() {
         // A rounded minimum stripe count larger than capacity would create
         // permanently empty stripes, which the constructor rejects.
-        let _ = Freelist::new(NZUsize!(3), NZUsize!(4));
+        let _ = Freelist::new(NZU32!(3), NZUsize!(4));
     }
 
     #[test]
     fn test_freelist_put_batch_handles_empty_single_and_multi_entry_paths() {
-        let set = Freelist::new(NZUsize!(8), NZUsize!(8));
+        let set = Freelist::new(NZU32!(8), NZUsize!(8));
 
         // Empty batches are a no-op and must not publish anything.
         set.put_batch(std::iter::empty());
@@ -620,7 +614,7 @@ mod tests {
     fn test_freelist_put_batch_uses_heap_masks_when_word_count_exceeds_inline_capacity() {
         // A capacity of 4097 requires more than 64 bitmap words after rounding,
         // forcing `put_batch` to use heap scratch for its per-word masks.
-        let set = Freelist::new(NZUsize!(4097), NZUsize!(65));
+        let set = Freelist::new(NZU32!(4097), NZUsize!(65));
         assert!(set.num_words() > INLINE_PUT_BATCH_MASKS);
 
         set.put_batch(
@@ -651,7 +645,7 @@ mod tests {
     fn test_freelist_take_batch_handles_zero_single_and_partial_fill() {
         // Publish fewer slots than the largest requested batch to cover exact,
         // partial, and empty refill behavior in one setup.
-        let set = Freelist::new(NZUsize!(4), NZUsize!(4));
+        let set = Freelist::new(NZU32!(4), NZUsize!(4));
         for slot in 0..3 {
             set.put(slot, AlignedBuffer::new(64, 64));
         }
@@ -707,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_freelist_take_batch_breaks_after_filling_target_in_home_word() {
-        let set = Freelist::new(NZUsize!(16), NZUsize!(8));
+        let set = Freelist::new(NZU32!(16), NZUsize!(8));
         let start_word = SlotBitmapProbe::thread_id() & set.word_mask;
         let slot0 = set.slot_index(start_word, 0);
         let slot1 = set.slot_index(start_word, 1);
@@ -737,7 +731,7 @@ mod tests {
 
     #[test]
     fn test_freelist_take_batch_stops_mid_word_when_limit_is_reached() {
-        let set = Freelist::new(NZUsize!(24), NZUsize!(8));
+        let set = Freelist::new(NZU32!(24), NZUsize!(8));
         let start_word = SlotBitmapProbe::thread_id() & set.word_mask;
         // Put three slots in the same word so the batch claim has to stop after
         // clearing only the requested number of bits.
@@ -796,7 +790,7 @@ mod tests {
         // contenders should observe a stale non-zero word and follow the retry
         // path before discovering that another thread already claimed the slot.
         for _ in 0..32 {
-            let set = Arc::new(Freelist::new(NZUsize!(1), NZUsize!(1)));
+            let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1)));
             set.put(0, AlignedBuffer::new(64, 64));
 
             // Align the contenders so several can race on the same observed
@@ -831,7 +825,7 @@ mod tests {
     fn test_freelist_drop_drains_remaining_buffers() {
         // Dropping a non-empty freelist must drop any buffers still parked in
         // globally free slots.
-        let set = Freelist::new(NZUsize!(2), NZUsize!(2));
+        let set = Freelist::new(NZU32!(2), NZUsize!(2));
         set.put(0, AlignedBuffer::new(64, 64));
         set.put(1, AlignedBuffer::new(64, 64));
         drop(set);

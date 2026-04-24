@@ -2366,7 +2366,7 @@ mod tests {
                 // Reduce max_per_class to avoid slow atomics under miri.
                 let pool_config = BufferPoolConfig {
                     pool_min_size: 0,
-                    max_per_class: commonware_utils::NZUsize!(32),
+                    max_per_class: commonware_utils::NZU32!(32),
                     ..BufferPoolConfig::for_network()
                 };
             } else {

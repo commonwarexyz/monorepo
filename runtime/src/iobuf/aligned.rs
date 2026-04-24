@@ -707,7 +707,7 @@ mod tests {
     use super::*;
     use crate::iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig};
     use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU32};
     use prometheus_client::registry::Registry;
     use std::ops::Bound;
 
@@ -719,12 +719,12 @@ mod tests {
         Registry::default()
     }
 
-    fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {
+    fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
         BufferPoolConfig {
             pool_min_size: 0,
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
-            max_per_class: NZUsize!(max_per_class),
+            max_per_class: NZU32!(max_per_class),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,

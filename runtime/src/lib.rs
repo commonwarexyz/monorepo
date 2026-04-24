@@ -868,7 +868,7 @@ mod tests {
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
-        NZUsize, SystemTimeExt,
+        NZUsize, SystemTimeExt, NZU32,
     };
     use futures::{
         future::{pending, ready},
@@ -4184,8 +4184,8 @@ mod tests {
 
     fn test_buffer_pooler<R: Runner>(
         runner: R,
-        expected_network_max_per_class: usize,
-        expected_storage_max_per_class: usize,
+        expected_network_max_per_class: u32,
+        expected_storage_max_per_class: u32,
     ) where
         R::Context: BufferPooler,
     {
@@ -4217,10 +4217,10 @@ mod tests {
         let runner = deterministic::Runner::new(
             deterministic::Config::default()
                 .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
                 )
                 .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
                 ),
         );
         test_buffer_pooler(runner, 64, 8);
@@ -4233,10 +4233,10 @@ mod tests {
         let runner = tokio::Runner::new(
             tokio::Config::default()
                 .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
                 )
                 .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
                 ),
         );
         test_buffer_pooler(runner, 64, 8);

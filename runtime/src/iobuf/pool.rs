@@ -51,7 +51,7 @@
 
 use super::{freelist::Freelist, IoBufMut};
 use crate::iobuf::aligned::{AlignedBuffer, PooledBufMut};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU32};
 use crossbeam_utils::CachePadded;
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -61,7 +61,7 @@ use prometheus_client::{
 use std::{
     cell::UnsafeCell,
     mem::align_of,
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -149,7 +149,10 @@ pub struct BufferPoolConfig {
     /// Maximum buffer size. Must be a power of two and >= min_size.
     pub max_size: NonZeroUsize,
     /// Maximum number of buffers per size class.
-    pub max_per_class: NonZeroUsize,
+    ///
+    /// Size-class slots are identified by `u32`, so the per-class capacity is
+    /// capped by this type.
+    pub max_per_class: NonZeroU32,
     /// Whether to pre-allocate all buffers on pool creation.
     pub prefill: bool,
     /// Buffer alignment. Must be a power of two.
@@ -182,7 +185,7 @@ impl BufferPoolConfig {
             pool_min_size: 1024,
             min_size: NZUsize!(1024),
             max_size: NZUsize!(64 * 1024),
-            max_per_class: NZUsize!(4096),
+            max_per_class: NZU32!(4096),
             prefill: false,
             alignment: cache_line,
             parallelism: NZUsize!(1),
@@ -190,7 +193,7 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Storage I/O preset: page-aligned, page_size to 8MB buffers, 32 per class,
+    /// Storage I/O preset: page-aligned, page_size to 8MB buffers, 64 per class,
     /// not prefilled.
     ///
     /// Page alignment is required for direct I/O and efficient DMA transfers.
@@ -200,7 +203,7 @@ impl BufferPoolConfig {
             pool_min_size: 1024,
             min_size: page,
             max_size: NZUsize!(8 * 1024 * 1024),
-            max_per_class: NZUsize!(64),
+            max_per_class: NZU32!(64),
             prefill: false,
             alignment: page,
             parallelism: NZUsize!(1),
@@ -227,7 +230,7 @@ impl BufferPoolConfig {
     }
 
     /// Returns a copy of this config with a new maximum number of buffers per size class.
-    pub const fn with_max_per_class(mut self, max_per_class: NonZeroUsize) -> Self {
+    pub const fn with_max_per_class(mut self, max_per_class: NonZeroU32) -> Self {
         self.max_per_class = max_per_class;
         self
     }
@@ -278,6 +281,10 @@ impl BufferPoolConfig {
     /// where `size_class_bytes` includes every class from `min_size` to `max_size`.
     /// This always rounds up to at least one buffer per size class, so the
     /// resulting estimated capacity may exceed `budget_bytes`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the derived per-class capacity does not fit in `u32`.
     pub fn with_budget_bytes(mut self, budget_bytes: NonZeroUsize) -> Self {
         let mut class_bytes = 0usize;
         for i in 0..self.num_classes() {
@@ -286,7 +293,10 @@ impl BufferPoolConfig {
         if class_bytes == 0 {
             return self;
         }
-        self.max_per_class = NZUsize!(budget_bytes.get().div_ceil(class_bytes));
+        let max_per_class = u32::try_from(budget_bytes.get().div_ceil(class_bytes))
+            .expect("max_per_class must fit in u32 slot ids");
+        self.max_per_class =
+            NonZeroU32::new(max_per_class).expect("max_per_class must be non-zero");
         self
     }
 
@@ -330,15 +340,10 @@ impl BufferPoolConfig {
             self.pool_min_size,
             self.min_size
         );
-        assert!(
-            self.max_per_class.get() <= u32::MAX as usize,
-            "max_per_class ({}) must fit in u32 slot ids",
-            self.max_per_class
-        );
         if let BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity) = self.thread_cache_config
         {
             assert!(
-                thread_cache_capacity <= self.max_per_class,
+                thread_cache_capacity.get() <= self.max_per_class.get() as usize,
                 "thread_cache_capacity ({}) must be <= max_per_class ({})",
                 thread_cache_capacity,
                 self.max_per_class
@@ -389,7 +394,7 @@ impl BufferPoolConfig {
     fn resolve_thread_cache_capacity(&self) -> usize {
         match self.thread_cache_config {
             BufferPoolThreadCacheConfig::Auto => {
-                let max_per_class = self.max_per_class.get();
+                let max_per_class = self.max_per_class.get() as usize;
                 let effective_threads = self.parallelism.get().min(max_per_class);
                 (max_per_class / (2 * effective_threads)).clamp(1, 8)
             }
@@ -407,7 +412,7 @@ impl BufferPoolConfig {
     /// permanently empty stripes, use the largest power-of-two stripe count that
     /// fits.
     const fn resolve_freelist_min_stripes(&self) -> NonZeroUsize {
-        let capacity = self.max_per_class.get();
+        let capacity = self.max_per_class.get() as usize;
         let stripes = match self.parallelism.get().checked_next_power_of_two() {
             Some(rounded) if rounded <= capacity => self.parallelism.get(),
             _ => 1usize << capacity.ilog2(),
@@ -504,17 +509,13 @@ impl SizeClass {
         class_id: usize,
         size: usize,
         alignment: usize,
-        max: NonZeroUsize,
+        max: NonZeroU32,
         min_stripes: NonZeroUsize,
         thread_cache_capacity: usize,
         prefill: bool,
     ) -> Self {
-        assert!(
-            max.get() <= u32::MAX as usize,
-            "max buffers per size class must fit in u32 slot ids"
-        );
         let freelist = Freelist::new(max, min_stripes);
-        let max = max.get();
+        let max = max.get() as usize;
         let mut created = 0;
         if prefill {
             for slot in 0..max {
@@ -1130,6 +1131,7 @@ mod tests {
     use super::*;
     use crate::iobuf::IoBuf;
     use bytes::{Buf, BufMut};
+    use commonware_utils::NZU32;
     use std::{
         sync::{mpsc, Arc},
         thread,
@@ -1140,7 +1142,7 @@ mod tests {
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             size,
             alignment,
-            NZUsize!(8),
+            NZU32!(8),
             NZUsize!(4),
             4,
             false,
@@ -1152,12 +1154,12 @@ mod tests {
     }
 
     /// Creates a test config with page alignment.
-    fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {
+    fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
         BufferPoolConfig {
             pool_min_size: 0,
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
-            max_per_class: NZUsize!(max_per_class),
+            max_per_class: NZU32!(max_per_class),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
@@ -1223,7 +1225,7 @@ mod tests {
             pool_min_size: 0,
             min_size: NZUsize!(3000),
             max_size: NZUsize!(8192),
-            max_per_class: NZUsize!(10),
+            max_per_class: NZU32!(10),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
@@ -1348,7 +1350,7 @@ mod tests {
                 pool_min_size: 512,
                 min_size: NZUsize!(512),
                 max_size: NZUsize!(1024),
-                max_per_class: NZUsize!(2),
+                max_per_class: NZU32!(2),
                 parallelism: NZUsize!(1),
                 thread_cache_config: BufferPoolThreadCacheConfig::Auto,
                 prefill: false,
@@ -1398,7 +1400,7 @@ mod tests {
                 pool_min_size: 0,
                 min_size: page,
                 max_size: page,
-                max_per_class: NZUsize!(5),
+                max_per_class: NZU32!(5),
                 parallelism: NZUsize!(1),
                 thread_cache_config: BufferPoolThreadCacheConfig::Auto,
                 prefill: true,
@@ -1466,7 +1468,7 @@ mod tests {
         let page = NZUsize!(page_size());
         let config = BufferPoolConfig::for_storage()
             .with_pool_min_size(1024)
-            .with_max_per_class(NZUsize!(64))
+            .with_max_per_class(NZU32!(64))
             .with_parallelism(NZUsize!(4))
             .with_thread_cache_capacity(NZUsize!(8))
             .with_prefill(true)
@@ -1628,7 +1630,7 @@ mod tests {
             pool_min_size: 0,
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
-            max_per_class: NZUsize!(1),
+            max_per_class: NZU32!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
@@ -1642,7 +1644,7 @@ mod tests {
             pool_min_size: 0,
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
-            max_per_class: NZUsize!(1),
+            max_per_class: NZU32!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
@@ -1672,7 +1674,7 @@ mod tests {
             pool_min_size: 0,
             min_size: NZUsize!(8),
             max_size: NZUsize!(4),
-            max_per_class: NZUsize!(1),
+            max_per_class: NZU32!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
@@ -1687,7 +1689,7 @@ mod tests {
             pool_min_size: 0,
             min_size: NZUsize!(8),
             max_size: NZUsize!(12),
-            max_per_class: NZUsize!(1),
+            max_per_class: NZU32!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
@@ -1765,7 +1767,8 @@ mod tests {
         let page = page_size();
         let mut registry = test_registry();
         let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-        let max_per_class = threads * 8;
+        let max_per_class =
+            u32::try_from(threads * 8).expect("test capacity must fit in u32 slot ids");
         let pool = BufferPool::new(test_config(page, page, max_per_class), &mut registry);
         let class_index = pool
             .inner
@@ -1842,7 +1845,7 @@ mod tests {
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             64,
             64,
-            NZUsize!(2),
+            NZU32!(2),
             NZUsize!(1),
             1,
             false,
@@ -2485,11 +2488,11 @@ mod tests {
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
                 let storage_config = BufferPoolConfig {
-                    max_per_class: NZUsize!(32),
+                    max_per_class: NZU32!(32),
                     ..BufferPoolConfig::for_storage()
                 };
                 let network_config = BufferPoolConfig {
-                    max_per_class: NZUsize!(32),
+                    max_per_class: NZU32!(32),
                     ..BufferPoolConfig::for_network()
                 };
             } else {
