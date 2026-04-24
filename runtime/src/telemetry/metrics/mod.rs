@@ -559,7 +559,7 @@ impl RegistryInner {
             self.claim_registration(existing_id);
             return Registered {
                 metric: existing_metric,
-                registration: Registration::from_registration_guard(RegistryGuard {
+                registration: Registration::from(RegistryGuard {
                     id: existing_id,
                     registry,
                 }),
@@ -568,7 +568,7 @@ impl RegistryInner {
         self.assert_family_matches(&name, &help, metric_type);
 
         let id = self.allocate_metric_id();
-        let registration = Registration::from_registration_guard(RegistryGuard { id, registry });
+        let registration = Registration::from(RegistryGuard { id, registry });
         let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
         self.insert_metric_entry(
             id,
@@ -1045,7 +1045,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let registered = Registered::with_registration(
             raw::Counter::<u64>::default(),
-            Registration::from_guard(NotifyOnDrop(tx)),
+            Registration::from(NotifyOnDrop(tx)),
         );
         let clone = registered.clone();
 
