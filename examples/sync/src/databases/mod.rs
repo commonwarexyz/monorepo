@@ -140,8 +140,12 @@ pub trait ExampleDatabase: Sized {
     type Operation: Encode + Send + Sync + 'static;
 
     /// Create test operations with the given count and seed.
+    ///
+    /// `starting_loc` is the floor each commit in the returned stream should carry. Callers
+    /// applying the stream to a fresh db pass `0`; callers growing an already-running db pass
+    /// the current value of [`Self::current_floor`] so floors stay monotonic across appends.
     /// The returned operations must end with a commit operation.
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
+    fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation>;
 
     /// Add operations to the database, ignoring any input that doesn't end with a commit
     /// operation.
@@ -149,6 +153,10 @@ pub trait ExampleDatabase: Sized {
         &mut self,
         operations: Vec<Self::Operation>,
     ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
+
+    /// Return the floor anchor a caller should pass as `starting_loc` when generating a stream
+    /// to append to this db's current state.
+    fn current_floor(&self) -> u64;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;

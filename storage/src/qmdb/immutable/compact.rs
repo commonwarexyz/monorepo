@@ -24,7 +24,7 @@ use super::operation::Operation;
 use crate::{
     merkle::{
         batch, compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location,
-        Proof, Readable,
+        Proof,
     },
     qmdb::{
         any::value::ValueEncoding,
@@ -525,10 +525,10 @@ where
     /// Durably persist the current db state to disk.
     ///
     /// This is the point at which in-memory mutations become servable via compact sync. The compact
-    /// Merkle frontier and the last-commit witness are captured and written into the same slot, and
-    /// the in-memory serve cache is updated only after that persistence succeeds.
+    /// Merkle frontier and last-commit witness are written into the same slot, reusing the cached
+    /// witness when the current state has already been persisted.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_with_current_witness(self).await
+        compact_witness::persist_witness(self).await
     }
 
     /// Durably persist the current db state to disk (alias for [`Self::sync`]).
@@ -1061,6 +1061,114 @@ mod tests {
             // The rewind restored the state that `held` was merkleized against, so its
             // base_size matches mem.size and it applies cleanly.
             db.apply_batch(held).unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_noop_commit_after_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.with_label("db"), "immutable-noop-after-commit")
+                    .await;
+
+            let k1 = Sha256::hash(&[1]);
+            let v1 = Sha256::fill(11u8);
+            let k2 = Sha256::hash(&[2]);
+            let v2 = Sha256::fill(22u8);
+            db.apply_batch(db.new_batch().set(k1, v1).set(k2, v2).merkleize(
+                &db,
+                Some(Sha256::fill(0xaa)),
+                Location::new(0),
+            ))
+            .unwrap();
+            db.commit().await.unwrap();
+            let root_after_first = db.root();
+            let size_after_first = db.size();
+
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), size_after_first);
+            assert_eq!(db.root(), root_after_first);
+            assert_eq!(db.current_target().root, db.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_noop_commit_after_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-noop-after-reopen";
+
+            let (root_before_drop, size_before_drop) = {
+                let mut db = open_db::<mmr::Family>(context.with_label("first"), partition).await;
+                let k1 = Sha256::hash(&[1]);
+                let v1 = Sha256::fill(11u8);
+                let k2 = Sha256::hash(&[2]);
+                let v2 = Sha256::fill(22u8);
+                db.apply_batch(db.new_batch().set(k1, v1).set(k2, v2).merkleize(
+                    &db,
+                    Some(Sha256::fill(0xaa)),
+                    Location::new(0),
+                ))
+                .unwrap();
+                db.commit().await.unwrap();
+                (db.root(), db.size())
+            };
+
+            let db = open_db::<mmr::Family>(context.with_label("second"), partition).await;
+            assert_eq!(db.root(), root_before_drop);
+            assert_eq!(db.size(), size_before_drop);
+
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), size_before_drop);
+            assert_eq!(db.root(), root_before_drop);
+            assert_eq!(db.current_target().root, db.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_noop_commit_after_rewind() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.with_label("db"), "immutable-noop-after-rewind")
+                    .await;
+
+            let k1 = Sha256::hash(&[1]);
+            let v1 = Sha256::fill(11u8);
+            let k2 = Sha256::hash(&[2]);
+            let v2 = Sha256::fill(22u8);
+            db.apply_batch(db.new_batch().set(k1, v1).set(k2, v2).merkleize(
+                &db,
+                Some(Sha256::fill(0xaa)),
+                Location::new(0),
+            ))
+            .unwrap();
+            db.commit().await.unwrap();
+            let root_after_first = db.root();
+            let size_after_first = db.size();
+
+            let k3 = Sha256::hash(&[3]);
+            let v3 = Sha256::fill(33u8);
+            db.apply_batch(db.new_batch().set(k3, v3).merkleize(
+                &db,
+                Some(Sha256::fill(0xbb)),
+                Location::new(1),
+            ))
+            .unwrap();
+            db.commit().await.unwrap();
+
+            db.rewind().await.unwrap();
+            assert_eq!(db.size(), size_after_first);
+            assert_eq!(db.root(), root_after_first);
+
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), size_after_first);
+            assert_eq!(db.root(), root_after_first);
+            assert_eq!(db.current_target().root, db.root());
 
             db.destroy().await.unwrap();
         });

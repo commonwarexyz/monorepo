@@ -58,24 +58,14 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
 
 /// Create deterministic test operations for demonstration purposes.
 ///
-/// Generates Append operations and periodic Commit operations for a freshly initialized
-/// example database.
-///
-/// The commit floors in this returned stream are exact for bootstrapping from the initial
-/// commit at location 0. When later appending demo operations onto an already-running
-/// example database, `add_operations` recomputes each commit's floor from the live db
-/// state so repeated server-side growth keeps the floor monotonic.
-pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
+/// Generates Append operations and periodic Commit operations. Every commit in the stream
+/// carries `starting_loc` as its inactivity floor; the caller is responsible for picking a
+/// `starting_loc` that is monotonically valid against the live db (see
+/// [`super::ExampleDatabase::current_floor`]).
+pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
-
-    // The DB's initial commit lands at location 0 before any of these ops are applied.
-    // `op_count` tracks the total ops that will exist on disk (including this initial commit
-    // and everything we push below). `prev_commit_loc` tracks the last commit's location
-    // and is used as the next commit's floor — always <= the next commit's own location, so
-    // the per-commit floor bound is satisfied.
-    let mut op_count: u64 = 1;
-    let mut prev_commit_loc: u64 = 0;
+    let floor = Location::new(starting_loc);
 
     for i in 0..count {
         let value = {
@@ -85,20 +75,14 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         };
 
         operations.push(Operation::Append(value));
-        op_count += 1;
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None, Location::new(prev_commit_loc)));
-            prev_commit_loc = op_count;
-            op_count += 1;
+            operations.push(Operation::Commit(None, floor));
         }
     }
 
-    // Always end with a commit, floor set to the previous commit's location.
-    operations.push(Operation::Commit(
-        Some(Sha256::fill(1)),
-        Location::new(prev_commit_loc),
-    ));
+    // Always end with a commit.
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), floor));
     operations
 }
 
@@ -109,8 +93,8 @@ where
     type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_test_operations(count, seed)
+    fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation> {
+        create_test_operations(count, seed, starting_loc)
     }
 
     async fn add_operations(
@@ -129,8 +113,7 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata, _floor) => {
-                    let floor = self.last_commit_loc();
+                Operation::Commit(metadata, floor) => {
                     let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
@@ -139,6 +122,10 @@ where
             }
         }
         Ok(())
+    }
+
+    fn current_floor(&self) -> u64 {
+        *self.last_commit_loc()
     }
 
     fn root(&self) -> Key {
@@ -198,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_create_test_operations() {
-        let ops = <KeylessDb as ExampleDatabase>::create_test_operations(5, 12345);
+        let ops = <KeylessDb as ExampleDatabase>::create_test_operations(5, 12345, 0);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
         if let Operation::Commit(Some(_), _) = &ops[5] {
@@ -211,12 +198,12 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Operations should be deterministic based on seed
-        let ops1 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345);
-        let ops2 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345);
+        let ops1 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
+        let ops2 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
         assert_eq!(ops1, ops2);
 
         // Different seeds should produce different operations
-        let ops3 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 54321);
+        let ops3 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 54321, 0);
         assert_ne!(ops1, ops3);
     }
 }

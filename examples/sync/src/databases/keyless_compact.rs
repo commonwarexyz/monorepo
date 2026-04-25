@@ -39,9 +39,9 @@ where
     type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+    fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation> {
         // Keep the compact example's operation stream aligned with the full variant.
-        super::keyless::create_test_operations(count, seed)
+        super::keyless::create_test_operations(count, seed, starting_loc)
     }
 
     async fn add_operations(
@@ -63,8 +63,7 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata, _floor) => {
-                    let floor = self.last_commit_loc();
+                Operation::Commit(metadata, floor) => {
                     let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized)?;
                     self.commit().await?;
@@ -73,6 +72,10 @@ where
             }
         }
         Ok(())
+    }
+
+    fn current_floor(&self) -> u64 {
+        *Self::last_commit_loc(self)
     }
 
     fn root(&self) -> Key {

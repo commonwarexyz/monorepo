@@ -41,12 +41,6 @@ pub enum EngineError<F: Family, D: Digest> {
         old: Target<F, D>,
         new: Target<F, D>,
     },
-    /// Sync target root changed without growing the tree.
-    #[error("sync target root changed without end growth: {old:?} -> {new:?}")]
-    SyncTargetRootChangedWithoutGrowth {
-        old: Target<F, D>,
-        new: Target<F, D>,
-    },
     /// Sync already completed
     #[error("sync already completed")]
     AlreadyComplete,

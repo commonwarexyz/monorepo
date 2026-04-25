@@ -332,35 +332,38 @@ where
     }
 }
 
-/// Capture a fresh witness from the current tip, persist it with the frontier, and refresh cache.
+/// Persist the current servable witness for a compact db, picking between fresh and cached paths.
 ///
-/// Call this after a compact db advances locally. The proof is built from the unpruned in-memory
-/// tip while `sync_with_witness` still has access to the full committed `Mem`, then the
-/// resulting witness bytes are persisted into the same inactive slot as the new frontier.
-pub(crate) async fn persist_with_current_witness<S, F, E, H>(source: &S) -> Result<(), Error<F>>
+/// Matching cached state is re-persisted without rebuilding a proof, since compact `Mem` may
+/// already be pruned to peaks. The cache check runs inside `sync_with_witness` so concurrent syncs
+/// observe the latest cache after each persisted slot flip.
+pub(crate) async fn persist_witness<S, F, E, H>(source: &S) -> Result<(), Error<F>>
 where
     S: WitnessSource<F, E, H>,
     F: Family,
     E: Context,
     H: Hasher,
 {
-    // Capture a fresh witness from the currently committed in-memory tip, then atomically persist
-    // it into the inactive slot alongside the Merkle frontier.
     let hasher = StandardHasher::<H>::new();
     let last_commit_loc = source.last_commit_loc();
     let commit_op_bytes = source.encode_current_commit_op();
-    let serve_state = source
+    source
         .merkle()
         .sync_with_witness(
             |mem| {
-                let leaf_count = mem.leaves();
-                let pinned_nodes = F::nodes_to_pin(leaf_count)
+                let cached = source.cloned_serve_state();
+                let mem_root = *mem.root();
+                let mem_leaves = mem.leaves();
+                if cached.root == mem_root && cached.leaf_count == mem_leaves {
+                    return Ok(cached);
+                }
+                let pinned_nodes = F::nodes_to_pin(mem_leaves)
                     .map(|pos| *mem.get_node_unchecked(pos))
                     .collect::<Vec<_>>();
                 let commit_proof = mem.proof(&hasher, last_commit_loc)?;
                 Ok(CachedServeState {
-                    root: *mem.root(),
-                    leaf_count,
+                    root: mem_root,
+                    leaf_count: mem_leaves,
                     pinned_nodes,
                     commit_op_bytes: commit_op_bytes.clone(),
                     commit_proof,
@@ -368,11 +371,11 @@ where
             },
             |metadata, slot, serve_state| {
                 write_serve_state_metadata(metadata, slot, &serve_state);
+                source.store_serve_state(serve_state.clone());
                 Ok(())
             },
         )
         .await?;
-    source.store_serve_state(serve_state);
     Ok(())
 }
 

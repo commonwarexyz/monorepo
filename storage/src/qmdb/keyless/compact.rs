@@ -511,10 +511,10 @@ where
     /// Durably persist the current db state to disk.
     ///
     /// This is the point at which in-memory mutations become servable via compact sync. The compact
-    /// Merkle frontier and the last-commit witness are captured and written into the same slot, and
-    /// the in-memory serve cache is updated only after that persistence succeeds.
+    /// Merkle frontier and last-commit witness are written into the same slot, reusing the cached
+    /// witness when the current state has already been persisted.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_with_current_witness(self).await
+        compact_witness::persist_witness(self).await
     }
 
     /// Durably persist the current db state to disk (alias for [`Self::sync`]).
@@ -1025,6 +1025,102 @@ mod tests {
             // The rewind restored the state that `held` was merkleized against, so its
             // base_size matches mem.size and it applies cleanly.
             db.apply_batch(held).unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_noop_commit_after_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.with_label("db"), "keyless-noop-after-commit").await;
+
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .append(U64::new(2))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0)),
+            )
+            .unwrap();
+            db.commit().await.unwrap();
+            let root_after_first = db.root();
+            assert_eq!(db.size(), Location::new(4));
+
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), Location::new(4));
+            assert_eq!(db.root(), root_after_first);
+            assert_eq!(db.current_target().root, db.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_noop_commit_after_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "keyless-noop-after-reopen";
+
+            let root_before_drop = {
+                let mut db = open_db::<mmr::Family>(context.with_label("first"), partition).await;
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(1))
+                        .append(U64::new(2))
+                        .merkleize(&db, Some(U64::new(11)), Location::new(0)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                let root = db.root();
+                assert_eq!(db.size(), Location::new(4));
+                root
+            };
+
+            let db = open_db::<mmr::Family>(context.with_label("second"), partition).await;
+            assert_eq!(db.root(), root_before_drop);
+            assert_eq!(db.size(), Location::new(4));
+
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), Location::new(4));
+            assert_eq!(db.root(), root_before_drop);
+            assert_eq!(db.current_target().root, db.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_noop_commit_after_rewind() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.with_label("db"), "keyless-noop-after-rewind").await;
+
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .append(U64::new(2))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0)),
+            )
+            .unwrap();
+            db.commit().await.unwrap();
+            let root_after_first = db.root();
+
+            db.apply_batch(db.new_batch().append(U64::new(3)).merkleize(
+                &db,
+                Some(U64::new(22)),
+                Location::new(1),
+            ))
+            .unwrap();
+            db.commit().await.unwrap();
+
+            db.rewind().await.unwrap();
+            assert_eq!(db.size(), Location::new(4));
+            assert_eq!(db.root(), root_after_first);
+
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), Location::new(4));
+            assert_eq!(db.root(), root_after_first);
+            assert_eq!(db.current_target().root, db.root());
 
             db.destroy().await.unwrap();
         });

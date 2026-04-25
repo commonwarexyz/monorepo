@@ -72,7 +72,7 @@ where
     type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+    fn create_test_operations(count: usize, seed: u64, _starting_loc: u64) -> Vec<Self::Operation> {
         let mut hasher = <Hasher as CryptoHasher>::new();
         let mut operations = Vec::new();
         for i in 0..count {
@@ -129,6 +129,12 @@ where
         Ok(())
     }
 
+    fn current_floor(&self) -> u64 {
+        // `current`'s `merkleize` derives the floor internally; the `starting_loc` passed to
+        // `create_test_operations` is unused, so any value is safe.
+        0
+    }
+
     fn root(&self) -> Key {
         // Return the ops root (not the canonical root) because this is what the
         // sync engine verifies against.
@@ -181,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_create_test_operations() {
-        let ops = <CurrentDb as ExampleDatabase>::create_test_operations(5, 12345);
+        let ops = <CurrentDb as ExampleDatabase>::create_test_operations(5, 12345, 0);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
         if let Operation::CommitFloor(_, loc) = &ops[5] {
@@ -193,11 +199,11 @@ mod tests {
 
     #[test]
     fn test_deterministic_operations() {
-        let ops1 = <CurrentDb as ExampleDatabase>::create_test_operations(3, 12345);
-        let ops2 = <CurrentDb as ExampleDatabase>::create_test_operations(3, 12345);
+        let ops1 = <CurrentDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
+        let ops2 = <CurrentDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
         assert_eq!(ops1, ops2);
 
-        let ops3 = <CurrentDb as ExampleDatabase>::create_test_operations(3, 54321);
+        let ops3 = <CurrentDb as ExampleDatabase>::create_test_operations(3, 54321, 0);
         assert_ne!(ops1, ops3);
     }
 }

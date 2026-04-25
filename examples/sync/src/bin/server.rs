@@ -195,17 +195,18 @@ where
         }
     };
     if should_add {
+        let seed = context.next_u64();
+        let mut database = state.database.write().await;
+        let starting_loc = database.current_floor();
         let new_operations =
-            DB::create_test_operations(config.ops_per_interval, context.next_u64());
+            DB::create_test_operations(config.ops_per_interval, seed, starting_loc);
         let new_operations_len = new_operations.len();
-        let root = {
-            let mut database = state.database.write().await;
-            if let Err(err) = database.add_operations(new_operations).await {
-                error!(?err, "failed to add operations to database");
-                return Err(err.into());
-            }
-            database.root()
-        };
+        if let Err(err) = database.add_operations(new_operations).await {
+            error!(?err, "failed to add operations to database");
+            return Err(err.into());
+        }
+        let root = database.root();
+        drop(database);
         state.ops_counter.inc_by(new_operations_len as u64);
         info!(
             new_operations_len,
@@ -562,7 +563,9 @@ where
     info!("starting {} database", DB::name());
 
     // Create and initialize database
-    let initial_ops = DB::create_test_operations(config.initial_ops, context.next_u64());
+    let starting_loc = database.current_floor();
+    let initial_ops =
+        DB::create_test_operations(config.initial_ops, context.next_u64(), starting_loc);
     info!(
         operations_len = initial_ops.len(),
         "creating initial operations"
@@ -590,7 +593,9 @@ where
 {
     info!("starting {} database", DB::name());
 
-    let initial_ops = DB::create_test_operations(config.initial_ops, context.next_u64());
+    let starting_loc = database.current_floor();
+    let initial_ops =
+        DB::create_test_operations(config.initial_ops, context.next_u64(), starting_loc);
     info!(
         operations_len = initial_ops.len(),
         "creating initial operations"

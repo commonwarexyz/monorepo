@@ -53,13 +53,14 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig>
 
 /// Create deterministic test operations for demonstration purposes.
 ///
-/// Generates Set operations and periodic Commit operations for bootstrapping the example
-/// database. When later appending demo operations onto an already-running database,
-/// `add_operations` recomputes each commit floor from the live db state so repeated growth keeps
-/// the floor monotonic.
-pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
+/// Generates Set operations and periodic Commit operations. Every commit in the stream
+/// carries `starting_loc` as its inactivity floor; the caller is responsible for picking a
+/// `starting_loc` that is monotonically valid against the live db (see
+/// [`super::ExampleDatabase::current_floor`]).
+pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
+    let floor = Location::new(starting_loc);
 
     for i in 0..count {
         let key = {
@@ -77,12 +78,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Set(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None, Location::new(0)));
+            operations.push(Operation::Commit(None, floor));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1)), Location::new(0)));
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), floor));
     operations
 }
 
@@ -93,8 +94,8 @@ where
     type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_test_operations(count, seed)
+    fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation> {
+        create_test_operations(count, seed, starting_loc)
     }
 
     async fn add_operations(
@@ -113,8 +114,7 @@ where
                 Operation::Set(key, value) => {
                     batch = batch.set(key, value);
                 }
-                Operation::Commit(metadata, _floor) => {
-                    let floor = self.inactivity_floor_loc();
+                Operation::Commit(metadata, floor) => {
                     let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
@@ -123,6 +123,10 @@ where
             }
         }
         Ok(())
+    }
+
+    fn current_floor(&self) -> u64 {
+        *self.inactivity_floor_loc()
     }
 
     fn root(&self) -> Key {
