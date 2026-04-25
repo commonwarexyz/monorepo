@@ -145,8 +145,10 @@ fn fuzz(input: FuzzInput) {
             ),
         > = HashMap::new();
 
-        // Track expected messages: (to_idx, sender_pk, channel_id) -> queue of messages
-        // Messages may be dropped (unreliable links) but those delivered must match expectations
+        // Track messages that may still be delivered: (to_idx, sender_pk, channel_id) -> messages.
+        // The simulated network may drop messages, but an accepted message may also remain in
+        // flight across link updates. Keep prior accepted messages until they are observed instead
+        // of assuming that a later delivery proves earlier entries have been dropped.
         let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = HashMap::new();
 
         for op in input.operations.into_iter() {
@@ -239,14 +241,11 @@ fn fuzz(input: FuzzInput) {
                                 let expected_msgs_key = (to_idx, sender_pk.clone(), channel_id);
                                 let queue = expected_msgs.get_mut(&expected_msgs_key).expect("Expected queue not found");
 
-                                // Find message in expected queue
-                                // Messages can be dropped, but if received they must be in order
+                                // Find message in expected queue. Messages can be dropped, delayed,
+                                // or delivered after a link update, but any delivered payload must
+                                // correspond to a prior accepted send for this sender/receiver/channel.
                                 if let Some(pos) = queue.iter().position(|m| *m == message) {
-                                    // Remove all messages up to and including this one
-                                    // Messages before it were implicitly dropped, this one is received
-                                    for _ in 0..=pos {
-                                        queue.pop_front();
-                                    }
+                                    queue.remove(pos);
 
                                     // Clean up empty queue
                                     if queue.is_empty() {
