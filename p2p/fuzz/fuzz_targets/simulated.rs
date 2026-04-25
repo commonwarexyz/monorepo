@@ -11,7 +11,7 @@ use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
-    collections::{hash_map, HashMap, HashSet, VecDeque},
+    collections::{hash_map, HashMap, VecDeque},
     num::NonZeroU32,
     time::Duration,
 };
@@ -21,9 +21,16 @@ const MAX_PEERS: usize = 16;
 const MIN_PEERS: usize = 2;
 const MAX_MSG_SIZE: u32 = 1024 * 1024;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
+const MSG_ID_SIZE: usize = core::mem::size_of::<u64>();
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+struct ExpectedMsg {
+    id: u64,
+    generation: u64,
+    message: IoBuf,
+}
 
 /// Operations that can be performed on the simulated p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -48,6 +55,11 @@ enum Operation {
     },
     /// Attempt to receive pending messages from all peers.
     ReceiveMessages,
+    /// Advance deterministic time before later operations.
+    Sleep {
+        /// Duration to sleep in milliseconds.
+        duration_ms: u16,
+    },
     /// Add or update a network link between two peers with specific characteristics.
     AddLink {
         /// Index of the sender peer.
@@ -147,9 +159,13 @@ fn fuzz(input: FuzzInput) {
 
         // Track messages that may still be delivered: (to_idx, sender_pk, channel_id) -> messages.
         // The simulated network may drop messages, but an accepted message may also remain in
-        // flight across link updates. Keep prior accepted messages until they are observed instead
-        // of assuming that a later delivery proves earlier entries have been dropped.
-        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = HashMap::new();
+        // flight across link updates. FIFO is enforced only within a single link generation.
+        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<ExpectedMsg>> =
+            HashMap::new();
+        let mut skipped_msgs: HashMap<(usize, ed25519::PublicKey, u8), Vec<(u64, u64)>> =
+            HashMap::new();
+        let mut link_generations: HashMap<(usize, usize), u64> = HashMap::new();
+        let mut next_msg_id = 0u64;
 
         for op in input.operations.into_iter() {
             match op {
@@ -182,17 +198,23 @@ fn fuzz(input: FuzzInput) {
                     let from_idx = (peer_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
-                    // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
+                    // Clamp message size to not exceed max, accounting for channel and ID overhead.
+                    let msg_size =
+                        msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE - MSG_ID_SIZE);
 
                     // Skip if sender channel not registered
                     let Some((sender, _)) = channels.get_mut(&(from_idx, channel_id)) else {
                         continue;
                     };
 
-                    // Generate random message payload
-                    let mut bytes = vec![0u8; msg_size];
-                    context.fill(&mut bytes[..]);
+                    // Generate a uniquely-tagged random message payload.
+                    let id = next_msg_id;
+                    next_msg_id = next_msg_id.wrapping_add(1);
+                    let mut bytes = Vec::with_capacity(MSG_ID_SIZE + msg_size);
+                    bytes.extend_from_slice(&id.to_le_bytes());
+                    let payload_offset = bytes.len();
+                    bytes.resize(MSG_ID_SIZE + msg_size, 0);
+                    context.fill(&mut bytes[payload_offset..]);
                     let message = IoBuf::from(bytes);
 
                     // Attempt to send the message
@@ -208,61 +230,130 @@ fn fuzz(input: FuzzInput) {
                     // Track the message only if the network accepted this recipient.
                     if let Ok(accepted) = accepted {
                         if accepted.iter().any(|pk| pk == &peer_pks[to_idx]) {
+                            let generation =
+                                *link_generations.get(&(from_idx, to_idx)).unwrap_or(&0);
                             expected_msgs
                                 .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
                                 .or_default()
-                                .push_back(message);
+                                .push_back(ExpectedMsg {
+                                    id,
+                                    generation,
+                                    message,
+                                });
                         }
                     }
                 }
 
                 Operation::ReceiveMessages => {
-                    // Attempt to receive one message from each receiver channel with pending messages
-                    let receiver_channels: HashSet<(usize, u8)> = expected_msgs
-                        .keys()
-                        .map(|(to_idx, _sender_pk, channel_id)| (*to_idx, *channel_id))
-                        .collect();
+                    // Attempt to receive one message from each registered receiver channel.
+                    let mut receiver_channels: Vec<(usize, u8)> = channels.keys().copied().collect();
+                    receiver_channels.sort_unstable();
 
                     // Each (to_idx, channel_id) is a distinct mailbox receiving from all senders
                     for (to_idx, channel_id) in receiver_channels {
-                        // Skip if receiver hasn't registered this channel
-                        let Some((_, receiver)) = channels.get_mut(&(to_idx, channel_id)) else {
-                            continue;
-                        };
+                        let (_, receiver) = channels.get_mut(&(to_idx, channel_id)).unwrap();
 
-                        // Try to receive one message with timeout
+                        // Try to receive one message without waiting for future deliveries.
                         commonware_macros::select! {
                             result = receiver.recv() => {
                                 let Ok((sender_pk, message)) = result else {
                                     continue; // Receive error
                                 };
+                                if message.len() < MSG_ID_SIZE {
+                                    panic!(
+                                        "Message from sender {} to receiver {} on channel {} too short for ID. Message len: {}",
+                                        sender_pk, to_idx, channel_id, message.len()
+                                    );
+                                }
+                                let id = u64::from_le_bytes(
+                                    message.as_ref()[..MSG_ID_SIZE]
+                                        .try_into()
+                                        .expect("slice length checked"),
+                                );
 
                                 // Find the expected queue for this sender-receiver-channel tuple
                                 let expected_msgs_key = (to_idx, sender_pk.clone(), channel_id);
-                                let queue = expected_msgs.get_mut(&expected_msgs_key).expect("Expected queue not found");
+                                let fifo_skip = |id: u64| -> Option<u64> {
+                                    skipped_msgs
+                                        .get(&expected_msgs_key)
+                                        .and_then(|skipped| {
+                                            skipped
+                                                .iter()
+                                                .find(|(skipped_id, _)| *skipped_id == id)
+                                        })
+                                        .map(|(_, generation)| *generation)
+                                };
+                                let Some(queue) = expected_msgs.get_mut(&expected_msgs_key) else {
+                                    if let Some(generation) = fifo_skip(id) {
+                                        panic!(
+                                            "FIFO violation from sender {} to receiver {} on channel {}. Message ID {} was already skipped in generation {}",
+                                            sender_pk, to_idx, channel_id, id, generation
+                                        );
+                                    }
+                                    panic!(
+                                        "Expected queue not found for sender {} to receiver {} on channel {}. Message ID: {}, message len: {}",
+                                        sender_pk, to_idx, channel_id, id, message.len()
+                                    );
+                                };
 
-                                // Find message in expected queue. Messages can be dropped, delayed,
-                                // or delivered after a link update, but any delivered payload must
+                                // Find message by unique ID. Messages can be dropped, delayed, or
+                                // delivered after a link update, but any delivered payload must
                                 // correspond to a prior accepted send for this sender/receiver/channel.
-                                if let Some(pos) = queue.iter().position(|m| *m == message) {
-                                    queue.remove(pos);
+                                if let Some(pos) = queue.iter().position(|m| m.id == id) {
+                                    let generation = queue[pos].generation;
+                                    let first_same_generation = queue
+                                        .iter()
+                                        .position(|m| m.generation == generation)
+                                        .expect("matched message has a generation");
+
+                                    let skipped: Vec<_> = queue
+                                        .drain(first_same_generation..pos)
+                                        .map(|msg| (msg.id, msg.generation))
+                                        .collect();
+                                    if !skipped.is_empty() {
+                                        skipped_msgs
+                                            .entry(expected_msgs_key.clone())
+                                            .or_default()
+                                            .extend(skipped);
+                                    }
+
+                                    let expected = queue
+                                        .remove(first_same_generation)
+                                        .expect("matched message present");
+                                    if expected.message != message {
+                                        panic!(
+                                            "Corrupted message from sender {} to receiver {} on channel {}. Message ID: {}, message len: {}",
+                                            sender_pk, to_idx, channel_id, id, message.len()
+                                        );
+                                    }
 
                                     // Clean up empty queue
                                     if queue.is_empty() {
                                         expected_msgs.remove(&expected_msgs_key);
                                     }
                                 } else {
+                                    if let Some(generation) = fifo_skip(id) {
+                                        panic!(
+                                            "FIFO violation from sender {} to receiver {} on channel {}. Message ID {} was already skipped in generation {}",
+                                            sender_pk, to_idx, channel_id, id, generation
+                                        );
+                                    }
                                     panic!(
-                                        "Unexpected message from sender {} to receiver {} on channel {}. Message len: {}",
-                                        sender_pk, to_idx, channel_id, message.len()
+                                        "Unexpected message from sender {} to receiver {} on channel {}. Message ID: {}, message len: {}",
+                                        sender_pk, to_idx, channel_id, id, message.len()
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
-                                continue; // Timeout - message may not have arrived yet
+                            _ = context.sleep(Duration::ZERO) => {
+                                continue; // No message is ready now.
                             }
                         }
                     }
+                }
+
+                Operation::Sleep { duration_ms } => {
+                    let duration_ms = (duration_ms as u64).min(MAX_SLEEP_DURATION_MS);
+                    context.sleep(Duration::from_millis(duration_ms)).await;
                 }
 
                 Operation::AddLink {
@@ -283,9 +374,15 @@ fn fuzz(input: FuzzInput) {
                         jitter: Duration::from_millis(jitter as u64),
                         success_rate: (success_rate as f64) / 255.0,
                     };
-                    let _ = oracle
+                    if oracle
                         .add_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone(), link)
-                        .await;
+                        .await
+                        .is_ok()
+                    {
+                        // Generation 0 means no link has ever existed for the pair. Accepted sends
+                        // should only observe generations created by successful AddLink calls.
+                        *link_generations.entry((from_idx, to_idx)).or_default() += 1;
+                    }
                 }
 
                 Operation::RemoveLink { from_idx, to_idx } => {
