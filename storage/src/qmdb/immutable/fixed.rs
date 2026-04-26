@@ -128,6 +128,18 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
+    #[allow(dead_code)]
+    type ImmutableTokio =
+        Db<mmr::Family, commonware_runtime::tokio::Context, Digest, Digest, Sha256, TwoCap>;
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _check_immutable_send_sync() {
+        _assert_send::<Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>>();
+        _assert_sync::<Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>>();
+        _assert_send::<ImmutableTokio>();
+        _assert_sync::<ImmutableTokio>();
+    }
+
     fn small_sections_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
         let mut cfg = config(suffix, pooler);
         cfg.log.items_per_blob = NZU64!(1);

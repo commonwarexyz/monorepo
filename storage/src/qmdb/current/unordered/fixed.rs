@@ -112,6 +112,48 @@ pub mod test {
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
+    #[allow(dead_code)]
+    type CurrentTokio =
+        Db<mmr::Family, commonware_runtime::tokio::Context, Digest, Digest, Sha256, TwoCap, 32>;
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _check_current_send_sync() {
+        _assert_send::<CurrentTest>();
+        _assert_sync::<CurrentTest>();
+        _assert_send::<CurrentTokio>();
+        _assert_sync::<CurrentTokio>();
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+    fn require_send_future<F: core::future::Future + Send>(_: F) {}
+
+    #[allow(dead_code)]
+    fn _check_current_ref_send_and_futures(db: &CurrentTokio, key: &Digest) {
+        assert_send(db);
+        assert_send(db.get(key));
+        assert_send(db.get_metadata());
+        assert_send(db.bounds());
+        assert_send(db.sync());
+    }
+
+    // Mirrors the "submit pipeline doing 3-5 QMDB reads" scenario from issue #3666:
+    // &Db is held across multiple .await points inside the caller's own Send future.
+    #[allow(dead_code)]
+    async fn _current_pipeline_3_reads(db: &CurrentTokio, k1: &Digest, k2: &Digest, k3: &Digest) {
+        let _ = db.get(k1).await;
+        let _ = db.get(k2).await;
+        let _ = db.get(k3).await;
+    }
+
+    #[allow(dead_code)]
+    fn _check_current_pipeline_send(db: &CurrentTokio, k1: &Digest, k2: &Digest, k3: &Digest) {
+        assert_send(_current_pipeline_3_reads(db, k1, k2, k3));
+        require_send_future(async move {
+            let _ = db.get(k1).await;
+            let _ = db.get(k2).await;
+        });
+    }
+
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);

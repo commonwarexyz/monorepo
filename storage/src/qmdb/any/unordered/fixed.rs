@@ -177,6 +177,48 @@ pub(crate) mod test {
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
+    #[allow(dead_code)]
+    type AnyTokio =
+        Db<mmr::Family, commonware_runtime::tokio::Context, Digest, Digest, Sha256, TwoCap>;
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _check_any_send_sync() {
+        _assert_send::<AnyTest>();
+        _assert_sync::<AnyTest>();
+        _assert_send::<AnyTokio>();
+        _assert_sync::<AnyTokio>();
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+    fn require_send_future<F: core::future::Future + Send>(_: F) {}
+
+    #[allow(dead_code)]
+    fn _check_any_ref_send_and_futures(db: &AnyTokio, key: &Digest) {
+        assert_send(db);
+        assert_send(db.get(key));
+        assert_send(db.get_metadata());
+        assert_send(db.root());
+    }
+
+    // Mirrors the "submit pipeline doing 3-5 QMDB reads" scenario from issue #3666:
+    // &Db is held across multiple .await points inside the caller's own Send future.
+    #[allow(dead_code)]
+    async fn _any_pipeline_3_reads(db: &AnyTokio, k1: &Digest, k2: &Digest, k3: &Digest) {
+        let _ = db.get(k1).await;
+        let _ = db.get(k2).await;
+        let _ = db.get(k3).await;
+    }
+
+    #[allow(dead_code)]
+    fn _check_any_pipeline_send(db: &AnyTokio, k1: &Digest, k2: &Digest, k3: &Digest) {
+        assert_send(_any_pipeline_3_reads(db, k1, k2, k3));
+        // Also exercise the "Send bound on a downstream trait" path.
+        require_send_future(async move {
+            let _ = db.get(k1).await;
+            let _ = db.get(k2).await;
+        });
+    }
+
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: crate::merkle::Family>(
         context: deterministic::Context,

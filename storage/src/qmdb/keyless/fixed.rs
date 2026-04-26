@@ -80,6 +80,22 @@ mod test {
 
     type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
+    #[allow(dead_code)]
+    type KeylessTokio = Db<
+        mmr::Family,
+        commonware_runtime::tokio::Context,
+        commonware_utils::sequence::U64,
+        Sha256,
+    >;
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _check_keyless_send_sync() {
+        _assert_send::<TestDb<mmr::Family>>();
+        _assert_sync::<TestDb<mmr::Family>>();
+        _assert_send::<KeylessTokio>();
+        _assert_sync::<KeylessTokio>();
+    }
+
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
     }
