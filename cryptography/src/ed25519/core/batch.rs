@@ -34,7 +34,7 @@
 //!
 //! # Example
 //! ```
-//! # use commonware_cryptography::ed25519::ed25519_consensus::*;
+//! # use commonware_cryptography::ed25519::core::*;
 //! let mut batch = batch::Verifier::new();
 //! for _ in 0..32 {
 //!     let sk = SigningKey::new(rand::thread_rng());
@@ -169,7 +169,7 @@ impl Verifier {
         // However, when m = 1 and all signatures are from a single verification
         // key, this is nearly twice as fast.
 
-        let m = self.signatures.keys().count();
+        let m = self.signatures.len();
 
         let mut A_coeffs = Vec::with_capacity(m);
         let mut As = Vec::with_capacity(m);

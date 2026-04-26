@@ -20,7 +20,7 @@ use sha2::{digest::Update, Sha512};
 /// ```
 /// use core::convert::TryFrom;
 /// # use rand::thread_rng;
-/// # use commonware_cryptography::ed25519::ed25519_consensus::*;
+/// # use commonware_cryptography::ed25519::core::*;
 /// # let msg = b"ed25519-consensus";
 /// # let sk = SigningKey::new(thread_rng());
 /// # let sig = sk.sign(msg);
