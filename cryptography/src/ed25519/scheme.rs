@@ -244,7 +244,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    /// Because [`ed25519_consensus::Signature`] can be created from this byte array
+    /// Because [`crate::ed25519::core::Signature`] can be created from this byte array
     /// with minimal overhead, we only store the raw bytes.
     raw: [u8; SIGNATURE_LENGTH],
 }
