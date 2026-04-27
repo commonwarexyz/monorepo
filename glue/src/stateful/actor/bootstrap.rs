@@ -78,7 +78,7 @@ use commonware_consensus::{
     Application as ConsensusApplication, Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{telemetry::metrics::Registered, Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{Config as MetadataConfig, Metadata};
 use commonware_utils::{channel::ring, sequence::U64};
 use prometheus_client::metrics::gauge::Gauge;
@@ -207,11 +207,10 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         mode,
     } = config;
 
-    let state_sync_done: Gauge = Gauge::default();
-    context.register(
+    let state_sync_done: Registered<Gauge> = context.register(
         "state_sync_done",
         "Whether state sync has completed",
-        state_sync_done.clone(),
+        Gauge::default(),
     );
     state_sync_done.set(0);
 

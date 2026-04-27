@@ -8,7 +8,7 @@ use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::status::{self, CounterExt, GaugeExt},
+    telemetry::metrics::{status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::{

@@ -1,6 +1,9 @@
 //! Metrics for state sync progress.
 
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics as MetricsTrait};
+use commonware_runtime::{
+    telemetry::metrics::{GaugeExt, MetricsExt, Registered},
+    Metrics as MetricsTrait,
+};
 use commonware_storage::qmdb::sync::SyncProgress;
 use commonware_utils::channel::mpsc;
 use prometheus_client::{
@@ -27,35 +30,27 @@ impl DbLabel {
 #[derive(Clone)]
 pub(super) struct SyncMetrics {
     /// Current journal size (operations applied) per database.
-    pub journal_size: Family<DbLabel, Gauge>,
+    pub journal_size: Registered<Family<DbLabel, Gauge>>,
     /// Target range end (operations needed) per database.
-    pub target_end: Family<DbLabel, Gauge>,
+    pub target_end: Registered<Family<DbLabel, Gauge>>,
     /// Block height whose targets each database is syncing towards.
-    pub target_height: Family<DbLabel, Gauge>,
+    pub target_height: Registered<Family<DbLabel, Gauge>>,
 }
 
 impl SyncMetrics {
     /// Register sync metrics on the provided context.
     pub fn new(context: &impl MetricsTrait) -> Self {
-        let journal_size = Family::<DbLabel, Gauge>::default();
-        context.register(
+        let journal_size = context.family(
             "sync_journal_size",
             "Current journal size (operations applied) per database",
-            journal_size.clone(),
         );
-
-        let target_end = Family::<DbLabel, Gauge>::default();
-        context.register(
+        let target_end = context.family(
             "sync_target_end",
             "Target range end (operations needed) per database",
-            target_end.clone(),
         );
-
-        let target_height = Family::<DbLabel, Gauge>::default();
-        context.register(
+        let target_height = context.family(
             "sync_target_height",
             "Block height whose targets each database is syncing towards",
-            target_height.clone(),
         );
 
         Self {

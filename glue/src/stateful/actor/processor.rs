@@ -34,7 +34,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digestible;
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
 use std::{
