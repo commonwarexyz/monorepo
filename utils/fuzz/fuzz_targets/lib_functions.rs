@@ -100,6 +100,7 @@ fn fuzz(input: FuzzInput) {
 
             let n3f1_quorum = N3f1::quorum(n);
             assert_eq!(n3f1_quorum + n3f1_faults, n);
+            assert!(2 * u64::from(n3f1_quorum) > u64::from(n) + u64::from(n3f1_faults));
 
             let n5f1_faults = N5f1::max_faults(n);
             assert_eq!(n5f1_faults, (n - 1) / 5);
@@ -108,6 +109,8 @@ fn fuzz(input: FuzzInput) {
             assert_eq!(n5f1_quorum + n5f1_faults, n);
             assert_eq!(N5f1::l_quorum(n), n5f1_quorum);
             assert_eq!(N5f1::m_quorum(n), 2 * n5f1_faults + 1);
+            // BFT safety / quorum-intersection: 2q > n + f
+            assert!(2 * u64::from(n5f1_quorum) > u64::from(n) + u64::from(n5f1_faults));
         }
 
         FuzzInput::Quorum { n } => {
@@ -117,12 +120,16 @@ fn fuzz(input: FuzzInput) {
             let n3f1_quorum = N3f1::quorum(n);
             let n3f1_faults = N3f1::max_faults(n);
             assert_eq!(n3f1_quorum, n - n3f1_faults);
+            // BFT safety / quorum-intersection: 2q > n + f
+            assert!(2 * u64::from(n3f1_quorum) > u64::from(n) + u64::from(n3f1_faults));
 
             let n5f1_quorum = N5f1::quorum(n);
             let n5f1_faults = N5f1::max_faults(n);
             assert_eq!(n5f1_quorum, n - n5f1_faults);
             assert_eq!(N5f1::l_quorum(n), n5f1_quorum);
             assert_eq!(N5f1::m_quorum(n), 2 * n5f1_faults + 1);
+            // BFT safety / quorum-intersection: 2q > n + f
+            assert!(2 * u64::from(n5f1_quorum) > u64::from(n) + u64::from(n5f1_faults));
         }
 
         FuzzInput::Union { a, b } => {
