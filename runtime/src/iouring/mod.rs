@@ -85,9 +85,10 @@
 //! 3. Ready-queue requests that were already admitted and need another SQE.
 //! 4. Fresh requests drained from the channel, until waiter or SQ capacity is hit.
 //!
-//! During shutdown, there is no new channel work, so the drain phase continues
-//! servicing cancellations and the ready queue until requests complete, time
-//! out, or are abandoned by `shutdown_timeout`.
+//! After the channel has closed and buffered channel work has been drained,
+//! there is no new channel work, so the drain phase continues servicing
+//! cancellations and the ready queue until requests complete, time out, or are
+//! abandoned by `shutdown_timeout`.
 //!
 //! ## Wake Handling
 //!
@@ -105,13 +106,19 @@
 //!
 //! ## Shutdown Process
 //!
-//! When the request channel closes, the event loop enters a drain phase:
+//! When the request channel is closed and no buffered requests remain, the event
+//! loop enters a drain phase:
 //! 1. Stops accepting new requests
 //! 2. Waits for all in-flight requests to complete or be cancelled
 //! 3. If `shutdown_timeout` is configured, abandons remaining requests after the timeout
 //! 4. Cleans up and exits. Dropping the last submitter latches one wake and, if a
 //!    target is currently armed, signals it immediately so shutdown is observed
 //!    promptly whether the loop is already blocked or about to sleep.
+//!
+//! If waiter capacity is full when the last submitter disconnects, buffered
+//! channel work is still drained as capacity becomes available before drain
+//! begins. `shutdown_timeout` bounds only the drain phase after that buffered
+//! work has been drained.
 //!
 //! ## Liveness Model
 //!
@@ -241,11 +248,13 @@ pub struct Config {
     /// Deadlines are clamped to this horizon. This value should be set to the
     /// largest expected per-request deadline budget.
     pub max_request_timeout: Duration,
-    /// The maximum time the io_uring event loop will wait for in-flight requests
-    /// to complete before abandoning them during shutdown.
+    /// The maximum time the io_uring event loop will wait during the drain phase
+    /// after producer disconnect has been fully observed and buffered channel
+    /// work has been drained.
+    ///
     /// If None, the event loop will wait indefinitely for in-flight requests
-    /// to complete before shutting down. In this case, the caller should be careful
-    /// to ensure that the requests submitted to the io_uring will eventually complete.
+    /// to complete during that drain phase. In this case, the caller should be
+    /// careful to ensure that submitted requests will eventually complete.
     pub shutdown_timeout: Option<Duration>,
     /// Tick granularity used by the userspace timeout wheel.
     ///
