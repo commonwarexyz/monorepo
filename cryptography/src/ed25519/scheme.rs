@@ -1,4 +1,3 @@
-#[cfg(feature = "std")]
 use crate::BatchVerifier;
 use crate::{
     ed25519::core::{self as ed_core, VerificationKey},
@@ -342,12 +341,10 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// Ed25519 Batch Verifier.
-#[cfg(feature = "std")]
 pub struct Batch {
     verifier: ed_core::batch::Verifier,
 }
 
-#[cfg(feature = "std")]
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
@@ -372,7 +369,6 @@ impl BatchVerifier for Batch {
     }
 }
 
-#[cfg(feature = "std")]
 impl Batch {
     #[inline(always)]
     fn add_inner(

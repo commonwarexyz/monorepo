@@ -6,17 +6,15 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-#[cfg(feature = "std")]
 use super::Batch;
 use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
-#[cfg(feature = "std")]
 use crate::{certificate::Verification, BatchVerifier};
 use crate::{
     certificate::{Attestation, Namespace, Scheme, Signers, Subject},
     Digest, Signer as _, Verifier as _,
 };
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::{
@@ -117,7 +115,6 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    #[cfg(feature = "std")]
     pub fn verify_attestations<'a, S, R, D, I>(
         &self,
         rng: &mut R,
@@ -179,47 +176,6 @@ impl<N: Namespace> Generic<N> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
-    #[cfg(not(feature = "std"))]
-    pub fn verify_attestations<'a, S, R, D, I>(
-        &self,
-        _rng: &mut R,
-        subject: S::Subject<'a, D>,
-        attestations: I,
-    ) -> crate::certificate::Verification<S>
-    where
-        S: Scheme<Signature = Ed25519Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
-        D: Digest,
-        I: IntoIterator<Item = Attestation<S>>,
-    {
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
-
-        let mut invalid = alloc::collections::BTreeSet::new();
-        let mut verified = Vec::new();
-
-        for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.key(attestation.signer) else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-            let Some(signature) = attestation.signature.get() else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-
-            if public_key.verify(namespace, &message, signature) {
-                verified.push(attestation);
-            } else {
-                invalid.insert(attestation.signer);
-            }
-        }
-
-        crate::certificate::Verification::new(verified, invalid.into_iter().collect())
-    }
-
     /// Assembles a certificate from a collection of attestations.
     pub fn assemble<S, I, M>(&self, attestations: I) -> Option<Certificate>
     where
@@ -255,7 +211,6 @@ impl<N: Namespace> Generic<N> {
     /// Stages a certificate for batch verification.
     ///
     /// Returns false if the certificate structure is invalid.
-    #[cfg(feature = "std")]
     fn batch_verify_certificate<'a, S, D, M>(
         &self,
         batch: &mut Batch,
@@ -301,7 +256,6 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Verifies a certificate using batch verification.
-    #[cfg(feature = "std")]
     pub fn verify_certificate<'a, S, R, D, M>(
         &self,
         rng: &mut R,
@@ -323,50 +277,7 @@ impl<N: Namespace> Generic<N> {
         batch.verify(rng)
     }
 
-    /// Verifies a certificate by checking each signature individually.
-    #[cfg(not(feature = "std"))]
-    pub fn verify_certificate<'a, S, R, D, M>(
-        &self,
-        _rng: &mut R,
-        subject: S::Subject<'a, D>,
-        certificate: &Certificate,
-    ) -> bool
-    where
-        S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
-        D: Digest,
-        M: Faults,
-    {
-        if certificate.signers.len() != self.participants.len() {
-            return false;
-        }
-        if certificate.signers.count() != certificate.signatures.len() {
-            return false;
-        }
-        if certificate.signers.count() < self.participants.quorum::<M>() as usize {
-            return false;
-        }
-
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.key(signer) else {
-                return false;
-            };
-            let Some(signature) = signature.get() else {
-                return false;
-            };
-            if !public_key.verify(namespace, &message, signature) {
-                return false;
-            }
-        }
-
-        true
-    }
-
     /// Verifies multiple certificates in a batch.
-    #[cfg(feature = "std")]
     pub fn verify_certificates<'a, S, R, D, I, M>(&self, rng: &mut R, certificates: I) -> bool
     where
         S: Scheme,
@@ -386,34 +297,12 @@ impl<N: Namespace> Generic<N> {
         batch.verify(rng)
     }
 
-    /// Verifies multiple certificates one-by-one.
-    #[cfg(not(feature = "std"))]
-    pub fn verify_certificates<'a, S, R, D, I, M>(&self, rng: &mut R, certificates: I) -> bool
-    where
-        S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
-        D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
-        M: Faults,
-    {
-        for (subject, certificate) in certificates {
-            if !self.verify_certificate::<S, _, D, M>(rng, subject, certificate) {
-                return false;
-            }
-        }
-
-        true
-    }
-
     pub const fn is_attributable() -> bool {
         true
     }
 
     pub const fn is_batchable() -> bool {
-        // Batch verification requires the `std` feature because it depends on
-        // the vendored batch verifier.
-        cfg!(feature = "std")
+        true
     }
 
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
@@ -762,17 +651,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "std")]
     fn test_is_batchable() {
         assert!(Generic::<Vec<u8>>::is_batchable());
         assert!(Scheme::is_batchable());
-    }
-
-    #[test]
-    #[cfg(not(feature = "std"))]
-    fn test_is_not_batchable() {
-        assert!(!Generic::is_batchable());
-        assert!(!Scheme::is_batchable());
     }
 
     #[test]

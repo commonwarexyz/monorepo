@@ -35,6 +35,8 @@
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
 use super::{Error, Signature, VerificationKeyBytes};
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap as Map, vec::Vec};
 use curve25519_dalek::{
     edwards::{CompressedEdwardsY, EdwardsPoint},
     scalar::Scalar,
@@ -42,7 +44,10 @@ use curve25519_dalek::{
 };
 use rand_core::{CryptoRng, RngCore};
 use sha2::{digest::Update, Sha512};
+#[cfg(feature = "std")]
 use std::collections::HashMap;
+#[cfg(feature = "std")]
+type Map<K, V> = HashMap<K, V>;
 
 // Shim to generate a u128 without importing `rand`.
 fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
@@ -81,8 +86,8 @@ impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKeyBytes, Signature, &'msg
 #[derive(Default)]
 pub struct Verifier {
     /// Signature data queued for verification.
-    signatures: HashMap<VerificationKeyBytes, Vec<(Scalar, Signature)>>,
-    /// Caching this count avoids a hash traversal to figure out
+    signatures: Map<VerificationKeyBytes, Vec<(Scalar, Signature)>>,
+    /// Caching this count avoids a map traversal to figure out
     /// how much to preallocate.
     batch_size: usize,
 }
@@ -130,7 +135,7 @@ impl Verifier {
         //
         // Normally n signatures would require a multiscalar multiplication of
         // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
-        // and R_i). However, because we store batch entries in a HashMap
+        // and R_i). However, because we store batch entries in a map
         // indexed by the verification key, we can "coalesce" all z_i * k_i
         // terms for each distinct verification key into a single coefficient.
         //

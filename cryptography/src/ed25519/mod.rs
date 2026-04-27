@@ -30,6 +30,5 @@ pub mod certificate;
 pub(in crate::ed25519) mod core;
 mod scheme;
 
-#[cfg(feature = "std")]
 pub use scheme::Batch;
 pub use scheme::{PrivateKey, PublicKey, Signature};
