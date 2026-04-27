@@ -129,6 +129,7 @@ impl From<[u8; 32]> for SigningKey {
 impl zeroize::Zeroize for SigningKey {
     fn zeroize(&mut self) {
         self.seed.zeroize();
+        self.prefix.zeroize();
         self.s.zeroize()
     }
 }

@@ -6,6 +6,7 @@
 //! - Uses clamped bits for Ed25519 public-key derivation, but reduces the signing scalar with
 //!   [`Scalar::from_bytes_mod_order`] before scalar-scalar arithmetic. See `Scalar::from_bits`'
 //!   deprecation notice.
+//! - Zeroizes the signing key's prefix, along with the seed and scalar.
 //! - Removed `serde` dependency.
 //! - Swapped `hex` dependency to [`commonware_utils::hex()`].
 //! - Adapted code to `commonware`'s clippy rules.
