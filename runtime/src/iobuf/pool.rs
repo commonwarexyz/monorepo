@@ -50,14 +50,12 @@
 //! batch back to the global freelist if needed.
 
 use super::{freelist::Freelist, IoBufMut};
-use crate::iobuf::aligned::{AlignedBuffer, PooledBufMut};
+use crate::{
+    iobuf::aligned::{AlignedBuffer, PooledBufMut},
+    telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
+};
 use commonware_utils::{NZUsize, NZU32};
 use crossbeam_utils::CachePadded;
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
-};
 use std::{
     cell::UnsafeCell,
     mem::align_of,
@@ -418,38 +416,32 @@ struct SizeClassLabel {
 /// Metrics for the buffer pool.
 struct PoolMetrics {
     /// Number of tracked buffers currently created for the size class.
-    created: Family<SizeClassLabel, Gauge>,
+    created: GaugeFamily<SizeClassLabel>,
     /// Total number of failed allocations (pool exhausted).
-    exhausted_total: Family<SizeClassLabel, Counter>,
+    exhausted_total: CounterFamily<SizeClassLabel>,
     /// Total number of oversized allocation requests.
     oversized_total: Counter,
 }
 
 impl PoolMetrics {
-    fn new(registry: &mut Registry) -> Self {
-        let metrics = Self {
-            created: Family::default(),
-            exhausted_total: Family::default(),
-            oversized_total: Counter::default(),
-        };
-
-        registry.register(
-            "buffer_pool_created",
-            "Number of tracked buffers currently created for the pool",
-            metrics.created.clone(),
-        );
-        registry.register(
-            "buffer_pool_exhausted_total",
-            "Total number of failed allocations due to pool exhaustion",
-            metrics.exhausted_total.clone(),
-        );
-        registry.register(
-            "buffer_pool_oversized_total",
-            "Total number of allocation requests exceeding max buffer size",
-            metrics.oversized_total.clone(),
-        );
-
-        metrics
+    fn new(registry: &mut impl Register) -> Self {
+        Self {
+            created: registry.register(
+                "buffer_pool_created",
+                "Number of tracked buffers currently created for the pool",
+                raw::Family::default(),
+            ),
+            exhausted_total: registry.register(
+                "buffer_pool_exhausted_total",
+                "Total number of failed allocations due to pool exhaustion",
+                raw::Family::default(),
+            ),
+            oversized_total: registry.register(
+                "buffer_pool_oversized_total",
+                "Total number of allocation requests exceeding max buffer size",
+                raw::Counter::default(),
+            ),
+        }
     }
 }
 
@@ -906,7 +898,7 @@ impl BufferPool {
     /// # Panics
     ///
     /// Panics if the configuration is invalid.
-    pub(crate) fn new(config: BufferPoolConfig, registry: &mut Registry) -> Self {
+    pub(crate) fn new(config: BufferPoolConfig, registry: &mut impl Register) -> Self {
         config.validate();
         let metrics = PoolMetrics::new(registry);
         let mut classes = Vec::with_capacity(config.num_classes());
@@ -1128,7 +1120,10 @@ impl BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::{freelist::tests as freelist_tests, IoBuf};
+    use crate::{
+        iobuf::{freelist, IoBuf},
+        telemetry::metrics::Registry,
+    };
     use bytes::{Buf, BufMut};
     use commonware_utils::NZU32;
     use std::{
@@ -1148,8 +1143,9 @@ mod tests {
         ))
     }
 
-    fn test_registry() -> Registry {
-        Registry::default()
+    fn test_pool(config: BufferPoolConfig) -> BufferPool {
+        let mut registry = Registry::default();
+        BufferPool::new(config, &mut registry)
     }
 
     /// Creates a test config with page alignment.
@@ -1185,7 +1181,7 @@ mod tests {
 
     /// Helper to get the number of free buffers parked in the global freelist.
     fn get_global_len(class: &SizeClass) -> usize {
-        freelist_tests::len(&class.global)
+        freelist::tests::len(&class.global)
     }
 
     /// Helper to get the number of free buffers parked in the current thread's
@@ -1257,8 +1253,7 @@ mod tests {
     #[test]
     fn test_pool_alloc_and_return() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 2));
 
         // Allocate a buffer - returns buffer with len=0, capacity >= requested
         let buf = pool.try_alloc(page).unwrap();
@@ -1277,8 +1272,7 @@ mod tests {
     #[test]
     fn test_alloc_len_sets_len() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 2));
 
         // SAFETY: we immediately initialize all bytes before reading.
         let mut buf = unsafe { pool.alloc_len(100) };
@@ -1291,8 +1285,7 @@ mod tests {
     #[test]
     fn test_alloc_zeroed_sets_len_and_zeros() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 2));
 
         let buf = pool.alloc_zeroed(100);
         assert_eq!(buf.len(), 100);
@@ -1302,8 +1295,7 @@ mod tests {
     #[test]
     fn test_try_alloc_zeroed_sets_len_and_zeros() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 2));
 
         let buf = pool.try_alloc_zeroed(page).unwrap();
         assert!(buf.is_pooled());
@@ -1314,8 +1306,7 @@ mod tests {
     #[test]
     fn test_alloc_zeroed_fallback_uses_untracked_zeroed_buffer() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+        let pool = test_pool(test_config(page, page, 1));
 
         // Exhaust pooled capacity for this class.
         let _pooled = pool.try_alloc(page).unwrap();
@@ -1329,8 +1320,7 @@ mod tests {
     #[test]
     fn test_alloc_zeroed_reuses_dirty_pooled_buffer() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+        let pool = test_pool(test_config(page, page, 1));
 
         let mut first = pool.alloc_zeroed(page);
         assert!(first.is_pooled());
@@ -1348,20 +1338,16 @@ mod tests {
 
     #[test]
     fn test_requests_smaller_than_pool_min_size_bypass_pool() {
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
-            BufferPoolConfig {
-                pool_min_size: 512,
-                min_size: NZUsize!(512),
-                max_size: NZUsize!(1024),
-                max_per_class: NZU32!(2),
-                parallelism: NZUsize!(1),
-                thread_cache_config: BufferPoolThreadCacheConfig::Auto,
-                prefill: false,
-                alignment: NZUsize!(128),
-            },
-            &mut registry,
-        );
+        let pool = test_pool(BufferPoolConfig {
+            pool_min_size: 512,
+            min_size: NZUsize!(512),
+            max_size: NZUsize!(1024),
+            max_per_class: NZU32!(2),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
+            prefill: false,
+            alignment: NZUsize!(128),
+        });
 
         let buf = pool.try_alloc(200).unwrap();
         assert!(!buf.is_pooled());
@@ -1380,8 +1366,7 @@ mod tests {
     #[test]
     fn test_pool_size_classes() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         // Small request gets smallest class
         let buf1 = pool.try_alloc(page).unwrap();
@@ -1398,20 +1383,16 @@ mod tests {
     #[test]
     fn test_prefill() {
         let page = NZUsize!(page_size());
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
-            BufferPoolConfig {
-                pool_min_size: 0,
-                min_size: page,
-                max_size: page,
-                max_per_class: NZU32!(5),
-                parallelism: NZUsize!(1),
-                thread_cache_config: BufferPoolThreadCacheConfig::Auto,
-                prefill: true,
-                alignment: page,
-            },
-            &mut registry,
-        );
+        let pool = test_pool(BufferPoolConfig {
+            pool_min_size: 0,
+            min_size: page,
+            max_size: page,
+            max_per_class: NZU32!(5),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
+            prefill: true,
+            alignment: page,
+        });
 
         // Should be able to allocate max_per_class buffers immediately
         let mut bufs = Vec::new();
@@ -1460,8 +1441,7 @@ mod tests {
     #[test]
     fn test_storage_config_supports_default_allocations() {
         // The storage preset's max_size (8 MB) should be allocatable out of the box.
-        let mut registry = test_registry();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool(BufferPoolConfig::for_storage());
 
         let buf = pool.try_alloc(8 * 1024 * 1024).unwrap();
         assert_eq!(buf.capacity(), 8 * 1024 * 1024);
@@ -1512,11 +1492,7 @@ mod tests {
     #[test]
     fn test_parallelism_policy_resolves_thread_cache_capacity() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
-            test_config(page, page, 64).with_parallelism(NZUsize!(8)),
-            &mut registry,
-        );
+        let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(8)));
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 4);
     }
@@ -1524,16 +1500,12 @@ mod tests {
     #[test]
     fn test_auto_thread_cache_disables_when_parallelism_exceeds_budget() {
         let page = page_size();
-        let mut registry = test_registry();
 
         // With only two buffers and eight expected threads, the auto policy's
         // per-thread share is zero: 2 / (2 * min(8, 2)) == 0. In that case the
         // pool should disable TLS instead of forcing every thread to retain at
         // least one buffer.
-        let pool = BufferPool::new(
-            test_config(page, page, 2).with_parallelism(NZUsize!(8)),
-            &mut registry,
-        );
+        let pool = test_pool(test_config(page, page, 2).with_parallelism(NZUsize!(8)));
         let class_index = pool.inner.config.class_index(page).unwrap();
         let class = &pool.inner.classes[class_index];
         assert_eq!(class.thread_cache_capacity, 0);
@@ -1573,38 +1545,34 @@ mod tests {
     #[test]
     fn test_parallelism_policy_resolves_freelist_stripes() {
         let page = page_size();
-        let config = test_config(page, page, 64).with_parallelism(NZUsize!(16));
+        let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(16)));
 
-        let mut registry = test_registry();
-        let pool = BufferPool::new(config, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(
-            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            freelist::tests::num_words(&pool.inner.classes[class_index].global),
             16
         );
 
         // When expected parallelism rounds above capacity, the freelist caps
         // stripes so every word can contain at least one slot.
-        let capped = test_config(page, page, 12).with_parallelism(NZUsize!(9));
+        let pool = test_pool(test_config(page, page, 12).with_parallelism(NZUsize!(9)));
 
-        let mut registry = test_registry();
-        let pool = BufferPool::new(capped, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(
-            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            freelist::tests::num_words(&pool.inner.classes[class_index].global),
             8
         );
 
         // Disabling thread-local caches should not change global striping.
-        let disabled = test_config(page, page, 64)
-            .with_parallelism(NZUsize!(16))
-            .with_thread_cache_disabled();
+        let pool = test_pool(
+            test_config(page, page, 64)
+                .with_parallelism(NZUsize!(16))
+                .with_thread_cache_disabled(),
+        );
 
-        let mut registry = test_registry();
-        let pool = BufferPool::new(disabled, &mut registry);
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(
-            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            freelist::tests::num_words(&pool.inner.classes[class_index].global),
             16
         );
     }
@@ -1612,19 +1580,17 @@ mod tests {
     #[test]
     fn test_fixed_thread_cache_capacity_overrides_auto_capacity() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
+        let pool = test_pool(
             test_config(page, page, 64)
                 .with_parallelism(NZUsize!(8))
                 .with_thread_cache_capacity(NZUsize!(7)),
-            &mut registry,
         );
         let class_index = pool.inner.config.class_index(page).unwrap();
 
         // Fixed capacity should bypass the derived parallelism heuristic.
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 7);
         assert_eq!(
-            freelist_tests::num_words(&pool.inner.classes[class_index].global),
+            freelist::tests::num_words(&pool.inner.classes[class_index].global),
             8
         );
     }
@@ -1632,11 +1598,7 @@ mod tests {
     #[test]
     fn test_disabled_thread_cache_does_not_retain_buffers_locally() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
-            test_config(page, page, 2).with_thread_cache_disabled(),
-            &mut registry,
-        );
+        let pool = test_pool(test_config(page, page, 2).with_thread_cache_disabled());
         let class_index = pool.inner.config.class_index(page).unwrap();
         let class = &pool.inner.classes[class_index];
 
@@ -1653,11 +1615,8 @@ mod tests {
     #[test]
     fn test_thread_cache_flush_moves_local_entries_to_global() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
-            test_config(page, page * 2, 8).with_thread_cache_capacity(NZUsize!(4)),
-            &mut registry,
-        );
+        let pool =
+            test_pool(test_config(page, page * 2, 8).with_thread_cache_capacity(NZUsize!(4)));
 
         // Use two distinct size classes so the test exercises the whole TLS
         // registry, not just a single per-class cache entry.
@@ -1772,8 +1731,7 @@ mod tests {
     fn test_pool_debug_and_config_accessor() {
         // Debug formatting and config accessor should be consistent.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let debug = format!("{pool:?}");
         assert!(debug.contains("BufferPool"));
@@ -1784,8 +1742,7 @@ mod tests {
     #[test]
     fn test_return_buffer_local_overflow_spills_to_global() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
         let class_index = pool
             .inner
             .config
@@ -1811,8 +1768,7 @@ mod tests {
     #[test]
     fn test_small_local_cache_overflow_preserves_locality() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // With `thread_cache_capacity == 1`, the first return stays local and the
         // second overflows directly to global instead of spilling the hot
@@ -1835,11 +1791,10 @@ mod tests {
     #[test]
     fn test_large_local_cache_batches_overflow_and_refill() {
         let page = page_size();
-        let mut registry = test_registry();
         let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
         let max_per_class =
             u32::try_from(threads * 8).expect("test capacity must fit in u32 slot ids");
-        let pool = BufferPool::new(test_config(page, page, max_per_class), &mut registry);
+        let pool = test_pool(test_config(page, page, max_per_class));
         let class_index = pool
             .inner
             .config
@@ -1993,8 +1948,7 @@ mod tests {
     #[test]
     fn test_freeze_returns_buffer_to_pool() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Initially: 0 allocated, 0 available
         assert_eq!(get_allocated(&pool, page), 0);
@@ -2018,8 +1972,7 @@ mod tests {
     #[test]
     fn test_refcount_and_copy_to_bytes_paths() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Refcount behavior:
         // - clone/slice keep the pooled allocation alive
@@ -2107,8 +2060,7 @@ mod tests {
     fn test_iobuf_to_iobufmut_conversion_reuses_pool_for_non_full_unique_view() {
         // IoBuf -> IoBufMut should recover pooled ownership for unique non-full views.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let buf = pool.try_alloc(page).unwrap();
         assert_eq!(get_allocated(&pool, page), 1);
@@ -2137,8 +2089,7 @@ mod tests {
         // IoBuf -> IoBufMut via From should preserve data and keep pooled
         // ownership for a fully-written unique view.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Fill a pooled buffer completely and freeze.
         let mut buf = pool.try_alloc(page).unwrap();
@@ -2163,8 +2114,7 @@ mod tests {
         // try_into_mut on a uniquely-owned full-view pooled IoBuf should recover
         // mutable ownership without copying, preserving data and pool tracking.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let mut buf = pool.try_alloc(page).unwrap();
         buf.put_slice(&vec![0xAB; page]);
@@ -2188,8 +2138,7 @@ mod tests {
     #[test]
     fn test_iobuf_try_into_mut_succeeds_for_unique_slice_and_fails_for_shared() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Unique sliced views can recover mutable ownership without copying.
         let mut buf = pool.try_alloc(page).unwrap();
@@ -2226,8 +2175,7 @@ mod tests {
     #[test]
     fn test_multithreaded_alloc_freeze_return() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = Arc::new(BufferPool::new(test_config(page, page, 100), &mut registry));
+        let pool = Arc::new(test_pool(test_config(page, page, 100)));
 
         let mut handles = vec![];
 
@@ -2278,8 +2226,7 @@ mod tests {
     fn test_cross_thread_buffer_return() {
         // Allocate on one thread, freeze, send to another thread, drop there
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 100), &mut registry);
+        let pool = test_pool(test_config(page, page, 100));
 
         let (tx, rx) = mpsc::channel();
 
@@ -2324,8 +2271,7 @@ mod tests {
         // When a thread exits, its TLS cache Drop flushes buffers back to the
         // global freelist, making them available to other threads.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = Arc::new(BufferPool::new(test_config(page, page, 1), &mut registry));
+        let pool = Arc::new(test_pool(test_config(page, page, 1)));
 
         // Allocate and return a buffer on a worker thread, then let it exit.
         let worker_pool = pool.clone();
@@ -2359,8 +2305,7 @@ mod tests {
         // Dropping the pool should immediately reclaim globally-visible free
         // tracked buffers, while leaving TLS-cached buffers alone.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
         let class_index = pool
             .inner
             .config
@@ -2393,8 +2338,7 @@ mod tests {
         // The size class remains alive until the last tracked buffer is dropped.
 
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let mut buf = pool.try_alloc(page).unwrap();
         buf.put_slice(&[0u8; 100]);
@@ -2415,8 +2359,7 @@ mod tests {
     fn test_pool_exhaustion_and_recovery() {
         // Test pool exhaustion and recovery.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 3), &mut registry);
+        let pool = test_pool(test_config(page, page, 3));
 
         // Exhaust the pool
         let buf1 = pool.try_alloc(page).expect("first alloc");
@@ -2448,8 +2391,7 @@ mod tests {
     fn test_try_alloc_errors() {
         // Test try_alloc error variants.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Oversized request
         let result = pool.try_alloc(page * 10);
@@ -2466,8 +2408,7 @@ mod tests {
     fn test_try_alloc_zeroed_errors() {
         // try_alloc_zeroed should return the same error variants as try_alloc.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Oversized request.
         let result = pool.try_alloc_zeroed(page * 10);
@@ -2484,8 +2425,7 @@ mod tests {
     fn test_fallback_allocation() {
         // Test fallback allocation when pool is exhausted or oversized.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Exhaust the pool
         let buf1 = pool.try_alloc(page).unwrap();
@@ -2522,8 +2462,7 @@ mod tests {
         // IoBufMut from the pool should report is_pooled, while heap-backed
         // buffers should not.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let pooled = pool.try_alloc(page).unwrap();
         assert!(pooled.is_pooled());
@@ -2535,8 +2474,7 @@ mod tests {
     #[test]
     fn test_iobuf_is_pooled() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let pooled = pool.try_alloc(page).unwrap().freeze();
         assert!(pooled.is_pooled());
@@ -2553,8 +2491,6 @@ mod tests {
     fn test_buffer_alignment() {
         let page = page_size();
         let cache_line = cache_line_size();
-        let mut registry = test_registry();
-
         // Reduce max_per_class under miri (atomics are slow)
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
@@ -2573,7 +2509,7 @@ mod tests {
         }
 
         // Storage preset - page aligned
-        let storage_buffer_pool = BufferPool::new(storage_config, &mut registry);
+        let storage_buffer_pool = test_pool(storage_config);
         let mut buf = storage_buffer_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % page,
@@ -2582,7 +2518,7 @@ mod tests {
         );
 
         // Network preset - cache-line aligned
-        let network_buffer_pool = BufferPool::new(network_config, &mut registry);
+        let network_buffer_pool = test_pool(network_config);
         let mut buf = network_buffer_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % cache_line,

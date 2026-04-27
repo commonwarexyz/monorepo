@@ -22,6 +22,7 @@ commonware-conformance = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
+commonware-runtime-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 crossbeam-utils.workspace = true
 futures.workspace = true

@@ -4,15 +4,12 @@ use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram::Buckets,
-        status::{self, CounterExt, GaugeExt, Status},
+        status::{self, Status},
+        EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, Metrics,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{family::Family, gauge::Gauge, histogram::Histogram},
-};
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -21,9 +18,10 @@ use std::{
 };
 use tracing::debug;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Peer {
-    peer: String,
+/// Per-peer label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+struct Peer<P: PublicKey> {
+    peer: P,
 }
 
 /// Unique identifier for a request.
@@ -135,7 +133,7 @@ where
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of response time in ms)
-    performance: Family<Peer, Gauge>,
+    performance: GaugeFamily<Peer<P>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
     requests_created: status::Counter,
@@ -159,29 +157,20 @@ where
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let performance = Family::<Peer, Gauge>::default();
-        context.register(
+        let performance = context.family(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
-            performance.clone(),
         );
-        let requests_created = status::Counter::default();
-        context.register(
-            "requests_created",
-            "Status of request creation attempts",
-            requests_created.clone(),
-        );
-        let requests_sent = status::Counter::default();
-        context.register(
+        let requests_created =
+            context.family("requests_created", "Status of request creation attempts");
+        let requests_sent = context.family(
             "requests_sent",
             "Status of individual network requests sent to peers",
-            requests_sent.clone(),
         );
-        let resolves = Histogram::new(Buckets::NETWORK);
-        context.register(
+        let resolves = context.histogram(
             "resolves",
             "Number and duration of requests that were resolved",
-            resolves.clone(),
+            Buckets::NETWORK,
         );
         Self {
             context,
@@ -221,10 +210,7 @@ where
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
         self.participants.put(participant.clone(), next);
-        let label = Peer {
-            peer: participant.to_string(),
-        };
-        let _ = self.performance.get_or_create(&label).try_set(next);
+        let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
     /// Get eligible peers for a key in priority order.

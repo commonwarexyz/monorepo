@@ -16,6 +16,7 @@ members = [
     "parallel",
     "resolver",
     "runtime",
+    "runtime/macros",
     "storage",
     "stream",
     "invariants",
@@ -104,6 +105,7 @@ commonware-p2p = { version = "2026.4.0", path = "p2p" }
 commonware-parallel = { version = "2026.4.0", path = "parallel", default-features = false }
 commonware-resolver = { version = "2026.4.0", path = "resolver" }
 commonware-runtime = { version = "2026.4.0", path = "runtime" }
+commonware-runtime-macros = { version = "2026.4.0", path = "runtime/macros" }
 commonware-storage = { version = "2026.4.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.4.0", path = "stream" }
 commonware-utils = { version = "2026.4.0", path = "utils", default-features = false }
@@ -115,8 +117,9 @@ crossbeam-queue = "0.3.12"
 crossbeam-utils = "0.8.21"
 crossterm = "0.29.0"
 ctutils = "0.3.1"
+curve25519-dalek = "4.1.3"
 ecdsa = { version = "0.16.9", default-features = false }
-ed25519-consensus = { version = "2.1.0", default-features = false }
+ed25519-consensus = "2.1.0"
 ed25519-zebra = "4.1.0"
 either = "1.13.0"
 futures = "0.3.31"
@@ -195,3 +198,69 @@ debug = true
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+
+[profile.test.package.curve25519-dalek]
+opt-level = 3
+
+[profile.test.package.aws-lc-rs]
+opt-level = 3
+
+[profile.test.package.aws-lc-sys]
+opt-level = 3
+
+[profile.test.package.blake3]
+opt-level = 3
+
+[profile.test.package.blst]
+opt-level = 3
+
+[profile.test.package.chacha20poly1305]
+opt-level = 3
+
+[profile.test.package.crc]
+opt-level = 3
+
+[profile.test.package.crc-fast]
+opt-level = 3
+
+[profile.test.package.ctutils]
+opt-level = 3
+
+[profile.test.package.crypto-bigint]
+opt-level = 3
+
+[profile.test.package.ecdsa]
+opt-level = 3
+
+[profile.test.package.elliptic-curve]
+opt-level = 3
+
+[profile.test.package.num-bigint]
+opt-level = 3
+
+[profile.test.package.num-integer]
+opt-level = 3
+
+[profile.test.package.num-rational]
+opt-level = 3
+
+[profile.test.package.num-traits]
+opt-level = 3
+
+[profile.test.package.p256]
+opt-level = 3
+
+[profile.test.package.primeorder]
+opt-level = 3
+
+[profile.test.package.rand_chacha]
+opt-level = 3
+
+[profile.test.package.reed-solomon-simd]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
+[profile.test.package.x25519-dalek]
+opt-level = 3

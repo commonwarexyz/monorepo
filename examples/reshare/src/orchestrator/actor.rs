@@ -21,11 +21,12 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock,
-    ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef,
+    spawn_cell,
+    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
-use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
@@ -112,8 +113,7 @@ where
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
-        let latest_epoch = Gauge::default();
-        context.register("latest_epoch", "current epoch", latest_epoch.clone());
+        let latest_epoch = context.gauge("latest_epoch", "current epoch");
 
         (
             Self {
@@ -195,7 +195,7 @@ where
 
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-        let mut engines: BTreeMap<Epoch, (Handle<()>, ContextCell<E>)> = BTreeMap::new();
+        let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
 
         select_loop! {
             self.context,
@@ -251,7 +251,7 @@ where
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                     // Enter the new epoch.
-                    let (handle, scope) = self
+                    let handle = self
                         .enter_epoch(
                             transition.epoch,
                             scheme,
@@ -260,14 +260,14 @@ where
                             &mut resolver_mux,
                         )
                         .await;
-                    engines.insert(transition.epoch, (handle, scope));
+                    engines.insert(transition.epoch, handle);
                     let _ = self.latest_epoch.try_set(transition.epoch.get());
 
                     info!(epoch = %transition.epoch, "entered epoch");
                 }
                 Message::Exit(epoch) => {
                     // Remove the engine and abort it.
-                    let Some((handle, _scope)) = engines.remove(&epoch) else {
+                    let Some(handle) = engines.remove(&epoch) else {
                         warn!(%epoch, "exited non-existent epoch");
                         continue;
                     };
@@ -298,16 +298,15 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
-    ) -> (Handle<()>, ContextCell<E>) {
+    ) -> Handle<()> {
         // Start the new engine
         let elector = L::default();
-        let scope = self
+        let context = self
             .context
             .with_label("consensus_engine")
-            .with_attribute("epoch", epoch)
-            .with_scope();
+            .with_attribute("epoch", epoch);
         let engine = simplex::Engine::new(
-            scope.clone(),
+            context,
             simplex::Config {
                 scheme,
                 elector,
@@ -337,9 +336,6 @@ where
         let vote = vote_mux.register(epoch.get()).await.unwrap();
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
-
-        // Retain the scoped context so its metrics registry stays alive
-        // until the epoch is exited and the engine is aborted.
-        (engine.start(vote, certificate, resolver), scope)
+        engine.start(vote, certificate, resolver)
     }
 }

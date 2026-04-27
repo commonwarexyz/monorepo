@@ -6,22 +6,25 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "external")]
 use crate::Pacer;
+use crate::{
+    child_label,
+    network::metered::Network as MeteredNetwork,
+    prefixed_name,
+    process::metered::Metrics as MeteredProcess,
+    signal::Signal,
+    storage::metered::Storage as MeteredStorage,
+    telemetry::metrics::{
+        add_attribute, raw, task::Label, CounterFamily, GaugeFamily, Metric, Register, Registered,
+        Registry,
+    },
+    utils::{self, signal::Stopper, supervision::Tree, Panicker},
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
+    Spawner as _, StreamOf, METRICS_PREFIX,
+};
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
-};
-use crate::{
-    network::metered::Network as MeteredNetwork,
-    process::metered::Metrics as MeteredProcess,
-    signal::Signal,
-    storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label,
-    utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
-    },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -29,15 +32,10 @@ use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, NZUsize};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry as PrometheusRegistry},
-};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
-    borrow::Cow,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -63,27 +61,24 @@ cfg_if::cfg_if! {
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Family<Label, Counter>,
-    tasks_running: Family<Label, Gauge>,
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
 }
 
 impl Metrics {
-    pub fn init(registry: &mut PrometheusRegistry) -> Self {
-        let metrics = Self {
-            tasks_spawned: Family::default(),
-            tasks_running: Family::default(),
-        };
-        registry.register(
-            "tasks_spawned",
-            "Total number of tasks spawned",
-            metrics.tasks_spawned.clone(),
-        );
-        registry.register(
-            "tasks_running",
-            "Number of tasks currently running",
-            metrics.tasks_running.clone(),
-        );
-        metrics
+    pub fn init(registry: &mut impl Register) -> Self {
+        Self {
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+        }
     }
 }
 
@@ -327,7 +322,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    registry: Mutex<Registry>,
+    registry: Registry,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -363,10 +358,10 @@ impl crate::Runner for Runner {
     {
         // Create a new registry
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let mut builder = Builder::new_multi_thread();
         builder
             .worker_threads(self.cfg.worker_threads)
@@ -385,24 +380,24 @@ impl crate::Runner for Runner {
         //
         // We prefer to collect process metrics outside of `Context` because
         // we are using `runtime_registry` rather than the one provided by `Context`.
-        let process = MeteredProcess::init(runtime_registry);
+        let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             self.cfg.resolved_network_buffer_pool_config(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             self.cfg.resolved_storage_buffer_pool_config(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let iouring_registry =
-                    runtime_registry.sub_registry_with_prefix("iouring_storage");
+                let mut iouring_registry =
+                    runtime_registry.sub_registry("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(
                         IoUringConfig {
@@ -410,10 +405,10 @@ impl crate::Runner for Runner {
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
-                        iouring_registry,
+                        &mut iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             } else {
                 let storage = MeteredStorage::new(
@@ -424,7 +419,7 @@ impl crate::Runner for Runner {
                         ),
                         storage_buffer_pool.clone(),
                     ),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             }
         }
@@ -432,8 +427,8 @@ impl crate::Runner for Runner {
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let iouring_registry =
-                    runtime_registry.sub_registry_with_prefix("iouring_network");
+                let mut iouring_registry =
+                    runtime_registry.sub_registry("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
@@ -451,11 +446,11 @@ impl crate::Runner for Runner {
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(
                         config,
-                        iouring_registry,
+                        &mut iouring_registry,
                         network_buffer_pool.clone(),
                     )
                     .unwrap(),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             } else {
                 let config = TokioNetworkConfig::default()
@@ -465,14 +460,14 @@ impl crate::Runner for Runner {
                     .with_zero_linger(self.cfg.network_cfg.zero_linger);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             }
         }
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            registry,
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -490,7 +485,6 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
-            scope: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
@@ -528,7 +522,6 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -545,7 +538,6 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -695,17 +687,8 @@ impl crate::Metrics for Context {
     }
 
     fn with_label(&self, label: &str) -> Self {
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
         Self {
-            name,
+            name: child_label(&self.name, label),
             ..self.clone()
         }
     }
@@ -719,25 +702,6 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn with_scope(&self) -> Self {
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        // Closure is infallible to avoid panicking in Drop.
-        let executor = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            executor.registry.lock().remove_scope(id);
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
-    }
-
     fn with_span(&self) -> Self {
         Self {
             traced: true,
@@ -745,31 +709,25 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
         let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
+        let help = help.into();
+        let metric = Arc::new(metric);
+        self.executor.registry.register(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
     }
 
     fn encode(&self) -> String {
-        self.executor.registry.lock().encode()
+        self.executor.registry.encode()
     }
 }
 

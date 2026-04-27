@@ -708,18 +708,21 @@ impl BufMut<TrackedOwner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig};
+    use crate::{
+        iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig},
+        telemetry::metrics::Registry,
+    };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use commonware_utils::{NZUsize, NZU32};
-    use prometheus_client::registry::Registry;
     use std::ops::Bound;
 
     fn page_size() -> usize {
         BufferPoolConfig::for_storage().min_size.get()
     }
 
-    fn test_registry() -> Registry {
-        Registry::default()
+    fn test_pool(config: BufferPoolConfig) -> BufferPool {
+        let mut registry = Registry::default();
+        BufferPool::new(config, &mut registry)
     }
 
     fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
@@ -867,8 +870,7 @@ mod tests {
         // Freeze a pooled mutable buffer and verify content is preserved in the
         // resulting immutable view, including slices.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Write data into a pooled buffer.
         let mut buf = pool.try_alloc(11).unwrap();
@@ -892,8 +894,7 @@ mod tests {
     #[should_panic(expected = "range start overflow")]
     fn test_pooled_slice_excluded_start_overflow() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+        let pool = test_pool(test_config(page, page, 1));
 
         let pooled = pool.try_alloc(page).unwrap().freeze();
         let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
@@ -903,8 +904,7 @@ mod tests {
     fn test_bytes_parity_iobuf_buf_trait() {
         // Verify pooled IoBuf matches Bytes semantics for Buf trait methods.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let data: Vec<u8> = (0..100u8).collect();
 
@@ -952,8 +952,7 @@ mod tests {
     fn test_bytes_parity_iobuf_slice() {
         // Verify pooled IoBuf slice behavior matches Bytes for content semantics.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let data: Vec<u8> = (0..32u8).collect();
         let mut pooled_mut = pool.try_alloc(data.len()).unwrap();
@@ -972,8 +971,7 @@ mod tests {
     fn test_bytes_parity_iobuf_split_to() {
         // Verify pooled IoBuf split_to matches Bytes split_to semantics.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+        let pool = test_pool(test_config(page, page, 1));
 
         let mut pooled_mut = pool.try_alloc(8).unwrap();
         pooled_mut.put_slice(b"abcdefgh");
@@ -1001,8 +999,7 @@ mod tests {
     #[should_panic(expected = "split_to out of bounds")]
     fn test_iobuf_split_to_out_of_bounds() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+        let pool = test_pool(test_config(page, page, 1));
 
         let mut pooled_mut = pool.try_alloc(3).unwrap();
         pooled_mut.put_slice(b"abc");
@@ -1014,8 +1011,7 @@ mod tests {
     fn test_bytesmut_parity_buf_trait() {
         // Verify PooledBufMut matches BytesMut semantics for Buf trait.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         bytes.put_slice(&[0xAAu8; 50]);
@@ -1048,8 +1044,7 @@ mod tests {
     fn test_bytesmut_parity_bufmut_trait() {
         // Verify PooledBufMut matches BytesMut semantics for BufMut trait.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         let mut pooled = pool.try_alloc(100).unwrap();
@@ -1080,8 +1075,7 @@ mod tests {
         // Verify PooledBufMut matches BytesMut after advance for truncate,
         // clear, set_len, and put operations.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         // truncate after advance
         {
@@ -1154,8 +1148,7 @@ mod tests {
     fn test_alloc_and_freeze_view_paths() {
         // Allocation edge cases and freeze behavior after advance/clear.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         // Zero-capacity request should round up to the minimum size class.
         let buf = pool.try_alloc(0).expect("zero capacity should succeed");
@@ -1192,8 +1185,7 @@ mod tests {
         // Writing after advancing should append beyond the initialized tail,
         // with the read cursor keeping both old and new data visible.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(b"hello");
@@ -1206,8 +1198,7 @@ mod tests {
     fn test_alignment_after_advance() {
         // Advancing breaks base-pointer alignment, which is expected.
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool(BufferPoolConfig::for_storage());
 
         let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0; 100]);
