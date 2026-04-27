@@ -4,6 +4,7 @@ use crate::merkle::{
     hasher::Hasher,
     mmr::{Error, Family, Location, Proof},
     storage::Storage,
+    RootSpec,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -23,8 +24,9 @@ pub async fn range_proof<
     hasher: &H,
     mmr: &S,
     range: Range<Location>,
+    spec: RootSpec,
 ) -> Result<Proof<D>, Error> {
-    crate::merkle::verification::range_proof(hasher, mmr, range).await
+    crate::merkle::verification::range_proof(hasher, mmr, range, spec).await
 }
 
 /// Analogous to [range_proof] but for a previous database state.
@@ -41,8 +43,9 @@ pub async fn historical_range_proof<
     mmr: &S,
     leaves: Location,
     range: Range<Location>,
+    spec: RootSpec,
 ) -> Result<Proof<D>, Error> {
-    crate::merkle::verification::historical_range_proof(hasher, mmr, leaves, range).await
+    crate::merkle::verification::historical_range_proof(hasher, mmr, leaves, range, spec).await
 }
 
 /// Return an inclusion proof for the elements at the specified locations.
@@ -51,7 +54,8 @@ pub async fn historical_range_proof<
 /// [multi_proof](crate::merkle::verification::multi_proof), specialized for the MMR family.
 pub async fn multi_proof<D: Digest, S: Storage<Family, Digest = D>>(
     mmr: &S,
+    spec: RootSpec,
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {
-    crate::merkle::verification::multi_proof(mmr, locations).await
+    crate::merkle::verification::multi_proof(mmr, spec, locations).await
 }

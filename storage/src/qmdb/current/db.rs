@@ -167,15 +167,15 @@ where
         self.root
     }
 
-    /// Returns the ops tree root.
+    /// Returns the QMDB ops tree root.
     ///
-    /// This is the root of the raw operations log, without the activity bitmap. It is used as the
-    /// sync target because the sync engine verifies batches against the ops root, not the canonical
-    /// root.
+    /// This is the root of the operations log computed using full forward bagging, without the activity bitmap. It
+    /// is used as the sync target because the sync engine verifies batches against the ops root,
+    /// not the canonical root.
     ///
     /// See the [Root structure](super) section in the module documentation.
-    pub fn ops_root(&self) -> H::Digest {
-        self.any.log.root()
+    pub const fn ops_root(&self) -> H::Digest {
+        self.any.root()
     }
 
     /// Returns a witness that this database's canonical root commits to its ops root.
@@ -217,7 +217,7 @@ where
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
-        let ops_root = self.any.log.root();
+        let ops_root = self.any.root();
         OperationProof::new(hasher, self.status.as_ref(), &storage, loc, ops_root).await
     }
 
@@ -239,7 +239,7 @@ where
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
         let storage = self.grafted_storage();
-        let ops_root = self.any.log.root();
+        let ops_root = self.any.root();
         RangeProof::new_with_ops(
             hasher,
             self.status.as_ref(),
@@ -409,7 +409,6 @@ where
             let grafted_prune_pos =
                 Position::try_from(prune_loc_grafted).expect("valid leaf count");
             if prune_loc_grafted > bounds_start {
-                let root = *self.grafted_tree.root();
                 let size = self.grafted_tree.size();
 
                 let mut pinned = BTreeMap::new();
@@ -430,7 +429,7 @@ where
                     );
                 }
                 self.grafted_tree =
-                    Mem::from_pruned_with_retained(root, grafted_prune_pos, pinned, retained);
+                    Mem::from_pruned_with_retained(grafted_prune_pos, pinned, retained);
             }
         }
 
@@ -551,7 +550,7 @@ where
             hasher.clone(),
         );
         let partial_chunk = partial_chunk(self.status.as_ref());
-        let ops_root = self.any.log.root();
+        let ops_root = self.any.root();
         let root = compute_db_root(
             &hasher,
             self.status.as_ref(),
@@ -955,15 +954,10 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
     let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
     let mut grafted_tree = if pruned_chunks > 0 {
         let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
-        Mem::from_components(
-            &grafted_hasher,
-            Vec::new(),
-            grafted_pruning_boundary,
-            pinned_nodes.to_vec(),
-        )
-        .map_err(|_| Error::<F>::DataCorrupted("grafted tree rebuild failed"))?
+        Mem::from_components(Vec::new(), grafted_pruning_boundary, pinned_nodes.to_vec())
+            .map_err(|_| Error::<F>::DataCorrupted("grafted tree rebuild failed"))?
     } else {
-        Mem::new(&grafted_hasher)
+        Mem::new()
     };
 
     // Add each grafted leaf digest.

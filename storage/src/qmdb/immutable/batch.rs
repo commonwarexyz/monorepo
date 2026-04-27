@@ -8,7 +8,7 @@ use crate::{
         any::{batch::lookup_sorted, ValueEncoding},
         immutable::operation::Operation,
         operation::Key,
-        Error,
+        Error, RootSpec,
     },
     translator::Translator,
     Context, Persistable,
@@ -25,7 +25,7 @@ type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
-pub(crate) struct DiffEntry<F: Family, V> {
+pub(crate) struct DiffEntry<F: Family + RootSpec, V> {
     pub(crate) value: V,
     pub(crate) loc: Location<F>,
 }
@@ -38,7 +38,7 @@ pub(crate) struct DiffEntry<F: Family, V> {
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V>
 where
-    F: Family,
+    F: Family + RootSpec,
     K: Key,
     V: ValueEncoding,
     H: CHasher,
@@ -63,9 +63,12 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
+pub struct MerkleizedBatch<F: Family + RootSpec, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>>>,
+
+    /// Cached operations root after applying this batch.
+    pub(super) root: D,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -103,7 +106,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
 where
-    F: Family,
+    F: Family + RootSpec,
     K: Key,
     V: ValueEncoding,
     H: CHasher,
@@ -276,7 +279,17 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(total_size)),
+            inactivity_floor,
+        );
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
+        let root = db
+            .journal
+            .with_mem(|mem| {
+                journal_merkleized.root(mem, &db.journal.hasher, F::root_spec(inactive_peaks))
+            })
+            .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_diffs = Vec::new();
         let mut ancestor_diff_ends = Vec::new();
@@ -294,6 +307,7 @@ where
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
+            root,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
@@ -307,13 +321,13 @@ where
     }
 }
 
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
+impl<F: Family + RootSpec, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
 {
     /// Return the speculative root.
-    pub fn root(&self) -> D {
-        self.journal_batch.root()
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
@@ -431,7 +445,7 @@ where
 
 impl<F, E, K, V, C, H, T> Immutable<F, E, K, V, C, H, T>
 where
-    F: Family,
+    F: Family + RootSpec,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -445,6 +459,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
+            root: self.root,
             diff: Arc::new(Vec::new()),
             parent: None,
             base_size: journal_size,

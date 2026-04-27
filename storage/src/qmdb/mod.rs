@@ -44,8 +44,11 @@
 
 use crate::{
     index::{Cursor, Unordered as Index},
-    journal::contiguous::{Mutable, Reader},
-    merkle::{Family, Location},
+    journal::{
+        contiguous::{Mutable, Reader},
+        Error as JournalError,
+    },
+    merkle::{self, Family, Location, RootSpec as MerkleRootSpec},
     qmdb::operation::Operation,
 };
 use commonware_utils::NZUsize;
@@ -64,10 +67,86 @@ pub mod operation;
 pub mod store;
 pub mod sync;
 pub mod verify;
+
+/// Per-family root spec used by QMDB databases.
+///
+/// QMDB chooses different active-region bagging per family: MMR uses forward bagging and MMB uses
+/// backward bagging (so the active suffix can collapse into a single accumulator under MMB's
+/// pyramid shape).
+///
+/// This trait isolates that consumer choice from the family's structural topology — `Family` itself
+/// stays bagging-agnostic.
+pub trait RootSpec: Family {
+    fn root_spec(inactive_peaks: usize) -> MerkleRootSpec;
+}
+
+impl RootSpec for merkle::mmr::Family {
+    fn root_spec(inactive_peaks: usize) -> MerkleRootSpec {
+        MerkleRootSpec::split_forward(inactive_peaks)
+    }
+}
+
+impl RootSpec for merkle::mmb::Family {
+    fn root_spec(inactive_peaks: usize) -> MerkleRootSpec {
+        MerkleRootSpec::split_backward(inactive_peaks)
+    }
+}
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
+
+/// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
+///
+/// `op_count` must be a non-zero commit-boundary historical size: the operation at `op_count - 1`
+/// must itself be a commit op (one for which `floor_of` returns `Some`).
+///
+/// # Errors
+///
+/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
+///   `op_count - 1` is retained but is not a commit op (either because the caller passed a
+///   non-commit-boundary size, or because pruning removed the commit that would have governed this
+///   size).
+/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
+pub(crate) async fn find_inactivity_floor_at<F, R>(
+    reader: &R,
+    op_count: Location<F>,
+    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
+) -> Result<Location<F>, Error<F>>
+where
+    F: Family,
+    R: Reader,
+{
+    let Some(last_op) = op_count.checked_sub(1) else {
+        return Err(Error::HistoricalFloorPruned(op_count));
+    };
+    let last_op = *last_op;
+    let bounds = reader.bounds();
+    if last_op < bounds.start {
+        return Err(JournalError::ItemPruned(last_op).into());
+    }
+
+    let op = reader.read(last_op).await?;
+    floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))
+}
+
+/// Compute the inactive peak count for a historical operation count.
+pub(crate) async fn inactive_peaks_at<F, R>(
+    reader: &R,
+    op_count: Location<F>,
+    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
+) -> Result<usize, Error<F>>
+where
+    F: Family,
+    R: Reader,
+{
+    if op_count == Location::new(0) {
+        return Ok(0);
+    }
+
+    let floor = find_inactivity_floor_at::<F, _>(reader, op_count, floor_of).await?;
+    Ok(F::inactive_peaks(F::location_to_position(op_count), floor))
+}
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
@@ -126,6 +205,17 @@ pub enum Error<F: Family> {
     /// last readable commit from the journal.
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
+
+    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
+    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
+    /// proof matching the historical root.
+    ///
+    /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
+    /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
+    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
+    /// commit that would have governed the size.
+    #[error("historical floor pruned for size: {0}")]
+    HistoricalFloorPruned(Location<F>),
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {

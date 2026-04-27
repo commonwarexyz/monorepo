@@ -10,7 +10,7 @@ use commonware_storage::{
     mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
-        verify_proof,
+        verify_proof, RootSpec,
     },
     translator::TwoCap,
 };
@@ -122,7 +122,7 @@ fn db_config(
 
 /// Assign locations to pending keys based on sorted order (matching BTreeMap
 /// iteration in `merkleize()`).
-fn assign_pending_locations<F: MerkleFamily>(
+fn assign_pending_locations<F: MerkleFamily + RootSpec>(
     pending: &[(Digest, Vec<u8>)],
     base: Location<F>,
     keys_set: &mut Vec<(Digest, Location<F>)>,
@@ -137,7 +137,7 @@ fn assign_pending_locations<F: MerkleFamily>(
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::seeded(input.seed);
 
     runner.start(|context| {
@@ -269,7 +269,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             last_commit_loc = Some(db.bounds().await.end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
-                                let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
+                                let _ = verify_proof(
+                                    &hasher,
+                                    &proof,
+                                    safe_start,
+                                    &ops,
+                                    &root,
+                                    F::root_spec(proof.inactive_peaks),
+                                );
                             }
                         }
                     }

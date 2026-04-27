@@ -58,7 +58,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let mut leaf_locations = Vec::with_capacity(leaves);
                             let h = StandardHasher::<Sha256>::new();
 
-                            let mut mem = Mem::<F, _>::new(&h);
+                            let mut mem = Mem::<F, _>::new();
                             let batch = {
                                 let mut batch = mem.new_batch();
                                 for _ in 0..leaves {

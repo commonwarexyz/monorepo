@@ -215,9 +215,9 @@
 //!
 //! This combines two (or three) components into a single hash:
 //!
-//! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
-//!   root). Used for state sync, where a client downloads operations and verifies each batch
-//!   against this root using standard Merkle range proofs.
+//! - **QMDB ops root**: The root of the operations tree computed using full forward bagging (the inner
+//!   [crate::qmdb::any] database's root). Used for state sync, where a client downloads operations
+//!   and verifies each batch against this root using QMDB range proofs.
 //!
 //! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
 //!   with ops subtree roots). Used for proofs about operation values and their activity status.
@@ -227,10 +227,11 @@
 //!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
-//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
-//! verifies batches against the ops root, not the canonical root.
+//! The QMDB ops root is returned by the `sync::Database` trait's `root()` method, since the sync
+//! engine verifies batches against the ops root, not the canonical root. Current DBs use the
+//! ops root computed using full forward bagging until split grafting is supported.
 //!
-//! For state sync, the sync engine targets the ops root and verifies each batch against it.
+//! For state sync, the sync engine targets the QMDB ops root and verifies each batch against it.
 //! After sync, the bitmap and grafted tree are reconstructed deterministically from the
 //! operations, and the canonical root is computed. [proof::OpsRootWitness] can be used to validate
 //! that a particular ops root is committed by a trusted canonical root; the sync engine does not
@@ -251,6 +252,7 @@ use crate::{
             Config as AnyConfig,
         },
         operation::Committable,
+        RootSpec,
     },
     translator::Translator,
     Context,
@@ -307,7 +309,7 @@ pub(super) async fn init<F, E, U, H, T, I, J, const N: usize>(
     config: Config<T, J::Config>,
 ) -> Result<db::Db<F, E, J, I, H, U, N>, crate::qmdb::Error<F>>
 where
-    F: merkle::Graftable,
+    F: merkle::Graftable + RootSpec,
     E: Context,
     U: Update + Send + Sync,
     H: Hasher,
@@ -343,7 +345,7 @@ where
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init(
+    let any = any::init_full_forward(
         context.with_label("any"),
         config.into(),
         Some(last_known_inactivity_floor),
@@ -375,7 +377,7 @@ where
         hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(&status);
-    let ops_root = any.log.root();
+    let ops_root = any.root();
     let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
@@ -415,6 +417,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            RootSpec,
         },
         translator::Translator,
     };
@@ -495,7 +498,7 @@ pub mod tests {
     }
 
     /// Commit a set of writes as a single batch.
-    async fn commit_writes<F: merkle::Graftable, C: DbAny<F>>(
+    async fn commit_writes<F: merkle::Graftable + RootSpec, C: DbAny<F>>(
         db: &mut C,
         writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)>,
     ) -> Result<(), Error<F>> {
@@ -520,7 +523,7 @@ pub mod tests {
         mut db: C,
     ) -> Result<C, Error<F>>
     where
-        F: merkle::Graftable,
+        F: merkle::Graftable + RootSpec,
         C: DbAny<F>,
         C::Key: TestKey,
         <C as DbAny<F>>::Value: TestValue,
@@ -569,7 +572,7 @@ pub mod tests {
         db: C,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>>>>
     where
-        F: merkle::Graftable + 'static,
+        F: merkle::Graftable + RootSpec + 'static,
         C: DbAny<F> + 'static,
         C::Key: TestKey,
         <C as DbAny<F>>::Value: TestValue,
@@ -588,7 +591,7 @@ pub mod tests {
     /// The factory will be called multiple times to test reopening.
     pub fn test_build_random_close_reopen<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable + RootSpec + 'static,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -653,7 +656,7 @@ pub mod tests {
     /// failure scenarios.
     pub fn test_simulate_write_failures<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable + RootSpec + 'static,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -732,7 +735,7 @@ pub mod tests {
     /// with identical operations but different pruning schedules should have the same root.
     pub fn test_different_pruning_delays_same_root<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable,
+        M: merkle::Graftable + RootSpec,
         C: DbAny<M>,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -807,7 +810,7 @@ pub mod tests {
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
     pub fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable + RootSpec + 'static,
         C: DbAny<M> + BitmapPrunedBits + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -879,7 +882,7 @@ pub mod tests {
     /// persists correctly after close and reopen.
     pub fn test_current_db_build_big<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable,
+        M: merkle::Graftable + RootSpec,
         C: DbAny<M>,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -963,7 +966,7 @@ pub mod tests {
     /// The stale batch must be rejected without mutating the committed state.
     pub fn test_stale_batch_side_effect_free<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable,
+        M: merkle::Graftable + RootSpec,
         C: DbAny<M>,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -1294,7 +1297,7 @@ pub mod tests {
     // Wrapper functions for build_big tests with ordered/unordered expected values.
     fn test_ordered_build_big<M, C, F, Fut>(open_db: F)
     where
-        M: merkle::Graftable,
+        M: merkle::Graftable + RootSpec,
         C: DbAny<M>,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -1306,7 +1309,7 @@ pub mod tests {
 
     fn test_unordered_build_big<M, C, F, Fut>(open_db: F)
     where
-        M: merkle::Graftable,
+        M: merkle::Graftable + RootSpec,
         C: DbAny<M>,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -2529,7 +2532,7 @@ pub mod tests {
     /// the grafted root computation for newly completed chunks.
     pub fn test_speculative_root_matches_committed<M, C, F, Fut>(mut open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable + RootSpec + 'static,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -3529,6 +3532,68 @@ pub mod tests {
 
             db.destroy().await.unwrap();
             ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: a `current::Db` over `mmb::Family` commits its ops root with full-forward
+    /// bagging, so [`crate::qmdb::verify_proof`] must be invoked with
+    /// [`MerkleRootSpec::FULL_FORWARD`] (not the family-default split-backward spec) to accept
+    /// proofs returned by `ops_historical_proof`.
+    #[test_traced("INFO")]
+    fn test_current_mmb_ops_historical_proof_verifies_with_full_forward_spec() {
+        use crate::{
+            merkle::{hasher::Standard, RootSpec as MerkleRootSpec},
+            qmdb::{verify_proof, RootSpec as _},
+        };
+        use commonware_utils::NZU64;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedFixedMmbDb = UnorderedFixedMmbDb::init(
+                ctx.clone(),
+                fixed_config::<OneCap>("mmb-ops-proof", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Apply a batch and commit so an ops historical proof exists.
+            let writes: Vec<(Digest, Option<Digest>)> =
+                (0u64..16).map(|i| (key(i), Some(val(i)))).collect();
+            commit_writes(&mut db, writes).await.unwrap();
+
+            let ops_root = db.ops_root();
+            let historical_size = db.bounds().await.end;
+            let (proof, ops) = db
+                .ops_historical_proof(historical_size, Location::new(0), NZU64!(32))
+                .await
+                .unwrap();
+
+            let hasher = Standard::<Sha256>::new();
+
+            // Verifies under the spec the prover actually used.
+            assert!(verify_proof(
+                &hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root,
+                MerkleRootSpec::FULL_FORWARD,
+            ));
+
+            // Sanity: the family-default split-backward spec — what the old
+            // helper passed implicitly — must not accept this proof, since the
+            // ops root is bagged full-forward.
+            assert!(!verify_proof(
+                &hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root,
+                mmb::Family::root_spec(proof.inactive_peaks),
+            ));
+
+            db.destroy().await.unwrap();
         });
     }
 }

@@ -15,7 +15,7 @@ use commonware_storage::{
             value::FixedEncoding,
             FixedConfig as Config,
         },
-        verify_proof,
+        verify_proof, RootSpec,
     },
     translator::EightCap,
 };
@@ -79,7 +79,7 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(555);
 const PAGE_CACHE_SIZE: usize = 100;
 
-async fn commit_pending<F: MerkleFamily>(
+async fn commit_pending<F: MerkleFamily + RootSpec>(
     db: &mut GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, RawValue>,
@@ -101,7 +101,7 @@ async fn commit_pending<F: MerkleFamily>(
     committed_state.extend(pending_inserts.drain());
 }
 
-fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily + RootSpec>(data: &FuzzInput, suffix: &str) {
     let hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
 
@@ -203,7 +203,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                     &proof,
                                     adjusted_start,
                                     &log,
-                                    &current_root
+                                    &current_root,
+                                    F::root_spec(proof.inactive_peaks),
                                 ),
                                 "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                             );
@@ -219,6 +220,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
                         let proof = Proof {
                             leaves: Location::<F>::new(*proof_leaves),
+                            inactive_peaks: 0,
                             digests: digests.iter().map(|d| Digest::from(*d)).collect(),
                         };
 
@@ -234,7 +236,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                         &proof,
                                         adjusted_start,
                                         &res.1,
-                                        &current_root
+                                        &current_root,
+                                        F::root_spec(proof.inactive_peaks),
                                     );
 
                             }

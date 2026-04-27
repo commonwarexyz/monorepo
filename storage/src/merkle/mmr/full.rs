@@ -25,7 +25,7 @@ pub type Mmr<E, D> = crate::merkle::full::Merkle<Family, E, D>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, Family as _},
+        merkle::{conformance::build_test_mmr, Family as _, RootSpec},
         mmr::{mem, Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -61,9 +61,9 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
             let hasher: Standard<Sha256> = Standard::new();
-            let test_mmr = mem::Mmr::new(&hasher);
+            let test_mmr = mem::Mmr::new();
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root();
+            let expected_root = test_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
 
             let mut mmr = Mmr::init(
                 context.clone(),
@@ -80,7 +80,10 @@ mod tests {
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
             mmr.apply_batch(&batch).unwrap();
-            assert_eq!(mmr.root(), *expected_root);
+            assert_eq!(
+                mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+                expected_root
+            );
 
             mmr.destroy().await.unwrap();
         });
@@ -91,11 +94,18 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new();
-            let peek = Mmr::<_, Digest>::peek_root(context.clone(), test_config(&context), &hasher)
-                .await
-                .unwrap();
+            let peek = Mmr::<_, Digest>::peek_root(
+                context.clone(),
+                test_config(&context),
+                &hasher,
+                RootSpec::FULL_FORWARD,
+            )
+            .await
+            .unwrap();
 
-            let empty_root = *mem::Mmr::new(&hasher).root();
+            let empty_root = mem::Mmr::new()
+                .root(&hasher, RootSpec::FULL_FORWARD)
+                .unwrap();
             assert_eq!(peek, Some((Location::new(0), Location::new(0), empty_root)));
         });
     }
@@ -122,9 +132,9 @@ mod tests {
 
             // Rewind one node at a time without syncing until empty, confirming the root matches.
             for i in (0..NUM_ELEMENTS).rev() {
-                assert!(mmr.rewind(1, &hasher).await.is_ok());
-                let root = mmr.root();
-                let mut reference_mmr = mem::Mmr::new(&hasher);
+                assert!(mmr.rewind(1).await.is_ok());
+                let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+                let mut reference_mmr = mem::Mmr::new();
                 let batch = {
                     let mut batch = reference_mmr.new_batch();
                     for j in 0..i {
@@ -137,12 +147,12 @@ mod tests {
                 reference_mmr.apply_batch(&batch).unwrap();
                 assert_eq!(
                     root,
-                    *reference_mmr.root(),
+                    reference_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
                     "root mismatch after rewind at {i}"
                 );
             }
-            assert!(matches!(mmr.rewind(1, &hasher).await, Err(Error::Empty)));
-            assert!(mmr.rewind(0, &hasher).await.is_ok());
+            assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
+            assert!(mmr.rewind(0).await.is_ok());
 
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
             // cached to uncached leaves, and rewind 2 at a time instead of just 1.
@@ -172,17 +182,17 @@ mod tests {
             }
 
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
-                assert!(mmr.rewind(2, &hasher).await.is_ok(), "at position {i:?}");
-                let root = mmr.root();
-                let reference_mmr = mem::Mmr::new(&hasher);
+                assert!(mmr.rewind(2).await.is_ok(), "at position {i:?}");
+                let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+                let reference_mmr = mem::Mmr::new();
                 let reference_mmr = build_test_mmr(&hasher, reference_mmr, i);
                 assert_eq!(
                     root,
-                    *reference_mmr.root(),
+                    reference_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
                     "root mismatch at position {i:?}"
                 );
             }
-            assert!(matches!(mmr.rewind(99, &hasher).await, Err(Error::Empty)));
+            assert!(matches!(mmr.rewind(99).await, Err(Error::Empty)));
 
             // Repeat one more time only after pruning the MMR first.
             {
@@ -208,17 +218,16 @@ mod tests {
             let prune_pos = Position::try_from(prune_loc).unwrap();
             mmr.prune(prune_loc).await.unwrap();
             // Rewind enough nodes to cause the mem-mmr to be completely emptied, and then some.
-            mmr.rewind(80, &hasher).await.unwrap();
+            mmr.rewind(80).await.unwrap();
             // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
-            mmr.proof(&hasher, prune_loc).await.unwrap();
+            mmr.proof(&hasher, prune_loc, RootSpec::FULL_FORWARD)
+                .await
+                .unwrap();
             // prune all remaining leaves 1 at a time.
             while mmr.size() > prune_pos {
-                assert!(mmr.rewind(1, &hasher).await.is_ok());
+                assert!(mmr.rewind(1).await.is_ok());
             }
-            assert!(matches!(
-                mmr.rewind(1, &hasher).await,
-                Err(Error::ElementPruned(_))
-            ));
+            assert!(matches!(mmr.rewind(1).await, Err(Error::ElementPruned(_))));
 
             // Make sure pruning to an older location is a no-op.
             assert!(mmr.prune(prune_loc - 1).await.is_ok());
@@ -269,16 +278,24 @@ mod tests {
                 batch_b = batch_b.add(&hasher, &element);
             }
             let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
-            let expected_root = merkleized_b.root();
+            let expected_root = mmr
+                .with_mem(|mem| merkleized_b.root(mem, &hasher, RootSpec::FULL_FORWARD))
+                .unwrap();
 
             // Apply.
             mmr.apply_batch(&merkleized_b).unwrap();
-            assert_eq!(mmr.root(), expected_root);
+            assert_eq!(
+                mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+                expected_root
+            );
 
             // Build a reference in-memory MMR with 20 elements to verify.
-            let empty = mem::Mmr::new(&hasher);
+            let empty = mem::Mmr::new();
             let reference = build_test_mmr(&hasher, empty, 20);
-            assert_eq!(mmr.root(), *reference.root());
+            assert_eq!(
+                mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+                reference.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+            );
 
             mmr.destroy().await.unwrap();
         });
@@ -342,7 +359,7 @@ mod tests {
                 range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
-            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg)
                 .await
                 .unwrap();
 
