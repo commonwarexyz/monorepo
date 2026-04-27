@@ -199,3 +199,24 @@ overflow-checks = true
 
 [profile.test.package.curve25519-dalek]
 opt-level = 3
+
+[profile.test.package.blake3]
+opt-level = 3
+
+[profile.test.package.blst]
+opt-level = 3
+
+[profile.test.package.crypto-bigint]
+opt-level = 3
+
+[profile.test.package.ecdsa]
+opt-level = 3
+
+[profile.test.package.elliptic-curve]
+opt-level = 3
+
+[profile.test.package.p256]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
