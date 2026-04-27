@@ -87,7 +87,6 @@
 //! let (sharing, share) = play::<N3f1>(&mut rng, &info, logs, &player_keys[0], &Sequential)?;
 //! ```
 
-#[allow(dead_code)]
 mod evrf;
 
 use crate::{
