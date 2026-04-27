@@ -76,14 +76,14 @@ impl ProgressMetrics {
         let journal_size = Gauge::default();
         context.register(
             "journal_size",
-            "Current journal size (operations applied) per database",
+            "Current journal size (operations applied)",
             journal_size.clone(),
         );
 
         let target_end = Gauge::default();
         context.register(
             "target_end",
-            "Target range end (operations needed) per database",
+            "Target range end (operations needed)",
             target_end.clone(),
         );
 
