@@ -17,8 +17,7 @@ use commonware_storage::{
     qmdb::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
-            fixed, variable, CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch,
-            Operation,
+            fixed, variable, CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation,
         },
         operation::Key,
         sync::{self, SyncProgress},
@@ -28,8 +27,7 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
-type ImmutableUnjournaledDbHandle<F, E, K, V, H, C> =
-    Arc<AsyncRwLock<CompactDb<F, E, K, V, H, C>>>;
+type ImmutableUnjournaledDbHandle<F, E, K, V, H, C> = Arc<AsyncRwLock<CompactDb<F, E, K, V, H, C>>>;
 
 fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
     let mut latest = None;
@@ -143,8 +141,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, C> UnmerkleizedTrait
-    for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C>
+impl<F, E, K, V, H, C> UnmerkleizedTrait for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C>
 where
     F: Family,
     E: Storage + Clock + Metrics,
@@ -172,8 +169,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, C> MerkleizedTrait
-    for ImmutableUnjournaledMerkleized<F, E, K, V, H, C>
+impl<F, E, K, V, H, C> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, C>
 where
     F: Family,
     E: Storage + Clock + Metrics,
@@ -315,10 +311,10 @@ where
     H: Hasher + 'static,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
     R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, K, FixedEncoding<V>>,
-            Digest = H::Digest,
-        >,
+        Family = F,
+        Op = Operation<F, K, FixedEncoding<V>>,
+        Digest = H::Digest,
+    >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -382,10 +378,10 @@ where
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, K, VariableEncoding<V>>,
-            Digest = H::Digest,
-        >,
+        Family = F,
+        Op = Operation<F, K, VariableEncoding<V>>,
+        Digest = H::Digest,
+    >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -445,15 +441,9 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_storage::merkle::{compact::Config as MerkleConfig, mmr};
-    use commonware_utils::{NZU64, NZUsize};
+    use commonware_utils::{NZUsize, NZU64};
 
-    type FixedDb = fixed::CompactDb<
-        mmr::Family,
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-    >;
+    type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, Digest, Digest, Sha256>;
     type VariableDb = variable::CompactDb<
         mmr::Family,
         deterministic::Context,

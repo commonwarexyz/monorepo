@@ -17,8 +17,7 @@ use commonware_storage::{
     qmdb::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
-            fixed, variable, CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch,
-            Operation,
+            fixed, variable, CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation,
         },
         sync::{self, SyncProgress},
         Error,
@@ -301,11 +300,7 @@ where
     V: FixedValue + 'static,
     H: Hasher + 'static,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-    R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, FixedEncoding<V>>,
-            Digest = H::Digest,
-        >,
+    R: sync::compact::Resolver<Family = F, Op = Operation<F, FixedEncoding<V>>, Digest = H::Digest>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -393,10 +388,10 @@ where
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, VariableEncoding<V>>,
-            Digest = H::Digest,
-        >,
+        Family = F,
+        Op = Operation<F, VariableEncoding<V>>,
+        Digest = H::Digest,
+    >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -487,7 +482,7 @@ mod tests {
         merkle::{compact::Config as MerkleConfig, full::Config as FullMerkleConfig, mmr},
         qmdb::keyless as storage_keyless,
     };
-    use commonware_utils::{sequence::U64, NZU16, NZU64, NZUsize};
+    use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
     use std::time::Duration;
 
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256>;
@@ -537,7 +532,10 @@ mod tests {
         }
     }
 
-    fn full_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> storage_keyless::fixed::Config {
+    fn full_fixed_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> storage_keyless::fixed::Config {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
             merkle: FullMerkleConfig {
@@ -626,10 +624,11 @@ mod tests {
                 .await
                 .unwrap();
             let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor);
+            let batch =
+                source
+                    .new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&source, Some(U64::new(9)), floor);
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
 
@@ -665,10 +664,11 @@ mod tests {
             .unwrap();
 
             let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor);
+            let batch =
+                source
+                    .new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&source, Some(U64::new(9)), floor);
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let first_target = sync::compact::Target {
@@ -677,10 +677,11 @@ mod tests {
             };
 
             let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(8))
-                .merkleize(&source, Some(U64::new(10)), floor);
+            let batch = source.new_batch().append(U64::new(8)).merkleize(
+                &source,
+                Some(U64::new(10)),
+                floor,
+            );
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let second_target = sync::compact::Target {
@@ -722,19 +723,21 @@ mod tests {
             .unwrap();
 
             let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor);
+            let batch =
+                source
+                    .new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&source, Some(U64::new(9)), floor);
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
             let stale_target = source.current_target();
 
             let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(8))
-                .merkleize(&source, Some(U64::new(10)), floor);
+            let batch = source.new_batch().append(U64::new(8)).merkleize(
+                &source,
+                Some(U64::new(10)),
+                floor,
+            );
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
             let latest_target = source.current_target();
@@ -791,19 +794,19 @@ mod tests {
                 .unwrap();
 
             let floor = db.inactivity_floor_loc();
-            let batch = db
-                .new_batch()
-                .append(U64::new(1))
-                .merkleize(&db, Some(U64::new(11)), floor);
+            let batch =
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, Some(U64::new(11)), floor);
             db.apply_batch(batch).unwrap();
             db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
 
             let floor = db.inactivity_floor_loc();
-            let batch = db
-                .new_batch()
-                .append(U64::new(2))
-                .merkleize(&db, Some(U64::new(22)), floor);
+            let batch =
+                db.new_batch()
+                    .append(U64::new(2))
+                    .merkleize(&db, Some(U64::new(22)), floor);
             db.apply_batch(batch).unwrap();
             db.sync().await.unwrap();
             let second_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;

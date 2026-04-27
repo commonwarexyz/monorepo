@@ -921,6 +921,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
