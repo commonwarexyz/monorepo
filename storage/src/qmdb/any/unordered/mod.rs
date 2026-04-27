@@ -57,64 +57,34 @@ where
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_db_any! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
+    [F, E, K, V, C, I, H] Db<F, E, C, I, H, Update<K, V>>
     where {
+        F: crate::merkle::Family,
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmr::Family, K, V>>,
-        I: Index<Value = crate::mmr::Location> + Send + Sync + 'static,
+        C: PersistableMutableLog<Operation<F, K, V>>,
+        I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
         H: Hasher,
-        Operation<crate::merkle::mmr::Family, K, V>: Codec,
+        Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
     }
-    Family = crate::merkle::mmr::Family, Key = K, Value = V::Value, Digest = H::Digest
+    Family = F, Key = K, Value = V::Value, Digest = H::Digest
 }
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_provable! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
+    [F, E, K, V, C, I, H] Db<F, E, C, I, H, Update<K, V>>
     where {
+        F: crate::merkle::Family,
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmr::Family, K, V>>,
-        I: Index<Value = crate::mmr::Location> + Send + Sync + 'static,
+        C: PersistableMutableLog<Operation<F, K, V>>,
+        I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
         H: Hasher,
-        Operation<crate::merkle::mmr::Family, K, V>: Codec,
+        Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
     }
-    Family = crate::merkle::mmr::Family, Operation = Operation<crate::merkle::mmr::Family, K, V>
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_db_any! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmb::Family, E, C, I, H, Update<K, V>>
-    where {
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmb::Family, K, V>>,
-        I: Index<Value = crate::merkle::Location<crate::merkle::mmb::Family>> + Send + Sync + 'static,
-        H: Hasher,
-        Operation<crate::merkle::mmb::Family, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = crate::merkle::mmb::Family, Key = K, Value = V::Value, Digest = H::Digest
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_provable! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmb::Family, E, C, I, H, Update<K, V>>
-    where {
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmb::Family, K, V>>,
-        I: Index<Value = crate::merkle::Location<crate::merkle::mmb::Family>> + Send + Sync + 'static,
-        H: Hasher,
-        Operation<crate::merkle::mmb::Family, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = crate::merkle::mmb::Family, Operation = Operation<crate::merkle::mmb::Family, K, V>
+    Family = F, Operation = Operation<F, K, V>
 }

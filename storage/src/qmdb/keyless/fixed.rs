@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::Family,
+    merkle::{hasher::Standard as StandardHasher, Family},
     qmdb::{
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
@@ -25,10 +25,16 @@ pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
 pub type Db<F, E, V, H> =
     super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H>;
 
+/// A compact keyless authenticated db for fixed-size data.
+pub type CompactDb<F, E, V, H> = super::CompactDb<F, E, FixedEncoding<V>, H>;
+
 type Journal<F, E, V, H> = authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H>;
 
 /// Configuration for a fixed-size [keyless](super) authenticated db.
 pub type Config = super::Config<JournalConfig>;
+
+/// Configuration for a fixed-size [keyless](super) compact db.
+pub type CompactConfig = super::CompactConfig<()>;
 
 impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher> Db<F, E, V, H> {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
@@ -37,6 +43,16 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher> Db<F, E,
         let journal: Journal<F, E, V, H> =
             Journal::new(context, cfg.merkle, cfg.log, Operation::<F, V>::is_commit).await?;
         Self::init_from_journal(journal).await
+    }
+}
+
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher> CompactDb<F, E, V, H> {
+    /// Returns a [CompactDb] initialized from `cfg`.
+    pub async fn init(context: E, cfg: CompactConfig) -> Result<Self, Error<F>> {
+        let merkle =
+            crate::merkle::compact::Merkle::init(context, &StandardHasher::<H>::new(), cfg.merkle)
+                .await?;
+        Self::init_from_merkle(merkle, ()).await
     }
 }
 
@@ -61,7 +77,7 @@ mod test {
     fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::merkle::journaled::Config {
+            merkle: crate::merkle::full::Config {
                 journal_partition: format!("fixed-journal-{suffix}"),
                 metadata_partition: format!("fixed-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -79,6 +95,8 @@ mod test {
     }
 
     type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
+    type TestCompactDb<F> =
+        CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
@@ -90,6 +108,19 @@ mod test {
     ) -> TestDb<F> {
         let cfg = db_config(suffix, &context);
         TestDb::init(context, cfg).await.unwrap()
+    }
+
+    async fn open_compact<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) -> TestCompactDb<F> {
+        let cfg = CompactConfig {
+            merkle: crate::merkle::compact::Config {
+                partition: "compact-keyless-fixed".into(),
+                thread_pool: None,
+            },
+            commit_codec_config: (),
+        };
+        TestCompactDb::init(context, cfg).await.unwrap()
     }
 
     fn reopen<F: crate::merkle::Family>() -> tests::Reopen<TestDb<F>> {
@@ -182,6 +213,62 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
             tests::test_keyless_db_metadata(db).await;
+        });
+    }
+
+    async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
+        ctx: deterministic::Context,
+    ) {
+        let mut db = open_db::<F>(ctx.with_label("db")).await;
+        let mut compact = open_compact::<F>(ctx.with_label("compact")).await;
+        assert_eq!(db.root(), compact.root());
+
+        let v1 = commonware_utils::sequence::U64::new(1);
+        let v2 = commonware_utils::sequence::U64::new(2);
+        let metadata = commonware_utils::sequence::U64::new(99);
+
+        let floor = db.inactivity_floor_loc();
+        let retained = db
+            .new_batch()
+            .append(v1.clone())
+            .append(v2.clone())
+            .merkleize(&db, Some(metadata.clone()), floor);
+        let compact_batch = compact.new_batch().append(v1).append(v2).merkleize(
+            &compact,
+            Some(metadata.clone()),
+            floor,
+        );
+
+        assert_eq!(retained.root(), compact_batch.root());
+
+        db.apply_batch(retained).await.unwrap();
+        compact.apply_batch(compact_batch).unwrap();
+        db.commit().await.unwrap();
+        compact.commit().await.unwrap();
+
+        assert_eq!(db.root(), compact.root());
+        assert_eq!(compact.get_metadata(), Some(metadata.clone()));
+
+        drop(compact);
+        let reopened = open_compact::<F>(ctx.with_label("reopen")).await;
+        assert_eq!(db.root(), reopened.root());
+        assert_eq!(reopened.get_metadata(), Some(metadata));
+
+        reopened.destroy().await.unwrap();
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_compact_root_compatibility() {
+        deterministic::Runner::default().start(|ctx| async move {
+            assert_compact_root_compatibility::<mmr::Family>(ctx).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_compact_root_compatibility_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            assert_compact_root_compatibility::<mmb::Family>(ctx).await;
         });
     }
 

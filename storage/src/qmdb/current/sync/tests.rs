@@ -23,6 +23,7 @@ use commonware_macros::test_traced;
 use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Metrics as _, Runner as _,
 };
+use commonware_utils::non_empty_range;
 use rand::RngCore as _;
 
 // ===== Harness Implementations =====
@@ -558,6 +559,78 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             .destroy()
             .await
             .unwrap();
+    });
+}
+
+#[test_traced]
+fn test_current_has_local_target_state_rejects_target_before_local_lower_bound() {
+    type Db = crate::qmdb::current::unordered::variable::Db<
+        crate::merkle::mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        32,
+    >;
+
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context: Context| async move {
+        let suffix = context.next_u64().to_string();
+        let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+        let mut db: Db = Db::init(context.with_label("db"), config.clone())
+            .await
+            .unwrap();
+
+        let key = Digest::from([9u8; 32]);
+        for round in 0..300u64 {
+            let merkleized = db
+                .new_batch()
+                .write(key, Some(Digest::from([round as u8; 32])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+        }
+        let prune_loc = crate::merkle::Location::new(256);
+        assert!(db.sync_boundary() >= prune_loc);
+        db.prune(prune_loc).await.unwrap();
+
+        let bounds = db.bounds().await;
+        let local_start = bounds.start;
+        let local_end = bounds.end;
+        let sync_root = SyncDatabase::root(&db);
+
+        assert!(local_start > crate::merkle::Location::new(0));
+
+        let stale_target = crate::qmdb::sync::Target {
+            root: sync_root,
+            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        };
+        assert!(
+            !<Db as SyncDatabase>::has_local_target_state(
+                context.with_label("probe_stale"),
+                &config,
+                &stale_target,
+            )
+            .await
+        );
+
+        let matching_target = crate::qmdb::sync::Target {
+            root: sync_root,
+            range: non_empty_range!(local_start, local_end),
+        };
+        assert!(
+            <Db as SyncDatabase>::has_local_target_state(
+                context.with_label("probe_matching"),
+                &config,
+                &matching_target,
+            )
+            .await
+        );
+
+        db.destroy().await.unwrap();
     });
 }
 

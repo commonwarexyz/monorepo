@@ -7,7 +7,7 @@ use commonware_runtime::{Handle, IoBufs, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const REQUEST_BUFFER_SIZE: usize = 64;
 const RECV_BUFFER_SIZE: usize = 64;
@@ -97,7 +97,17 @@ async fn run_loop<E, Si, St, M>(
                         let _ = sender.send(Ok(message));
                     }
                 }
-                Err(_) => { /* ignore */ }
+                Err(_) => {
+                    recv_handle.abort();
+                    warn!(
+                        pending_count = pending_requests.len(),
+                        "failed to decode response; terminating I/O task"
+                    );
+                    for (_, sender) in pending_requests.drain() {
+                        let _ = sender.send(Err(Error::InvalidResponse));
+                    }
+                    return;
+                }
             }
         },
     }

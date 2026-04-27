@@ -16,7 +16,10 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::Metrics as _;
+use commonware_runtime::{
+    telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
+    Metrics as _,
+};
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -61,6 +64,32 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishRequested,
     /// The finish signal channel was closed
     FinishChannelClosed,
+}
+
+/// Progress gauges updated by the sync engine.
+struct ProgressMetrics {
+    journal_size: Gauge,
+    target_end: Gauge,
+}
+
+impl ProgressMetrics {
+    /// Register sync progress metrics on the provided context.
+    fn new(context: &impl commonware_runtime::Metrics) -> Self {
+        let journal_size =
+            context.gauge("journal_size", "Current journal size (operations applied)");
+        let target_end = context.gauge("target_end", "Target range end (operations needed)");
+
+        Self {
+            journal_size,
+            target_end,
+        }
+    }
+
+    /// Update progress gauges from the current engine snapshot.
+    fn record(&self, journal_size: u64, target_end: u64) {
+        let _ = self.journal_size.try_set(journal_size);
+        let _ = self.target_end.try_set(target_end);
+    }
 }
 
 /// Result from a fetch operation with its request ID and starting location.
@@ -230,6 +259,9 @@ where
     /// proceeding, so backpressure can pause progress at target.
     reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
 
+    /// Progress gauges updated after target updates and batch application.
+    progress_metrics: ProgressMetrics,
+
     /// Whether explicit finish has been requested.
     finish_requested: bool,
 
@@ -285,6 +317,7 @@ where
         )
         .await?;
 
+        let progress_metrics = ProgressMetrics::new(&config.context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
@@ -307,8 +340,10 @@ where
             reached_target_tx: config.reached_target_tx,
             finish_requested: false,
             reached_current_target_reported: false,
+            progress_metrics,
         };
         engine.schedule_requests().await?;
+        engine.record_progress().await;
         Ok(engine)
     }
 
@@ -481,6 +516,12 @@ where
             }
         }
         self.reached_current_target_reported = true;
+    }
+
+    /// Record a progress snapshot in metrics.
+    async fn record_progress(&self) {
+        self.progress_metrics
+            .record(self.journal.size().await, *self.target.range.end());
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -708,6 +749,7 @@ where
                 validate_update(&self.target, &new_target)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
+                updated_self.record_progress().await;
                 updated_self.schedule_requests().await?;
                 Ok(NextStep::Continue(updated_self))
             }
@@ -724,6 +766,7 @@ where
                 self.handle_fetch_result(fetch_result)?;
                 self.schedule_requests().await?;
                 self.apply_operations().await?;
+                self.record_progress().await;
                 Ok(NextStep::Continue(self))
             }
         }

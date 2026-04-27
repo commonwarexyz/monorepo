@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::{self, hasher::Standard as StandardHasher, journaled, Location},
+    merkle::{self, full, hasher::Standard as StandardHasher, Location},
     qmdb::{
         self,
         any::{
@@ -49,15 +49,15 @@ pub(crate) mod tests;
 
 /// Returns whether persisted local state already matches the requested sync target.
 ///
-/// Shared across [crate::qmdb::any] and [crate::qmdb::current] sync because both
-/// build on the same operations-tree layout and share the same merkle partition.
-/// Verifies only that the persisted tree size and root match; the merkle pruning
-/// boundary is not re-checked. Callers must keep their local pruning point at or
-/// below `target.range.start()` or a later
-/// [`qmdb::sync::Database::from_sync_result`] rebuild may fail.
+/// Shared helper for [crate::qmdb::any] sync implementations, which can reuse persisted
+/// state by checking only the operations-tree size and root.
+///
+/// [crate::qmdb::current] performs an additional lower-bound check because its grafted-state
+/// reconstruction depends on the persisted pruning point remaining at or below
+/// `target.range.start()`.
 pub async fn has_local_target_state<F, E, H>(
     context: E,
-    merkle_config: journaled::Config,
+    merkle_config: full::Config,
     target: &qmdb::sync::Target<F, H::Digest>,
 ) -> bool
 where
@@ -66,7 +66,7 @@ where
     H: Hasher,
 {
     let hasher = StandardHasher::<H>::new();
-    let peek = journaled::Journaled::<F, _, _>::peek_root(
+    let peek = full::Merkle::<F, _, _>::peek_root(
         context.with_label("local_target_probe"),
         merkle_config,
         &hasher,
@@ -84,7 +84,7 @@ where
 /// Shared helper to build a [Db] from sync components.
 async fn build_db<F, E, U, I, H, C, T>(
     context: E,
-    merkle_config: journaled::Config,
+    merkle_config: full::Config,
     log: C,
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -103,9 +103,9 @@ where
 {
     let hasher = StandardHasher::<H>::new();
 
-    let merkle = journaled::Journaled::<F, _, _>::init_sync(
+    let merkle = full::Merkle::<F, _, _>::init_sync(
         context.with_label("merkle"),
-        journaled::SyncConfig {
+        full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
             pinned_nodes,

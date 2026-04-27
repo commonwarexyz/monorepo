@@ -26,6 +26,8 @@ pub enum ErrorCode {
     DatabaseError,
     /// Network error occurred.
     NetworkError,
+    /// Compact target went stale and should be retried.
+    StaleTarget,
     /// Request timeout.
     Timeout,
     /// Internal server error.
@@ -38,8 +40,9 @@ impl Write for ErrorCode {
             Self::InvalidRequest => 0u8,
             Self::DatabaseError => 1u8,
             Self::NetworkError => 2u8,
-            Self::Timeout => 3u8,
-            Self::InternalError => 4u8,
+            Self::StaleTarget => 3u8,
+            Self::Timeout => 4u8,
+            Self::InternalError => 5u8,
         };
         discriminant.write(buf);
     }
@@ -60,8 +63,9 @@ impl Read for ErrorCode {
             0 => Ok(Self::InvalidRequest),
             1 => Ok(Self::DatabaseError),
             2 => Ok(Self::NetworkError),
-            3 => Ok(Self::Timeout),
-            4 => Ok(Self::InternalError),
+            3 => Ok(Self::StaleTarget),
+            4 => Ok(Self::Timeout),
+            5 => Ok(Self::InternalError),
             _ => Err(Error::InvalidEnum(discriminant)),
         }
     }
@@ -113,9 +117,13 @@ impl Read for ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::net::{request_id::Generator, wire::GetOperationsRequest, ErrorCode};
+    use crate::{
+        keyless_compact,
+        net::{request_id::Generator, wire, wire::GetOperationsRequest, ErrorCode},
+    };
     use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_storage::mmr::Location;
+    use commonware_cryptography::sha256;
+    use commonware_storage::{mmr::Location, qmdb::sync::compact::State};
     use commonware_utils::NZU64;
     use rstest::rstest;
 
@@ -123,6 +131,7 @@ mod tests {
     #[case(ErrorCode::InvalidRequest)]
     #[case(ErrorCode::DatabaseError)]
     #[case(ErrorCode::NetworkError)]
+    #[case(ErrorCode::StaleTarget)]
     #[case(ErrorCode::Timeout)]
     #[case(ErrorCode::InternalError)]
     fn test_error_code_roundtrip_serialization(#[case] error_code: ErrorCode) {
@@ -137,6 +146,7 @@ mod tests {
             (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
             (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
             (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
+            (ErrorCode::StaleTarget, ErrorCode::StaleTarget) => {}
             (ErrorCode::Timeout, ErrorCode::Timeout) => {}
             (ErrorCode::InternalError, ErrorCode::InternalError) => {}
             _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
@@ -181,5 +191,41 @@ mod tests {
             request.validate(),
             Err(crate::Error::InvalidRequest(_))
         ));
+    }
+
+    #[test]
+    fn test_get_compact_state_response_roundtrip() {
+        let request_id = Generator::new().next();
+        let digest_a = sha256::Digest::from([7; 32]);
+        let digest_b = sha256::Digest::from([8; 32]);
+        let digest_c = sha256::Digest::from([10; 32]);
+        let message = wire::Message::GetCompactStateResponse(wire::GetCompactStateResponse {
+            request_id,
+            state: State {
+                leaf_count: Location::new(11),
+                pinned_nodes: vec![digest_a, digest_b],
+                last_commit_op: keyless_compact::Operation::Commit(None, Location::new(0)),
+                last_commit_proof: commonware_storage::mmr::Proof {
+                    leaves: Location::new(11),
+                    digests: vec![digest_c],
+                },
+            },
+        });
+
+        let encoded = message.encode().to_vec();
+        let decoded = wire::Message::<
+            keyless_compact::Operation,
+            commonware_cryptography::sha256::Digest,
+        >::decode(&encoded[..])
+        .expect("failed to decode compact response");
+
+        match decoded {
+            wire::Message::GetCompactStateResponse(response) => {
+                assert_eq!(response.request_id, request_id);
+                assert_eq!(response.state.leaf_count, Location::new(11));
+                assert_eq!(response.state.pinned_nodes.len(), 2);
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
     }
 }

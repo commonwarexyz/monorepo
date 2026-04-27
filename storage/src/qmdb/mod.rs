@@ -54,6 +54,7 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
+pub(crate) mod compact_witness;
 #[cfg(test)]
 mod conformance;
 pub mod current;
