@@ -8,11 +8,11 @@
 use crate::{
     index::ordered::Index,
     journal::contiguous::variable::Journal,
-    merkle::{self, Location},
+    merkle::{Family, Location},
     qmdb::{
         any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error,
+        Error, RootSpec,
     },
     translator::Translator,
     Context,
@@ -28,7 +28,7 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, VariableEncoding<V>>;
 pub type Db<F, E, K, V, H, T> =
     super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
 
-impl<F: merkle::Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator>
+impl<F: Family + RootSpec, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator>
     Db<F, E, K, V, H, T>
 where
     Operation<F, K, V>: Codec,
@@ -53,11 +53,11 @@ pub mod partitioned {
     use crate::{
         index::partitioned::ordered::Index,
         journal::contiguous::variable::Journal,
-        merkle::{self, Location},
+        merkle::{Family, Location},
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error,
+            Error, RootSpec,
         },
         translator::Translator,
         Context,
@@ -84,7 +84,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: merkle::Family,
+            F: Family + RootSpec,
             E: Context,
             K: Key,
             V: VariableValue,
@@ -564,10 +564,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{
-                mmr::{self, full::Mmr},
-                Family as _,
-            },
+            merkle::mmr::{self, full::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

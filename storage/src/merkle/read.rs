@@ -22,9 +22,6 @@ pub trait Readable: Send + Sync {
     /// Digest of the node at `pos`, or `None` if pruned / out of bounds.
     fn get_node(&self, pos: Position<Self::Family>) -> Option<Self::Digest>;
 
-    /// Root digest of the structure.
-    fn root(&self) -> Self::Digest;
-
     /// Leaf location up to which pruning has been performed, or 0 if never pruned.
     fn pruning_boundary(&self) -> Location<Self::Family>;
 
@@ -64,10 +61,6 @@ impl<T: Readable> Readable for Arc<T> {
 
     fn get_node(&self, pos: Position<Self::Family>) -> Option<Self::Digest> {
         (**self).get_node(pos)
-    }
-
-    fn root(&self) -> Self::Digest {
-        (**self).root()
     }
 
     fn pruning_boundary(&self) -> Location<Self::Family> {

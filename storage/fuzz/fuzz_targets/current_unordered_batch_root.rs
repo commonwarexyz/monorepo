@@ -6,7 +6,10 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, R
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable},
-    qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
+    qmdb::{
+        current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
+        RootSpec,
+    },
     translator::OneCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -107,7 +110,7 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
+fn fuzz_family<F: Graftable + RootSpec>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
     let test_name = test_name.to_string();

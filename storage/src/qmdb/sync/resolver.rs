@@ -92,7 +92,7 @@ macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
         impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
@@ -131,7 +131,7 @@ macro_rules! impl_resolver {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
@@ -170,7 +170,7 @@ macro_rules! impl_resolver {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
@@ -229,7 +229,7 @@ macro_rules! impl_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
         impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -268,7 +268,7 @@ macro_rules! impl_resolver_immutable {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -307,7 +307,7 @@ macro_rules! impl_resolver_immutable {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -358,7 +358,7 @@ macro_rules! impl_resolver_keyless {
     ($db:ident, $op:ident, $val_bound:ident) => {
         impl<F, E, V, H> Resolver for Arc<$db<F, E, V, H>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -394,7 +394,7 @@ macro_rules! impl_resolver_keyless {
 
         impl<F, E, V, H> Resolver for Arc<AsyncRwLock<$db<F, E, V, H>>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -430,7 +430,7 @@ macro_rules! impl_resolver_keyless {
 
         impl<F, E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H>>>>
         where
-            F: Family,
+            F: Family + qmdb::RootSpec,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,

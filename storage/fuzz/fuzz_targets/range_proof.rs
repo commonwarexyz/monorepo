@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::merkle::{
     hasher::Standard,
     mem::{Config, Mem},
-    mmb, mmr, Family as MerkleFamily, Location,
+    mmb, mmr, Family as MerkleFamily, Location, RootSpec,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -34,7 +34,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     };
 
     let hasher = Standard::<Sha256>::new();
-    let Ok(merkle) = Mem::<F, Digest>::init(config, &hasher) else {
+    let Ok(merkle) = Mem::<F, Digest>::init(config) else {
         return;
     };
 
@@ -44,7 +44,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
 
     let leaves = merkle.leaves();
     if leaves > 0 {
-        let _ = merkle.range_proof(&hasher, Location::<F>::new(0)..leaves);
+        let _ = merkle.range_proof(
+            &hasher,
+            Location::<F>::new(0)..leaves,
+            RootSpec::FULL_FORWARD,
+        );
     }
 }
 
