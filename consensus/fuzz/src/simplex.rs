@@ -120,7 +120,7 @@ impl Simplex for SimplexSecp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard};
+    use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard, N4F1C3};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
 
@@ -135,6 +135,7 @@ mod tests {
             required_containers: containers,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
+            configuration: N4F1C3,
         }
     }
 
