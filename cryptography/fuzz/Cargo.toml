@@ -18,6 +18,7 @@ commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 crc.workspace = true
+ed25519-consensus.workspace = true
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 num-rational.workspace = true
