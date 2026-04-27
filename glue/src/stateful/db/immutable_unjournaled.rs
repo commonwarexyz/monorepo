@@ -20,7 +20,7 @@ use commonware_storage::{
             fixed, variable, CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation,
         },
         operation::Key,
-        sync::{self, SyncProgress},
+        sync::{self},
         Error,
     },
 };
@@ -327,7 +327,6 @@ where
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
-        _progress_tx: Option<mpsc::Sender<SyncProgress>>,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         loop {
@@ -394,7 +393,6 @@ where
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
-        _progress_tx: Option<mpsc::Sender<SyncProgress>>,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         loop {
@@ -554,7 +552,6 @@ mod tests {
                 None,
                 None,
                 sync_config(),
-                None,
             )
             .await
             .unwrap();

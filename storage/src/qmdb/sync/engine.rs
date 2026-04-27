@@ -8,7 +8,7 @@ use crate::{
             error::EngineError,
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
-            target::{validate_update, SyncProgress},
+            target::validate_update,
             Database, DbResolver, Error as SyncError, Journal, Target,
         },
     },
@@ -177,12 +177,6 @@ where
     /// requests after target updates. Set to 0 to disable (all retained
     /// requests will be re-fetched).
     pub max_retained_roots: usize,
-
-    /// Optional channel for reporting sync progress after each batch of
-    /// operations is applied or the target is updated.
-    ///
-    /// The engine uses `send_lossy` so a dropped receiver never stalls sync.
-    pub progress_tx: Option<mpsc::Sender<SyncProgress>>,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
 pub(crate) struct Engine<DB, R>
@@ -273,9 +267,6 @@ where
 
     /// Tracks whether the current target has already been reported as reached.
     reached_current_target_reported: bool,
-
-    /// Optional channel for reporting sync progress.
-    progress_tx: Option<mpsc::Sender<SyncProgress>>,
 }
 
 #[cfg(test)]
@@ -350,7 +341,6 @@ where
             finish_requested: false,
             reached_current_target_reported: false,
             progress_metrics,
-            progress_tx: config.progress_tx,
         };
         engine.schedule_requests().await?;
         engine.record_progress().await;
@@ -532,19 +522,6 @@ where
     async fn record_progress(&self) {
         self.progress_metrics
             .record(self.journal.size().await, *self.target.range.end());
-    }
-
-    /// Send a progress snapshot if a progress channel is configured.
-    async fn report_progress(&mut self) {
-        if let Some(tx) = self.progress_tx.as_ref() {
-            let progress = SyncProgress {
-                journal_size: self.journal.size().await,
-                target_end: *self.target.range.end(),
-            };
-            if !tx.send_lossy(progress).await {
-                self.progress_tx = None;
-            }
-        }
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -773,7 +750,6 @@ where
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress().await;
-                updated_self.report_progress().await;
                 updated_self.schedule_requests().await?;
                 Ok(NextStep::Continue(updated_self))
             }
@@ -791,7 +767,6 @@ where
                 self.schedule_requests().await?;
                 self.apply_operations().await?;
                 self.record_progress().await;
-                self.report_progress().await;
                 Ok(NextStep::Continue(self))
             }
         }

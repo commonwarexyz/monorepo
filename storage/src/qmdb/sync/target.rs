@@ -36,15 +36,6 @@ impl<F: Family, D: Digest> PartialEq for Target<F, D> {
 
 impl<F: Family, D: Digest> Eq for Target<F, D> {}
 
-/// Snapshot of sync progress emitted by the sync engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncProgress {
-    /// Current journal size (operations applied so far).
-    pub journal_size: u64,
-    /// Target range end (total operations needed).
-    pub target_end: u64,
-}
-
 impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);

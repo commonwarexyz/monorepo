@@ -21,7 +21,7 @@ pub mod resolver;
 pub(crate) use resolver::{FetchResult, Resolver};
 
 mod target;
-pub use target::{SyncProgress, Target};
+pub use target::Target;
 
 pub mod compact;
 mod requests;

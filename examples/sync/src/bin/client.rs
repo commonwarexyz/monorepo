@@ -199,7 +199,6 @@ where
                     finish_rx: None,
                     reached_target_tx: None,
                     max_retained_roots: 8,
-                    progress_tx: None,
                 };
             let database: any::Database<_> = sync::sync(sync_config).await?;
             info!(
@@ -241,7 +240,6 @@ where
                     finish_rx: None,
                     reached_target_tx: None,
                     max_retained_roots: 8,
-                    progress_tx: None,
                 };
             let database: current::Database<_> = sync::sync(sync_config).await?;
             info!(
@@ -283,7 +281,6 @@ where
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
-                progress_tx: None,
             };
             let database: immutable::Database<_> = sync::sync(sync_config).await?;
             info!(
@@ -322,7 +319,6 @@ where
                     finish_rx: None,
                     reached_target_tx: None,
                     max_retained_roots: 8,
-                    progress_tx: None,
                 };
             let database: keyless::Database<_> = sync::sync(sync_config).await?;
             info!(

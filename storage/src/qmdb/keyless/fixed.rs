@@ -904,7 +904,6 @@ mod test {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
-                progress_tx: None,
             };
             let synced_db: TestDb<mmr::Family> = sync::sync(config).await.unwrap();
 
