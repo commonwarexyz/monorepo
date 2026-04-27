@@ -1,8 +1,8 @@
 //! Ed25519 implementation of the [crate::Verifier] and [crate::Signer] traits.
 //!
-//! # Validation Rules (ZIP-215)
+//! # Validation Rules (ZIP215)
 //!
-//! This crate follows the [ZIP-215](https://zips.z.cash/zip-0215) specification
+//! This crate follows the [ZIP215](https://zips.z.cash/zip-0215) specification
 //! for Ed25519 signature validation. You can read more about the rationale for
 //! this [here](https://hdevalence.ca/blog/2020-10-04-its-25519am).
 //!

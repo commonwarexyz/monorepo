@@ -54,7 +54,7 @@ impl Signature {
     /// Returns the bytes of the signature.
     ///
     /// This is the same as `.into()`, but does not require type inference.
-    pub fn to_bytes(&self) -> [u8; 64] {
+    pub fn to_bytes(self) -> [u8; 64] {
         let mut bytes = [0; 64];
         bytes[0..32].copy_from_slice(&self.R_bytes[..]);
         bytes[32..64].copy_from_slice(&self.s_bytes[..]);
