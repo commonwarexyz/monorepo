@@ -343,6 +343,7 @@ where
             progress_metrics,
         };
         engine.schedule_requests().await?;
+        engine.record_progress().await;
         Ok(engine)
     }
 
