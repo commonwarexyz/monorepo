@@ -1022,7 +1022,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 
     async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
         context: E,
-        merkle_cfg: crate::merkle::journaled::Config,
+        merkle_cfg: crate::merkle::full::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
     ) -> Result<

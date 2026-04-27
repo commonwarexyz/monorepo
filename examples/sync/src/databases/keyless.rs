@@ -11,13 +11,14 @@ use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
-        journaled::Config as MmrConfig,
+        full::Config as MmrConfig,
         mmr::{self, Location, Proof},
     },
     qmdb::{
         self,
         keyless::{self, fixed},
         operation::Committable,
+        sync::compact,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -57,21 +58,13 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
 
 /// Create deterministic test operations for demonstration purposes.
 ///
-/// Generates Append operations and periodic Commit operations, advancing the inactivity
-/// floor at each commit to the *previous* commit's location. This models a realistic
-/// application that declares older commits inactive over time (enabling pruning) while
-/// always keeping the most recent commit readable.
-pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
+/// Generates Append operations and periodic Commit operations. Every commit in the stream
+/// carries `starting_loc` as its inactivity floor. Pass `0` for a fresh db; for growth, pass
+/// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
+pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
-
-    // The DB's initial commit lands at location 0 before any of these ops are applied.
-    // `op_count` tracks the total ops that will exist on disk (including this initial commit
-    // and everything we push below). `prev_commit_loc` tracks the last commit's location
-    // and is used as the next commit's floor — always <= the next commit's own location, so
-    // the per-commit floor bound is satisfied.
-    let mut op_count: u64 = 1;
-    let mut prev_commit_loc: u64 = 0;
+    let floor = Location::new(starting_loc);
 
     for i in 0..count {
         let value = {
@@ -81,32 +74,26 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         };
 
         operations.push(Operation::Append(value));
-        op_count += 1;
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None, Location::new(prev_commit_loc)));
-            prev_commit_loc = op_count;
-            op_count += 1;
+            operations.push(Operation::Commit(None, floor));
         }
     }
 
-    // Always end with a commit, floor set to the previous commit's location.
-    operations.push(Operation::Commit(
-        Some(Sha256::fill(1)),
-        Location::new(prev_commit_loc),
-    ));
+    // Always end with a commit.
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), floor));
     operations
 }
 
-impl<E> super::Syncable for Database<E>
+impl<E> super::ExampleDatabase for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
     type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_test_operations(count, seed)
+    fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation> {
+        create_test_operations(count, seed, starting_loc)
     }
 
     async fn add_operations(
@@ -136,10 +123,23 @@ where
         Ok(())
     }
 
+    fn current_floor(&self) -> u64 {
+        *self.last_commit_loc()
+    }
+
     fn root(&self) -> Key {
         self.root()
     }
 
+    fn name() -> &'static str {
+        "keyless"
+    }
+}
+
+impl<E> super::Syncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
     async fn size(&self) -> Location {
         self.bounds().await.end
     }
@@ -160,23 +160,31 @@ where
     async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<Key>, qmdb::Error<mmr::Family>> {
         self.pinned_nodes_at(loc).await
     }
+}
 
-    fn name() -> &'static str {
-        "keyless"
+impl<E> super::CompactSyncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    async fn current_target(&self) -> compact::Target<Self::Family, Key> {
+        compact::Target {
+            root: self.root(),
+            leaf_count: self.bounds().await.end,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::databases::Syncable;
+    use crate::databases::ExampleDatabase;
     use commonware_runtime::deterministic;
 
     type KeylessDb = Database<deterministic::Context>;
 
     #[test]
     fn test_create_test_operations() {
-        let ops = <KeylessDb as Syncable>::create_test_operations(5, 12345);
+        let ops = <KeylessDb as ExampleDatabase>::create_test_operations(5, 12345, 0);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
         if let Operation::Commit(Some(_), _) = &ops[5] {
@@ -189,12 +197,12 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Operations should be deterministic based on seed
-        let ops1 = <KeylessDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <KeylessDb as Syncable>::create_test_operations(3, 12345);
+        let ops1 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
+        let ops2 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
         assert_eq!(ops1, ops2);
 
         // Different seeds should produce different operations
-        let ops3 = <KeylessDb as Syncable>::create_test_operations(3, 54321);
+        let ops3 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 54321, 0);
         assert_ne!(ops1, ops3);
     }
 }

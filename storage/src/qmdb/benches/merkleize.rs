@@ -16,7 +16,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, journaled},
+    merkle::{self, full},
     qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
     translator::EightCap,
 };
@@ -255,8 +255,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
-    journaled::Config {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config {
+    full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
