@@ -14,10 +14,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{
-        histogram,
-        status::{CounterExt, GaugeExt, Status},
-    },
+    telemetry::metrics::{histogram, status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
@@ -149,7 +146,7 @@ impl<
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.

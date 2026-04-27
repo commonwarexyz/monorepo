@@ -1,21 +1,24 @@
 use super::{Operation, COMMIT_CONTEXT, SET_CONTEXT};
-use crate::qmdb::{
-    any::{value::VariableEncoding, VariableValue},
-    operation::Key,
+use crate::{
+    merkle::{Family, Location},
+    qmdb::{
+        any::{value::VariableEncoding, VariableValue},
+        operation::Key,
+    },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
 
-impl<K: Key, V: VariableValue> EncodeSize for Operation<K, VariableEncoding<V>> {
+impl<F: Family, K: Key, V: VariableValue> EncodeSize for Operation<F, K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Set(k, v) => k.encode_size() + v.encode_size(),
-            Self::Commit(v) => v.encode_size(),
+            Self::Commit(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
         }
     }
 }
 
-impl<K: Key, V: VariableValue> Write for Operation<K, VariableEncoding<V>> {
+impl<F: Family, K: Key, V: VariableValue> Write for Operation<F, K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Set(k, v) => {
@@ -23,15 +26,16 @@ impl<K: Key, V: VariableValue> Write for Operation<K, VariableEncoding<V>> {
                 k.write(buf);
                 v.write(buf);
             }
-            Self::Commit(v) => {
+            Self::Commit(v, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 v.write(buf);
+                UInt(**floor_loc).write(buf);
             }
         }
     }
 }
 
-impl<K: Key, V: VariableValue> Read for Operation<K, VariableEncoding<V>> {
+impl<F: Family, K: Key, V: VariableValue> Read for Operation<F, K, VariableEncoding<V>> {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -41,7 +45,11 @@ impl<K: Key, V: VariableValue> Read for Operation<K, VariableEncoding<V>> {
                 let value = V::read_cfg(buf, &cfg.1)?;
                 Ok(Self::Set(key, value))
             }
-            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, &cfg.1)?)),
+            COMMIT_CONTEXT => {
+                let metadata = Option::<V>::read_cfg(buf, &cfg.1)?;
+                let floor_loc = Location::read(buf)?;
+                Ok(Self::Commit(metadata, floor_loc))
+            }
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
@@ -50,10 +58,11 @@ impl<K: Key, V: VariableValue> Read for Operation<K, VariableEncoding<V>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::mmr;
     use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize as _};
     use commonware_utils::sequence::U64;
 
-    type VarOp = Operation<U64, VariableEncoding<U64>>;
+    type VarOp = Operation<mmr::Family, U64, VariableEncoding<U64>>;
 
     #[test]
     fn test_operation_encode_decode() {
@@ -67,13 +76,13 @@ mod tests {
         assert_eq!(set_op, decoded);
 
         // Test Commit operation with value
-        let commit_op = VarOp::Commit(Some(value));
+        let commit_op = VarOp::Commit(Some(value), Location::new(100));
         let encoded = commit_op.encode();
         let decoded = VarOp::decode(encoded).unwrap();
         assert_eq!(commit_op, decoded);
 
         // Test Commit operation without value
-        let commit_op = VarOp::Commit(None);
+        let commit_op = VarOp::Commit(None, Location::new(0));
         let encoded = commit_op.encode();
         let decoded = VarOp::decode(encoded).unwrap();
         assert_eq!(commit_op, decoded);
@@ -88,14 +97,18 @@ mod tests {
         assert_eq!(set_op.encode_size(), 1 + U64::SIZE + value.encode_size());
         assert_eq!(set_op.encode().len(), set_op.encode_size());
 
-        let commit_op = VarOp::Commit(Some(value.clone()));
-        assert_eq!(commit_op.encode_size(), 1 + Some(value).encode_size());
-        assert_eq!(commit_op.encode().len(), commit_op.encode_size());
-
-        let commit_op = VarOp::Commit(None);
+        let floor = Location::new(100);
+        let commit_op = VarOp::Commit(Some(value.clone()), floor);
         assert_eq!(
             commit_op.encode_size(),
-            1 + Option::<U64>::None.encode_size()
+            1 + Some(value).encode_size() + UInt(*floor).encode_size()
+        );
+        assert_eq!(commit_op.encode().len(), commit_op.encode_size());
+
+        let commit_op = VarOp::Commit(None, Location::new(0));
+        assert_eq!(
+            commit_op.encode_size(),
+            1 + Option::<U64>::None.encode_size() + UInt(0u64).encode_size()
         );
         assert_eq!(commit_op.encode().len(), commit_op.encode_size());
     }
@@ -128,8 +141,8 @@ mod tests {
 
         let operations: Vec<VarOp> = vec![
             VarOp::Set(key, value.clone()),
-            VarOp::Commit(Some(value)),
-            VarOp::Commit(None),
+            VarOp::Commit(Some(value), Location::new(50)),
+            VarOp::Commit(None, Location::new(0)),
         ];
 
         for op in operations {
@@ -144,29 +157,28 @@ mod tests {
     fn test_operation_variable_key_roundtrip() {
         use commonware_codec::Decode as _;
 
+        type VecOp = Operation<mmr::Family, Vec<u8>, VariableEncoding<U64>>;
+
         let key = vec![1u8, 2, 3, 4, 5];
         let cfg = ((commonware_codec::RangeCfg::from(0..=100usize), ()), ());
 
         // Test Set with variable-length key
-        let set_op = Operation::Set(key, U64::new(42));
+        let set_op = VecOp::Set(key, U64::new(42));
         let encoded = set_op.encode();
         assert_eq!(encoded.len(), set_op.encode_size());
-        let decoded =
-            Operation::<Vec<u8>, VariableEncoding<U64>>::decode_cfg(encoded, &cfg).unwrap();
+        let decoded = VecOp::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(set_op, decoded);
 
         // Test Commit (key-independent, should work the same)
-        let commit_op = Operation::<Vec<u8>, VariableEncoding<U64>>::Commit(Some(U64::new(42)));
+        let commit_op = VecOp::Commit(Some(U64::new(42)), Location::new(10));
         let encoded = commit_op.encode();
-        let decoded =
-            Operation::<Vec<u8>, VariableEncoding<U64>>::decode_cfg(encoded, &cfg).unwrap();
+        let decoded = VecOp::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(commit_op, decoded);
 
         // Test empty key
-        let empty_key_op = Operation::Set(vec![], U64::new(99));
+        let empty_key_op = VecOp::Set(vec![], U64::new(99));
         let encoded = empty_key_op.encode();
-        let decoded =
-            Operation::<Vec<u8>, VariableEncoding<U64>>::decode_cfg(encoded, &cfg).unwrap();
+        let decoded = VecOp::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(empty_key_op, decoded);
     }
 
@@ -175,7 +187,7 @@ mod tests {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
 
-        type VarKeyOp = Operation<Vec<u8>, VariableEncoding<U64>>;
+        type VarKeyOp = Operation<mmr::Family, Vec<u8>, VariableEncoding<U64>>;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<VarOp>,

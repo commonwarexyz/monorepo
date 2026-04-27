@@ -41,8 +41,6 @@ where
     V: Variant,
     S: Scheme,
 {
-    /// Scoped context that keeps this epoch's metrics alive until the cache is dropped.
-    _scope: R,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarized blocks stored by view
@@ -199,35 +197,34 @@ where
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let scope = self
+        let context = self
             .context
             .with_label("cache")
-            .with_attribute("epoch", epoch)
-            .with_scope();
+            .with_attribute("epoch", epoch);
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
-                &scope,
+                &context,
                 &self.cfg,
                 epoch,
                 "verified",
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
-                &scope,
+                &context,
                 &self.cfg,
                 epoch,
                 "notarized",
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
-                &scope,
+                &context,
                 &self.cfg,
                 epoch,
                 "notarizations",
                 S::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
-                &scope,
+                &context,
                 &self.cfg,
                 epoch,
                 "finalizations",
@@ -237,7 +234,6 @@ where
         let existing = self.caches.insert(
             epoch,
             Cache {
-                _scope: scope,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -369,6 +365,16 @@ where
             .get(Identifier::Index(round.view().get()))
             .await
             .expect("failed to get notarization")
+    }
+
+    /// Get the block previously persisted in the verified archive for `round`.
+    pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
+        let cache = self.caches.get(&round.epoch())?;
+        cache
+            .verified_blocks
+            .get(Identifier::Index(round.view().get()))
+            .await
+            .expect("failed to get verified block")
     }
 
     /// Get a finalization from the prunable archive by block digest.

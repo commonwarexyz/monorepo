@@ -40,7 +40,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -165,6 +165,7 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub mailbox: Mailbox<S, H::Variant>,
     pub extra: H::ValidatorExtra,
     pub height: Height,
+    pub actor_handle: commonware_runtime::Handle<()>,
 }
 
 /// Per-validator handle for test operations.
@@ -258,6 +259,13 @@ pub trait TestHarness: 'static + Sized {
         all_handles: &mut [ValidatorHandle<Self>],
     ) -> impl Future<Output = ()> + Send;
 
+    /// Mark a block as certified.
+    fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> impl Future<Output = bool> + Send;
+
     /// Create a finalization certificate.
     fn make_finalization(
         proposal: Proposal<Self::Commitment>,
@@ -312,6 +320,1200 @@ pub trait TestHarness: 'static + Sized {
     ) -> impl Future<Output = ()> + Send;
 }
 
+fn contract_runner(seed: u64) -> deterministic::Runner {
+    deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30))),
+    )
+}
+
+fn restart_cycles_for_seed(seed: u64) -> usize {
+    let mut rng = test_rng_seeded(seed);
+    rng.gen_range(2..=4)
+}
+
+struct HailstormValidator<H: TestHarness> {
+    application: Application<H::ApplicationBlock>,
+    handle: ValidatorHandle<H>,
+    actor_handle: commonware_runtime::Handle<()>,
+}
+
+type CanonicalEntry<H> = (Height, D, Finalization<S, <H as TestHarness>::Commitment>);
+type CanonicalChain<H> = Vec<CanonicalEntry<H>>;
+
+struct HailstormState<'a, H: TestHarness> {
+    validators: &'a mut [Option<HailstormValidator<H>>],
+    canonical: &'a mut CanonicalChain<H>,
+    parent: &'a mut D,
+    parent_commitment: &'a mut H::Commitment,
+    participants: &'a [K],
+    schemes: &'a [S],
+}
+
+fn active_validator_indices<H: TestHarness>(
+    validators: &[Option<HailstormValidator<H>>],
+) -> Vec<usize> {
+    validators
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, validator)| validator.as_ref().map(|_| idx))
+        .collect()
+}
+
+async fn wait_for_validator_height<H: TestHarness>(
+    context: &mut deterministic::Context,
+    validator: &HailstormValidator<H>,
+    height: Height,
+    expected_digest: D,
+    expected_finalization: &Finalization<S, H::Commitment>,
+    label: &str,
+) {
+    loop {
+        let block = validator.handle.mailbox.get_block(height).await;
+        let finalization = validator.handle.mailbox.get_finalization(height).await;
+        if let (Some(block), Some(finalization)) = (block, finalization) {
+            assert_eq!(
+                block.digest(),
+                expected_digest,
+                "{label}: wrong block digest at height {}",
+                height.get()
+            );
+            assert_eq!(
+                finalization.round(),
+                expected_finalization.round(),
+                "{label}: wrong finalization round at height {}",
+                height.get()
+            );
+            assert_eq!(
+                finalization.proposal.payload,
+                expected_finalization.proposal.payload,
+                "{label}: wrong finalization payload at height {}",
+                height.get()
+            );
+            break;
+        }
+        context.sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn assert_validator_matches_canonical<H: TestHarness>(
+    validator: &HailstormValidator<H>,
+    canonical: &[CanonicalEntry<H>],
+    label: &str,
+) {
+    let delivered = validator.application.blocks();
+    for (height, block) in delivered {
+        let (_, expected_digest, _) = canonical
+            .iter()
+            .find(|(expected_height, _, _)| *expected_height == height)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: unexpected delivered block at height {}",
+                    height.get()
+                )
+            });
+        assert_eq!(
+            block.digest(),
+            *expected_digest,
+            "{label}: application delivered wrong digest at height {}",
+            height.get()
+        );
+    }
+
+    if let Some((height, digest)) = validator.application.tip() {
+        let (_, expected_digest, _) = canonical
+            .iter()
+            .find(|(expected_height, _, _)| *expected_height == height)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: unexpected delivered tip at height {}",
+                    height.get()
+                )
+            });
+        assert_eq!(
+            digest,
+            *expected_digest,
+            "{label}: application reported wrong tip digest at height {}",
+            height.get()
+        );
+    }
+
+    for (height, expected_digest, expected_finalization) in canonical {
+        let stored_block = validator
+            .handle
+            .mailbox
+            .get_block(*height)
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: missing finalized block at height {}",
+                    height.get()
+                )
+            });
+        assert_eq!(
+            stored_block.digest(),
+            *expected_digest,
+            "{label}: stored wrong block digest at height {}",
+            height.get()
+        );
+
+        let stored_finalization = validator
+            .handle
+            .mailbox
+            .get_finalization(*height)
+            .await
+            .unwrap_or_else(|| panic!("{label}: missing finalization at height {}", height.get()));
+        assert_eq!(
+            stored_finalization.round(),
+            expected_finalization.round(),
+            "{label}: stored wrong finalization round at height {}",
+            height.get()
+        );
+        assert_eq!(
+            stored_finalization.proposal.payload,
+            expected_finalization.proposal.payload,
+            "{label}: stored wrong finalization payload at height {}",
+            height.get()
+        );
+    }
+
+    if let Some((height, digest, _)) = canonical.last() {
+        assert_eq!(
+            validator.handle.mailbox.get_info(Identifier::Latest).await,
+            Some((*height, *digest)),
+            "{label}: latest info should match the canonical tip",
+        );
+    }
+}
+
+async fn assert_active_validators_match_canonical<H: TestHarness>(
+    validators: &[Option<HailstormValidator<H>>],
+    canonical: &[CanonicalEntry<H>],
+) {
+    for idx in active_validator_indices(validators) {
+        let validator = validators[idx]
+            .as_ref()
+            .expect("active validator should be present");
+        assert_validator_matches_canonical(validator, canonical, &format!("validator_{idx}")).await;
+    }
+}
+
+/// A height that has been driven through propose + verify but has not yet had
+/// its finalization reported to the validators.
+struct PendingHailstormHeight<H: TestHarness> {
+    height: Height,
+    expected_digest: D,
+    finalization: Finalization<S, H::Commitment>,
+    next_parent: D,
+    next_parent_commitment: H::Commitment,
+}
+
+/// Drives one height through the propose and verify phases without reporting
+/// finalization. The returned pending height must be committed via
+/// [`finalize_hailstorm_height`] to advance the canonical chain.
+async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
+    height_value: u64,
+    context: &mut deterministic::Context,
+    state: &mut HailstormState<'_, H>,
+) -> PendingHailstormHeight<H> {
+    let height = Height::new(height_value);
+    let active = active_validator_indices(state.validators);
+    let proposer_idx = active[context.gen_range(0..active.len())];
+    let verifier_count = usize::min(QUORUM as usize, active.len());
+    let verifier_indices = active
+        .iter()
+        .copied()
+        .filter(|idx| *idx != proposer_idx)
+        .choose_multiple(context, verifier_count.saturating_sub(1));
+    let block = H::make_test_block(
+        *state.parent,
+        *state.parent_commitment,
+        height,
+        height_value,
+        state.participants.len() as u16,
+    );
+    let round = Round::new(Epoch::zero(), View::new(height_value));
+    let proposal = Proposal {
+        round,
+        parent: height
+            .previous()
+            .map(|previous| View::new(previous.get()))
+            .unwrap_or(View::zero()),
+        payload: H::commitment(&block),
+    };
+    let expected_digest = H::digest(&block);
+    let finalization = H::make_finalization(proposal.clone(), state.schemes, QUORUM);
+
+    {
+        let proposer = state.validators[proposer_idx]
+            .as_mut()
+            .expect("proposer should be active");
+        H::propose(&mut proposer.handle, round, &block).await;
+        H::report_notarization(
+            &mut proposer.handle.mailbox,
+            H::make_notarization(proposal, state.schemes, QUORUM),
+        )
+        .await;
+    }
+
+    for verifier_idx in verifier_indices.iter().copied() {
+        let verifier = state.validators[verifier_idx]
+            .as_mut()
+            .expect("verifier should be active");
+        H::verify(&mut verifier.handle, round, &block, &mut []).await;
+    }
+
+    PendingHailstormHeight {
+        height,
+        expected_digest,
+        finalization,
+        next_parent: expected_digest,
+        next_parent_commitment: H::commitment(&block),
+    }
+}
+
+/// Reports the finalization for a previously-driven pending height to every
+/// currently-active validator, waits for them to reach the height, and updates
+/// the canonical chain.
+async fn finalize_hailstorm_height<H: TestHarness>(
+    pending: PendingHailstormHeight<H>,
+    context: &mut deterministic::Context,
+    state: &mut HailstormState<'_, H>,
+) {
+    let PendingHailstormHeight {
+        height,
+        expected_digest,
+        finalization,
+        next_parent,
+        next_parent_commitment,
+    } = pending;
+
+    for idx in active_validator_indices(state.validators) {
+        let validator = state.validators[idx]
+            .as_mut()
+            .expect("validator should remain active");
+        H::report_finalization(&mut validator.handle.mailbox, finalization.clone()).await;
+    }
+
+    state
+        .canonical
+        .push((height, expected_digest, finalization));
+    *state.parent = next_parent;
+    *state.parent_commitment = next_parent_commitment;
+
+    let (_, _, expected_finalization) = state
+        .canonical
+        .last()
+        .expect("canonical chain should contain the new height");
+    for idx in active_validator_indices(state.validators) {
+        let validator = state.validators[idx]
+            .as_ref()
+            .expect("validator should be active");
+        wait_for_validator_height(
+            context,
+            validator,
+            height,
+            expected_digest,
+            expected_finalization,
+            &format!("validator_{idx}"),
+        )
+        .await;
+    }
+}
+
+async fn advance_hailstorm_to<H: TestHarness>(
+    target: u64,
+    context: &mut deterministic::Context,
+    state: &mut HailstormState<'_, H>,
+) {
+    for height_value in (state.canonical.len() as u64 + 1)..=target {
+        let pending = drive_hailstorm_height_up_to_verify(height_value, context, state).await;
+        finalize_hailstorm_height(pending, context, state).await;
+    }
+
+    assert_active_validators_match_canonical(state.validators, state.canonical).await;
+}
+
+/// Stress marshal with repeated validator crashes and recoveries while a
+/// canonical finalized chain continues to advance.
+pub fn hailstorm<H: TestHarness>(
+    seed: u64,
+    shutdowns: usize,
+    interval: u64,
+    max_down: usize,
+    link: Link,
+) -> String {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(H::finalize_timeout())),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                .await;
+        setup_network_links(&mut oracle, &participants, link.clone()).await;
+
+        let mut validators = Vec::new();
+        for (idx, validator) in participants.iter().enumerate() {
+            let setup = H::setup_validator(
+                context.with_label(&format!("validator_{idx}")),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[idx].clone()),
+            )
+            .await;
+            validators.push(Some(HailstormValidator::<H> {
+                application: setup.application,
+                handle: ValidatorHandle {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                },
+                actor_handle: setup.actor_handle,
+            }));
+        }
+
+        let mut canonical = CanonicalChain::<H>::new();
+        let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut target_height = 0u64;
+        let max_interval = interval.max(1);
+        let max_down = max_down.max(1);
+
+        for shutdown_idx in 0..shutdowns {
+            let leadup = context.gen_range(1..=max_interval);
+            target_height += leadup;
+
+            // Pick validators to crash and compute how far the advance should
+            // run before aborting them. `crash_after == leadup` fires the
+            // crash after every new height has fully finalized; any smaller
+            // value lands mid-cycle, after `verified` / `certified` have
+            // returned for the post-crash height but before finalization is
+            // reported for it.
+            let active_pre = active_validator_indices(&validators);
+            let down_limit = usize::min(max_down, active_pre.len().saturating_sub(1));
+            let down_count = context.gen_range(1..=down_limit.max(1));
+            let mut selected = active_pre
+                .iter()
+                .copied()
+                .choose_multiple(&mut context, down_count);
+            selected.sort_unstable();
+            let crash_after = context.gen_range(0..=leadup);
+            let persisted_height = target_height - leadup + crash_after;
+
+            {
+                let mut state = HailstormState {
+                    validators: &mut validators,
+                    canonical: &mut canonical,
+                    parent: &mut parent,
+                    parent_commitment: &mut parent_commitment,
+                    participants: &participants,
+                    schemes: &schemes,
+                };
+                advance_hailstorm_to(persisted_height, &mut context, &mut state).await;
+            }
+
+            // Crash mid-advance: drive propose + verify for the next height
+            // and abort the selected validators before reporting
+            // finalization. If `crash_after == leadup - 1` the crash still
+            // happens after the last height's finalization because the loop
+            // below is a no-op.
+            let pending = if persisted_height < target_height {
+                let mut state = HailstormState {
+                    validators: &mut validators,
+                    canonical: &mut canonical,
+                    parent: &mut parent,
+                    parent_commitment: &mut parent_commitment,
+                    participants: &participants,
+                    schemes: &schemes,
+                };
+                Some(
+                    drive_hailstorm_height_up_to_verify(
+                        persisted_height + 1,
+                        &mut context,
+                        &mut state,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+
+            for idx in selected.iter().copied() {
+                let crashed = validators[idx]
+                    .take()
+                    .expect("selected validator should be active");
+                crashed.actor_handle.abort();
+                let _ = crashed.actor_handle.await;
+            }
+
+            if let Some(pending) = pending {
+                let mut state = HailstormState {
+                    validators: &mut validators,
+                    canonical: &mut canonical,
+                    parent: &mut parent,
+                    parent_commitment: &mut parent_commitment,
+                    participants: &participants,
+                    schemes: &schemes,
+                };
+                finalize_hailstorm_height(pending, &mut context, &mut state).await;
+            }
+
+            info!(
+                seed,
+                shutdown_idx,
+                ?selected,
+                down_count,
+                persisted_height,
+                leadup,
+                crash_after,
+                "marshal hailstorm shutdown"
+            );
+
+            let downtime = context.gen_range(1..=max_interval);
+            target_height += downtime;
+            let mut state = HailstormState {
+                validators: &mut validators,
+                canonical: &mut canonical,
+                parent: &mut parent,
+                parent_commitment: &mut parent_commitment,
+                participants: &participants,
+                schemes: &schemes,
+            };
+            advance_hailstorm_to(target_height, &mut context, &mut state).await;
+
+            for idx in selected.iter().copied() {
+                let restarted = H::setup_validator(
+                    context.with_label(&format!("validator_{idx}_restart_{shutdown_idx}")),
+                    &mut oracle,
+                    participants[idx].clone(),
+                    ConstantProvider::new(schemes[idx].clone()),
+                )
+                .await;
+                assert_eq!(
+                    restarted.height,
+                    Height::new(persisted_height),
+                    "validator {idx} should recover its persisted finalized height before replay"
+                );
+
+                let mut restarted = HailstormValidator::<H> {
+                    application: restarted.application,
+                    handle: ValidatorHandle {
+                        mailbox: restarted.mailbox,
+                        extra: restarted.extra,
+                    },
+                    actor_handle: restarted.actor_handle,
+                };
+                for (_, _, finalization) in canonical.iter().skip(persisted_height as usize) {
+                    H::report_finalization(&mut restarted.handle.mailbox, finalization.clone())
+                        .await;
+                }
+                validators[idx] = Some(restarted);
+            }
+
+            for idx in selected.iter().copied() {
+                let validator = validators[idx]
+                    .as_ref()
+                    .expect("restarted validator should be active");
+                for (height, digest, finalization) in canonical.iter() {
+                    wait_for_validator_height(
+                        &mut context,
+                        validator,
+                        *height,
+                        *digest,
+                        finalization,
+                        &format!("validator_{idx}_restarted"),
+                    )
+                    .await;
+                }
+            }
+            assert_active_validators_match_canonical(&validators, &canonical).await;
+            info!(
+                seed,
+                shutdown_idx,
+                ?selected,
+                target_height,
+                downtime,
+                "marshal hailstorm recovered"
+            );
+        }
+
+        context.auditor().state()
+    })
+}
+
+/// Contract: `marshal.proposed(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
+pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let digest = H::digest(&block);
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let block = block.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                )
+                .await;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                };
+                H::propose(&mut handle, round, &block).await;
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_verified(round)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.proposed() returning true must imply \
+                                     get_verified(round) recovers the block after restart \
+                                     (seed={seed}, cycle={cycle})"
+                                    )
+                                });
+                        assert_eq!(
+                            recovered.digest(),
+                            digest,
+                            "get_verified(round) must return the proposed block \
+                             (seed={seed}, cycle={cycle})"
+                        );
+                        assert!(
+                            restarted.mailbox.get_block(&digest).await.is_some(),
+                            "get_block(&digest) must also recover the proposed block \
+                             (seed={seed}, cycle={cycle})"
+                        );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
+/// Contract: `marshal.verified(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
+pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let digest = H::digest(&block);
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let block = block.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                )
+                .await;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                };
+                let mut peers: [ValidatorHandle<H>; 0] = [];
+                H::verify(&mut handle, round, &block, &mut peers).await;
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_verified(round)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.verified() returning true must imply \
+                                     get_verified(round) recovers the block after restart \
+                                     (seed={seed}, cycle={cycle})"
+                                    )
+                                });
+                        assert_eq!(
+                            recovered.digest(),
+                            digest,
+                            "get_verified(round) must return the verified block \
+                             (seed={seed}, cycle={cycle})"
+                        );
+                        assert!(
+                            restarted.mailbox.get_block(&digest).await.is_some(),
+                            "get_block(&digest) must also recover the verified block \
+                             (seed={seed}, cycle={cycle})"
+                        );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
+/// Contract: `marshal.certified(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
+///
+/// Complements [`verified_success_implies_recoverable_after_restart`] by
+/// exercising the `Message::Certified -> cache_block -> put_sync` handshake.
+/// A regression that acked before syncing the notarized cache would surface
+/// here as a missing block after restart.
+pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let digest = H::digest(&block);
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let block = block.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                )
+                .await;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                };
+                assert!(
+                    H::certify(&mut handle, round, &block).await,
+                    "certify must ack"
+                );
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_block(&digest)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.certified() returning true must imply \
+                                     get_block(&digest) recovers the block after restart \
+                                     (seed={seed}, cycle={cycle})"
+                                    )
+                                });
+                        assert_eq!(
+                            recovered.digest(),
+                            digest,
+                            "get_block(&digest) must return the certified block \
+                             (seed={seed}, cycle={cycle})"
+                        );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
+/// Regression: when the same block is verified at an earlier view and later
+/// certified at a much later view (epoch-boundary reproposal), both writes
+/// must land so retention can prune the earlier view without losing the
+/// block. A naive "skip the sibling write if the block's digest is already
+/// present in the other archive" optimization is unsafe because the two
+/// archives prune per-view on the same boundary: if the block lives only in
+/// `verified_blocks[V_early]` and never gets written to
+/// `notarized_blocks[V_late]`, advancing retention past V_early drops the
+/// block even though V_late is still within the window.
+pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let application = setup.application;
+        let mut handle = ValidatorHandle::<H> {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // A repeated block that we will verify at an early view and certify
+        // at a later view. Its height is intentionally well beyond the chain
+        // we'll drive below, so it never enters the finalized archive via
+        // gap repair and lives solely in the prunable caches.
+        let repeated = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(5_000),
+            9_999,
+            NUM_VALIDATORS as u16,
+        );
+        let repeated_digest = H::digest(&repeated);
+
+        // Negative control: a verify-only block at a distinct early view.
+        // Placing `orphan` at V=2 (instead of V=1, where `repeated` already
+        // occupies the verified index) guarantees the write actually lands in
+        // `verified_blocks[V=2]` rather than being silently dropped as a
+        // duplicate index. Because it is never certified, it lives solely in
+        // that verified entry and must disappear once retention pruning
+        // advances past V=2. Asserting it is gone (after asserting it was
+        // present before pruning) confirms the prune actually fires at the
+        // expected floor.
+        let orphan = H::make_test_block(
+            Sha256::hash(b"orphan"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(6_000),
+            9_998,
+            NUM_VALIDATORS as u16,
+        );
+        let orphan_digest = H::digest(&orphan);
+
+        // Verify `repeated` at V=1, then certify at V=25 (reproposal-style gap).
+        // The chain below starts at V=3 to avoid overwriting V=1 (`repeated`)
+        // or V=2 (`orphan`) in the verified archive (which drops subsequent
+        // writes at an existing view).
+        let v_early = Round::new(Epoch::zero(), View::new(1));
+        let v_orphan = Round::new(Epoch::zero(), View::new(2));
+        let v_late = Round::new(Epoch::zero(), View::new(25));
+        let mut peers: [ValidatorHandle<H>; 0] = [];
+        H::verify(&mut handle, v_early, &repeated, &mut peers).await;
+        assert!(
+            H::certify(&mut handle, v_late, &repeated).await,
+            "certify must ack"
+        );
+
+        // Verify `orphan` at its own distinct view V=2 (no certify).
+        H::verify(&mut handle, v_orphan, &orphan, &mut peers).await;
+        assert!(
+            handle.mailbox.get_block(&orphan_digest).await.is_some(),
+            "negative control assumes `orphan` is present before pruning; \
+             if it is not, the V=2 write was dropped and the post-prune \
+             assertion would pass vacuously"
+        );
+
+        // Drive the finalized chain forward to advance `last_processed_round`
+        // past V=2's retention boundary but not past V=25's. With
+        // view_retention_timeout=10 and prunable_items_per_section=10, the
+        // prune floor snaps down to the section boundary and evicts V=1 and
+        // V=2 while leaving V=25 intact.
+        const CHAIN_LEN: u64 = 21;
+        let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        for i in 1..=CHAIN_LEN {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let digest = H::digest(&block);
+            let commitment = H::commitment(&block);
+            let round = Round::new(Epoch::zero(), View::new(i + 2));
+            H::propose(&mut handle, round, &block).await;
+            let proposal = Proposal {
+                round,
+                parent: View::new(i),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            H::report_finalization(&mut handle.mailbox, finalization).await;
+            parent = digest;
+            parent_commitment = commitment;
+        }
+        while (application.blocks().len() as u64) < CHAIN_LEN {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        context.sleep(Duration::from_millis(100)).await;
+
+        // Negative control: the verify-only orphan at V=2 must be gone, which
+        // proves retention pruning actually evicted the early-view entries at
+        // the expected floor.
+        assert!(
+            handle.mailbox.get_block(&orphan_digest).await.is_none(),
+            "verify-only block at V=2 must be evicted by retention pruning"
+        );
+
+        // The repeated block must still be retrievable: verified_blocks[V=1]
+        // has been pruned, but notarized_blocks[V=25] still holds it.
+        let recovered = handle.mailbox.get_block(&repeated_digest).await;
+        assert!(
+            recovered.is_some(),
+            "block certified at V=25 must survive retention pruning of V=1"
+        );
+        assert_eq!(recovered.unwrap().digest(), repeated_digest);
+    });
+}
+
+/// Regression: when a leader equivocates, a validator may verify one block
+/// (A) and then certify a different block (B) at the same round. `verified()`
+/// and `certified()` must write to distinct archives so both blocks are
+/// retained and retrievable; otherwise the second write collides on the same
+/// prunable-archive index (`skip_if_index_exists=true`) and is silently
+/// dropped despite the mailbox returning success.
+pub fn certify_persists_equivocated_block<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle::<H> {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let parent = Sha256::hash(b"");
+        let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+
+        // Two distinct blocks at the same height/round (leader equivocation):
+        // distinct timestamps yield distinct digests.
+        let block_a = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            NUM_VALIDATORS as u16,
+        );
+        let digest_a = H::digest(&block_a);
+        let block_b = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            2,
+            NUM_VALIDATORS as u16,
+        );
+        let digest_b = H::digest(&block_b);
+        assert_ne!(digest_a, digest_b, "test requires distinct digests");
+
+        let mut peers: [ValidatorHandle<H>; 0] = [];
+        H::verify(&mut handle, round, &block_a, &mut peers).await;
+        assert!(
+            H::certify(&mut handle, round, &block_b).await,
+            "certified must ack"
+        );
+
+        let got_a = handle.mailbox.get_block(&digest_a).await;
+        assert!(
+            got_a.is_some(),
+            "verified block A must be persisted in verified_blocks"
+        );
+        assert_eq!(got_a.unwrap().digest(), digest_a);
+        let got_b = handle.mailbox.get_block(&digest_b).await;
+        assert!(
+            got_b.is_some(),
+            "certified block B must be persisted despite a verify at the same round"
+        );
+        assert_eq!(got_b.unwrap().digest(), digest_b);
+    });
+}
+
+/// Contract: once marshal has delivered a finalized block to the application,
+/// that finalized block and its certificate must already be durable.
+pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let application = Application::<H::ApplicationBlock>::manual_ack();
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let finalization = H::make_finalization(
+            Proposal::new(round, View::zero(), H::commitment(&block)),
+            &schemes,
+            QUORUM,
+        );
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let application = application.clone();
+            let block = block.clone();
+            let finalization = finalization.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator_with(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                    NZUsize!(1),
+                    application.clone(),
+                )
+                .await;
+                let mut mailbox = setup.mailbox;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: mailbox.clone(),
+                    extra: setup.extra,
+                };
+                let mut peers: [ValidatorHandle<H>; 0] = [];
+                H::verify(&mut handle, round, &block, &mut peers).await;
+                H::report_finalization(&mut mailbox, finalization.clone()).await;
+
+                let height = application.acknowledged().await;
+                assert_eq!(
+                    height,
+                    Height::new(1),
+                    "expected the first delivered finalized block to become visible at height 1 \
+                     before restart (seed={seed})"
+                );
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let expected_round = finalization.round();
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        let recovered = restarted.mailbox.get_block(Height::new(1)).await.expect(
+                            "delivered finalized block must be recoverable after restart \
+                             (seed={seed}, cycle={cycle})",
+                        );
+                        assert_eq!(
+                            recovered.height(),
+                            Height::new(1),
+                            "restart should recover the delivered finalized block by height \
+                         (seed={seed}, cycle={cycle})"
+                        );
+                        assert_eq!(
+                            restarted
+                                .mailbox
+                                .get_finalization(Height::new(1))
+                                .await
+                                .expect(
+                                    "delivered finalization must be recoverable after restart \
+                                 (seed={seed}, cycle={cycle})",
+                                )
+                                .round(),
+                            expected_round,
+                            "restart should recover the delivered finalization by height \
+                         (seed={seed}, cycle={cycle})"
+                        );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
 // =============================================================================
 // Standard Harness Implementation
 // =============================================================================
@@ -323,7 +1525,7 @@ impl TestHarness for StandardHarness {
     type ApplicationBlock = B;
     type Variant = Standard<B>;
     type TestBlock = B;
-    type ValidatorExtra = ();
+    type ValidatorExtra = buffered::Mailbox<K, B>;
     type Commitment = D;
 
     async fn setup_validator(
@@ -482,13 +1684,14 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        actor.start(application.clone(), buffer, resolver);
+        let actor_handle = actor.start(application.clone(), buffer.clone(), resolver);
 
         ValidatorSetup {
             application,
             mailbox,
-            extra: (),
+            extra: buffer,
             height,
+            actor_handle,
         }
     }
 
@@ -519,7 +1722,7 @@ impl TestHarness for StandardHarness {
     }
 
     async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        handle.mailbox.proposed(round, block.clone()).await;
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -528,7 +1731,11 @@ impl TestHarness for StandardHarness {
         block: &B,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
+    }
+
+    async fn certify(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) -> bool {
+        handle.mailbox.certified(round, block.clone()).await
     }
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
@@ -668,13 +1875,13 @@ impl TestHarness for StandardHarness {
         )
         .await;
         let application = Application::<B>::default();
-        actor.start(application.clone(), buffer, resolver);
+        actor.start(application.clone(), buffer.clone(), resolver);
 
-        (mailbox, (), application)
+        (mailbox, buffer, application)
     }
 
     async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 }
 
@@ -700,6 +1907,7 @@ impl TestHarness for InlineHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -725,6 +1933,7 @@ impl TestHarness for InlineHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -764,7 +1973,7 @@ impl TestHarness for InlineHarness {
         StandardHarness::propose(
             &mut ValidatorHandle::<StandardHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -781,13 +1990,29 @@ impl TestHarness for InlineHarness {
         StandardHarness::verify(
             &mut ValidatorHandle::<StandardHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
             &mut [],
         )
         .await;
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> bool {
+        StandardHarness::certify(
+            &mut ValidatorHandle::<StandardHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra.clone(),
+            },
+            round,
+            block,
+        )
+        .await
     }
 
     fn make_finalization(
@@ -855,7 +2080,7 @@ impl TestHarness for InlineHarness {
         StandardHarness::verify_for_prune(
             &mut ValidatorHandle::<StandardHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -886,6 +2111,7 @@ impl TestHarness for DeferredHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -911,6 +2137,7 @@ impl TestHarness for DeferredHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -950,7 +2177,7 @@ impl TestHarness for DeferredHarness {
         InlineHarness::propose(
             &mut ValidatorHandle::<InlineHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -967,13 +2194,29 @@ impl TestHarness for DeferredHarness {
         InlineHarness::verify(
             &mut ValidatorHandle::<InlineHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
             &mut [],
         )
         .await;
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> bool {
+        InlineHarness::certify(
+            &mut ValidatorHandle::<InlineHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra.clone(),
+            },
+            round,
+            block,
+        )
+        .await
     }
 
     fn make_finalization(
@@ -1041,7 +2284,7 @@ impl TestHarness for DeferredHarness {
         InlineHarness::verify_for_prune(
             &mut ValidatorHandle::<InlineHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -1250,13 +2493,14 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-        actor.start(application.clone(), shard_mailbox.clone(), resolver);
+        let actor_handle = actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         ValidatorSetup {
             application,
             mailbox,
             extra: shard_mailbox,
             height,
+            actor_handle,
         }
     }
 
@@ -1302,7 +2546,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        handle.mailbox.proposed(round, block.clone()).await;
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -1311,7 +2555,15 @@ impl TestHarness for CodingHarness {
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+    ) -> bool {
+        handle.mailbox.certified(round, block.clone()).await
     }
 
     fn make_finalization(
@@ -1474,7 +2726,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 }
 

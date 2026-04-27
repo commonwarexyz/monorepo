@@ -7,10 +7,13 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, IoBuf};
+use commonware_runtime::{
+    buffer,
+    telemetry::metrics::{Counter, MetricsExt as _},
+    Blob, Buf, BufMut, BufferPooler, IoBuf,
+};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
-use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
 
@@ -752,28 +755,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         };
 
         // Create metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let unnecessary_writes = Counter::default();
-        let resizes = Counter::default();
-        context.register("puts", "number of put operations", puts.clone());
-        context.register("gets", "number of get operations", gets.clone());
-        context.register(
+        let puts = context.counter("puts", "number of put operations");
+        let gets = context.counter("gets", "number of get operations");
+        let unnecessary_reads = context.counter(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
         );
-        context.register(
+        let unnecessary_writes = context.counter(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            unnecessary_writes.clone(),
         );
-        context.register(
-            "resizes",
-            "number of table resizing operations",
-            resizes.clone(),
-        );
+        let resizes = context.counter("resizes", "number of table resizing operations");
 
         Ok(Self {
             context,

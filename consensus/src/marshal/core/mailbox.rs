@@ -9,6 +9,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_p2p::Recipients;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     vec::NonEmptyVec,
@@ -85,21 +86,30 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
-    /// A request to broadcast a proposed block to peers.
-    Proposed {
-        /// The round in which the block was proposed.
+    /// A request to retrieve the verified block previously persisted for `round`.
+    GetVerified {
+        /// The round to query.
         round: Round,
-        /// The block to broadcast.
-        block: V::Block,
+        /// A channel to send the retrieved block, if any.
+        response: oneshot::Sender<Option<V::Block>>,
     },
-    /// A request to forward a block to a set of peers.
+    /// A request to forward a block to a set of recipients.
     Forward {
         /// The round in which the block was proposed.
         round: Round,
         /// The commitment of the block to forward.
         commitment: V::Commitment,
-        /// The peers to forward the block to.
-        peers: Vec<S::PublicKey>,
+        /// The recipients to forward the block to.
+        recipients: Recipients<S::PublicKey>,
+    },
+    /// A notification that a block has been locally proposed by this node.
+    Proposed {
+        /// The round in which the block was proposed.
+        round: Round,
+        /// The proposed block.
+        block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
     },
     /// A notification that a block has been verified by the application.
     Verified {
@@ -107,6 +117,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The verified block.
         block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
+    },
+    /// A notification that a block has been certified by the application.
+    Certified {
+        /// The round in which the block was certified.
+        round: Round,
+        /// The certified block.
+        block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
@@ -283,18 +304,43 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .map(|block| AncestorStream::new(self.clone(), [V::into_inner(block)]))
     }
 
-    /// Requests that a proposed block is sent to peers.
-    pub async fn proposed(&self, round: Round, block: V::Block) {
+    /// Returns the verified block previously persisted for `round`, if any.
+    pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         self.sender
-            .send_lossy(Message::Proposed { round, block })
-            .await;
+            .request(|response| Message::GetVerified { round, response })
+            .await
+            .flatten()
     }
 
-    /// Notifies the actor that a block has been verified.
-    pub async fn verified(&self, round: Round, block: V::Block) {
+    /// Notifies the actor that a block has been locally proposed, awaiting
+    /// the actor's confirmation that the block has been durably persisted
+    /// before returning.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         self.sender
-            .send_lossy(Message::Verified { round, block })
-            .await;
+            .request(|ack| Message::Proposed { round, block, ack })
+            .await
+            .is_some()
+    }
+
+    /// Notifies the actor that a block has been verified, awaiting the actor's
+    /// confirmation that the block has been durably persisted before returning.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+        self.sender
+            .request(|ack| Message::Verified { round, block, ack })
+            .await
+            .is_some()
+    }
+
+    /// Notifies the actor that a block has been certified, awaiting the actor's
+    /// confirmation that the block has been durably persisted before returning.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
+        self.sender
+            .request(|ack| Message::Certified { round, block, ack })
+            .await
+            .is_some()
     }
 
     /// Sets the sync starting point (advances if higher than current).
@@ -321,13 +367,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         self.sender.send_lossy(Message::Prune { height }).await;
     }
 
-    /// Forward a block to a set of peers.
-    pub async fn forward(&self, round: Round, commitment: V::Commitment, peers: Vec<S::PublicKey>) {
+    /// Forward a block to a set of recipients.
+    pub async fn forward(
+        &self,
+        round: Round,
+        commitment: V::Commitment,
+        recipients: Recipients<S::PublicKey>,
+    ) {
         self.sender
             .send_lossy(Message::Forward {
                 round,
                 commitment,
-                peers,
+                recipients,
             })
             .await;
     }

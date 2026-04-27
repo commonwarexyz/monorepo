@@ -27,6 +27,7 @@ use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
+    range::NonEmptyRange,
     sequence::prefixed_u64::U64,
     sync::{AsyncMutex, RwLock},
 };
@@ -135,7 +136,7 @@ pub struct SyncConfig<F: Family, D: Digest> {
     pub config: Config,
 
     /// Sync range expressed as leaf-aligned bounds.
-    pub range: std::ops::Range<Location<F>>,
+    pub range: NonEmptyRange<Location<F>>,
 
     /// The pinned nodes the structure needs at the pruning boundary (range start), in the order
     /// specified by `Family::nodes_to_pin`. If `None`, the pinned nodes are expected to already be
@@ -151,9 +152,9 @@ pub struct Journaled<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
     /// Stores all unpruned nodes.
     pub(crate) journal: Journal<E, D>,
 
-    /// Stores all "pinned nodes" (pruned nodes required for proving & root generation), and the
-    /// corresponding pruning boundary used to generate them. The metadata remains empty until
-    /// pruning is invoked, and its contents change only when the pruning boundary moves.
+    /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
+    /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
+    /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Serializes concurrent sync calls.
@@ -241,6 +242,86 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         mem.add_pinned_nodes(pinned_nodes);
 
         Ok(())
+    }
+
+    /// Read-only peek at the persisted structure's root and boundaries.
+    ///
+    /// Returns `Ok(None)` when:
+    /// - Journal size is structurally invalid and would require a rewind (i.e.
+    ///   a crash left the structure in an unrecoverable state for a read-only
+    ///   probe).
+    pub async fn peek_root(
+        context: E,
+        cfg: Config,
+        hasher: &impl Hasher<F, Digest = D>,
+    ) -> Result<Option<(Location<F>, Location<F>, D)>, Error<F>> {
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition,
+            items_per_blob: cfg.items_per_blob,
+            write_buffer: cfg.write_buffer,
+            page_cache: cfg.page_cache,
+        };
+        let journal: Journal<E, D> =
+            Journal::init(context.with_label("merkle_journal_peek"), journal_cfg).await?;
+        let journal_size = Position::<F>::new(journal.size().await);
+
+        if journal_size == 0 {
+            let empty_root = *Mem::new(hasher).root();
+            return Ok(Some((Location::new(0), Location::new(0), empty_root)));
+        }
+
+        // Bail if the journal would require a rewind to reach a valid size.
+        // Probe is read-only; the caller will handle recovery via `init`.
+        let last_valid_size = F::to_nearest_size(journal_size);
+        if last_valid_size != journal_size {
+            return Ok(None);
+        }
+
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.with_label("merkle_metadata_peek"),
+            metadata_cfg,
+        )
+        .await?;
+
+        let prune_loc = metadata
+            .get(&U64::new(PRUNED_TO_PREFIX, 0))
+            .map(|bytes| -> Result<Location<F>, Error<F>> {
+                let raw: [u8; 8] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::DataCorrupted("metadata pruned_to is not 8 bytes"))?;
+                Ok(Location::<F>::new(u64::from_be_bytes(raw)))
+            })
+            .transpose()?
+            .unwrap_or_else(|| Location::<F>::new(0));
+        let prune_pos = Position::try_from(prune_loc)?;
+
+        let journal_leaves = Location::try_from(journal_size)?;
+        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
+        let mut mem_pinned_nodes = Vec::new();
+        for pos in nodes_to_pin_mem {
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            mem_pinned_nodes.push(digest);
+        }
+        let mut mem = Mem::init(
+            MemConfig {
+                nodes: vec![],
+                pruning_boundary: journal_leaves,
+                pinned_nodes: mem_pinned_nodes,
+            },
+            hasher,
+        )?;
+
+        if prune_pos < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+        }
+
+        let root = *mem.root();
+        Ok(Some((prune_loc, journal_leaves, root)))
     }
 
     /// Initialize a new `Journaled` instance.
@@ -441,8 +522,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         cfg: SyncConfig<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Self, Error<F>> {
-        let prune_pos = Position::try_from(cfg.range.start)?;
-        let end_pos = Position::try_from(cfg.range.end)?;
+        let prune_pos = Position::try_from(cfg.range.start())?;
+        let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
@@ -469,7 +550,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         }
 
         // Handle existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
         if journal_size > *end_pos {
             return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
         }
@@ -490,7 +570,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            cfg.range.start.as_u64().to_be_bytes().into(),
+            cfg.range.start().as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
@@ -815,10 +895,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     /// Rewind the structure by the given number of leaves.
     ///
     /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
-    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to
-    /// O(log n) pinned peaks. A batch pop would expose new peaks that are not in memory, and
-    /// `merkleize` cannot load them because [`Readable::get_node`] is synchronous. `rewind`
-    /// performs async journal I/O to rebuild state at the target position.
+    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to O(log
+    /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
+    /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
+    /// journal I/O to rebuild state at the target position.
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,
@@ -1069,7 +1149,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
-    use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -1986,7 +2066,7 @@ mod tests {
         // Test fresh start scenario with completely new structure (no existing data)
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(0)..Location::<F>::new(52),
+            range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(52)),
             pinned_nodes: None,
         };
 
@@ -2063,7 +2143,7 @@ mod tests {
         }
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: lower_bound_loc..upper_bound_loc,
+            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
 
@@ -2145,7 +2225,7 @@ mod tests {
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: lower_bound_loc..upper_bound_loc,
+            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
 
@@ -2195,7 +2275,7 @@ mod tests {
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(6)..Location::<F>::new(20),
+            range: non_empty_range!(Location::<F>::new(6), Location::<F>::new(20)),
             pinned_nodes: Some(vec![test_digest(1), test_digest(2), test_digest(3)]),
         };
 
@@ -2399,7 +2479,7 @@ mod tests {
         let prune_loc = Location::<F>::new(32);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: cfg,
-            range: prune_loc..Location::<F>::new(128),
+            range: non_empty_range!(prune_loc, Location::<F>::new(128)),
             pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
         };
 
@@ -2994,7 +3074,7 @@ mod tests {
         // init_sync should recover by rewinding to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(0)..Location::<F>::new(100),
+            range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),
             pinned_nodes: None,
         };
         let sync_mmr =

@@ -93,7 +93,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Provider, TrackedPeers,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Quota, Runner,
+    };
     use commonware_utils::{non_empty_vec, ordered::Set, NZUsize, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
@@ -496,7 +498,7 @@ mod tests {
                 event = cons_out1.recv() => {
                     panic!("fetch should wait for the initial peer set, got {event:?}");
                 },
-                _ = context.sleep(Duration::from_millis(200)) => {}
+                _ = context.sleep(Duration::from_millis(200)) => {},
             };
 
             oracle

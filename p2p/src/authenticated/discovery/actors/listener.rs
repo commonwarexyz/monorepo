@@ -8,12 +8,13 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics,
-    Network, Quota, SinkOf, Spawner, StreamOf,
+    spawn_cell,
+    telemetry::metrics::{Counter, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
+    SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
-use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
@@ -52,29 +53,21 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
-        let handshakes_blocked = Counter::default();
-        context.register(
+        let handshakes_blocked = context.counter(
             "handshakes_blocked",
             "number of handshake attempts blocked because the IP was private",
-            handshakes_blocked.clone(),
         );
-        let handshakes_concurrent_rate_limited = Counter::default();
-        context.register(
+        let handshakes_concurrent_rate_limited = context.counter(
             "handshake_concurrent_rate_limited",
             "number of handshake attempts dropped because maximum concurrent handshakes was reached",
-            handshakes_concurrent_rate_limited.clone(),
         );
-        let handshakes_ip_rate_limited = Counter::default();
-        context.register(
+        let handshakes_ip_rate_limited = context.counter(
             "handshake_ip_rate_limited",
             "number of handshake attempts dropped because an IP exceeded its rate limit",
-            handshakes_ip_rate_limited.clone(),
         );
-        let handshakes_subnet_rate_limited = Counter::default();
-        context.register(
+        let handshakes_subnet_rate_limited = context.counter(
             "handshake_subnet_rate_limited",
             "number of handshake attempts dropped because a subnet exceeded its rate limit",
-            handshakes_subnet_rate_limited.clone(),
         );
 
         Self {
@@ -137,7 +130,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, supervisor).await)
+        spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]

@@ -23,9 +23,9 @@
 
 use crate::{
     iouring::{self},
+    telemetry::metrics::Register,
     utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
-use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
     os::fd::OwnedFd,
@@ -113,7 +113,7 @@ impl Network {
     /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(
         mut cfg: Config,
-        registry: &mut Registry,
+        registry: &mut impl Register,
         pool: BufferPool,
     ) -> Result<Self, Error> {
         // Optimize performance by hinting the kernel that a single task will
@@ -127,15 +127,15 @@ impl Network {
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
-        let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
+        let mut sender_registry = registry.sub_registry("iouring_sender");
         let (send_handle, send_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
+            iouring::IoUringLoop::new(cfg.iouring_config.clone(), &mut sender_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
-        let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
+        let mut receiver_registry = registry.sub_registry("iouring_receiver");
         let (recv_handle, recv_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
+            iouring::IoUringLoop::new(cfg.iouring_config, &mut receiver_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
@@ -484,11 +484,11 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
+        telemetry::metrics::{Register, Registry},
         thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
         Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
-    use prometheus_client::registry::Registry;
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -496,8 +496,17 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    fn test_pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    fn test_pool(scope: &mut impl Register) -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_network(), scope)
+    }
+
+    /// Start a test network with a single shared registry scoped into
+    /// `pool` and `network` sub-prefixes so both components register into
+    /// the same registry.
+    fn test_network(cfg: Config) -> Result<Network, Error> {
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        Network::start(cfg, &mut registry.sub_registry("network"), pool)
     }
 
     #[test]
@@ -512,8 +521,7 @@ mod tests {
     async fn test_trait() {
         // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default(), test_pool())
-                .expect("Failed to start io_uring")
+            test_network(Config::default()).expect("Failed to start io_uring")
         })
         .await;
     }
@@ -523,17 +531,13 @@ mod tests {
     async fn test_stress_trait() {
         // Exercise the io_uring backend under the shared stress suite.
         tests::stress_test_network_trait(|| {
-            Network::start(
-                Config {
-                    iouring_config: iouring::Config {
-                        size: 256,
-                        ..Default::default()
-                    },
+            test_network(Config {
+                iouring_config: iouring::Config {
+                    size: 256,
                     ..Default::default()
                 },
-                &mut Registry::default(),
-                test_pool(),
-            )
+                ..Default::default()
+            })
             .expect("Failed to start io_uring")
         })
         .await;
@@ -542,8 +546,7 @@ mod tests {
     #[tokio::test]
     async fn test_small_send_read_quickly() {
         // Verify a small message is delivered promptly through the buffered recv path.
-        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
-            .expect("Failed to start io_uring");
+        let network = test_network(Config::default()).expect("Failed to start io_uring");
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -574,14 +577,10 @@ mod tests {
         // Verify a top-level recv returns timeout after partial progress stalls.
         // Use a short timeout to make the test fast
         let op_timeout = Duration::from_millis(100);
-        let network = Network::start(
-            Config {
-                read_write_timeout: op_timeout,
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
+        let network = test_network(Config {
+            read_write_timeout: op_timeout,
+            ..Default::default()
+        })
         .expect("Failed to start io_uring");
 
         // Bind a listener
@@ -617,14 +616,10 @@ mod tests {
     async fn test_unbuffered_mode() {
         // Verify disabling the internal read buffer preserves direct recv behavior.
         // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
-        let network = Network::start(
-            Config {
-                read_buffer_size: 0,
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
+        let network = test_network(Config {
+            read_buffer_size: 0,
+            ..Default::default()
+        })
         .expect("Failed to start io_uring");
 
         // Bind a listener
@@ -671,14 +666,10 @@ mod tests {
         // the request is still queued. The request's fd field keeps the socket alive
         // so the OS cannot reuse the FD number.
         let op_timeout = Duration::from_millis(200);
-        let network = Network::start(
-            Config {
-                read_write_timeout: op_timeout,
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
+        let network = test_network(Config {
+            read_write_timeout: op_timeout,
+            ..Default::default()
+        })
         .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -714,8 +705,7 @@ mod tests {
     async fn test_peek_with_buffered_data() {
         // Verify buffered recv calls leave unread bytes visible via peek().
         // Use default buffer size to enable buffering
-        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
-            .expect("Failed to start io_uring");
+        let network = test_network(Config::default()).expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -761,8 +751,11 @@ mod tests {
         // Verify `submit_recv` translates the request state's cumulative total
         // back into the per-call byte count expected by the higher-level recv loop.
         let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
         let handle = std::thread::spawn(move || io_loop.run());
 
         // Build the wrapper directly so the test exercises `submit_recv`
@@ -773,7 +766,7 @@ mod tests {
             submitter,
             Duration::from_secs(1),
             0,
-            test_pool(),
+            pool,
         );
 
         // Pretend the caller already filled two bytes, then complete exactly
@@ -847,14 +840,10 @@ mod tests {
     async fn test_large_recv_skips_internal_buffer() {
         // Verify reads that are at least as large as the internal buffer go
         // straight into the caller-owned output buffer.
-        let network = Network::start(
-            Config {
-                read_buffer_size: 8,
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
+        let network = test_network(Config {
+            read_buffer_size: 8,
+            ..Default::default()
+        })
         .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -879,15 +868,11 @@ mod tests {
     #[tokio::test]
     async fn test_configured_socket_options_cover_accept_and_dial_paths() {
         // Verify both dial and accept exercise the configured socket-option branches.
-        let network = Network::start(
-            Config {
-                tcp_nodelay: Some(true),
-                zero_linger: true,
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
+        let network = test_network(Config {
+            tcp_nodelay: Some(true),
+            zero_linger: true,
+            ..Default::default()
+        })
         .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -906,15 +891,11 @@ mod tests {
     #[tokio::test]
     async fn test_disabled_socket_options_cover_accept_and_dial_paths() {
         // Verify both dial and accept also cover the "do not touch socket options" branches.
-        let network = Network::start(
-            Config {
-                tcp_nodelay: None,
-                zero_linger: false,
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
+        let network = test_network(Config {
+            tcp_nodelay: None,
+            zero_linger: false,
+            ..Default::default()
+        })
         .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -932,8 +913,11 @@ mod tests {
     async fn test_channel_close_fallbacks() {
         // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
         let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
         let recv_handle = submitter.clone();
         drop(io_loop);
 
@@ -954,7 +938,7 @@ mod tests {
             recv_handle,
             Duration::from_secs(1),
             0,
-            test_pool(),
+            pool,
         );
         assert!(matches!(stream.recv(1).await, Err(Error::RecvFailed)));
     }

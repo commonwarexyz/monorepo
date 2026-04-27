@@ -22,7 +22,7 @@ use tracing::error;
 pub type Database<E> = immutable::variable::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = immutable::variable::Operation<Key, Value>;
+pub type Operation = immutable::variable::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
@@ -74,12 +74,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Set(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None));
+            operations.push(Operation::Commit(None, Location::new(0)));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1))));
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), Location::new(0)));
     operations
 }
 
@@ -110,8 +110,8 @@ where
                 Operation::Set(key, value) => {
                     batch = batch.set(key, value);
                 }
-                Operation::Commit(metadata) => {
-                    let merkleized = batch.merkleize(self, metadata);
+                Operation::Commit(metadata, floor) => {
+                    let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
@@ -129,10 +129,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        // For Immutable databases, all retained operations are active,
-        // so the inactivity floor equals the pruning boundary.
-        self.bounds().await.start
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
     }
 
     fn historical_proof(

@@ -4,13 +4,14 @@ use crate::Key;
 use commonware_codec::Encode;
 use commonware_storage::{
     merkle::{self, Location, Proof},
-    qmdb::{self, operation::Operation},
+    qmdb,
 };
 use std::{future::Future, num::NonZeroU64};
 
 pub mod any;
 pub mod current;
 pub mod immutable;
+pub mod keyless;
 
 /// Database type to sync.
 #[derive(Debug, Clone, Copy)]
@@ -18,6 +19,7 @@ pub enum DatabaseType {
     Any,
     Current,
     Immutable,
+    Keyless,
 }
 
 impl std::str::FromStr for DatabaseType {
@@ -28,8 +30,9 @@ impl std::str::FromStr for DatabaseType {
             "any" => Ok(Self::Any),
             "current" => Ok(Self::Current),
             "immutable" => Ok(Self::Immutable),
+            "keyless" => Ok(Self::Keyless),
             _ => Err(format!(
-                "Invalid database type: '{s}'. Must be 'any', 'current', or 'immutable'",
+                "Invalid database type: '{s}'. Must be 'any', 'current', 'immutable', or 'keyless'",
             )),
         }
     }
@@ -41,6 +44,7 @@ impl DatabaseType {
             Self::Any => "any",
             Self::Current => "current",
             Self::Immutable => "immutable",
+            Self::Keyless => "keyless",
         }
     }
 }
@@ -52,7 +56,7 @@ pub trait Syncable: Sized {
     type Family: merkle::Family;
 
     /// The type of operations in the database.
-    type Operation: Operation<Self::Family> + Encode + Sync + 'static;
+    type Operation: Encode + Sync + 'static;
 
     /// Create test operations with the given count and seed.
     /// The returned operations must end with a commit operation.
@@ -71,8 +75,11 @@ pub trait Syncable: Sized {
     /// Get the total number of operations in the database (including pruned operations).
     fn size(&self) -> impl Future<Output = Location<Self::Family>> + Send;
 
-    /// Get the inactivity floor, the location below which all operations are inactive.
-    fn inactivity_floor(&self) -> impl Future<Output = Location<Self::Family>> + Send;
+    /// Get the most recent location from which this database can safely be synced.
+    ///
+    /// Callers constructing a sync target should use this value (or any earlier retained
+    /// location) as the `range.start`.
+    fn sync_boundary(&self) -> impl Future<Output = Location<Self::Family>> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(

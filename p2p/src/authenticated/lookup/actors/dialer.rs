@@ -17,11 +17,12 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Spawner, StreamOf,
+    spawn_cell,
+    telemetry::metrics::{CounterFamily, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
+    StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -65,7 +66,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: Family<metrics::Peer, Counter>,
+    attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
 }
 
 impl<
@@ -74,12 +75,7 @@ impl<
     > Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
-        let attempts = Family::<metrics::Peer, Counter>::default();
-        context.register(
-            "attempts",
-            "The number of dial attempts made to each peer",
-            attempts.clone(),
-        );
+        let attempts = context.family("attempts", "The number of dial attempts made to each peer");
         Self {
             context: ContextCell::new(context),
             queue: Vec::new(),
@@ -104,9 +100,7 @@ impl<
         };
 
         // Increment metrics.
-        self.attempts
-            .get_or_create(&metrics::Peer::new(&peer))
-            .inc();
+        self.attempts.get_or_create_by(&peer).inc();
 
         // Spawn dialer to connect to peer
         self.context.with_label("dialer").spawn({
@@ -157,7 +151,7 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, supervisor).await)
+        spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     async fn run(

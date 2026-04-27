@@ -1,10 +1,11 @@
 //! Server that serves operations and proofs to clients attempting to sync an
-//! `any`, `current`, or `immutable` database.
+//! `any`, `current`, `immutable`, or `keyless` database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
+    telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
     Spawner, Storage, StreamOf,
 };
@@ -13,7 +14,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
     databases::{DatabaseType, Syncable},
-    immutable,
+    immutable, keyless,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
@@ -23,7 +24,6 @@ use commonware_utils::{
     sync::{AsyncRwLock, Mutex},
     DurationExt,
 };
-use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -77,25 +77,16 @@ impl<DB> State<DB> {
     where
         E: Metrics,
     {
-        let state = Self {
+        Self {
             database: AsyncRwLock::new(database),
-            request_counter: Counter::default(),
-            error_counter: Counter::default(),
-            ops_counter: Counter::default(),
+            request_counter: context.counter("requests", "Number of requests received"),
+            error_counter: context.counter("error", "Number of errors"),
+            ops_counter: context.counter(
+                "ops_added",
+                "Number of operations added since server start, not including the initial operations",
+            ),
             last_operation_time: Mutex::new(SystemTime::now()),
-        };
-        context.register(
-            "requests",
-            "Number of requests received",
-            state.request_counter.clone(),
-        );
-        context.register("error", "Number of errors", state.error_counter.clone());
-        context.register(
-            "ops_added",
-            "Number of operations added since server start, not including the initial operations",
-            state.ops_counter.clone(),
-        );
-        state
+        }
     }
 }
 
@@ -160,11 +151,11 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, inactivity_floor, size) = {
+    let (root, sync_boundary, size) = {
         let database = state.database.read().await;
         (
             database.root(),
-            database.inactivity_floor().await,
+            database.sync_boundary().await,
             database.size().await,
         )
     };
@@ -172,7 +163,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            range: non_empty_range!(inactivity_floor, size),
+            range: non_empty_range!(sync_boundary, size),
         },
     };
 
@@ -430,7 +421,7 @@ where
         .collect::<String>();
     info!(
         size = ?database.size().await,
-        inactivity_floor = ?database.inactivity_floor().await,
+        sync_boundary = ?database.sync_boundary().await,
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -537,6 +528,17 @@ where
     run_helper(context, config, database).await
 }
 
+/// Run the Keyless database server.
+async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = keyless::create_config(&context);
+    let database = keyless::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
 /// Parse command line arguments and return configuration.
 fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
@@ -546,8 +548,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|current|immutable")
-                .help("Database type to use. Must be `any`, `current`, or `immutable`.")
+                .value_name("any|current|immutable|keyless")
+                .help("Database type to use. Must be `any`, `current`, `immutable`, or `keyless`.")
                 .default_value("any"),
         )
         .arg(
@@ -680,6 +682,7 @@ fn main() {
             DatabaseType::Any => run_any(context, config).await,
             DatabaseType::Current => run_current(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
+            DatabaseType::Keyless => run_keyless(context, config).await,
         };
 
         if let Err(err) = result {

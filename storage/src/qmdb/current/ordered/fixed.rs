@@ -159,8 +159,7 @@ pub mod test {
             }
 
             // Prune the database
-            let floor = db.any.inactivity_floor_loc;
-            db.prune(floor).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
 
             assert!(
                 db.status.pruned_chunks() > 0,

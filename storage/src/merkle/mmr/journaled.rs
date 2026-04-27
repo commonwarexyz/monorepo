@@ -33,7 +33,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {
@@ -83,6 +83,20 @@ mod tests {
             assert_eq!(journaled_mmr.root(), *expected_root);
 
             journaled_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_journaled_mmr_peek_root_empty_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new();
+            let peek = Mmr::<_, Digest>::peek_root(context.clone(), test_config(&context), &hasher)
+                .await
+                .unwrap();
+
+            let empty_root = *mem::Mmr::new(&hasher).root();
+            assert_eq!(peek, Some((Location::new(0), Location::new(0), empty_root)));
         });
     }
 
@@ -325,7 +339,7 @@ mod tests {
             // "fresh start" path (clear_to_size).
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(&context),
-                range: Location::new(100)..Location::new(200),
+                range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
             let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)

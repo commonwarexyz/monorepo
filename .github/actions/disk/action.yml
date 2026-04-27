@@ -59,6 +59,39 @@ runs:
         echo "TMP=D:\Temp" >> $env:GITHUB_ENV
         New-Item -ItemType Directory -Path "D:\Temp" -Force | Out-Null
 
+    - name: Configure swap (Linux)
+      shell: bash
+      if: runner.os == 'Linux'
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 8G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show
+
+    # macOS manages swap dynamically via dynamic_pager; ensure it is running and report state.
+    - name: Configure swap (macOS)
+      shell: bash
+      if: runner.os == 'macOS'
+      run: |
+        set -euxo pipefail
+        sudo mkdir -p /private/var/vm
+        if ! pgrep -x dynamic_pager >/dev/null; then
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
+        fi
+        sysctl vm.swapusage || true
+
+    # Windows manages the pagefile dynamically by default, and changing its size requires a
+    # reboot to take effect (not practical within a single job). Log the current state only.
+    - name: Log pagefile (Windows)
+      shell: pwsh
+      if: runner.os == 'Windows'
+      run: |
+        $ErrorActionPreference = 'Continue'
+        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List Name, AllocatedBaseSize, CurrentUsage, PeakUsage
+        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
+
     - name: Show disk free (after)
       shell: bash
       run: df -h || true

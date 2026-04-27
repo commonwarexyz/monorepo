@@ -24,10 +24,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{
-        histogram,
-        status::{CounterExt, GaugeExt, Status},
-    },
+    telemetry::metrics::{histogram, status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
@@ -223,7 +220,7 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.

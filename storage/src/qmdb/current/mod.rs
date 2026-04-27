@@ -6,6 +6,29 @@
 //! See [`crate::qmdb::any`] for batch API examples (forking, sequential
 //! commit, staleness). The Current layer uses the same batch API.
 //!
+//! # Batch validity
+//!
+//! Current batches are branch-scoped views, not immutable snapshots.
+//!
+//! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
+//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid
+//! objects: do not read through them, do not build children from them, and do not attempt to
+//! apply them.
+//!
+//! A short rule of thumb:
+//! - A batch is only usable while it stays on the winning branch.
+//!
+//! Valid:
+//! - Build `A`, apply `A`, then build `B` from `A` and read or merkleize `B`.
+//! - Call [`Db::to_batch`](db::Db::to_batch) and use the returned batch only while no divergent
+//!   branch has been applied.
+//!
+//! Invalid:
+//! - Build siblings `B1` and `B2`, apply `B1`, then call `B2.get()`, `B2.new_batch()`, or
+//!   `apply_batch(B2)`.
+//! - Hold `snapshot = db.to_batch()`, mutate the DB through another branch, then use `snapshot`
+//!   again.
+//!
 //! # Motivation
 //!
 //! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some
@@ -138,9 +161,44 @@
 //! ## Pruning
 //!
 //! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted
-//! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
-//! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
-//! allowing the grafted tree to be rebuilt without the pruned chunks.
+//! tree's peak digests covering the pruned region are persisted to metadata as "pinned nodes".
+//! On recovery, these pinned nodes are loaded and serve as opaque siblings during upward
+//! propagation, allowing the grafted tree to be rebuilt without the pruned chunks.
+//!
+//! ### Delayed-merge settlement
+//!
+//! For families with delayed merges (e.g. MMB), pruning is slightly more conservative than
+//! the inactivity floor alone would allow.
+//!
+//! The grafted root is computed by iterating the _ops tree's_ peaks and looking up the
+//! corresponding nodes in the grafted tree. After pruning, only the grafted tree's pinned
+//! peaks are available in the pruned region; interior nodes (including individual grafted
+//! leaves) are discarded. If the ops tree has a peak that maps to a discarded grafted node,
+//! root computation fails.
+//!
+//! In an MMR the ops tree's peaks within the pruned region always coincide with the grafted
+//! tree's pinned peaks, so this is never a problem. In an MMB, delayed merges cause the ops
+//! tree's peak structure to lag behind: a chunk pair's parent node at height `gh+1` is not
+//! created until some number of leaves after the pair's last leaf. Until that merge happens,
+//! the ops tree still has individual height-`gh` peaks for each chunk in the pair, and those
+//! map to grafted _leaves_ (height 0 in the grafted tree), which are not pinned peaks.
+//!
+//! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose
+//! chunk-pair parent has not yet been born in the ops tree (see
+//! `Db::sync_boundary`). Once the parent is born, every ops peak within
+//! the pruned region is at height `gh+1` or above, and maps to a pinned peak or an
+//! ancestor of pinned peaks that can be reconstructed by hashing children (see
+//! `grafting::Storage::reconstruct_grafted_node`).
+//!
+//! The same birth threshold also defines a _rewind floor_: rewinding the database to a size
+//! where the chunk-pair parent has not been born would re-expose the individual ops peaks and
+//! break reconstruction. [`Db::rewind`](db::Db::rewind) rejects targets below this floor.
+//! The floor is a pure function of the pruned chunk count and the family geometry, so it does
+//! not need to be persisted; it is recomputed on startup from the pruned chunk count stored
+//! in metadata.
+//!
+//! The pruning lag is small: at most `2^(gh+1) - 1` ops beyond the chunk boundary
+//! (just under 2 chunks for the default chunk size).
 //!
 //! # Root structure
 //!
@@ -174,8 +232,9 @@
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it.
 //! After sync, the bitmap and grafted tree are reconstructed deterministically from the
-//! operations, and the canonical root is computed. Validating that the ops root is part of the
-//! canonical root is the caller's responsibility; the sync engine does not perform this check.
+//! operations, and the canonical root is computed. [proof::OpsRootWitness] can be used to validate
+//! that a particular ops root is committed by a trusted canonical root; the sync engine does not
+//! perform this check itself.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -183,8 +242,8 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, Location},
-    mmr::{journaled::Config as MmrConfig, StandardHasher},
+    merkle::{self, journaled::Config as MerkleConfig, Location},
+    mmr::StandardHasher,
     qmdb::{
         any::{
             self,
@@ -214,7 +273,7 @@ pub mod unordered;
 #[derive(Clone)]
 pub struct Config<T: Translator, J> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MmrConfig,
+    pub merkle_config: MerkleConfig,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -309,14 +368,19 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(
+        &grafted_tree,
+        grafting::height::<N>(),
+        &any.log.merkle,
+        hasher.clone(),
+    );
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
     let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
-        status: batch::BitmapBatch::Base(Arc::new(status)),
+        status: Arc::new(batch::SharedBitmap::new(status)),
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
@@ -342,7 +406,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
-    use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
+    use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
         merkle::{self, mmb, mmr},
         qmdb::{
@@ -362,7 +426,10 @@ pub mod tests {
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
+    };
     use tracing::warn;
 
     type Error<F> = crate::qmdb::Error<F>;
@@ -380,7 +447,7 @@ pub mod tests {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            merkle_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -406,7 +473,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -608,8 +675,7 @@ pub mod tests {
                 commit_writes(&mut db, []).await.unwrap();
                 let committed_root = db.root();
                 let committed_op_count = db.bounds().await.end;
-                let committed_inactivity_floor = db.inactivity_floor_loc().await;
-                db.prune(committed_inactivity_floor).await.unwrap();
+                db.prune(db.sync_boundary().await).await.unwrap();
 
                 // Perform more random operations without committing any of them.
                 let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
@@ -650,7 +716,7 @@ pub mod tests {
                 db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
                     .await
                     .unwrap();
-                db.prune(db.inactivity_floor_loc().await).await.unwrap();
+                db.prune(db.sync_boundary().await).await.unwrap();
                 // State from scenario #2 should match that of a successful commit.
                 assert_eq!(db.bounds().await.end, committed_op_count);
                 assert_eq!(db.root(), scenario_2_root);
@@ -704,7 +770,7 @@ pub mod tests {
                         .await
                         .unwrap();
                     db_pruning
-                        .prune(db_no_pruning.inactivity_floor_loc().await)
+                        .prune(db_no_pruning.sync_boundary().await)
                         .await
                         .unwrap();
                 }
@@ -763,8 +829,7 @@ pub mod tests {
             db.apply_batch(merkleized).await.unwrap();
 
             // Prune to flatten bitmap layers and advance pruned_chunks.
-            let floor = db.inactivity_floor_loc().await;
-            db.prune(floor).await.unwrap();
+            db.prune(db.sync_boundary().await).await.unwrap();
 
             let pruned_bits_before = db.pruned_bits();
             warn!(
@@ -867,7 +932,7 @@ pub mod tests {
 
             // Sync and prune.
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc().await).await.unwrap();
+            db.prune(db.sync_boundary().await).await.unwrap();
 
             // Record root before dropping.
             let root = db.root();
@@ -1345,6 +1410,19 @@ pub mod tests {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
+    async fn mmb_commit(
+        db: &mut UnorderedVariableMmbDb,
+        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
+    ) {
+        let mut batch = db.new_batch();
+        for (k, v) in writes {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+    }
+
     async fn commit_writes_with_metadata(
         db: &mut UnorderedVariableDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
@@ -1585,15 +1663,10 @@ pub mod tests {
         });
     }
 
-    /// Verify that reopening and proving a pruned MMB database does not panic when the pruned
-    /// prefix contains sub-grafting-height peaks that require chunk regrouping.
-    ///
-    /// With 100 single-key commits the MMB has 301 leaves (100 writes + 100 commit floors +
-    /// 101 internal nodes). The first 256 leaves span three sub-grafting-height ops peaks
-    /// (128 + 64 + 64), so grafted root recomposition must regroup them as chunk 0. After
-    /// pruning, chunk 0 is gone and get_chunk(0) would panic without the pruned-chunk guard.
+    /// Verify that the delayed-merge settlement guard holds `sync_boundary` at 0 during the
+    /// unsettled window, so `prune` rejects any non-zero `prune_loc`.
     #[test_traced("INFO")]
-    fn test_current_mmb_reopen_and_prove_after_prune_multi_peak_chunk() {
+    fn test_current_mmb_settlement_guard_defers_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const COMMITS: u64 = 100;
@@ -1623,13 +1696,23 @@ pub mod tests {
                 *db.inactivity_floor_loc() >= 256,
                 "expected inactivity floor past chunk 0"
             );
+            assert_eq!(
+                *db.sync_boundary(),
+                0,
+                "settlement guard should hold boundary at 0 during unsettled window"
+            );
 
-            db.prune(Location::<mmb::Family>::new(1)).await.unwrap();
-            assert_eq!(db.pruned_bits(), 256);
+            // `prune` must reject any non-zero loc because sync_boundary is still 0.
+            let result = db.prune(Location::<mmb::Family>::new(1)).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondMinRequired(_, _))),
+                "expected PruneBeyondMinRequired, got {result:?}"
+            );
+            assert_eq!(db.pruned_bits(), 0);
             db.sync().await.unwrap();
             drop(db);
 
-            // Reopen: compute_grafted_root must handle pruned chunk 0.
+            // Reopen: no pruning occurred, state is unchanged.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.with_label("reopen"),
                 variable_config::<OneCap>(partition, &context),
@@ -1643,6 +1726,601 @@ pub mod tests {
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
             let mut hasher = commonware_cryptography::Sha256::new();
             let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_mmb_rewind_rejects_unsettled_pruned_window() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+            const N: usize = 32;
+
+            let partition = "current-mmb-rewind-unsettled-window";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+
+            let key0 = key(0);
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                let mut batch = db.new_batch();
+                batch = batch.write(key0, Some(val(60_000 + round)));
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(pruned_bits > 0, "expected MMB bitmap pruning to be active");
+            db.sync().await.unwrap();
+
+            let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+            let pruned_chunks = (pruned_bits / chunk_bits) as u64;
+            let gh = super::grafting::height::<N>();
+            let youngest = pruned_chunks - 1;
+            let pair_chunk = youngest & !1;
+            let pair_start = pair_chunk << gh;
+            let pair_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+                merkle::Location::<mmb::Family>::new(pair_start),
+                gh + 1,
+            );
+            let absorbed_after =
+                <mmb::Family as merkle::Graftable>::peak_birth_size(pair_pos, gh + 1);
+
+            let unsafe_target = history
+                .iter()
+                .filter_map(|(size, floor)| {
+                    let s = **size;
+                    if s >= pruned_bits && s < absorbed_after && **floor >= pruned_bits {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected rewind target in unsettled window: pruned_bits={pruned_bits}, absorbed_after={absorbed_after}, history={history:?}"
+                    )
+                });
+
+            let err = db
+                .rewind(merkle::Location::<mmb::Family>::new(unsafe_target))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error for unsettled delayed-merge window: {err:?}"
+            );
+            drop(db);
+
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that `Db::prune` never advances the ops journal past the settled bitmap
+    /// pruning boundary on a delayed-merge (MMB) family. The journal's lower bound must be
+    /// less than or equal to `sync_boundary()`, and the test setup must force the lag to
+    /// be strictly active so the assertion is not vacuous.
+    #[test_traced]
+    fn test_current_mmb_prune_respects_sync_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-clip-mmb", &ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            for round in 0..COMMITS {
+                mmb_commit(&mut db, [(k, Some(val(70_000 + round)))]).await;
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            let boundary = db.sync_boundary();
+            let floor = db.inactivity_floor_loc();
+            assert!(
+                boundary < floor,
+                "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
+            );
+            assert!(
+                db.bounds().await.start <= boundary,
+                "ops journal was pruned past the settled bitmap boundary: \
+                 bounds.start={}, boundary={boundary}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that on a non-delayed-merge (MMR) family `sync_boundary()` lags the inactivity
+    /// floor only by chunk alignment (less than one chunk) — never by a delayed-merge absorption
+    /// window. Guards against an accidental regression that would introduce a larger lag on
+    /// families that don't need it.
+    #[test_traced]
+    fn test_current_mmr_prune_boundary_lag_is_only_chunk_alignment() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+            const N: usize = 32;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-clip-mmr", &ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key(0), Some(val(80_000 + round)))],
+                    None,
+                )
+                .await;
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            let boundary = db.sync_boundary();
+            let floor = db.inactivity_floor_loc();
+            let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+            assert!(
+                boundary <= floor && *floor - *boundary < chunk_bits,
+                "MMR lag should be only chunk alignment: boundary={boundary}, floor={floor}, chunk_bits={chunk_bits}"
+            );
+            assert!(
+                db.bounds().await.start <= boundary,
+                "ops journal bounds must be <= sync_boundary: bounds.start={}, boundary={boundary}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that `prune(loc)` with `loc < sync_boundary()` prunes the ops journal only as far
+    /// as the caller requested.
+    #[test_traced]
+    fn test_current_prune_below_settled_boundary_is_honored() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 100;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-below-boundary", &ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key(0), Some(val(90_000 + round)))], None)
+                    .await;
+            }
+
+            assert!(*db.inactivity_floor_loc() > 1);
+            let small = Location::new(1);
+            db.prune(small).await.unwrap();
+
+            assert!(
+                db.bounds().await.start <= small,
+                "journal pruning exceeded the caller-supplied target: bounds.start={}, requested={small}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Prune, then grow without pruning again so delayed MMB merges occur inside the
+    /// already-pruned region. Verify proof + reopen correctness.
+    #[test_traced]
+    fn test_current_mmb_reopen_and_prove_after_prune_delayed_merge() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_delayed_merge", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+
+            for round in 0..200u64 {
+                mmb_commit(&mut db, [(k, Some(val(60_000 + round)))]).await;
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+            db.sync().await.unwrap();
+
+            // Keep growing without pruning: delayed merges now occur in the pruned region.
+            for round in 200..300u64 {
+                mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
+            }
+
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                &mut hasher,
+                k,
+                val(60_000 + 199),
+                &proof,
+                &db.root()
+            ));
+
+            let target_root = db.root();
+            drop(db);
+
+            let reopen_ctx = context.with_label("db_reopen");
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                reopen_ctx.clone(),
+                variable_config::<OneCap>("test_prune_delayed_merge", &reopen_ctx),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), target_root);
+
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                &mut hasher,
+                k,
+                val(60_000 + 199),
+                &proof,
+                &reopened.root()
+            ));
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Grow past 2 full pruned chunks, prune, reopen, verify root + value.
+    #[test_traced]
+    fn test_current_mmb_reopen_after_prune_two_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_two", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            // Always assigned before the loop breaks.
+            let mut expected;
+
+            // Keep growing until the settle guard allows 2+ pruned chunks.
+            // The absorber for chunk pair [0,1] at gh=8 needs ~766 ops leaves.
+            let mut round = 0u64;
+            loop {
+                expected = Some(val(60_000 + round));
+                mmb_commit(&mut db, [(k, expected)]).await;
+                round += 1;
+                db.prune(db.sync_boundary()).await.unwrap();
+                if db.pruned_bits() >= 512 {
+                    break;
+                }
+                assert!(
+                    round < 500,
+                    "failed to reach 2 pruned chunks after {round} commits"
+                );
+            }
+            db.sync().await.unwrap();
+
+            let target_root = db.root();
+            drop(db);
+
+            let reopen_ctx = context.with_label("db_reopen");
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                reopen_ctx.clone(),
+                variable_config::<OneCap>("test_prune_two", &reopen_ctx),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.get(&k).await.unwrap(), expected);
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Three rounds of grow + prune + reopen. Verifies repeated prune cycles don't diverge.
+    #[test_traced]
+    fn test_current_mmb_repeated_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..3u64 {
+                let k = key(round * 1000);
+                let mut expected = None;
+                for i in 0..90 {
+                    expected = Some(val(round * 1000 + i));
+                    mmb_commit(&mut db, [(k, expected)]).await;
+                }
+
+                db.prune(db.sync_boundary()).await.unwrap();
+                db.sync().await.unwrap();
+
+                let root_before = db.root();
+                db_ctx = context.with_label(&format!("db_{round}"));
+
+                let prev_db = db;
+                db = UnorderedVariableMmbDb::init(
+                    db_ctx.clone(),
+                    variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(db.root(), root_before);
+                assert_eq!(db.get(&k).await.unwrap(), expected);
+                drop(prev_db);
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Step-by-step growth after prune, comparing roots against an unpruned reference.
+    #[test_traced]
+    fn test_current_mmb_stepwise_growth_matches_unpruned_reference() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db_stepwise");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_stepwise", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let ref_ctx = context.with_label("ref_stepwise");
+            let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("test_stepwise_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut commit_idx = 0u64;
+
+            // Grow until the inactivity floor reaches 4 chunks.
+            while *db.inactivity_floor_loc() < 1024 {
+                let value = Some(val(80_000 + commit_idx));
+                mmb_commit(&mut db, [(k, value)]).await;
+                mmb_commit(&mut ref_db, [(k, value)]).await;
+                commit_idx += 1;
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+            db.sync().await.unwrap();
+            assert_eq!(
+                db.root(),
+                ref_db.root(),
+                "root mismatch immediately after prune"
+            );
+
+            // Step-by-step growth through the delayed-merge window.
+            loop {
+                let db_leaves =
+                    *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap();
+                if db_leaves >= 1560 {
+                    break;
+                }
+
+                let value = Some(val(80_000 + commit_idx));
+                mmb_commit(&mut db, [(k, value)]).await;
+                mmb_commit(&mut ref_db, [(k, value)]).await;
+                commit_idx += 1;
+
+                let db_leaves =
+                    *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap();
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "stepwise root mismatch: leaves={db_leaves}, commit_idx={commit_idx}"
+                );
+            }
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Multi-round prune + reopen + proof against an unpruned reference.
+    #[test_traced]
+    fn test_current_mmb_large_repeated_prune_matches_unpruned_reference() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const ROUNDS: u64 = 8;
+            const COMMITS_PER_ROUND: u64 = 120;
+
+            let mut db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_large_prune", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let ref_ctx = context.with_label("ref");
+            let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("test_large_prune_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut expected = None;
+
+            for round in 0..ROUNDS {
+                for i in 0..COMMITS_PER_ROUND {
+                    let value = Some(val(round * 10_000 + i));
+                    expected = value;
+                    mmb_commit(&mut db, [(k, value)]).await;
+                    mmb_commit(&mut ref_db, [(k, value)]).await;
+                }
+
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "root mismatch before prune at round {round}"
+                );
+
+                db.prune(db.sync_boundary()).await.unwrap();
+                db.sync().await.unwrap();
+
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "root mismatch after prune at round {round}"
+                );
+
+                let mut hasher = commonware_cryptography::Sha256::new();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert!(
+                    UnorderedVariableMmbDb::verify_key_value_proof(
+                        &mut hasher,
+                        k,
+                        expected.expect("value should exist"),
+                        &proof,
+                        &db.root()
+                    ),
+                    "proof verification failed at round {round}"
+                );
+
+                db_ctx = context.with_label(&format!("db_reopen_{round}"));
+                let prev_db = db;
+                db = UnorderedVariableMmbDb::init(
+                    db_ctx.clone(),
+                    variable_config::<OneCap>("test_large_prune", &db_ctx),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "root mismatch after reopen at round {round}"
+                );
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected,
+                    "value mismatch after reopen at round {round}"
+                );
+
+                let mut hasher = commonware_cryptography::Sha256::new();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert!(
+                    UnorderedVariableMmbDb::verify_key_value_proof(
+                        &mut hasher,
+                        k,
+                        expected.expect("value should exist"),
+                        &proof,
+                        &db.root()
+                    ),
+                    "proof verification failed after reopen at round {round}"
+                );
+
+                drop(prev_db);
+            }
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that prune beyond the sync boundary is rejected without mutating state.
+    #[test_traced]
+    fn test_current_prune_rejects_beyond_sync_boundary_without_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 160;
+
+            let partition = "current-prune-beyond-boundary";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(40_000 + round)))], None)
+                    .await;
+            }
+
+            let expected_root = db.root();
+            let expected_ops_root = db.ops_root();
+            let expected_boundary = db.sync_boundary();
+            let expected_pruned_bits = db.pruned_bits();
+            let expected_value = db.get(&key0).await.unwrap();
+
+            // 32 * 8 = 256 bits per chunk for N=32.
+            let invalid_prune_loc = Location::new(*expected_boundary + 256);
+            let result = db.prune(invalid_prune_loc).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondMinRequired(loc, boundary))
+                    if loc == invalid_prune_loc && boundary == expected_boundary),
+                "expected prune rejection above sync boundary, got {result:?}"
+            );
+
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.ops_root(), expected_ops_root);
+            assert_eq!(db.pruned_bits(), expected_pruned_bits);
+            assert_eq!(db.get(&key0).await.unwrap(), expected_value);
+
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), expected_root);
+            assert_eq!(reopened.ops_root(), expected_ops_root);
+            assert_eq!(reopened.pruned_bits(), expected_pruned_bits);
+            assert_eq!(reopened.get(&key0).await.unwrap(), expected_value);
 
             reopened.destroy().await.unwrap();
         });
@@ -1746,7 +2424,7 @@ pub mod tests {
             )
             .await;
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(
                 pruned_bits > *first_range.start,
@@ -2307,120 +2985,175 @@ pub mod tests {
         });
     }
 
-    /// flatten() is a no-op on a freshly initialized DB (no layers to collapse).
+    /// A live batch (built off the committed state) must remain readable and applicable after
+    /// [`Db::prune`] advances the shared bitmap's pruning boundary. Pruning only discards
+    /// chunks for inactive bits (below the inactivity floor); the batch's own chain and
+    /// overlays operate at or above the floor, so no reads should land in the pruned region.
     #[test_traced("INFO")]
-    fn test_flatten_noop_on_fresh_db() {
+    fn test_current_live_batch_safe_across_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-noop", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-live", &ctx),
+            )
+            .await
+            .unwrap();
 
-            let root_before = db.root();
-            db.flatten();
-            assert_eq!(db.root(), root_before);
+            // Seed enough ops to span multiple bitmap chunks.
+            let mut seed = db.new_batch();
+            for i in 0u64..300 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed_m = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
+            let mut p = db.new_batch();
+            for i in 0u64..250 {
+                p = p.write(key(i), Some(val(i + 10_000)));
+            }
+            let p_m = p.merkleize(&db, None).await.unwrap();
+            db.apply_batch(Arc::clone(&p_m)).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build c off p_m; c is live and shares the committed bitmap via its chain.
+            let c = p_m
+                .new_batch::<Sha256>()
+                .write(key(250), Some(val(99_999)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Prune with c still alive. This advances pruned_chunks on the shared bitmap.
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            // Sanity: c's pending write is still readable via the any-layer diff chain.
+            assert_eq!(c.get(&key(250), &db).await.unwrap(), Some(val(99_999)));
+
+            // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
+            // chunks below the current pruned boundary.
+            db.apply_batch(c).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
+            assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
 
             db.destroy().await.unwrap();
         });
     }
 
-    /// flatten() preserves the root and data after multiple apply_batch calls.
+    /// Regression: extending a batch after it has been applied (building a child off the
+    /// just-applied parent) must produce correct data.
+    ///
+    /// With the shared-bitmap `RwLock` design, applying `A` mutates the committed bitmap in
+    /// place; reads through `A`'s chain after apply fall through to the committed bitmap (which
+    /// now reflects `A`'s state), and `A`'s own overlays applied on top are consistent with
+    /// committed. So `A.new_batch()` followed by merkleize + apply is the right-by-construction
+    /// case, and this test locks it in.
     #[test_traced("INFO")]
-    fn test_flatten_preserves_root_after_batches() {
+    fn test_current_extend_applied_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-root", &ctx))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("xtend", &ctx))
                     .await
                     .unwrap();
 
-            // Apply several batches to accumulate layers.
-            for i in 0u64..5 {
-                let m = db
-                    .new_batch()
-                    .write(key(i), Some(val(i)))
-                    .merkleize(&db, None)
-                    .await
-                    .unwrap();
-                db.apply_batch(m).await.unwrap();
-            }
-
-            let root_before = db.root();
-            db.flatten();
-            assert_eq!(db.root(), root_before);
-
-            // Data is still readable.
-            for i in 0u64..5 {
-                assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// flatten() is idempotent: a second call is a no-op.
-    #[test_traced("INFO")]
-    fn test_flatten_idempotent() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-idem", &ctx))
-                    .await
-                    .unwrap();
-
-            let m = db
+            // Apply A, retaining our Arc so we can extend it post-apply.
+            let a = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(m).await.unwrap();
+            db.apply_batch(Arc::clone(&a)).await.unwrap();
 
-            db.flatten();
-            let root_after_first = db.root();
-
-            db.flatten();
-            assert_eq!(db.root(), root_after_first);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// New batches built after flatten() produce correct roots and can be applied.
-    #[test_traced("INFO")]
-    fn test_flatten_then_new_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-then", &ctx))
-                    .await
-                    .unwrap();
-
-            // Apply a batch, flatten, then apply another.
-            let m = db
-                .new_batch()
-                .write(key(0), Some(val(0)))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            db.apply_batch(m).await.unwrap();
-            db.flatten();
-
-            let m = db
-                .new_batch()
+            // Build B off A after A was applied. B's chain walks through A's layer and falls
+            // through to the committed bitmap (now post-A). B's merkleize must read consistent
+            // state from both sources.
+            let b = a
+                .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(m).await.unwrap();
+            db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            // Extend once more to lock in multi-generation behavior.
+            let c = db
+                .new_batch()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(c).await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Build a child batch from a still-live parent whose apply was followed by a prune, then
+    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the shared
+    /// committed bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
+    /// child is constructed via `parent.new_batch()`, the internal `trim_committed` call must
+    /// observe the advanced boundary and produce a correct child chain; merkleize and apply must
+    /// then produce correct state for keys at and beyond the advanced floor.
+    #[test_traced("INFO")]
+    fn test_current_live_batch_child_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("child-after-prune", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Seed enough ops to span multiple bitmap chunks.
+            let mut seed = db.new_batch();
+            for i in 0u64..300 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed_m = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
+            let mut a_batch = db.new_batch();
+            for i in 0u64..250 {
+                a_batch = a_batch.write(key(i), Some(val(i + 10_000)));
+            }
+            let a = a_batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(Arc::clone(&a)).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Prune while `a` is still live. Mutates the shared bitmap's pruning boundary in place.
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            // Extend `a` into `b` AFTER the prune. Building `b` off `a` triggers
+            // `trim_committed` on `a`'s chain, which must correctly see the advanced pruning
+            // boundary on the shared bitmap.
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key(300), Some(val(300)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            db.apply_batch(b).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
+            assert_eq!(db.get(&key(249)).await.unwrap(), Some(val(10_249)));
+            assert_eq!(db.get(&key(300)).await.unwrap(), Some(val(300)));
 
             db.destroy().await.unwrap();
         });
@@ -2661,9 +3394,8 @@ pub mod tests {
             let floor = *db.inactivity_floor_loc();
             assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             db.apply_batch(c_m).await.unwrap();
-            db.flatten();
 
             db.destroy().await.unwrap();
         });

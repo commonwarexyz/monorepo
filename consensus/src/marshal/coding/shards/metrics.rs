@@ -1,28 +1,21 @@
 //! Metrics for the shard engine.
 
-use commonware_runtime::{telemetry::metrics::histogram::Buckets, Metrics as MetricsTrait};
-use commonware_utils::Array;
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+use commonware_cryptography::PublicKey;
+use commonware_runtime::{
+    telemetry::metrics::{
+        histogram::Buckets, Counter, CounterFamily, EncodeStruct, Gauge, Histogram, MetricsExt as _,
+    },
+    Metrics as MetricsTrait,
 };
 
-/// Label for per-peer metrics.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
-    pub peer: String,
-}
-
-impl Peer {
-    pub fn new(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-        }
-    }
+/// Per-peer label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Peer<P: PublicKey> {
+    pub peer: P,
 }
 
 /// Metrics for the shard engine.
-pub struct ShardMetrics {
+pub struct ShardMetrics<P: PublicKey> {
     /// Histogram of erasure decoding duration in seconds.
     pub erasure_decode_duration: Histogram,
     /// Number of blocks in the reconstructed blocks cache.
@@ -30,51 +23,38 @@ pub struct ShardMetrics {
     /// Number of active reconstruction states.
     pub reconstruction_states_count: Gauge,
     /// Number of shards received per peer.
-    pub shards_received: Family<Peer, Counter>,
+    pub shards_received: CounterFamily<Peer<P>>,
     /// Total number of blocks successfully reconstructed.
     pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
     pub reconstruction_failures_total: Counter,
 }
 
-impl ShardMetrics {
+impl<P: PublicKey> ShardMetrics<P> {
     /// Create and register metrics with the given context.
     pub fn new(context: &impl MetricsTrait) -> Self {
-        let erasure_decode_duration = Histogram::new(Buckets::LOCAL);
-        let reconstructed_blocks_cache_count = Gauge::default();
-        let reconstruction_states_count = Gauge::default();
-        let shards_received = Family::<Peer, Counter>::default();
-        let blocks_reconstructed_total = Counter::default();
-        let reconstruction_failures_total = Counter::default();
-        context.register(
+        let erasure_decode_duration = context.histogram(
             "erasure_decode_duration",
             "Histogram of erasure decoding duration in seconds",
-            erasure_decode_duration.clone(),
+            Buckets::LOCAL,
         );
-        context.register(
+        let reconstructed_blocks_cache_count = context.gauge(
             "reconstructed_blocks_cache_count",
             "Number of blocks in the reconstructed blocks cache",
-            reconstructed_blocks_cache_count.clone(),
         );
-        context.register(
+        let reconstruction_states_count = context.gauge(
             "reconstruction_states_count",
             "Number of active reconstruction states",
-            reconstruction_states_count.clone(),
         );
-        context.register(
-            "shards_received",
-            "Number of shards received per peer",
-            shards_received.clone(),
-        );
-        context.register(
+        let shards_received =
+            context.family("shards_received", "Number of shards received per peer");
+        let blocks_reconstructed_total = context.counter(
             "blocks_reconstructed_total",
             "Total number of blocks successfully reconstructed",
-            blocks_reconstructed_total.clone(),
         );
-        context.register(
+        let reconstruction_failures_total = context.counter(
             "reconstruction_failures_total",
             "Total number of block reconstruction failures",
-            reconstruction_failures_total.clone(),
         );
 
         Self {

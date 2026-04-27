@@ -1,4 +1,8 @@
-use crate::{supervision::Tree, utils::extract_panic_message, Error};
+use crate::{
+    telemetry::metrics::raw::Gauge,
+    utils::{extract_panic_message, supervision::Tree},
+    Error,
+};
 use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, Once},
@@ -9,7 +13,6 @@ use futures::{
     stream::{AbortHandle, Abortable, Aborted},
     FutureExt as _,
 };
-use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,

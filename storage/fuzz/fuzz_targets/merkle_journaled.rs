@@ -7,7 +7,7 @@ use commonware_storage::merkle::{
     hasher::Standard, journaled::Config, mem::Mem, mmb, mmr, Error, Family as MerkleFamily,
     Location, LocationRangeExt as _, Position,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -356,7 +356,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let sync_suffix = format!("{suffix}-sync");
                         let sync_config = SyncConfig::<F, _> {
                             config: test_config(&sync_suffix, &context),
-                            range: lower_bound_loc..upper_bound_loc,
+                            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
                             pinned_nodes: None,
                         };
 
