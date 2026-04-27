@@ -87,7 +87,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding,
-        build_snapshot_from_log,
+        build_snapshot_from_log, compact_witness,
         operation::{Key, Operation as _},
         Error,
     },
@@ -606,41 +606,16 @@ where
                 batch_base_size: batch.base_size,
             });
         }
-        // Validate every unapplied ancestor commit's floor against the running
-        // `prev_floor`, then validate the tip against the last accepted floor.
-        // Ancestors are stored newest-first, so iterate in reverse to walk
-        // commits oldest-first; skip ancestors whose ops are already in the
-        // journal (`ancestor_end <= db_size`), since those floors were already
-        // checked when their batch was applied.
-        let mut prev_floor = self.inactivity_floor_loc;
-        for i in (0..batch.ancestor_diff_ends.len()).rev() {
-            let ancestor_end = batch.ancestor_diff_ends[i];
-            if ancestor_end <= db_size {
-                continue;
-            }
-            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
-            let ancestor_commit_loc = Location::new(ancestor_end - 1);
-            if ancestor_floor < prev_floor {
-                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
-            }
-            if ancestor_floor > ancestor_commit_loc {
-                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
-            }
-            prev_floor = ancestor_floor;
-        }
-        if batch.new_inactivity_floor_loc < prev_floor {
-            return Err(Error::FloorRegressed(
-                batch.new_inactivity_floor_loc,
-                prev_floor,
-            ));
-        }
         let tip_commit_loc = Location::new(batch.total_size - 1);
-        if batch.new_inactivity_floor_loc > tip_commit_loc {
-            return Err(Error::FloorBeyondSize(
-                batch.new_inactivity_floor_loc,
-                tip_commit_loc,
-            ));
-        }
+        // Per-commit floor validation; see `compact_witness::validate_ancestor_floors`.
+        compact_witness::validate_ancestor_floors(
+            self.inactivity_floor_loc,
+            db_size,
+            &batch.ancestor_diff_ends,
+            &batch.ancestor_new_inactivity_floor_locs,
+            batch.new_inactivity_floor_loc,
+            tip_commit_loc,
+        )?;
         let start_loc = Location::new(db_size);
 
         // Apply journal.
