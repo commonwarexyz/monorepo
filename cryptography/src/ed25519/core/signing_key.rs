@@ -90,15 +90,14 @@ impl From<[u8; 32]> for SigningKey {
         let h = Sha512::digest(&seed[..]);
 
         // Scalar-scalar arithmetic in `sign` requires the reduced representation.
-        let mut scalar_bytes = [0u8; 32];
-        scalar_bytes[..].copy_from_slice(&h.as_slice()[0..32]);
-        scalar_bytes[0] &= 248;
-        scalar_bytes[31] &= 127;
-        scalar_bytes[31] |= 64;
-        let s = Scalar::from_bytes_mod_order(scalar_bytes);
-
-        // Compute the public key as A = [s]B.
-        let A = &s * constants::ED25519_BASEPOINT_TABLE;
+        let s = {
+            let mut scalar_bytes = [0u8; 32];
+            scalar_bytes[..].copy_from_slice(&h.as_slice()[0..32]);
+            scalar_bytes[0] &= 248;
+            scalar_bytes[31] &= 127;
+            scalar_bytes[31] |= 64;
+            Scalar::from_bytes_mod_order(scalar_bytes)
+        };
 
         // Extract and cache the high half.
         let prefix = {
@@ -106,6 +105,9 @@ impl From<[u8; 32]> for SigningKey {
             prefix[..].copy_from_slice(&h.as_slice()[32..64]);
             prefix
         };
+
+        // Compute the public key as A = [s]B.
+        let A = &s * constants::ED25519_BASEPOINT_TABLE;
 
         Self {
             seed,
