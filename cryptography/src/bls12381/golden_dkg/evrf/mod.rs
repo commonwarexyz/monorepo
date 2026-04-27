@@ -97,14 +97,6 @@ impl PrivateKey {
         crate::Signer::public_key(self)
     }
 
-    fn diffie_hellman(&self, public: &PublicKey, transcript: &mut Transcript) {
-        let shared = self.inner.expose(|x| {
-            let raw = public.point.clone() * x;
-            raw.clear_cofactor()
-        });
-        transcript.commit(shared.encode_fixed::<{ G::SIZE }>().as_slice());
-    }
-
     /// Compute the VRF output between ourselves and the other party, for a given message.
     ///
     /// `SENDER` indicates whether we are the sender (dealer) or receiver. Both
@@ -467,6 +459,7 @@ impl VrfCommitments {
     ///
     /// This exists to allow tests to simulate an adversary who provides
     /// fake mask commitments (exploiting the empty proof).
+    #[cfg(any(feature = "arbitrary", test))]
     pub(super) fn perturb(&mut self, receiver: &PublicKey, delta: &G1) {
         if let Some(c) = self.commitments.get_value_mut(receiver) {
             *c += delta;
