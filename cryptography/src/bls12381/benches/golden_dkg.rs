@@ -1,107 +1,62 @@
-use commonware_cryptography::bls12381::{
-    golden_dkg::{self, DealerLog, Info, Output, PrivateKey, PublicKey},
-    primitives::group::Share,
+use commonware_codec::EncodeSize as _;
+use commonware_cryptography::bls12381::golden_dkg::{
+    self, DealerLog, Info, PrivateKey, PublicKey, Setup, SignedDealerLog,
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
+use commonware_parallel::Sequential;
+use commonware_utils::{ordered::Set, N3f1, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, hint::black_box};
+use std::{collections::BTreeMap, hint::black_box, num::NonZeroU32, sync::LazyLock};
 
-/// Run a fresh honest DKG round, returning the output and per-key shares.
-fn run_fresh(
-    rng: &mut impl CryptoRngCore,
-    keys: &[PrivateKey],
-    dealers: &Set<PublicKey>,
-    players: &Set<PublicKey>,
-) -> (Output<PublicKey>, Vec<Share>) {
-    let info = Info::new(0, None, dealers.clone(), players.clone());
-    let mut logs = BTreeMap::new();
-    for k in keys {
-        let signed = golden_dkg::deal::<N3f1>(rng, &info, k, None).unwrap();
-        let (pk, log) = signed.identify().unwrap();
-        logs.insert(pk, log);
+// One dealer is enough: Golden DKG cost scales with the number of receivers,
+// not the number of dealers.
+cfg_if::cfg_if! {
+    if #[cfg(full_bench)] {
+        const RECEIVERS: &[u32] = &[5, 10, 15, 20, 25];
+        const MAX_RECEIVERS: u32 = 25;
+    } else {
+        const RECEIVERS: &[u32] = &[5, 10, 25];
+        const MAX_RECEIVERS: u32 = 25;
     }
-    let sharing = golden_dkg::observe::<N3f1>(rng, &info, logs.clone(), &Sequential).unwrap();
-    let mut shares = Vec::new();
-    for k in keys {
-        let (_, share) =
-            golden_dkg::play::<N3f1>(rng, &info, logs.clone(), k, &Sequential).unwrap();
-        shares.push(share);
-    }
-    let output = Output::new(*info.summary(), sharing, dealers.clone(), players.clone());
-    (output, shares)
 }
 
-struct DealBench {
+/// Cached eVRF setup, sized for the largest configuration we benchmark.
+/// Building it is expensive, so we share one across all benches.
+static SETUP: LazyLock<Setup> =
+    LazyLock::new(|| Setup::new(NonZeroU32::new(MAX_RECEIVERS).unwrap()));
+
+/// A Golden DKG scenario with one dealer and `n` receivers.
+struct Bench {
     info: Info,
     me: PrivateKey,
 }
 
-impl DealBench {
+impl Bench {
     fn new(rng: &mut impl CryptoRngCore, n: u32) -> Self {
-        let keys: Vec<PrivateKey> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
-        let me = keys[0].clone();
-        let dealers: Set<PublicKey> = keys.iter().map(|k| k.public()).try_collect().unwrap();
-        let players = dealers.clone();
+        let me = PrivateKey::random(&mut *rng);
+        let dealers: Set<PublicKey> = std::iter::once(me.public()).try_collect().unwrap();
+        let players: Set<PublicKey> = (0..n)
+            .map(|_| PrivateKey::random(&mut *rng).public())
+            .try_collect()
+            .unwrap();
         let info = Info::new(0, None, dealers, players);
         Self { info, me }
     }
-}
 
-struct PlayBench {
-    info: Info,
-    me: PrivateKey,
-    logs: BTreeMap<PublicKey, DealerLog>,
-}
-
-impl PlayBench {
-    fn new(rng: &mut impl CryptoRngCore, reshare: bool, n: u32) -> Self {
-        let keys: Vec<PrivateKey> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
-        let me = keys[0].clone();
-        let dealers: Set<PublicKey> = keys.iter().map(|k| k.public()).try_collect().unwrap();
-        let players = dealers.clone();
-
-        let (previous, shares) = if reshare {
-            let (output, shares) = run_fresh(rng, &keys, &dealers, &players);
-            (Some(output), Some(shares))
-        } else {
-            (None, None)
-        };
-
-        let round = if reshare { 1 } else { 0 };
-        let info = Info::new(round, previous, dealers, players);
-
-        let mut logs = BTreeMap::new();
-        for (i, k) in keys.iter().enumerate() {
-            let share = shares.as_ref().map(|s| s[i].clone());
-            let signed = golden_dkg::deal::<N3f1>(rng, &info, k, share).unwrap();
-            let (pk, log) = signed.identify().unwrap();
-            logs.insert(pk, log);
-        }
-
-        Self { info, me, logs }
+    fn deal(&self, rng: &mut impl CryptoRngCore) -> SignedDealerLog {
+        golden_dkg::deal::<N3f1>(rng, &SETUP, &self.info, &self.me, None, &Sequential)
+            .expect("honest deal should succeed")
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(full_bench)] {
-        const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
-        const CONCURRENCY: &[usize] = &[1, 4, 8];
-    } else {
-        const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
-        const CONCURRENCY: &[usize] = &[1];
-    }
-}
-
+/// Time for a dealer to produce a [`SignedDealerLog`] addressed to `n` receivers.
 fn bench_golden_dkg_deal(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in CONTRIBUTORS {
-        let t = N3f1::quorum(n);
-        let bench = DealBench::new(&mut rng, n);
-        c.bench_function(&format!("{}_deal/n={} t={}", module_path!(), n, t), |b| {
+    for &n in RECEIVERS {
+        let bench = Bench::new(&mut rng, n);
+        c.bench_function(&format!("{}::deal/n={}", module_path!(), n), |b| {
             b.iter_batched(
                 || {
                     (
@@ -111,7 +66,10 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
                     )
                 },
                 |(info, me, mut rng)| {
-                    black_box(golden_dkg::deal::<N3f1>(&mut rng, &info, &me, None).unwrap());
+                    black_box(
+                        golden_dkg::deal::<N3f1>(&mut rng, &SETUP, &info, &me, None, &Sequential)
+                            .unwrap(),
+                    );
                 },
                 BatchSize::SmallInput,
             );
@@ -119,66 +77,49 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
     }
 }
 
-fn bench_play(c: &mut Criterion, reshare: bool) {
-    let suffix = if reshare { "_reshare_play" } else { "_play" };
+/// Time for a receiver to verify one dealer's [`SignedDealerLog`].
+///
+/// `golden_dkg::observe` performs the full verification a real receiver does
+/// (signature check, eVRF batch check, and the per-dealing linear check).
+fn bench_golden_dkg_verify(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in CONTRIBUTORS {
-        let t = N3f1::quorum(n);
-        let bench = PlayBench::new(&mut rng, reshare, n);
-        for &concurrency in CONCURRENCY {
-            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
-            c.bench_function(
-                &format!(
-                    "{}{}/n={} t={} conc={}",
-                    module_path!(),
-                    suffix,
-                    n,
-                    t,
-                    concurrency,
-                ),
-                |b| {
-                    b.iter_batched(
-                        || {
-                            (
-                                bench.info.clone(),
-                                bench.me.clone(),
-                                bench.logs.clone(),
-                                StdRng::seed_from_u64(0),
-                            )
-                        },
-                        |(info, me, logs, mut rng)| {
-                            if concurrency > 1 {
-                                black_box(
-                                    golden_dkg::play::<N3f1>(&mut rng, &info, logs, &me, &strategy)
-                                        .unwrap(),
-                                );
-                            } else {
-                                black_box(
-                                    golden_dkg::play::<N3f1>(
-                                        &mut rng,
-                                        &info,
-                                        logs,
-                                        &me,
-                                        &Sequential,
-                                    )
-                                    .unwrap(),
-                                );
-                            }
-                        },
-                        BatchSize::SmallInput,
+    for &n in RECEIVERS {
+        let bench = Bench::new(&mut rng, n);
+        let signed = bench.deal(&mut rng);
+        let (pk, log) = signed.identify().expect("honest log should identify");
+        let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
+        logs.insert(pk, log);
+        c.bench_function(&format!("{}::verify/n={}", module_path!(), n), |b| {
+            b.iter_batched(
+                || (bench.info.clone(), logs.clone(), StdRng::seed_from_u64(0)),
+                |(info, logs, mut rng)| {
+                    black_box(
+                        golden_dkg::observe::<N3f1>(&mut rng, &SETUP, &info, logs, &Sequential)
+                            .unwrap(),
                     );
                 },
+                BatchSize::SmallInput,
             );
-        }
+        });
     }
 }
 
-fn bench_golden_dkg_play(c: &mut Criterion) {
-    bench_play(c, false);
-}
-
-fn bench_golden_dkg_reshare_play(c: &mut Criterion) {
-    bench_play(c, true);
+/// Encoded size of one dealer's [`SignedDealerLog`] addressed to `n` receivers.
+///
+/// Reported via stdout (no measured timing) in the same style as
+/// `coding/src/benches/bench_size.rs`.
+fn bench_golden_dkg_dealing_size(_c: &mut Criterion) {
+    let mut rng = StdRng::seed_from_u64(0);
+    for &n in RECEIVERS {
+        let bench = Bench::new(&mut rng, n);
+        let signed = bench.deal(&mut rng);
+        println!(
+            "{}::dealing_size/n={}: {} B",
+            module_path!(),
+            n,
+            signed.encode_size(),
+        );
+    }
 }
 
 criterion_group! {
@@ -186,6 +127,6 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets =
         bench_golden_dkg_deal,
-        bench_golden_dkg_play,
-        bench_golden_dkg_reshare_play,
+        bench_golden_dkg_verify,
+        bench_golden_dkg_dealing_size,
 }

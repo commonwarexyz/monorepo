@@ -87,6 +87,8 @@ arbitrary = "1.4.1"
 ark-ec = { version = "0.5", default-features = false }
 ark-ed-on-bls12-381-bandersnatch = { version = "0.5", default-features = false }
 ark-ff = { version = "0.5", default-features = false }
+ark-r1cs-std = { version = "0.5", default-features = false }
+ark-relations = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 aws-config = "1.8.12"
 aws-lc-rs = "1.16.3"

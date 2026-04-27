@@ -168,6 +168,7 @@ dependencies = [
  "ark-bls12-381",
  "ark-ec",
  "ark-ff",
+ "ark-r1cs-std",
  "ark-std",
 ]
 
@@ -227,6 +228,35 @@ dependencies = [
  "educe",
  "fnv",
  "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "ark-r1cs-std"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "941551ef1df4c7a401de7068758db6503598e6f01850bdb2cfdb614a1f9dbea1"
+dependencies = [
+ "ark-ec",
+ "ark-ff",
+ "ark-relations",
+ "ark-std",
+ "educe",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "tracing",
+]
+
+[[package]]
+name = "ark-relations"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec46ddc93e7af44bcab5230937635b06fb5744464dd6a7e7b083e80ebd274384"
+dependencies = [
+ "ark-ff",
+ "ark-std",
+ "tracing",
+ "tracing-subscriber 0.2.25",
 ]
 
 [[package]]
@@ -1177,7 +1207,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1193,7 +1223,7 @@ dependencies = [
  "commonware-utils",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1228,7 +1258,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1313,7 +1343,7 @@ dependencies = [
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1388,7 +1418,7 @@ dependencies = [
  "rstest",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1411,7 +1441,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1423,6 +1453,8 @@ dependencies = [
  "ark-ec",
  "ark-ed-on-bls12-381-bandersnatch",
  "ark-ff",
+ "ark-r1cs-std",
+ "ark-relations",
  "ark-serialize",
  "aws-lc-rs",
  "blake3",
@@ -1502,7 +1534,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
  "uuid",
 ]
 
@@ -1524,7 +1556,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1545,7 +1577,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
  "uuid",
 ]
 
@@ -1592,7 +1624,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1604,7 +1636,7 @@ dependencies = [
  "futures-timer",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1670,7 +1702,7 @@ dependencies = [
  "rand_distr",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1726,7 +1758,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1748,7 +1780,7 @@ dependencies = [
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1793,7 +1825,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -1843,7 +1875,7 @@ dependencies = [
  "rstest",
  "thiserror 2.0.17",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
  "zstd",
 ]
 
@@ -1918,7 +1950,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -2020,7 +2052,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-core",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -5737,7 +5769,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
  "web-time",
 ]
 
@@ -5748,6 +5780,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
 dependencies = [
  "serde",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0d2eaa99c3c2e41547cfa109e910a68ea03823cccad4a0525dcbc9b01e8c71"
+dependencies = [
  "tracing-core",
 ]
 

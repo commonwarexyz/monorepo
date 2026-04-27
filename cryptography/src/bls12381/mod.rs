@@ -9,7 +9,16 @@
 pub mod certificate;
 #[cfg(feature = "std")]
 pub mod dkg;
-#[cfg(feature = "std")]
+#[cfg(all(
+    feature = "std",
+    not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ))
+))] // ALPHA
 pub mod golden_dkg;
 pub mod primitives;
 mod scheme;
