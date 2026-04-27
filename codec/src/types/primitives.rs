@@ -207,6 +207,11 @@ impl<T: Write, const N: usize> Write for [T; N] {
     fn write(&self, buf: &mut impl BufMut) {
         T::write_slice(self, buf);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        T::write_slice_bufs(self, buf);
+    }
 }
 
 impl<T: Read, const N: usize> Read for [T; N] {
@@ -461,6 +466,24 @@ mod tests {
         [Byte(1), Byte(2), Byte(3)].write(&mut buf);
         assert_eq!(buf.put_slice_calls, 0);
         assert_eq!(buf.put_u8_calls, 3);
+
+        // `write_bufs` mirrors `write` for byte arrays.
+        let mut buf = TrackingWriteBuf::new();
+        [1u8, 2, 3].write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 0);
+        assert_eq!(buf.push_calls, 0);
+
+        // Arrays delegate `write_bufs` to element implementations that push chunks.
+        let mut buf = TrackingWriteBuf::new();
+        [
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ]
+        .write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 2);
+        assert_eq!(buf.push_calls, 2);
 
         // `[u8; N]` reads the fixed-size payload with one bulk copy.
         let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);
