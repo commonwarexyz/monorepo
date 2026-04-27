@@ -1771,6 +1771,7 @@ dependencies = [
  "libfuzzer-sys",
  "num-bigint",
  "num-rational",
+ "num-traits",
  "rand 0.8.5",
 ]
 

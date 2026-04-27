@@ -17,6 +17,7 @@ futures.workspace = true
 libfuzzer-sys.workspace = true
 num-bigint.workspace = true
 num-rational.workspace = true
+num-traits.workspace = true
 rand = { workspace = true, features = ["std_rng"] }
 
 [[bin]]
@@ -106,6 +107,34 @@ bench = false
 [[bin]]
 name = "channel"
 path = "fuzz_targets/channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unit"
+path = "fuzz_targets/unit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range"
+path = "fuzz_targets/range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "non_empty_vec"
+path = "fuzz_targets/non_empty_vec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hostname"
+path = "fuzz_targets/hostname.rs"
 test = false
 doc = false
 bench = false
