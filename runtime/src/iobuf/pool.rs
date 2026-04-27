@@ -758,11 +758,25 @@ impl BufferPoolThreadCache {
                 });
         }
 
-        Self::TLS_SIZE_CLASS_CACHES.with(|bins| {
-            Self::with_cache(bins, class.class_id, class.thread_cache_capacity, |cache| {
-                cache.pop(class)
+        // Allocation can happen from caller-owned TLS destructors during thread
+        // teardown. Once this key is being destroyed, `with` would panic. Fall
+        // back to the global freelist instead.
+        Self::TLS_SIZE_CLASS_CACHES
+            .try_with(|bins| {
+                Self::with_cache(bins, class.class_id, class.thread_cache_capacity, |cache| {
+                    cache.pop(class)
+                })
             })
-        })
+            .unwrap_or_else(|_| {
+                class
+                    .global
+                    .take()
+                    .map(|(slot, buffer)| TlsSizeClassCacheEntry {
+                        buffer,
+                        class: class.clone(),
+                        slot,
+                    })
+            })
     }
 
     /// Accesses the current thread's local cache for `class_id`, creating it

@@ -60,7 +60,7 @@
 use super::aligned::AlignedBuffer;
 use crossbeam_utils::CachePadded;
 use std::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -518,20 +518,18 @@ struct SlotBitmapProbe {
     bit_offset: u32,
 }
 
-// Monotonic source for per-thread probe ids. These ids only spread starting
-// points across bitmap words, they do not synchronize buffer ownership.
+// Monotonic source for per-thread probe ids.
 static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl SlotBitmapProbe {
     thread_local! {
-        // Assign each thread a stable numeric id on first touch so its home
-        // word selection is deterministic instead of depending on thread-local
-        // storage layout.
+        // The per-thread probe id gives each thread a stable starting point for
+        // bitmap scans.
         //
-        // Relaxed ordering is enough: these ids only spread probes out and do
-        // not synchronize access to buffers.
-        static TLS_SLOT_BITMAP_THREAD_ID: usize =
-            NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        // Keep this const-initialized so the TLS value has no destructor. The
+        // cold path initializes the id explicitly instead of using a lazy TLS
+        // initializer.
+        static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
     }
 
     /// Builds probe state for the current thread and freelist layout.
@@ -540,7 +538,18 @@ impl SlotBitmapProbe {
     /// offset inside each word.
     #[inline(always)]
     fn new(word_mask: usize, word_shift: u32) -> Self {
-        let thread_id = Self::TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| *thread_id);
+        let thread_id = Self::TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| {
+            if let Some(id) = thread_id.get() {
+                return id;
+            }
+
+            // Relaxed ordering is enough because probe ids only spread starting
+            // points across bitmap words, they do not synchronize buffer
+            // ownership.
+            let id = NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+            thread_id.set(Some(id));
+            id
+        });
         Self {
             // Low id bits choose the first bitmap word this thread probes.
             // With a power-of-two word count, masking is equivalent to modulo
