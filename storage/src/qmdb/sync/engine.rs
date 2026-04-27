@@ -519,7 +519,7 @@ where
     }
 
     /// Record a progress snapshot in metrics.
-    async fn record_progress(&self) {
+    async fn record_progress(&mut self) {
         self.progress_metrics
             .record(self.journal.size().await, *self.target.range.end());
     }
