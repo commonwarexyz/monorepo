@@ -89,23 +89,17 @@ impl From<[u8; 32]> for SigningKey {
         // Expand the seed to a 64-byte array with SHA512.
         let h = Sha512::digest(&seed[..]);
 
+        // Scalar-scalar arithmetic in `sign` requires the reduced representation.
         let mut scalar_bytes = [0u8; 32];
         scalar_bytes[..].copy_from_slice(&h.as_slice()[0..32]);
         scalar_bytes[0] &= 248;
         scalar_bytes[31] &= 127;
         scalar_bytes[31] |= 64;
 
-        #[expect(
-            deprecated,
-            reason = "Ed25519 key expansion uses the clamped bits directly for scalar-point multiplication."
-        )]
-        let point_scalar = Scalar::from_bits(scalar_bytes);
-
-        // Scalar-scalar arithmetic in `sign` requires the reduced representation.
         let s = Scalar::from_bytes_mod_order(scalar_bytes);
 
-        // Compute the public key as A = [a]B for the clamped 255-bit integer `a`.
-        let A = &point_scalar * constants::ED25519_BASEPOINT_TABLE;
+        // Compute the public key as A = [s]B.
+        let A = &s * constants::ED25519_BASEPOINT_TABLE;
 
         // Extract and cache the high half.
         let prefix = {
