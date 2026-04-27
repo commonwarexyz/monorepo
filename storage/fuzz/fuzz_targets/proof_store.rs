@@ -3,9 +3,12 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_storage::merkle::{
-    hasher::Standard, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location,
-    Position, Proof,
+use commonware_storage::{
+    merkle::{
+        hasher::Standard, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location,
+        Position, Proof,
+    },
+    qmdb::RootSpec as QmdbRootSpec,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -19,6 +22,7 @@ const MAX_PEAKS: usize = 64;
 #[derive(Debug)]
 struct FuzzInput<F: MerkleFamily> {
     proof_leaves: Location<F>,
+    inactive_peaks: usize,
     proof_digests: Vec<[u8; 32]>,
     elements: Vec<Vec<u8>>,
     start_loc: u64,
@@ -36,6 +40,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
         let num_peaks = u.int_in_range(0..=MAX_PEAKS)?;
         Ok(FuzzInput {
             proof_leaves: u.arbitrary()?,
+            inactive_peaks: u.arbitrary()?,
             proof_digests: (0..num_digests)
                 .map(|_| u.arbitrary::<[u8; 32]>())
                 .collect::<arbitrary::Result<Vec<_>>>()?,
@@ -55,10 +60,11 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
+fn fuzz_family<F: MerkleFamily + QmdbRootSpec>(input: &FuzzInput<F>) {
     let hasher = Standard::<Sha256>::new();
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
+        inactive_peaks: input.inactive_peaks,
         digests: input
             .proof_digests
             .iter()
@@ -69,19 +75,27 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
     let start_loc = Location::<F>::new(input.start_loc);
     let root = Digest::from(input.root);
     let range = Location::<F>::new(input.range.start)..Location::<F>::new(input.range.end);
+    let root_spec = F::root_spec(proof.inactive_peaks);
 
-    let Ok(proof_store) = ProofStore::new(&hasher, &proof, &input.elements, start_loc, &root)
-    else {
+    let Ok(proof_store) = ProofStore::new(
+        &hasher,
+        &proof,
+        &input.elements,
+        start_loc,
+        &root,
+        root_spec,
+    ) else {
         return;
     };
 
     if let Ok(proof) = proof_store.range_proof(&hasher, range) {
-        let _ = proof.verify_range_inclusion(&hasher, &input.elements, start_loc, &root);
+        let _ = proof.verify_range_inclusion(&hasher, &input.elements, start_loc, &root, root_spec);
         let _ = proof.verify_range_inclusion_and_extract_digests(
             &hasher,
             &input.elements,
             start_loc,
             &root,
+            root_spec,
         );
     }
 
@@ -105,6 +119,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
                 .map(|loc| (loc.encode(), *loc))
                 .collect::<Vec<_>>(),
             &root,
+            root_spec,
         );
 
         let _ = proof.verify_range_inclusion_and_extract_digests(
@@ -112,6 +127,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
             &input.elements,
             start_loc,
             &root,
+            root_spec,
         );
     }
 }

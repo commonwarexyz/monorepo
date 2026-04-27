@@ -10,7 +10,7 @@ pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, hasher::Hasher as _},
+        merkle::{conformance::build_test_mmr, hasher::Hasher as _, RootSpec},
         mmr::{Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
@@ -25,7 +25,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new();
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Location> = Vec::new();
             for _ in 0..11 {
@@ -69,52 +69,64 @@ mod tests {
                 assert_eq!(mmr.get_node(pos).unwrap(), digest);
             }
 
-            let root = *mmr.root();
+            let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
 
             // pruning tests
             mmr.prune(Location::new(8)).unwrap();
             assert_eq!(mmr.bounds().start, Location::new(8));
 
             assert!(matches!(
-                mmr.proof(&hasher, Location::new(0)),
+                mmr.proof(&hasher, Location::new(0), RootSpec::FULL_FORWARD),
                 Err(Error::ElementPruned(_))
             ));
             assert!(matches!(
-                mmr.proof(&hasher, Location::new(6)),
+                mmr.proof(&hasher, Location::new(6), RootSpec::FULL_FORWARD),
                 Err(Error::ElementPruned(_))
             ));
 
-            assert!(mmr.proof(&hasher, Location::new(8)).is_ok());
-            assert!(mmr.proof(&hasher, Location::new(10)).is_ok());
+            assert!(mmr
+                .proof(&hasher, Location::new(8), RootSpec::FULL_FORWARD)
+                .is_ok());
+            assert!(mmr
+                .proof(&hasher, Location::new(10), RootSpec::FULL_FORWARD)
+                .is_ok());
 
-            let root_after_prune = *mmr.root();
+            let root_after_prune = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(mmr
-                .range_proof(&hasher, Location::new(5)..Location::new(9))
+                .range_proof(
+                    &hasher,
+                    Location::new(5)..Location::new(9),
+                    RootSpec::FULL_FORWARD
+                )
                 .is_err(),);
             assert!(mmr
-                .range_proof(&hasher, Location::new(8)..mmr.leaves())
+                .range_proof(
+                    &hasher,
+                    Location::new(8)..mmr.leaves(),
+                    RootSpec::FULL_FORWARD
+                )
                 .is_ok(),);
 
             // Test that we can initialize a new MMR from another's elements.
             let oldest_loc = mmr.bounds().start;
             let digests = mmr.node_digests_to_pin(oldest_loc);
-            let mmr_copy = Mmr::init(
-                Config {
-                    nodes: (*Position::try_from(oldest_loc).unwrap()..*mmr.size())
-                        .map(|i| mmr.get_node(Position::new(i)).unwrap())
-                        .collect(),
-                    pruning_boundary: oldest_loc,
-                    pinned_nodes: digests,
-                },
-                &hasher,
-            )
+            let mmr_copy = Mmr::init(Config {
+                nodes: (*Position::try_from(oldest_loc).unwrap()..*mmr.size())
+                    .map(|i| mmr.get_node(Position::new(i)).unwrap())
+                    .collect(),
+                pruning_boundary: oldest_loc,
+                pinned_nodes: digests,
+            })
             .unwrap();
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
             assert_eq!(mmr_copy.bounds().start, mmr.bounds().start);
-            assert_eq!(*mmr_copy.root(), root);
+            assert_eq!(
+                mmr_copy.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+                root
+            );
         });
     }
 
@@ -125,11 +137,11 @@ mod tests {
         executor.start(|_| async move {
             let hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let mut test_mmr = Mmr::new(&hasher);
+            let mut test_mmr = Mmr::new();
             test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root();
+            let expected_root = test_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
 
-            let mut batched_mmr = Mmr::new(&hasher);
+            let mut batched_mmr = Mmr::new();
 
             let batch = {
                 let mut batch = batched_mmr.new_batch();
@@ -142,7 +154,7 @@ mod tests {
             batched_mmr.apply_batch(&batch).unwrap();
 
             assert_eq!(
-                batched_mmr.root(),
+                batched_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
                 expected_root,
                 "Batched MMR root should match reference"
             );
@@ -156,21 +168,18 @@ mod tests {
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let test_mmr = Mmr::new(&hasher);
+            let test_mmr = Mmr::new();
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root();
+            let expected_root = test_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
 
             let strategy = context.create_strategy(NZUsize!(4)).unwrap();
             let hasher: Standard<Sha256> = Standard::new();
 
-            let mut mmr = Mmr::init(
-                Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                },
-                &hasher,
-            )
+            let mut mmr = Mmr::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
             .unwrap();
 
             let batch = {
@@ -183,7 +192,7 @@ mod tests {
             };
             mmr.apply_batch(&batch).unwrap();
             assert_eq!(
-                mmr.root(),
+                mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
                 expected_root,
                 "Batched MMR root should match reference"
             );
@@ -195,43 +204,34 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: Standard<Sha256> = Standard::new();
-            assert!(Mmr::init(
-                Config::<sha256::Digest> {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                },
-                &hasher,
-            )
+            assert!(Mmr::init(Config::<sha256::Digest> {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
             .is_ok());
 
             assert!(matches!(
-                Mmr::init(
-                    Config {
-                        nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
-                        pruning_boundary: Location::new(0),
-                        pinned_nodes: vec![],
-                    },
-                    &hasher,
-                ),
+                Mmr::init(Config {
+                    nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
+                    pruning_boundary: Location::new(0),
+                    pinned_nodes: vec![],
+                }),
                 Err(Error::InvalidSize(_))
             ));
 
-            assert!(Mmr::init(
-                Config {
-                    nodes: vec![
-                        Sha256::hash(b"leaf1"),
-                        Sha256::hash(b"leaf2"),
-                        Sha256::hash(b"parent"),
-                    ],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                },
-                &hasher,
-            )
+            assert!(Mmr::init(Config {
+                nodes: vec![
+                    Sha256::hash(b"leaf1"),
+                    Sha256::hash(b"leaf2"),
+                    Sha256::hash(b"parent"),
+                ],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
             .is_ok());
 
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new();
             let batch = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..64 {
@@ -244,17 +244,14 @@ mod tests {
             let nodes: Vec<_> = (0..127)
                 .map(|i| mmr.get_node(Position::new(i)).unwrap())
                 .collect();
-            assert!(Mmr::init(
-                Config {
-                    nodes,
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                },
-                &hasher,
-            )
+            assert!(Mmr::init(Config {
+                nodes,
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
             .is_ok());
 
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new();
             let batch = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..11 {
@@ -268,25 +265,19 @@ mod tests {
                 .map(|i| mmr.get_node(Position::new(i)).unwrap())
                 .collect();
             let pinned_nodes = mmr.node_digests_to_pin(Location::new(4));
-            assert!(Mmr::init(
-                Config {
-                    nodes: nodes.clone(),
-                    pruning_boundary: Location::new(4),
-                    pinned_nodes: pinned_nodes.clone(),
-                },
-                &hasher,
-            )
+            assert!(Mmr::init(Config {
+                nodes: nodes.clone(),
+                pruning_boundary: Location::new(4),
+                pinned_nodes: pinned_nodes.clone(),
+            })
             .is_ok());
 
             assert!(matches!(
-                Mmr::init(
-                    Config {
-                        nodes,
-                        pruning_boundary: Location::new(5),
-                        pinned_nodes,
-                    },
-                    &hasher,
-                ),
+                Mmr::init(Config {
+                    nodes,
+                    pruning_boundary: Location::new(5),
+                    pinned_nodes,
+                }),
                 Err(Error::InvalidSize(_))
             ));
         });

@@ -7,11 +7,11 @@
 use crate::{
     index::unordered::Index,
     journal::contiguous::variable::Journal,
-    merkle::{self, Location},
+    merkle::{Family, Location},
     qmdb::{
         any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error,
+        Error, RootSpec,
     },
     translator::Translator,
     Context,
@@ -37,7 +37,7 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
 >;
 
 impl<
-        F: merkle::Family,
+        F: Family + RootSpec,
         E: Context,
         K: Key,
         V: VariableValue,
@@ -68,11 +68,11 @@ pub mod partitioned {
     use crate::{
         index::partitioned::unordered::Index,
         journal::contiguous::variable::Journal,
-        merkle::{self, Location},
+        merkle::{Family, Location},
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error,
+            Error, RootSpec,
         },
         translator::Translator,
         Context,
@@ -102,7 +102,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: merkle::Family,
+            F: Family + RootSpec,
             E: Context,
             K: Key,
             V: VariableValue,
@@ -702,10 +702,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{
-                mmr::{self, full::Mmr},
-                Family as _,
-            },
+            merkle::mmr::{self, full::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

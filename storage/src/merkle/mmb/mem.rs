@@ -12,6 +12,7 @@ mod tests {
     use crate::merkle::{
         hasher::{Hasher as _, Standard},
         mmb::{Error, Location, Position},
+        RootSpec,
     };
     use commonware_cryptography::Sha256;
 
@@ -20,7 +21,7 @@ mod tests {
 
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
         let hasher = H::new();
-        let mut mmb = Mmb::new(&hasher);
+        let mut mmb = Mmb::new();
         let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
@@ -35,7 +36,7 @@ mod tests {
     #[test]
     fn test_append_and_size() {
         let hasher = H::new();
-        let mut mmb = Mmb::new(&hasher);
+        let mut mmb = Mmb::new();
 
         for i in 0u64..8 {
             let batch = {
@@ -111,103 +112,104 @@ mod tests {
         );
         assert_eq!(mmb.get_node(Position::new(12)).unwrap(), digest12);
 
-        let expected_root = hasher.root(Location::new(8), [digest7, digest9, digest12].iter());
-        assert_eq!(*mmb.root(), expected_root, "incorrect root");
+        let expected_root = hasher
+            .root(
+                Location::new(8),
+                RootSpec::FULL_FORWARD,
+                [digest7, digest9, digest12].iter(),
+            )
+            .expect("zero inactive peaks is always valid");
+        assert_eq!(
+            mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+            expected_root,
+            "incorrect root"
+        );
     }
 
     #[test]
     fn test_prune_and_reinit() {
         let (hasher, mut mmb) = build_mmb(24);
 
-        let root = *mmb.root();
+        let root = mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
         let prune_loc = Location::new(9);
         mmb.prune(prune_loc).unwrap();
 
         assert_eq!(mmb.bounds().start, prune_loc);
-        assert_eq!(*mmb.root(), root);
+        assert_eq!(mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap(), root);
         assert!(matches!(
-            mmb.proof(&hasher, Location::new(0)),
+            mmb.proof(&hasher, Location::new(0), RootSpec::FULL_FORWARD),
             Err(Error::ElementPruned(_))
         ));
 
         for loc in *prune_loc..*mmb.leaves() {
             assert!(
-                mmb.proof(&hasher, Location::new(loc)).is_ok(),
+                mmb.proof(&hasher, Location::new(loc), RootSpec::FULL_FORWARD)
+                    .is_ok(),
                 "loc={loc} should remain provable after pruning"
             );
         }
 
-        let mmb_copy = Mmb::init(
-            Config {
-                nodes: (*Position::try_from(prune_loc).unwrap()..*mmb.size())
-                    .map(|i| mmb.get_node(Position::new(i)).unwrap())
-                    .collect(),
-                pruning_boundary: prune_loc,
-                pinned_nodes: mmb.node_digests_to_pin(prune_loc),
-            },
-            &hasher,
-        )
+        let mmb_copy = Mmb::init(Config {
+            nodes: (*Position::try_from(prune_loc).unwrap()..*mmb.size())
+                .map(|i| mmb.get_node(Position::new(i)).unwrap())
+                .collect(),
+            pruning_boundary: prune_loc,
+            pinned_nodes: mmb.node_digests_to_pin(prune_loc),
+        })
         .unwrap();
 
         assert_eq!(mmb_copy.size(), mmb.size());
         assert_eq!(mmb_copy.leaves(), mmb.leaves());
         assert_eq!(mmb_copy.bounds(), mmb.bounds());
-        assert_eq!(*mmb_copy.root(), root);
-        assert!(mmb_copy.proof(&hasher, Location::new(17)).is_ok());
+        assert_eq!(
+            mmb_copy.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+            root
+        );
+        assert!(mmb_copy
+            .proof(&hasher, Location::new(17), RootSpec::FULL_FORWARD)
+            .is_ok());
     }
 
     #[test]
     fn test_init_size_validation() {
         let hasher = H::new();
 
-        assert!(Mmb::<D>::init(
-            Config {
-                nodes: vec![],
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            },
-            &hasher,
-        )
+        assert!(Mmb::<D>::init(Config {
+            nodes: vec![],
+            pruning_boundary: Location::new(0),
+            pinned_nodes: vec![],
+        })
         .is_ok());
 
         assert!(matches!(
-            Mmb::init(
-                Config {
-                    nodes: vec![hasher.digest(b"node1"), hasher.digest(b"node2")],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                },
-                &hasher,
-            ),
+            Mmb::init(Config {
+                nodes: vec![hasher.digest(b"node1"), hasher.digest(b"node2")],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            }),
             Err(Error::InvalidSize(_))
         ));
 
-        assert!(Mmb::init(
-            Config {
-                nodes: vec![
-                    hasher.digest(b"leaf1"),
-                    hasher.digest(b"leaf2"),
-                    hasher.digest(b"parent"),
-                ],
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            },
-            &hasher,
-        )
+        assert!(Mmb::init(Config {
+            nodes: vec![
+                hasher.digest(b"leaf1"),
+                hasher.digest(b"leaf2"),
+                hasher.digest(b"parent"),
+            ],
+            pruning_boundary: Location::new(0),
+            pinned_nodes: vec![],
+        })
         .is_ok());
 
         let (_, mmb) = build_mmb(64);
         let nodes: Vec<_> = (0..*mmb.size())
             .map(|i| *mmb.get_node_unchecked(Position::new(i)))
             .collect();
-        assert!(Mmb::init(
-            Config {
-                nodes,
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            },
-            &hasher,
-        )
+        assert!(Mmb::init(Config {
+            nodes,
+            pruning_boundary: Location::new(0),
+            pinned_nodes: vec![],
+        })
         .is_ok());
 
         let (_, mut mmb) = build_mmb(11);
@@ -217,25 +219,19 @@ mod tests {
             .collect();
         let pinned_nodes = mmb.node_digests_to_pin(Location::new(4));
 
-        assert!(Mmb::init(
-            Config {
-                nodes: nodes.clone(),
-                pruning_boundary: Location::new(4),
-                pinned_nodes: pinned_nodes.clone(),
-            },
-            &hasher,
-        )
+        assert!(Mmb::init(Config {
+            nodes: nodes.clone(),
+            pruning_boundary: Location::new(4),
+            pinned_nodes: pinned_nodes.clone(),
+        })
         .is_ok());
 
         assert!(matches!(
-            Mmb::init(
-                Config {
-                    nodes,
-                    pruning_boundary: Location::new(2),
-                    pinned_nodes,
-                },
-                &hasher,
-            ),
+            Mmb::init(Config {
+                nodes,
+                pruning_boundary: Location::new(2),
+                pinned_nodes,
+            }),
             Err(Error::InvalidSize(_))
         ));
     }

@@ -11,7 +11,7 @@ use commonware_storage::{
     },
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
-        verify_proof,
+        verify_proof, RootSpec,
     },
     translator::TwoCap,
 };
@@ -161,7 +161,7 @@ fn test_config(
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
+fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
     let test_name = test_name.to_string();
@@ -235,7 +235,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     if start_loc >= oldest_retained_loc && start_loc < op_count {
                         if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
                             let root = db.root();
-                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root));
+                            let spec = F::root_spec(proof.inactive_peaks);
+                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root, spec,));
                         }
                     }
                 }
@@ -275,7 +276,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        assert!(verify_proof(&hasher, &proof, start_loc, &log, root));
+                        let spec = F::root_spec(proof.inactive_peaks);
+                        assert!(verify_proof(&hasher, &proof, start_loc, &log, root, spec));
                     }
                 }
 

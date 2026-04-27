@@ -23,9 +23,9 @@
 //!    its proof on every serve.
 
 use crate::{
-    merkle::{compact, hasher::Standard as StandardHasher, Family, Location, Proof, Readable},
+    merkle::{compact, hasher::Standard as StandardHasher, Family, Location, Proof},
     metadata::Metadata,
-    qmdb::{sync::compact::Target, Error},
+    qmdb::{sync::compact::Target, Error, RootSpec},
     Context,
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize};
@@ -201,7 +201,7 @@ pub(crate) async fn load_serve_state<F, E, H, S, C, M, DecodeCommitOp>(
     decode_commit_op: DecodeCommitOp,
 ) -> Result<(CachedServeState<F, H::Digest>, M, Location<F>), Error<F>>
 where
-    F: Family,
+    F: Family + RootSpec,
     E: Context,
     H: Hasher,
     S: Strategy,
@@ -222,18 +222,29 @@ where
     let max_digests = proof_bytes.len() / H::Digest::SIZE;
     let commit_proof = Proof::<F, H::Digest>::decode_cfg(proof_bytes.as_ref(), &max_digests)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    let root = merkle.root();
     let leaf_count = commit_proof.leaves;
     if leaf_count == 0 {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
+
+    // Decode the commit op to get the inactivity floor, which is needed to compute the root spec.
     let last_commit_loc = Location::new(*leaf_count - 1);
+    let (last_commit_metadata, inactivity_floor_loc) =
+        decode_commit_op(commit_op_bytes.as_ref(), commit_codec_config)?;
+    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+
+    let inactive_peaks =
+        F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
     let hasher = StandardHasher::<H>::new();
-    if !commit_proof.verify_element_inclusion(
+    let root = merkle
+        .root(&hasher, F::root_spec(inactive_peaks))
+        .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
+    if !commit_proof.verify_range_inclusion(
         &hasher,
-        commit_op_bytes.as_slice(),
+        &[commit_op_bytes.as_slice()],
         last_commit_loc,
         &root,
+        F::root_spec(inactive_peaks),
     ) {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
@@ -242,9 +253,6 @@ where
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>()
     });
-    let (last_commit_metadata, inactivity_floor_loc) =
-        decode_commit_op(commit_op_bytes.as_ref(), commit_codec_config)?;
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     let serve_state = CachedServeState {
         root,
         leaf_count,
@@ -266,7 +274,7 @@ pub(crate) async fn bootstrap_initial_commit<F, E, H, S>(
     commit_op_bytes: Vec<u8>,
 ) -> Result<(), Error<F>>
 where
-    F: Family,
+    F: Family + RootSpec,
     E: Context,
     H: Hasher,
     S: Strategy,
@@ -276,17 +284,22 @@ where
         let batch = merkle.new_batch().add(&hasher, &commit_op_bytes);
         merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
     };
-    let proof = batch.proof(&hasher, Location::new(0))?;
     merkle.apply_batch(&batch)?;
+
+    // The initial commit has one leaf and an inactivity floor of 0, giving 0 inactive peaks.
+    let leaf_count = merkle.leaves();
+    let inactive_peaks = F::inactive_peaks(F::location_to_position(leaf_count), Location::new(0));
     merkle
         .sync_with_witness(
-            |_| {
+            |mem| {
+                let root = mem.root(&hasher, F::root_spec(inactive_peaks))?;
+                let proof = mem.proof(&hasher, Location::new(0), F::root_spec(inactive_peaks))?;
                 Ok(CachedServeState {
-                    root: batch.root(),
+                    root,
                     leaf_count: Location::new(1),
                     pinned_nodes: Vec::new(),
                     commit_op_bytes: commit_op_bytes.clone(),
-                    commit_proof: proof.clone(),
+                    commit_proof: proof,
                 })
             },
             |metadata, slot, serve_state| {
@@ -317,6 +330,9 @@ where
     /// Return the location of the current tip commit in that Merkle.
     fn last_commit_loc(&self) -> Location<F>;
 
+    /// Return the inactivity floor declared by the current tip commit.
+    fn inactivity_floor_loc(&self) -> Location<F>;
+
     /// Encode the current tip commit exactly as it should be persisted and later served.
     fn encode_current_commit_op(&self) -> Vec<u8>;
 
@@ -344,28 +360,32 @@ where
 pub(crate) async fn persist_witness<W, F, E, H, S>(source: &W) -> Result<(), Error<F>>
 where
     W: WitnessSource<F, E, H, S>,
-    F: Family,
+    F: Family + RootSpec,
     E: Context,
     H: Hasher,
     S: Strategy,
 {
     let hasher = StandardHasher::<H>::new();
     let last_commit_loc = source.last_commit_loc();
+    let inactivity_floor_loc = source.inactivity_floor_loc();
     let commit_op_bytes = source.encode_current_commit_op();
     source
         .merkle()
         .sync_with_witness(
             |mem| {
-                let cached = source.cloned_serve_state();
-                let mem_root = *mem.root();
                 let mem_leaves = mem.leaves();
-                if cached.root == mem_root && cached.leaf_count == mem_leaves {
+                let cached = source.cloned_serve_state();
+                if cached.leaf_count == mem_leaves {
                     return Ok(cached);
                 }
+                let inactive_peaks =
+                    F::inactive_peaks(F::location_to_position(mem_leaves), inactivity_floor_loc);
+                let mem_root = mem.root(&hasher, F::root_spec(inactive_peaks))?;
                 let pinned_nodes = F::nodes_to_pin(mem_leaves)
                     .map(|pos| *mem.get_node_unchecked(pos))
                     .collect::<Vec<_>>();
-                let commit_proof = mem.proof(&hasher, last_commit_loc)?;
+                let commit_proof =
+                    mem.proof(&hasher, last_commit_loc, F::root_spec(inactive_peaks))?;
                 Ok(CachedServeState {
                     root: mem_root,
                     leaf_count: mem_leaves,

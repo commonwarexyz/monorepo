@@ -4,14 +4,20 @@ use super::{fixed, variable};
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered::variable::Operation as VariableOperation, FixedValue, VariableValue},
+        any::{
+            ordered::{
+                fixed::Operation as FixedOperation, variable::Operation as VariableOperation,
+            },
+            FixedValue, VariableValue,
+        },
         current::BitmapPrunedBits,
         operation::Key,
+        RootSpec,
     },
     translator::Translator,
     Context,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
@@ -23,13 +29,14 @@ use commonware_utils::Array;
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] fixed::Db<F, E, K, V, H, T, N, S>
     where {
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
         S: Strategy,
+        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -41,7 +48,7 @@ crate::qmdb::any::traits::impl_db_any! {
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] variable::Db<F, E, K, V, H, T, N, S>
     where {
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Key,
         V: VariableValue + 'static,
@@ -58,7 +65,7 @@ crate::qmdb::any::traits::impl_db_any! {
 // =============================================================================
 
 impl<
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -82,7 +89,7 @@ impl<
 }
 
 impl<
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Key,
         V: VariableValue,
@@ -115,19 +122,20 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S]
     fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
         S: Strategy,
+        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
 
 impl<
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -159,7 +167,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S]
     variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Key,
         V: VariableValue + 'static,
@@ -172,7 +180,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable,
+        F: Graftable + RootSpec,
         E: Context,
         K: Key,
         V: VariableValue,

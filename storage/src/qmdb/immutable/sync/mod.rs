@@ -7,7 +7,7 @@ use crate::{
     },
     merkle::{
         full::{self, Merkle},
-        Family, Location,
+        Family, Location, Proof, RootSpec as MerkleRootSpec,
     },
     qmdb::{
         any::ValueEncoding,
@@ -15,7 +15,7 @@ use crate::{
         immutable::{self, CompactDb, Operation},
         operation::{Key, Operation as _},
         sync::{self},
-        Error,
+        Error, RootSpec,
     },
     translator::Translator,
     Context, Persistable,
@@ -29,7 +29,7 @@ type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
-    F: Family,
+    F: Family + RootSpec,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -81,10 +81,9 @@ where
             context.with_label("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
-                range,
+                range: range.clone(),
                 pinned_nodes,
             },
-            &hasher,
         )
         .await?;
 
@@ -122,9 +121,15 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(*last_commit_loc + 1)),
+            inactivity_floor_loc,
+        );
+        let root = journal.root(F::root_spec(inactive_peaks))?;
 
         let db = Self {
             journal,
+            root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
@@ -137,11 +142,15 @@ where
     fn root(&self) -> Self::Digest {
         self.root()
     }
+
+    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> MerkleRootSpec {
+        F::root_spec(proof.inactive_peaks)
+    }
 }
 
 impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
-    F: Family,
+    F: Family + RootSpec,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -178,19 +187,25 @@ where
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
+        let hasher = StandardHasher::<H>::new();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.with_label("merkle"),
-            &StandardHasher::<H>::new(),
             config.merkle,
             leaf_count,
             pinned_nodes.clone(),
         )
         .await?;
+        let inactive_peaks =
+            F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+        let root = merkle
+            .root(&hasher, F::root_spec(inactive_peaks))
+            .map_err(|_| Error::DataCorrupted("failed to compute compact state root"))?;
         Self::init_from_verified_state(
             merkle,
             commit_codec_config,
             last_commit_metadata,
             inactivity_floor_loc,
+            root,
             commit_op_bytes,
             last_commit_proof,
             pinned_nodes,
@@ -199,6 +214,10 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
+    }
+
+    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> MerkleRootSpec {
+        F::root_spec(proof.inactive_peaks)
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {

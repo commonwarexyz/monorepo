@@ -4,7 +4,7 @@ use super::{operation::Operation, Keyless};
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, Error},
+    qmdb::{any::value::ValueEncoding, Error, RootSpec},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -22,7 +22,7 @@ type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
 pub struct UnmerkleizedBatch<F, H, V, S: Strategy = Sequential>
 where
-    F: Family,
+    F: Family + RootSpec,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -47,12 +47,15 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy = Sequential>
+pub struct MerkleizedBatch<F: Family + RootSpec, D: Digest, V: ValueEncoding, S: Strategy = Sequential>
 where
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>, S>>,
+
+    /// Cached operations root after applying this batch.
+    pub(super) root: D,
 
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
@@ -79,7 +82,8 @@ where
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
+impl<F: Family + RootSpec, D: Digest, V: ValueEncoding, S: Strategy>
+    MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -99,7 +103,7 @@ where
 /// Returns `None` if the location cannot be found in the live parent chain (e.g. the
 /// owning ancestor was committed and freed). Callers should fall through to the committed
 /// DB in that case.
-fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
+fn read_chain_op<F: Family + RootSpec, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
 ) -> Option<Operation<F, V>>
@@ -126,7 +130,7 @@ where
 
 impl<F, H, V, S: Strategy> UnmerkleizedBatch<F, H, V, S>
 where
-    F: Family,
+    F: Family + RootSpec,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -291,7 +295,15 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(total_size)),
+            inactivity_floor,
+        );
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
+        let root = db
+            .journal
+            .with_mem(|mem| journal.root(mem, &db.journal.hasher, F::root_spec(inactive_peaks)))
+            .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_batch_ends = Vec::new();
         let mut ancestor_new_inactivity_floor_locs = Vec::new();
@@ -306,6 +318,7 @@ where
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
+            root,
             parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
             total_size,
@@ -317,13 +330,14 @@ where
     }
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
+impl<F: Family + RootSpec, D: Digest, V: ValueEncoding, S: Strategy>
+    MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {
     /// Return the speculative root.
-    pub fn root(&self) -> D {
-        self.journal_batch.root()
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// Read a value at `loc`.

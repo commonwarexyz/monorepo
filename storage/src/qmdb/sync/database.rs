@@ -1,5 +1,5 @@
 use crate::{
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof, RootSpec},
     qmdb::sync::Journal,
     translator::Translator,
 };
@@ -75,4 +75,7 @@ pub trait Database: Sized + Send {
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
+
+    /// Return the root spec used to verify an ops proof for this database's sync root.
+    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> RootSpec;
 }

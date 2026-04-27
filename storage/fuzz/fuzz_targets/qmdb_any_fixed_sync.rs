@@ -12,7 +12,7 @@ use commonware_storage::{
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
-        sync,
+        sync, RootSpec,
     },
     translator::TwoCap,
 };
@@ -121,7 +121,7 @@ async fn test_sync<F, R>(
     sync_id: usize,
 ) -> bool
 where
-    F: MerkleFamily,
+    F: MerkleFamily + RootSpec,
     R: sync::resolver::Resolver<
         Family = F,
         Digest = commonware_cryptography::sha256::Digest,
@@ -158,7 +158,7 @@ where
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
+fn fuzz_family<F: MerkleFamily + RootSpec>(input: &mut FuzzInput, test_name: &str) {
     input.commit_counter = 0;
     let runner = deterministic::Runner::default();
 

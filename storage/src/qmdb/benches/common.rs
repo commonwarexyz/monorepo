@@ -20,6 +20,7 @@ use commonware_storage::{
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
         },
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
+        RootSpec,
     },
     translator::EightCap,
 };
@@ -68,7 +69,8 @@ pub type CurOVarVecDb<F> =
 
 pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256, Rayon>;
 
-pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
+/// Open a keyless benchmark database using the shared benchmark configuration.
+pub async fn open_keyless_db<F: Family + RootSpec>(ctx: Context) -> KeylessDb<F> {
     let cfg = keyless_cfg(&ctx);
     KeylessDb::<F>::init(ctx, cfg).await.unwrap()
 }

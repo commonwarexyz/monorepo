@@ -140,7 +140,7 @@ pub(super) fn fold_grafted_peaks<
 
 /// Compute the grafted root by folding peak digests with multi-peak chunk grafting.
 ///
-/// For MMR this produces the same result as `hasher.root(leaves, peaks)` because every chunk has a
+/// For MMR this produces the same result as `hasher.root(leaves, RootSpec::FULL_FORWARD, peaks).expect("zero inactive peaks is always valid")` because every chunk has a
 /// single peak at the grafting height. For MMB, chunks that span multiple sub-grafting-height peaks
 /// are folded together and combined with the bitmap chunk.
 ///
@@ -488,6 +488,7 @@ mod tests {
         merkle::{
             conformance::{build_test_mem, build_test_mmr},
             mem::Mem,
+            RootSpec,
         },
         mmb, mmr,
         mmr::{
@@ -524,7 +525,7 @@ mod tests {
     ) -> Mmr<sha256::Digest> {
         let grafted_hasher =
             GraftedHasher::<mmr::Family, _>::new(standard.clone(), grafting_height);
-        let mut grafted_mmr = Mmr::new(&grafted_hasher);
+        let mut grafted_mmr = Mmr::new();
         if !chunks.is_empty() {
             // Use a separate hasher for leaf digest computation to avoid borrow conflict
             // with grafted_hasher (which borrows standard via fork()).
@@ -556,7 +557,7 @@ mod tests {
         grafting_height: u32,
     ) -> Mem<F, sha256::Digest> {
         let grafted_hasher = GraftedHasher::<F, _>::new(standard.clone(), grafting_height);
-        let mut grafted_tree = Mem::<F, _>::new(&grafted_hasher);
+        let mut grafted_tree = Mem::<F, _>::new();
 
         if !chunks.is_empty() {
             let ops_size = ops.size();
@@ -681,7 +682,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = Mmr::new(&standard);
+            let mmr = Mmr::new();
             let ops_mmr = build_test_mmr(&standard, mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
@@ -727,7 +728,7 @@ mod tests {
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
-        let mut ops_mmr = Mmr::new(&standard);
+        let mut ops_mmr = Mmr::new();
         let batch = {
             let mut batch = ops_mmr.new_batch();
             for i in 0u8..4 {
@@ -742,7 +743,7 @@ mod tests {
 
         // Build grafted MMR with 2 leaves.
         let grafted_hasher = GraftedHasher::<mmr::Family, _>::new(standard, grafting_height);
-        let mut grafted = Mmr::new(&grafted_hasher);
+        let mut grafted = Mmr::new();
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
@@ -783,7 +784,7 @@ mod tests {
             let hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Build an ops MMR with 4 leaves.
-            let mut ops_mmr = Mmr::new(&hasher);
+            let mut ops_mmr = Mmr::new();
             let batch = {
                 let mut batch = ops_mmr.new_batch();
                 batch = batch.add(&hasher, &b1);
@@ -803,7 +804,7 @@ mod tests {
             // yield 2 grafted leaves.
             let grafted = build_test_grafted_mmr(&hasher, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
 
-            let ops_root = *ops_mmr.root();
+            let ops_root = ops_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
 
             {
                 let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
@@ -822,75 +823,157 @@ mod tests {
                             peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
                         }
                     }
-                    hasher.root(ops_leaves, peaks.iter())
+                    hasher
+                        .root(ops_leaves, RootSpec::FULL_FORWARD, peaks.iter())
+                        .expect("zero inactive peaks is always valid")
                 };
                 assert_ne!(grafted_root, ops_root);
 
                 // Verify inclusion proofs for each of the 4 ops leaves.
                 {
                     let loc = Location::new(0);
-                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
-                        .await
-                        .unwrap();
+                    let proof = verification::range_proof(
+                        &hasher,
+                        &combined,
+                        loc..loc + 1,
+                        RootSpec::FULL_FORWARD,
+                    )
+                    .await
+                    .unwrap();
 
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(
+                        &verifier,
+                        &b1,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     let loc = Location::new(1);
-                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
-                        .await
-                        .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
+                    let proof = verification::range_proof(
+                        &hasher,
+                        &combined,
+                        loc..loc + 1,
+                        RootSpec::FULL_FORWARD,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(proof.verify_element_inclusion(
+                        &verifier,
+                        &b2,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     let loc = Location::new(2);
-                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
-                        .await
-                        .unwrap();
+                    let proof = verification::range_proof(
+                        &hasher,
+                        &combined,
+                        loc..loc + 1,
+                        RootSpec::FULL_FORWARD,
+                    )
+                    .await
+                    .unwrap();
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(
+                        &verifier,
+                        &b3,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
-                        .await
-                        .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    let proof = verification::range_proof(
+                        &hasher,
+                        &combined,
+                        loc..loc + 1,
+                        RootSpec::FULL_FORWARD,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(proof.verify_element_inclusion(
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
                 {
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
-                        .await
-                        .unwrap();
+                    let proof = verification::range_proof(
+                        &hasher,
+                        &combined,
+                        loc..loc + 1,
+                        RootSpec::FULL_FORWARD,
+                    )
+                    .await
+                    .unwrap();
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &verifier,
+                        &b3,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     // Wrong root.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &verifier,
+                        &b4,
+                        loc,
+                        &ops_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     // Wrong position.
                     assert!(!proof.verify_element_inclusion(
                         &verifier,
                         &b4,
                         loc + 1,
-                        &grafted_root
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD,
                     ));
 
                     // Wrong chunk element in the verifier.
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
 
                     // Wrong chunk index in the verifier.
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 2, vec![&c2]);
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD
+                    ));
                 }
 
                 // Verify range proofs.
@@ -899,6 +982,7 @@ mod tests {
                         &hasher,
                         &combined,
                         Location::new(0)..Location::new(4),
+                        RootSpec::FULL_FORWARD,
                     )
                     .await
                     .unwrap();
@@ -909,7 +993,8 @@ mod tests {
                         &verifier,
                         &range,
                         Location::new(0),
-                        &grafted_root
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD,
                     ));
 
                     // Fails with incomplete chunk elements.
@@ -919,7 +1004,8 @@ mod tests {
                         &verifier,
                         &range,
                         Location::new(0),
-                        &grafted_root
+                        &grafted_root,
+                        RootSpec::FULL_FORWARD,
                     ));
                 }
             }
@@ -951,24 +1037,48 @@ mod tests {
                         peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
                     }
                 }
-                hasher.root(ops_leaves, peaks.iter())
+                hasher
+                    .root(ops_leaves, RootSpec::FULL_FORWARD, peaks.iter())
+                    .expect("zero inactive peaks is always valid")
             };
 
             // Verify inclusion proofs still work for both covered and uncovered ops leaves.
             let loc = Location::new(0);
-            let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1)
-                .await
-                .unwrap();
+            let proof = merkle::verification::range_proof(
+                &hasher,
+                &combined,
+                loc..loc + 1,
+                RootSpec::FULL_FORWARD,
+            )
+            .await
+            .unwrap();
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+            assert!(proof.verify_element_inclusion(
+                &verifier,
+                &b1,
+                loc,
+                &grafted_root,
+                RootSpec::FULL_FORWARD
+            ));
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let loc = Location::new(4);
-            let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1)
-                .await
-                .unwrap();
-            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
+            let proof = merkle::verification::range_proof(
+                &hasher,
+                &combined,
+                loc..loc + 1,
+                RootSpec::FULL_FORWARD,
+            )
+            .await
+            .unwrap();
+            assert!(proof.verify_element_inclusion(
+                &verifier,
+                &b5,
+                loc,
+                &grafted_root,
+                RootSpec::FULL_FORWARD
+            ));
         });
     }
 
@@ -981,7 +1091,7 @@ mod tests {
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
         let grafted_hasher = GraftedHasher::<mmr::Family, _>::new(standard, grafting_height);
-        let mut grafted = Mmr::new(&grafted_hasher);
+        let mut grafted = Mmr::new();
         let batch = grafted
             .new_batch()
             .add_leaf_digest(d0)
@@ -1020,13 +1130,9 @@ mod tests {
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
         let grafted_hasher = GraftedHasher::<mmr::Family, _>::new(standard, grafting_height);
-        let mut grafted = Mmr::from_components(
-            &grafted_hasher,
-            Vec::new(),
-            grafted_pruning_boundary,
-            vec![pinned_digest],
-        )
-        .unwrap();
+        let mut grafted =
+            Mmr::from_components(Vec::new(), grafted_pruning_boundary, vec![pinned_digest])
+                .unwrap();
         let batch = grafted
             .new_batch()
             .add_leaf_digest(d4)
@@ -1063,7 +1169,7 @@ mod tests {
                 }
 
                 exercised += 1;
-                let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(&hasher), leaf_count);
+                let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
                 let chunks: Vec<_> = (0..complete_chunks)
                     .map(|i| Sha256::fill(0xA0 + i as u8))
                     .collect();
@@ -1091,7 +1197,9 @@ mod tests {
                 );
 
                 // A naive peak fold does not regroup sub-grafting-height peaks within a chunk.
-                let naive_root = hasher.root(leaves, peaks.iter());
+                let naive_root = hasher
+                    .root(leaves, RootSpec::FULL_FORWARD, peaks.iter())
+                    .expect("zero inactive peaks is always valid");
                 assert_ne!(
                     grafted_root, naive_root,
                     "expected multi-peak regrouping to matter for leaf_count={leaf_count}"
@@ -1120,7 +1228,7 @@ mod tests {
                 continue;
             }
 
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(&hasher), leaf_count);
+            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
             let chunks: Vec<_> = (0..complete_chunks)
                 .map(|i| Sha256::fill(0xC0 + i as u8))
                 .collect();
