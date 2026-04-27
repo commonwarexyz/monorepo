@@ -56,6 +56,12 @@
 //! For positions in the committed structure, callers fall through to [`Mem::get_node`]
 //! (or an adapter that layers a batch over a `Mem`).
 //!
+//! # Batch invalidation
+//!
+//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
+//! applied. Invalid batches must not be used: their methods may return incorrect data rather than
+//! erroring.
+//!
 //! # Example (MMR)
 //!
 //! ```ignore
@@ -590,9 +596,8 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
 
     /// Create a child batch on top of this merkleized batch.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
+    /// fork has been applied.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D> {
         let batch = UnmerkleizedBatch::new(Arc::clone(self));
         #[cfg(feature = "std")]
