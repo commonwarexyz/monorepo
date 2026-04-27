@@ -9,7 +9,7 @@
 
 use crate::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Family},
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Family},
     qmdb::{
         any::{
             self,
@@ -76,6 +76,32 @@ type KeylessMmrFixed = keyless::fixed::Db<mmr::Family, Ctx, U64, Sha256>;
 type KeylessMmbFixed = keyless::fixed::Db<mmb::Family, Ctx, U64, Sha256>;
 type KeylessMmrVariable = keyless::variable::Db<mmr::Family, Ctx, Vec<u8>, Sha256>;
 type KeylessMmbVariable = keyless::variable::Db<mmb::Family, Ctx, Vec<u8>, Sha256>;
+
+type ImmutableMmrCompactFixed =
+    immutable::fixed::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256>;
+type ImmutableMmbCompactFixed =
+    immutable::fixed::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256>;
+type ImmutableMmrCompactVariable =
+    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, ((), ())>;
+type ImmutableMmbCompactVariable =
+    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, ((), ())>;
+
+type KeylessMmrCompactFixed = keyless::fixed::CompactDb<mmr::Family, Ctx, U64, Sha256>;
+type KeylessMmbCompactFixed = keyless::fixed::CompactDb<mmb::Family, Ctx, U64, Sha256>;
+type KeylessMmrCompactVariable = keyless::variable::CompactDb<
+    mmr::Family,
+    Ctx,
+    Vec<u8>,
+    Sha256,
+    (commonware_codec::RangeCfg<usize>, ()),
+>;
+type KeylessMmbCompactVariable = keyless::variable::CompactDb<
+    mmb::Family,
+    Ctx,
+    Vec<u8>,
+    Sha256,
+    (commonware_codec::RangeCfg<usize>, ()),
+>;
 
 // Config constructors
 
@@ -200,6 +226,53 @@ fn keyless_variable_config(
     }
 }
 
+fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config {
+    crate::merkle::compact::Config {
+        partition: format!("{suffix}-compact"),
+        thread_pool: None,
+    }
+}
+
+fn immutable_fixed_compact_config(
+    suffix: &str,
+    _pooler: &impl BufferPooler,
+) -> immutable::fixed::CompactConfig {
+    immutable::CompactConfig {
+        merkle: compact_merkle_config(suffix),
+        commit_codec_config: (),
+    }
+}
+
+fn immutable_variable_compact_config(
+    suffix: &str,
+    _pooler: &impl BufferPooler,
+) -> immutable::variable::CompactConfig<((), ())> {
+    immutable::CompactConfig {
+        merkle: compact_merkle_config(suffix),
+        commit_codec_config: ((), ()),
+    }
+}
+
+fn keyless_fixed_compact_config(
+    suffix: &str,
+    _pooler: &impl BufferPooler,
+) -> keyless::fixed::CompactConfig {
+    keyless::CompactConfig {
+        merkle: compact_merkle_config(suffix),
+        commit_codec_config: (),
+    }
+}
+
+fn keyless_variable_compact_config(
+    suffix: &str,
+    _pooler: &impl BufferPooler,
+) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ())> {
+    keyless::CompactConfig {
+        merkle: compact_merkle_config(suffix),
+        commit_codec_config: ((0..=10000usize).into(), ()),
+    }
+}
+
 // Workloads
 
 fn to_digest(i: u64) -> Digest {
@@ -244,6 +317,34 @@ macro_rules! apply_sets {
         }
         let merkleized = batch.merkleize(&$db, None, floor);
         $db.apply_batch(merkleized).await.unwrap();
+    }};
+}
+
+/// Immutable-set variant for the compact db. Identical to [`apply_sets`] except that
+/// [`CompactDb::apply_batch`] is synchronous.
+macro_rules! apply_sets_compact {
+    ($db:ident, $ops:expr) => {{
+        let floor = $db.inactivity_floor_loc();
+        let mut batch = $db.new_batch();
+        for (k, v) in $ops {
+            batch = batch.set(k, v);
+        }
+        let merkleized = batch.merkleize(&$db, None, floor);
+        $db.apply_batch(merkleized).unwrap();
+    }};
+}
+
+/// Keyless-append variant for the compact db. Identical to [`apply_appends`] except
+/// that [`CompactDb::apply_batch`] is synchronous.
+macro_rules! apply_appends_compact {
+    ($db:ident, $vals:expr) => {{
+        let floor = $db.inactivity_floor_loc();
+        let mut batch = $db.new_batch();
+        for v in $vals {
+            batch = batch.append(v);
+        }
+        let merkleized = batch.merkleize(&$db, None, floor);
+        $db.apply_batch(merkleized).unwrap();
     }};
 }
 
@@ -350,6 +451,54 @@ macro_rules! immutable_root {
     }};
 }
 
+/// Compact-db variant of [`immutable_root`].
+macro_rules! immutable_root_compact {
+    ($db:ident, $seed:ident) => {{
+        let n = $seed % 30 + 5;
+        let prefix = ($seed % 256) as u8;
+
+        apply_sets_compact!($db, (0..n).map(|i| (to_digest(i), to_val(i, 1))));
+        apply_sets_compact!($db, (n..2 * n).map(|i| (to_digest(i), to_val(i, 2))));
+        apply_sets_compact!(
+            $db,
+            (0..n / 2).map(|i| (colliding_digest(prefix, 10000 + i), to_val(i, 3)))
+        );
+
+        $db.root().to_vec()
+    }};
+}
+
+/// Compact-db variant of [`keyless_root`].
+macro_rules! keyless_root_compact {
+    ($db:ident, $seed:ident, |$x:ident| $make_val:expr) => {{
+        let n = $seed % 30 + 5;
+
+        apply_appends_compact!(
+            $db,
+            (0..n).map(|i| {
+                let $x = $seed.wrapping_add(i);
+                $make_val
+            })
+        );
+        apply_appends_compact!(
+            $db,
+            (0..n).map(|i| {
+                let $x = $seed.wrapping_add(n + i);
+                $make_val
+            })
+        );
+        apply_appends_compact!(
+            $db,
+            (0..n / 2).map(|i| {
+                let $x = (!$seed).wrapping_add(i);
+                $make_val
+            })
+        );
+
+        $db.root().to_vec()
+    }};
+}
+
 /// 3-batch keyless workload. The `$make_val` expression converts a `u64` into the
 /// appropriate value type (`U64` for fixed, `Vec<u8>` for variable).
 ///
@@ -421,6 +570,14 @@ macro_rules! keyed_conformance {
 macro_rules! immutable_conformance {
     ($name:ident, $db:ty, $cfg_fn:expr) => {
         db_conformance!($name, $db, $cfg_fn, |db, seed| immutable_root!(db, seed));
+    };
+}
+
+macro_rules! immutable_compact_conformance {
+    ($name:ident, $db:ty, $cfg_fn:expr) => {
+        db_conformance!($name, $db, $cfg_fn, |db, seed| immutable_root_compact!(
+            db, seed
+        ));
     };
 }
 
@@ -543,6 +700,52 @@ db_conformance!(
     |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
 );
 
+immutable_compact_conformance!(
+    ImmutableMmrCompactFixedConf,
+    ImmutableMmrCompactFixed,
+    immutable_fixed_compact_config
+);
+immutable_compact_conformance!(
+    ImmutableMmbCompactFixedConf,
+    ImmutableMmbCompactFixed,
+    immutable_fixed_compact_config
+);
+immutable_compact_conformance!(
+    ImmutableMmrCompactVariableConf,
+    ImmutableMmrCompactVariable,
+    immutable_variable_compact_config
+);
+immutable_compact_conformance!(
+    ImmutableMmbCompactVariableConf,
+    ImmutableMmbCompactVariable,
+    immutable_variable_compact_config
+);
+
+db_conformance!(
+    KeylessMmrCompactFixedConf,
+    KeylessMmrCompactFixed,
+    keyless_fixed_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| U64::new(x)) }
+);
+db_conformance!(
+    KeylessMmbCompactFixedConf,
+    KeylessMmbCompactFixed,
+    keyless_fixed_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| U64::new(x)) }
+);
+db_conformance!(
+    KeylessMmrCompactVariableConf,
+    KeylessMmrCompactVariable,
+    keyless_variable_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| x.to_be_bytes().to_vec()) }
+);
+db_conformance!(
+    KeylessMmbCompactVariableConf,
+    KeylessMmbCompactVariable,
+    keyless_variable_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| x.to_be_bytes().to_vec()) }
+);
+
 conformance_tests! {
     AnyMmrUnorderedFixedConf => 200,
     AnyMmrUnorderedVariableConf => 200,
@@ -568,6 +771,14 @@ conformance_tests! {
     KeylessMmbFixedConf => 200,
     KeylessMmrVariableConf => 200,
     KeylessMmbVariableConf => 200,
+    ImmutableMmrCompactFixedConf => 200,
+    ImmutableMmbCompactFixedConf => 200,
+    ImmutableMmrCompactVariableConf => 200,
+    ImmutableMmbCompactVariableConf => 200,
+    KeylessMmrCompactFixedConf => 200,
+    KeylessMmbCompactFixedConf => 200,
+    KeylessMmrCompactVariableConf => 200,
+    KeylessMmbCompactVariableConf => 200,
 }
 
 // Order-independence tests (run via `just test`, unlike the conformance tests above)
@@ -633,6 +844,38 @@ async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Val
         "recreate-after-delete order must not affect root",
     )
     .await;
+}
+
+// Macro rather than a generic function because compact immutable apply_batch is sync.
+macro_rules! assert_immutable_order_independent_compact {
+    ($fwd:ident, $rev:ident) => {{
+        let mut ops: Vec<_> = (0..20).map(|i| (to_digest(i), to_val(i, 0))).collect();
+        for i in 0..8u64 {
+            ops.push((colliding_digest(0xCD, i), to_val(i, 100)));
+        }
+
+        let fwd_floor = $fwd.inactivity_floor_loc();
+        let mut batch = $fwd.new_batch();
+        for &(k, v) in &ops {
+            batch = batch.set(k, v);
+        }
+        let merkleized = batch.merkleize(&$fwd, None, fwd_floor);
+        $fwd.apply_batch(merkleized).unwrap();
+
+        let rev_floor = $rev.inactivity_floor_loc();
+        let mut batch = $rev.new_batch();
+        for &(k, v) in ops.iter().rev() {
+            batch = batch.set(k, v);
+        }
+        let merkleized = batch.merkleize(&$rev, None, rev_floor);
+        $rev.apply_batch(merkleized).unwrap();
+
+        assert_eq!(
+            $fwd.root().to_vec(),
+            $rev.root().to_vec(),
+            "immutable set order must not affect root"
+        );
+    }};
 }
 
 // Macro rather than a generic function because immutable Db types don't implement DbAny.
@@ -805,4 +1048,28 @@ order_test!(
     ImmutableMmbVariable,
     immutable_variable_config,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
+);
+order_test!(
+    test_order_immutable_mmr_compact_fixed,
+    ImmutableMmrCompactFixed,
+    immutable_fixed_compact_config,
+    |fwd, rev| assert_immutable_order_independent_compact!(fwd, rev)
+);
+order_test!(
+    test_order_immutable_mmb_compact_fixed,
+    ImmutableMmbCompactFixed,
+    immutable_fixed_compact_config,
+    |fwd, rev| assert_immutable_order_independent_compact!(fwd, rev)
+);
+order_test!(
+    test_order_immutable_mmr_compact_variable,
+    ImmutableMmrCompactVariable,
+    immutable_variable_compact_config,
+    |fwd, rev| assert_immutable_order_independent_compact!(fwd, rev)
+);
+order_test!(
+    test_order_immutable_mmb_compact_variable,
+    ImmutableMmbCompactVariable,
+    immutable_variable_compact_config,
+    |fwd, rev| assert_immutable_order_independent_compact!(fwd, rev)
 );

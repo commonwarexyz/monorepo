@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
+    merkle::{full::Config as MerkleConfig, hasher::Standard, mmb, mmr, Family, Location},
     qmdb::{
         keyless::variable::{Config, Db as Keyless},
         verify_proof, Error,

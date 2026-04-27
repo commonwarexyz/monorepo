@@ -16,7 +16,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{journaled::Config as MerkleConfig, mmb},
+    merkle::{full::Config as MerkleConfig, mmb},
     qmdb::current::{unordered::fixed::Db as CurrentDb, BitmapPrunedBits, FixedConfig as Config},
     translator::TwoCap,
 };

@@ -69,7 +69,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{journaled::Config as MerkleConfig, Family, Location},
+    merkle::{full::Config as MerkleConfig, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         operation::Committable,

@@ -7,7 +7,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, R
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
-    mmr::journaled::Config as MerkleConfig,
+    mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
         verify_proof,
