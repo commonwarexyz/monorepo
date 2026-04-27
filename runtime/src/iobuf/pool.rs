@@ -251,7 +251,8 @@ impl BufferPoolConfig {
     ///
     /// Global-freelist striping is set separately by [`Self::with_parallelism`].
     pub const fn with_thread_cache_capacity(mut self, thread_cache_capacity: NonZeroUsize) -> Self {
-        self.thread_cache_config = BufferPoolThreadCacheConfig::Enabled(Some(thread_cache_capacity));
+        self.thread_cache_config =
+            BufferPoolThreadCacheConfig::Enabled(Some(thread_cache_capacity));
         self
     }
 
