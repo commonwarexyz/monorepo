@@ -200,10 +200,28 @@ overflow-checks = true
 [profile.test.package.curve25519-dalek]
 opt-level = 3
 
+[profile.test.package.aws-lc-rs]
+opt-level = 3
+
+[profile.test.package.aws-lc-sys]
+opt-level = 3
+
 [profile.test.package.blake3]
 opt-level = 3
 
 [profile.test.package.blst]
+opt-level = 3
+
+[profile.test.package.chacha20poly1305]
+opt-level = 3
+
+[profile.test.package.crc]
+opt-level = 3
+
+[profile.test.package.crc-fast]
+opt-level = 3
+
+[profile.test.package.ctutils]
 opt-level = 3
 
 [profile.test.package.crypto-bigint]
@@ -215,8 +233,32 @@ opt-level = 3
 [profile.test.package.elliptic-curve]
 opt-level = 3
 
+[profile.test.package.num-bigint]
+opt-level = 3
+
+[profile.test.package.num-integer]
+opt-level = 3
+
+[profile.test.package.num-rational]
+opt-level = 3
+
+[profile.test.package.num-traits]
+opt-level = 3
+
 [profile.test.package.p256]
 opt-level = 3
 
+[profile.test.package.primeorder]
+opt-level = 3
+
+[profile.test.package.rand_chacha]
+opt-level = 3
+
+[profile.test.package.reed-solomon-simd]
+opt-level = 3
+
 [profile.test.package.sha2]
+opt-level = 3
+
+[profile.test.package.x25519-dalek]
 opt-level = 3
