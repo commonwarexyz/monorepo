@@ -3,7 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::ed25519::PublicKey;
-use ed25519_zebra::{VerificationKey as RefPublicKey, VerificationKeyBytes as RefPublicKeyBytes};
+use ed25519_consensus::VerificationKey as ConsensusPublicKey;
+use ed25519_zebra::{
+    VerificationKey as ZebraPublicKey, VerificationKeyBytes as ZebraPublicKeyBytes,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Arbitrary)]
@@ -19,16 +22,23 @@ pub struct FuzzInput {
 }
 
 fn test_pubkey(pubkey: &[u8]) {
-    let ref_result = RefPublicKey::try_from(pubkey);
+    let consensus_result = ConsensusPublicKey::try_from(pubkey);
+    let zebra_result = ZebraPublicKey::try_from(pubkey);
     let our_result = PublicKey::decode(pubkey);
-    // Both should agree on validity
-    assert_eq!(ref_result.is_err(), our_result.is_err());
 
-    // If both succeeded, check round-trip encoding
-    if let (Ok(ref_key), Ok(our_key)) = (ref_result, our_result) {
-        let ref_bytes = RefPublicKeyBytes::from(ref_key).as_ref().to_vec();
+    // All implementations should agree on public key validity.
+    assert_eq!(consensus_result.is_err(), our_result.is_err());
+    assert_eq!(zebra_result.is_err(), our_result.is_err());
+
+    // If all succeeded, check round-trip encoding.
+    if let (Ok(consensus_key), Ok(zebra_key), Ok(our_key)) =
+        (consensus_result, zebra_result, our_result)
+    {
+        let consensus_bytes = consensus_key.to_bytes().to_vec();
+        let zebra_bytes = ZebraPublicKeyBytes::from(zebra_key).as_ref().to_vec();
         let our_bytes = our_key.encode().to_vec();
-        assert_eq!(ref_bytes, our_bytes);
+        assert_eq!(consensus_bytes, our_bytes);
+        assert_eq!(zebra_bytes, our_bytes);
     }
 }
 
