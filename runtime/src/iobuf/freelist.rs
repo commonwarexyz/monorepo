@@ -1,9 +1,9 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! A [`Freelist`] belongs to one [`super::pool::BufferPool`] size class. Each
-//! tracked buffer in that class has a stable slot id. When the buffer is not
-//! checked out or held in a thread-local cache, the freelist owns that slot and
-//! makes it available for reuse by any thread.
+//! A [`Freelist`] owns the tracked buffers from one [`super::pool::BufferPool`]
+//! size class that are not checked out and not held in a thread-local cache,
+//! making those buffers available for reuse by any thread in the pool. Each
+//! tracked buffer has a stable slot id within its size class.
 //!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
 //! queue:
@@ -20,30 +20,73 @@
 //! returning a buffer writes the cell and then sets the bit, while taking a
 //! buffer clears a set bit and then reads the cell.
 //!
-//! Free bits are split across cache-line-padded atomic words. Consecutive slot
-//! ids are not packed into the same word. Instead low slot-id bits choose the
-//! word and high slot-id bits choose the bit inside that word. With eight words,
-//! slots 0..7 occupy bit 0 in different words, slots 8..15 occupy bit 1 in
-//! those same words, and so on. This gives concurrent threads more independent
-//! atomic words to target without changing the slot ids handed back to the pool.
+//! Free bits are split across cache-line-padded atomic words. The pool passes
+//! its expected parallelism so the freelist can size this bitmap for the
+//! expected contention level. The freelist rounds that target up to a power of
+//! two, caps it so every word can contain at least one slot, and grows it when
+//! needed so no bitmap word tracks more than 64 slots.
 //!
+//! Consecutive slot ids are not packed into the same word. Instead low slot-id
+//! bits choose the word and high slot-id bits choose the bit inside that word.
 //! With a power-of-two word count, the mapping is:
 //!
-//! - `word = slot & word_mask`
-//! - `bit = slot >> word_shift`
+//! - `word_mask = word_count - 1`
+//! - `word_shift = log2(word_count)`
+//! - `word_index = slot & word_mask`
+//! - `bit_index = slot >> word_shift`
+//! - `bit_mask = 1 << bit_index`
 //!
-//! The pool passes its expected parallelism so the freelist can match the
-//! bitmap width to the expected contention level. The freelist rounds that
-//! target up to a power of two and caps it at the largest power of two that can
-//! fit within capacity, so striping does not create words that can never contain
-//! a slot. Larger capacities may still use more words so no bitmap word tracks
-//! more than 64 slots.
+//! For an eight-word freelist, slots are arranged like this:
+//!
+//! ```text
+//!            word 0   word 1   word 2   word 3   word 4   word 5   word 6   word 7
+//! bit 0:     slot 0   slot 1   slot 2   slot 3   slot 4   slot 5   slot 6   slot 7
+//! bit 1:     slot 8   slot 9   slot 10  slot 11  slot 12  slot 13  slot 14  slot 15
+//! bit 2:     slot 16  slot 17  slot 18  slot 19  slot 20  slot 21  slot 22  slot 23
+//! ...
+//! ```
+//!
+//! This gives concurrent threads more independent atomic words to target
+//! without changing the slot ids handed back to the pool.
+//!
+//! Each thread also gets a stable probe id. The probe id uses the same
+//! power-of-two split as slot ids:
+//!
+//! - low id bits choose the thread's home word
+//! - higher id bits identify the home-word collision group
+//! - the low six bits of that group are reversed to choose the starting bit
+//!
+//! The first `word_count` long-lived workers therefore start on different
+//! bitmap words. Workers that already start on different words do not need
+//! distinct bit offsets. When more workers share the same home word, their bit
+//! offsets spread by halves, quarters, and so on.
+//!
+//! ```text
+//! word_count = 8
+//!
+//! thread id:       0  1  2  3  4  5  6  7 |  8  9 10 11 12 13 14 15
+//! home word:       0  1  2  3  4  5  6  7 |  0  1  2  3  4  5  6  7
+//! group:           0  0  0  0  0  0  0  0 |  1  1  1  1  1  1  1  1
+//! bit offset:      0  0  0  0  0  0  0  0 | 32 32 32 32 32 32 32 32
+//!
+//! home_word = thread_id & word_mask
+//! group     = thread_id >> word_shift
+//! offset    = reverse_low_6(group)
+//!
+//! home-word collision sequence:
+//!
+//! thread id:   0   8  16  24  32  40  48  56
+//! group:       0   1   2   3   4   5   6   7
+//! bit offset:  0  32  16  48   8  40  24  56
+//! ```
 //!
 //! The hot paths are fast for a few concrete reasons:
 //!
 //! - `put` is just "write buffer into the parking cell, then `fetch_or` one bit".
 //! - `take` uses a stable per-thread home word before scanning others, so
 //!   threads tend to start from different stripes.
+//! - `take` and `take_batch` rotate bit selection inside each word, so threads
+//!   that share a word do not all probe bit 0 first.
 //! - `take` claims bits with `fetch_and` instead of a compare-and-swap loop.
 //!   Two threads removing different bits from the same word can both succeed
 //!   without one having to restart from scratch.
@@ -68,6 +111,8 @@ use std::{
 
 /// Number of slot bits tracked in each bitmap word.
 const SLOT_BITMAP_WORD_BITS: usize = u64::BITS as usize;
+/// Number of low-order bits needed to address bits within one bitmap word.
+const SLOT_BITMAP_WORD_SHIFT: u32 = SLOT_BITMAP_WORD_BITS.trailing_zeros();
 /// Number of word masks stored on the stack before falling back to heap scratch.
 const INLINE_PUT_BATCH_MASKS: usize = 128;
 
@@ -80,8 +125,8 @@ pub struct Freelist {
     /// Cache-line-padded striped bitmap of free slots.
     ///
     /// Padding matters here because threads often target different words in
-    /// steady state. Without padding, adjacent words can still fight over the
-    /// same cache line even when they represent disjoint slot stripes.
+    /// steady state. Without padding, different bitmap words could still share
+    /// a cache line even when they represent disjoint slot stripes.
     words: Box<[CachePadded<AtomicU64>]>,
     /// Per-slot parking place for returned buffers.
     ///
@@ -556,11 +601,21 @@ impl SlotBitmapProbe {
             // but avoids a division on the hot path.
             start_word: thread_id & word_mask,
             word_mask,
-            // The same stable id also rotates bit selection within each word.
-            // Drop the low bits already used for the word index so adjacent
-            // home words do not necessarily start at the same bit.
-            bit_offset: ((thread_id >> word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32,
+            // Threads that share a home word should start from well-separated
+            // bits within that word.
+            bit_offset: Self::bit_offset(thread_id, word_shift),
         }
+    }
+
+    /// Returns the bit offset for this thread's home-word collision group.
+    #[inline(always)]
+    const fn bit_offset(thread_id: usize, word_shift: u32) -> u32 {
+        // `word_shift` is `log2(word_count)`, so shifting drops the id bits
+        // used to choose the home word. Bit-reversing the low six group bits
+        // gives offsets `0, 32, 16, 48, ...`, spreading home-word collisions
+        // across the 64-bit word for power-of-two batch sizes.
+        let group = thread_id >> word_shift;
+        (group.reverse_bits() >> (usize::BITS - SLOT_BITMAP_WORD_SHIFT)) as u32
     }
 
     /// Returns the word index to inspect after `scanned` words.
@@ -906,6 +961,52 @@ pub(super) mod tests {
         assert_eq!(selected.count_ones(), 2);
         assert_eq!(selected & !word, 0);
         assert_eq!(selected, (1u64 << 9) | (1u64 << 20));
+
+        let probe_32 = SlotBitmapProbe {
+            start_word: 0,
+            word_mask: 0,
+            bit_offset: 32,
+        };
+        let wrap_word = (1u64 << 4) | (1u64 << 40);
+        let selected = probe_32.select_set_bits(wrap_word, 2);
+        // Starting after bit 32, selection should wrap after taking bit 40.
+        assert_eq!(selected, wrap_word);
+    }
+
+    #[test]
+    fn test_slot_bitmap_probe_offsets_spread_home_word_collisions() {
+        // For an 8-word freelist, thread ids spaced by 8 share home word 0.
+        // Spread their bit offsets across the word instead of assigning
+        // adjacent offsets.
+        assert_eq!(
+            [
+                SlotBitmapProbe::bit_offset(0, 3),
+                SlotBitmapProbe::bit_offset(8, 3),
+                SlotBitmapProbe::bit_offset(16, 3),
+                SlotBitmapProbe::bit_offset(24, 3),
+                SlotBitmapProbe::bit_offset(32, 3),
+                SlotBitmapProbe::bit_offset(40, 3),
+                SlotBitmapProbe::bit_offset(48, 3),
+                SlotBitmapProbe::bit_offset(56, 3),
+            ],
+            [0, 32, 16, 48, 8, 40, 24, 56]
+        );
+
+        // The same collision groups should spread for the 64-word network
+        // geometry.
+        assert_eq!(
+            [
+                SlotBitmapProbe::bit_offset(0, 6),
+                SlotBitmapProbe::bit_offset(64, 6),
+                SlotBitmapProbe::bit_offset(128, 6),
+                SlotBitmapProbe::bit_offset(192, 6),
+                SlotBitmapProbe::bit_offset(256, 6),
+                SlotBitmapProbe::bit_offset(320, 6),
+                SlotBitmapProbe::bit_offset(384, 6),
+                SlotBitmapProbe::bit_offset(448, 6),
+            ],
+            [0, 32, 16, 48, 8, 40, 24, 56]
+        );
     }
 
     #[test]
