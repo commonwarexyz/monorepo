@@ -87,7 +87,7 @@ fn apply(op: Op, nev: &mut NonEmptyVec<u8>, model: &mut Vec<u8>) {
         }
         Op::Resize { new_len, value } => {
             // Clamp to [1, MAX_LEN] to preserve the non-empty invariant.
-            let target = ((new_len as usize).max(1)).min(MAX_LEN);
+            let target = (new_len as usize).clamp(1, MAX_LEN);
             let nz = NonZeroUsize::new(target).unwrap();
             nev.resize(nz, value);
             model.resize(target, value);

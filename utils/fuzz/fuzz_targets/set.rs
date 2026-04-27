@@ -333,7 +333,7 @@ fn fuzz(input: FuzzInput) {
             assert_eq!(map.len(), target.min(prefix_keys.len()));
             let new_keys: Vec<u32> = map.keys().iter().copied().collect();
             assert_eq!(new_keys, prefix_keys);
-            let new_values: Vec<u64> = map.values().iter().copied().collect();
+            let new_values: Vec<u64> = map.values().to_vec();
             assert_eq!(new_values, prefix_values);
         }
     }

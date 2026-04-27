@@ -541,10 +541,10 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let old_len = v.len();
                 v.push_chunk(&chunk);
                 assert_eq!(v.len(), old_len + BitMap::CHUNK_SIZE_BITS);
-                for byte_idx in 0..chunk.len() {
+                for (byte_idx, byte) in chunk.iter().enumerate() {
                     for bit_idx in 0..8 {
                         let global = old_len + (byte_idx as u64) * 8 + (bit_idx as u64);
-                        let expected = (chunk[byte_idx] >> bit_idx) & 1 == 1;
+                        let expected = (byte >> bit_idx) & 1 == 1;
                         assert_eq!(v.get(global), expected);
                     }
                 }
