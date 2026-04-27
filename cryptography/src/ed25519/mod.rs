@@ -1,9 +1,10 @@
 //! Ed25519 implementation of the [crate::Verifier] and [crate::Signer] traits.
 //!
-//! This implementation uses the `ed25519-consensus` crate to adhere to a strict
-//! set of validation rules for Ed25519 signatures (which is necessary for
-//! stability in a consensus context). You can read more about this
-//! [here](https://hdevalence.ca/blog/2020-10-04-its-25519am).
+//! # Validation Rules (ZIP215)
+//!
+//! This crate follows the [ZIP215](https://zips.z.cash/zip-0215) specification
+//! for Ed25519 signature validation. You can read more about the rationale for
+//! this [here](https://hdevalence.ca/blog/2020-10-04-its-25519am).
 //!
 //! # Example
 //! ```rust
@@ -26,9 +27,7 @@
 //! ```
 
 pub mod certificate;
-pub mod core;
+pub(in crate::ed25519) mod core;
 mod scheme;
 
-#[cfg(feature = "std")]
-pub use scheme::Batch;
-pub use scheme::{PrivateKey, PublicKey, Signature};
+pub use scheme::{Batch, PrivateKey, PublicKey, Signature};

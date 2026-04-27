@@ -15,19 +15,8 @@ use sha2::{digest::Update, Sha512};
 /// [`VerificationKey`] type in this library caches other decoded state used in
 /// signature verification.
 ///
-/// A `VerificationKeyBytes` can be used to verify a single signature using the
-/// following idiom:
-/// ```
-/// use core::convert::TryFrom;
-/// # use rand::thread_rng;
-/// # use commonware_cryptography::ed25519::core::*;
-/// # let msg = b"ed25519-consensus";
-/// # let sk = SigningKey::new(thread_rng());
-/// # let sig = sk.sign(msg);
-/// # let vk_bytes = VerificationKeyBytes::from(&sk);
-/// VerificationKey::try_from(vk_bytes)
-///     .and_then(|vk| vk.verify(&sig, msg));
-/// ```
+/// A `VerificationKeyBytes` can be converted into a [`VerificationKey`] for
+/// internal signature verification.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VerificationKeyBytes(pub(super) [u8; 32]);
 
@@ -35,7 +24,7 @@ impl VerificationKeyBytes {
     /// Returns the byte encoding of the verification key.
     ///
     /// This is the same as `.into()`, but does not require type inference.
-    pub const fn to_bytes(&self) -> [u8; 32] {
+    pub const fn to_bytes(self) -> [u8; 32] {
         self.0
     }
 
@@ -95,12 +84,13 @@ impl From<VerificationKeyBytes> for [u8; 32] {
 /// ## Consensus properties
 ///
 /// Ed25519 checks are described in [§5.4.5][ps] of the Zcash protocol specification and in
-/// [ZIP 215].  The verification criteria for an (encoded) verification key `A_bytes` are:
+/// [ZIP215].  The verification criteria for an (encoded) verification key `A_bytes` are:
 ///
 /// * `A_bytes` MUST be an encoding of a point `A` on the twisted Edwards form of
 ///   Curve25519, and non-canonical encodings MUST be accepted;
 ///
 /// [ps]: https://zips.z.cash/protocol/protocol.pdf#concreteed25519
+/// [ZIP215]:  https://zips.z.cash/zip-0215
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[allow(non_snake_case)]
 pub struct VerificationKey {
@@ -187,7 +177,7 @@ impl VerificationKey {
     /// Returns the byte encoding of the verification key.
     ///
     /// This is the same as `.into()`, but does not require type inference.
-    pub const fn to_bytes(&self) -> [u8; 32] {
+    pub const fn to_bytes(self) -> [u8; 32] {
         self.A_bytes.0
     }
 

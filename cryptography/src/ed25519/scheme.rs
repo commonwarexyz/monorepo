@@ -1,8 +1,6 @@
-#[cfg(feature = "std")]
-use crate::BatchVerifier;
 use crate::{
     ed25519::core::{self as ed_core, VerificationKey},
-    Secret,
+    BatchVerifier, Secret,
 };
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
@@ -244,8 +242,6 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    /// Because [`crate::ed25519::core::Signature`] can be created from this byte array
-    /// with minimal overhead, we only store the raw bytes.
     raw: [u8; SIGNATURE_LENGTH],
 }
 
@@ -344,12 +340,10 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// Ed25519 Batch Verifier.
-#[cfg(feature = "std")]
 pub struct Batch {
     verifier: ed_core::batch::Verifier,
 }
 
-#[cfg(feature = "std")]
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
@@ -374,7 +368,6 @@ impl BatchVerifier for Batch {
     }
 }
 
-#[cfg(feature = "std")]
 impl Batch {
     #[inline(always)]
     fn add_inner(
