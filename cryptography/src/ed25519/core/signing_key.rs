@@ -95,7 +95,6 @@ impl From<[u8; 32]> for SigningKey {
         scalar_bytes[0] &= 248;
         scalar_bytes[31] &= 127;
         scalar_bytes[31] |= 64;
-
         let s = Scalar::from_bytes_mod_order(scalar_bytes);
 
         // Compute the public key as A = [s]B.
