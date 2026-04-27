@@ -1,5 +1,6 @@
 #![no_main]
 
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey, Signature},
@@ -15,6 +16,96 @@ use ed25519_zebra::{
     VerificationKeyBytes as ZebraPublicKeyBytes,
 };
 use libfuzzer_sys::fuzz_target;
+
+#[derive(Debug)]
+pub enum FuzzInput<'a> {
+    PublicKey {
+        pubkey: [u8; 32],
+    },
+    PublicKeyVariable {
+        pubkey: &'a [u8],
+    },
+    Signature {
+        signature: [u8; 64],
+    },
+    SignatureVariable {
+        signature: &'a [u8],
+    },
+    Verification {
+        pubkey: [u8; 32],
+        signature: [u8; 64],
+        namespace: &'a [u8],
+        message: &'a [u8],
+    },
+    VerificationVariable {
+        pubkey: &'a [u8],
+        signature: &'a [u8],
+        namespace: &'a [u8],
+        message: &'a [u8],
+    },
+    Signing {
+        seed: [u8; 32],
+        namespace: &'a [u8],
+        message: &'a [u8],
+    },
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput<'a> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let mut selector = [0];
+        u.fill_buffer(&mut selector)?;
+        let input = u.bytes(u.len())?;
+
+        Ok(match selector[0] % 7 {
+            // Fixed-size public key decode and canonical byte comparison.
+            0 => Self::PublicKey {
+                pubkey: fixed(input),
+            },
+            // Variable-size public key decode rejection and acceptance.
+            1 => Self::PublicKeyVariable { pubkey: input },
+            // Fixed-size signature decode and canonical byte comparison.
+            2 => Self::Signature {
+                signature: fixed(input),
+            },
+            // Variable-size signature decode rejection and acceptance.
+            3 => Self::SignatureVariable { signature: input },
+            // Verification agreement for padded fixed-size public key and signature bytes.
+            4 => {
+                let (namespace, message) = split_namespace_message(remainder(input, 96));
+                Self::Verification {
+                    pubkey: fixed(input),
+                    signature: fixed(remainder(input, 32)),
+                    namespace,
+                    message,
+                }
+            }
+            // Verification agreement for raw variable-size public key and signature bytes.
+            5 => {
+                let split = input.len().min(32);
+                let (pubkey, rest) = input.split_at(split);
+                let split = rest.len().min(64);
+                let (signature, rest) = rest.split_at(split);
+                let (namespace, message) = split_namespace_message(rest);
+                Self::VerificationVariable {
+                    pubkey,
+                    signature,
+                    namespace,
+                    message,
+                }
+            }
+            // Signing agreement from the same seed and domain-separated payload.
+            6 => {
+                let (namespace, message) = split_namespace_message(remainder(input, 32));
+                Self::Signing {
+                    seed: fixed(input),
+                    namespace,
+                    message,
+                }
+            }
+            _ => unreachable!(),
+        })
+    }
+}
 
 fn fixed<const N: usize>(bytes: &[u8]) -> [u8; N] {
     let mut output = [0; N];
@@ -148,46 +239,32 @@ fn test_signing(seed: [u8; 32], namespace: &[u8], message: &[u8]) {
     assert!(our_public_key.verify(namespace, message, &our_signature));
 }
 
-fn fuzz(input: &[u8]) {
-    let Some((&selector, input)) = input.split_first() else {
-        return;
-    };
-
-    match selector % 7 {
-        // Fixed-size public key decode and canonical byte comparison.
-        0 => test_pubkey(&fixed::<32>(input)),
-        // Variable-size public key decode rejection and acceptance.
-        1 => test_pubkey(input),
-        // Fixed-size signature decode and canonical byte comparison.
-        2 => test_signature(&fixed::<64>(input)),
-        // Variable-size signature decode rejection and acceptance.
-        3 => test_signature(input),
-        // Verification agreement for padded fixed-size public key and signature bytes.
-        4 => {
-            let pubkey = fixed::<32>(input);
-            let signature = fixed::<64>(remainder(input, 32));
-            let (namespace, message) = split_namespace_message(remainder(input, 96));
-            test_verification(&pubkey, &signature, namespace, message);
-        }
-        // Verification agreement for raw variable-size public key and signature bytes.
-        5 => {
-            let split = input.len().min(32);
-            let (pubkey, rest) = input.split_at(split);
-            let split = rest.len().min(64);
-            let (signature, rest) = rest.split_at(split);
-            let (namespace, message) = split_namespace_message(rest);
-            test_verification(pubkey, signature, namespace, message);
-        }
-        // Signing agreement from the same seed and domain-separated payload.
-        6 => {
-            let seed = fixed::<32>(input);
-            let (namespace, message) = split_namespace_message(remainder(input, 32));
-            test_signing(seed, namespace, message);
-        }
-        _ => unreachable!(),
+fn fuzz(input: FuzzInput<'_>) {
+    match input {
+        FuzzInput::PublicKey { pubkey } => test_pubkey(&pubkey),
+        FuzzInput::PublicKeyVariable { pubkey } => test_pubkey(pubkey),
+        FuzzInput::Signature { signature } => test_signature(&signature),
+        FuzzInput::SignatureVariable { signature } => test_signature(signature),
+        FuzzInput::Verification {
+            pubkey,
+            signature,
+            namespace,
+            message,
+        } => test_verification(&pubkey, &signature, namespace, message),
+        FuzzInput::VerificationVariable {
+            pubkey,
+            signature,
+            namespace,
+            message,
+        } => test_verification(pubkey, signature, namespace, message),
+        FuzzInput::Signing {
+            seed,
+            namespace,
+            message,
+        } => test_signing(seed, namespace, message),
     }
 }
 
-fuzz_target!(|input: &[u8]| {
+fuzz_target!(|input: FuzzInput<'_>| {
     fuzz(input);
 });
