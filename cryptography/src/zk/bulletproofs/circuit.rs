@@ -136,14 +136,15 @@ use crate::transcript::Transcript;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
-    algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space},
+    algebra::{powers, Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space},
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
-    ops::{Index, IndexMut},
+    ops::{Index, IndexMut, Mul},
 };
 
 /// A sparse matrix indexed by `(row, column)`.
@@ -170,6 +171,22 @@ impl<F> SparseMatrix<F> {
     /// This is determined solely by the highest row with a non-zero entry.
     pub const fn height(&self) -> usize {
         self.height
+    }
+
+    /// Pad this matrix to have at least these dimensions.
+    pub fn pad(&mut self, width: usize, height: usize) {
+        self.width = self.width.max(width);
+        self.height = self.height.max(height);
+    }
+}
+
+impl<F> IntoIterator for SparseMatrix<F> {
+    type Item = ((usize, usize), F);
+
+    type IntoIter = <BTreeMap<(usize, usize), F> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.weights.into_iter()
     }
 }
 
@@ -201,6 +218,21 @@ impl<F: Additive> IndexMut<(usize, usize)> for SparseMatrix<F> {
             .width
             .max(idx.1.checked_add(1).expect("column index overflow"));
         self.weights.entry(idx).or_insert(F::zero())
+    }
+}
+
+impl<F: Ring> Mul<&[F]> for &SparseMatrix<F> {
+    type Output = Vec<F>;
+
+    fn mul(self, rhs: &[F]) -> Self::Output {
+        let mut out = vec![F::zero(); self.height];
+        for (&(i, j), weight) in &self.weights {
+            let Some(value) = rhs.get(j) else {
+                continue;
+            };
+            out[i] += &(weight.clone() * value);
+        }
+        out
     }
 }
 
@@ -268,6 +300,16 @@ impl<F: Ring> Circuit<F> {
         })
     }
 
+    /// Number of left/right/output internal wires.
+    pub const fn internal_vars(&self) -> usize {
+        self.internal_vars
+    }
+
+    /// Number of committed values.
+    pub const fn committed_vars(&self) -> usize {
+        self.committed_vars
+    }
+
     /// Checks whether a certain assignment to committed variables satisfies this circuit.
     ///
     /// This returns false if the assignment has the wrong length, rather than
@@ -305,6 +347,180 @@ impl<F: Ring> Circuit<F> {
     }
 }
 
+/// A rank-1 constraint system.
+///
+/// The matrices encode constraints of the form `<A_i, z> * <B_i, z> = <C_i, z>`,
+/// where `z_0` is the constant `1`.
+pub struct R1cs<F> {
+    /// The left-side linear combinations.
+    pub a: SparseMatrix<F>,
+    /// The right-side linear combinations.
+    pub b: SparseMatrix<F>,
+    /// The output linear combinations.
+    pub c: SparseMatrix<F>,
+}
+
+impl<F> R1cs<F> {
+    /// Make sure that the matrices have the same shapes, by zero-padding.
+    pub fn normalize(&mut self) {
+        let width = self.width();
+        let height = self.height();
+        for m in [&mut self.a, &mut self.b, &mut self.c] {
+            m.pad(width, height);
+        }
+    }
+
+    /// The width of each matrix.
+    pub fn width(&self) -> usize {
+        self.a.width.max(self.b.width).max(self.c.width)
+    }
+
+    /// The height of each matrix.
+    pub fn height(&self) -> usize {
+        self.a.height.max(self.b.height).max(self.c.height)
+    }
+}
+
+fn r1cs_to_circuit_maybe_witness<F: Ring>(
+    mut r1cs: R1cs<F>,
+    committed_indices: &[usize],
+    witness: Option<(Vec<F>, Vec<F>)>,
+) -> (Circuit<F>, Option<Witness<F>>) {
+    // The R1CS circuit is of the form:
+    //
+    //   <A_ij, z_j> <B_ij, z_j> = <C_ij, z_j>
+    //
+    // z_0 = 1, and some of the witness indices of z are to become our v vector.
+    //
+    // We set:
+    //
+    //   l_i = <A_ij, z_j>
+    //   r_i = <B_ij, z_j>
+    //   o_i = <C_ij, z_j>
+    //
+    // Then, the l_i * r_i = o_i part of bulletproofs will enforce this.
+    // Next, we need to enforce that they were constructed correctly.
+    // To do so, we use additional l_i wires for non-committed witness values.
+    // The corresponding r_i and o_i wires are not used anywhere else, so they
+    // do not need additional linear constraints.
+    r1cs.normalize();
+    let (r1cs_width, r1cs_height) = (r1cs.width(), r1cs.height());
+    let committed_indices = Set::from_iter_dedup(committed_indices.iter().cloned());
+    let v_len = committed_indices.len();
+    // Use x for the internal wires. Any witness that isn't in v is in x.
+    let x_len = r1cs_width - v_len;
+    // This will contain a mapping from old indices in the witness, into new indices.
+    // Any new index > v_len is part of the internal wires.
+    let old_to_new = {
+        let mut out = vec![(true, 0usize); r1cs_width];
+        // What index the current v value is at.
+        let mut v_i = 0;
+        // What index the current x value is at.
+        let mut x_i = 0;
+        let mut committed_indices = committed_indices.iter().peekable();
+        for (i, out_i) in out.iter_mut().enumerate() {
+            let (in_v, counter) = if committed_indices.next_if(|&&j| j == i).is_some() {
+                (true, &mut v_i)
+            } else {
+                (false, &mut x_i)
+            };
+            *out_i = (in_v, *counter);
+            *counter += 1;
+        }
+        out
+    };
+    // The length of the l, r and o vectors.
+    let internal_len = x_len + r1cs.height();
+    let witness = witness.map(|(witness, blinding)| {
+        let mut left = &r1cs.a * witness.as_slice();
+        let mut right = &r1cs.b * witness.as_slice();
+        let mut out = &r1cs.c * witness.as_slice();
+        let mut x = vec![F::zero(); x_len];
+        let mut values = vec![F::zero(); v_len];
+        for (i, w_i) in witness.into_iter().enumerate() {
+            let (in_v, i_new) = old_to_new[i];
+            let array = if in_v { &mut values } else { &mut x };
+            array[i_new] = w_i;
+        }
+        left.extend(x);
+        right.resize(left.len(), F::zero());
+        out.resize(left.len(), F::zero());
+        Witness::new(values, blinding, left, right, out)
+            .expect("should be able to construct witness")
+    });
+    // We'll build up the weights, row by row.
+    let mut weights = SparseMatrix::default();
+    weights.pad(1 + v_len + 3 * internal_len, 3 * r1cs.height());
+    let minus_one = -F::one();
+    // The non-committed witness values `x` are stored in the trailing slots
+    // of the LEFT wires region (positions `r1cs_height..r1cs_height + x_len`
+    // within that region). The right and out regions only carry the linear
+    // combinations of A, B, C with zeros padding the rest, so any lookup of a
+    // non-committed witness must go to the LEFT wires region regardless of
+    // which matrix (A/B/C) we are currently emitting weights for.
+    let x_col_base = 1 + v_len + r1cs_height;
+    for (row_start, col_start, m) in [
+        (0, 1 + v_len, r1cs.a),
+        (r1cs_height, 1 + v_len + internal_len, r1cs.b),
+        (2 * r1cs_height, 1 + v_len + 2 * internal_len, r1cs.c),
+    ] {
+        for ((i, j), m_ij) in m {
+            let (in_v, j_new) = old_to_new[j];
+            let col = if in_v {
+                // In this case, we just have a v value, and those start at index 1.
+                j_new + 1
+            } else {
+                // Non-committed witness values live in `x`, which is stored
+                // at the tail of the LEFT wires region.
+                x_col_base + j_new
+            };
+            weights[(row_start + i, col)] = m_ij;
+        }
+        // Now, add in the weights to force the left, right, resp. out wires
+        // to be equal to the linear combinations we've set up above.
+        for i in 0..r1cs_height {
+            weights[(row_start + i, col_start + i)] = minus_one.clone();
+        }
+    }
+    let circuit = Circuit::new(v_len, weights).expect("circuit construction should succeed");
+    (circuit, witness)
+}
+
+/// Convert an R1CS into a circuit, treating the witness positions named by
+/// `committed_indices` as committed values.
+///
+/// `committed_indices` must match what the prover passed to
+/// [`r1cs_to_circuit_and_witness`], otherwise the resulting [`Circuit`] will
+/// not match the prover's and proofs against it will fail.
+pub fn r1cs_to_circuit<F: Ring>(r1cs: R1cs<F>, committed_indices: &[usize]) -> Circuit<F> {
+    r1cs_to_circuit_maybe_witness(r1cs, committed_indices, None).0
+}
+
+/// Convert an R1CS and full R1CS assignment into a circuit and witness.
+///
+/// The witness vector is the Ark R1CS witness assignment, excluding the
+/// constant `1`. The returned witness commits to the values at
+/// `committed_indices`.
+pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
+    blinding_rng: Option<&mut impl CryptoRngCore>,
+    r1cs: R1cs<F>,
+    witness: Vec<F>,
+    committed_indices: &[usize],
+) -> (Circuit<F>, Witness<F>) {
+    let blinding = blinding_rng.map_or_else(
+        || vec![F::zero(); committed_indices.len()],
+        |rng| {
+            (0..committed_indices.len())
+                .map(|_| F::random(&mut *rng))
+                .collect::<Vec<_>>()
+        },
+    );
+    let (circuit, witness) =
+        r1cs_to_circuit_maybe_witness(r1cs, committed_indices, Some((witness, blinding)));
+    let witness = witness.expect("witness should be present because we passed witness");
+    (circuit, witness)
+}
+
 /// Generators used by the circuit proof system.
 ///
 /// This wraps the underlying IPA setup and adds two Pedersen generators used
@@ -312,20 +528,28 @@ impl<F: Ring> Circuit<F> {
 #[derive(PartialEq)]
 pub struct Setup<G> {
     ipa: ipa::Setup<G>,
-    pedersen_value: G,
-    pedersen_blinding: G,
+    value_generator: G,
+    blinding_generator: G,
 }
 
 impl<G> Setup<G> {
     /// Create a new [`Setup`] from an [`ipa::Setup`] and two Pedersen generators.
     ///
     /// You MUST ensure that all generators are unique.
-    pub const fn new(ipa: ipa::Setup<G>, pedersen_value: G, pedersen_blinding: G) -> Self {
+    pub const fn new(ipa: ipa::Setup<G>, value_generator: G, blinding_generator: G) -> Self {
         Self {
             ipa,
-            pedersen_value,
-            pedersen_blinding,
+            value_generator,
+            blinding_generator,
         }
+    }
+
+    pub const fn value_generator(&self) -> &G {
+        &self.value_generator
+    }
+
+    pub const fn blinding_generator(&self) -> &G {
+        &self.blinding_generator
     }
 
     /// Check if this setup supports claims of a given length.
@@ -333,15 +557,51 @@ impl<G> Setup<G> {
         self.ipa.supports(lg_len)
     }
 
-    /// Build a virtual setup, call `f` to obtain a verification equation,
-    /// and evaluate it against the concrete generators in `self`.
-    pub fn eval<F: Field>(
-        &self,
-        f: impl FnOnce(&Setup<Synthetic<F, G>>) -> Option<Synthetic<F, G>>,
-        strategy: &impl Strategy,
-    ) -> Option<G>
+    /// Construct a [`Setup`] of size `2^lg_len`, deterministically deriving
+    /// the IPA generators, the product generator, and the blinding generator
+    /// from `domain_separator` via [`HashToGroup`]. The caller supplies the
+    /// `value_generator` so external commitments (e.g. `value * G1::generator()`)
+    /// can line up with the Pedersen commitments produced by
+    /// [`Witness::claim`].
+    ///
+    /// Each hashed generator is derived with a unique label, so the
+    /// discrete-log relations between them are unknown (assuming a properly
+    /// modelled hash-to-curve). The caller is responsible for ensuring the
+    /// supplied `value_generator` has unknown discrete log relative to the
+    /// blinding generator (e.g. by using a system-fixed generator distinct
+    /// from any hashed point).
+    pub fn hashed(domain_separator: &[u8], lg_len: u8, value_generator: G) -> Self
     where
-        G: Space<F>,
+        G: HashToGroup,
+    {
+        let n: usize = 1usize << lg_len;
+        let product_generator = G::hash_to_group(domain_separator, b"product");
+        let blinding_generator = G::hash_to_group(domain_separator, b"blinding");
+        let g_and_h = (0..n).map(|i| {
+            let i_bytes = (i as u64).to_le_bytes();
+            let mut g_msg = Vec::with_capacity(2 + i_bytes.len());
+            g_msg.extend_from_slice(b"g/");
+            g_msg.extend_from_slice(&i_bytes);
+            let mut h_msg = Vec::with_capacity(2 + i_bytes.len());
+            h_msg.extend_from_slice(b"h/");
+            h_msg.extend_from_slice(&i_bytes);
+            (
+                G::hash_to_group(domain_separator, &g_msg),
+                G::hash_to_group(domain_separator, &h_msg),
+            )
+        });
+        Self::new(
+            ipa::Setup::new(product_generator, g_and_h),
+            value_generator,
+            blinding_generator,
+        )
+    }
+
+    /// Build the virtual setup and the flat array of concrete generators
+    /// used to evaluate any [`Synthetic`] produced against this setup.
+    fn build_virtual<F: Field>(&self) -> (Setup<Synthetic<F, G>>, Vec<G>)
+    where
+        G: Clone,
     {
         let n = self.ipa.g().len();
         let mut gens = Synthetic::<F, G>::generators();
@@ -360,25 +620,121 @@ impl<G> Setup<G> {
         flat.extend_from_slice(self.ipa.g());
         flat.extend_from_slice(self.ipa.h());
         flat.push(self.ipa.product_generator().clone());
-        flat.push(self.pedersen_value.clone());
-        flat.push(self.pedersen_blinding.clone());
+        flat.push(self.value_generator.clone());
+        flat.push(self.blinding_generator.clone());
+        (vs, flat)
+    }
+
+    /// Build a virtual setup, call `f` to obtain a verification equation,
+    /// and evaluate it against the concrete generators in `self`.
+    pub fn eval<F: Field>(
+        &self,
+        f: impl FnOnce(&Setup<Synthetic<F, G>>) -> Option<Synthetic<F, G>>,
+        strategy: &impl Strategy,
+    ) -> Option<G>
+    where
+        G: Space<F>,
+    {
+        let (vs, flat) = self.build_virtual::<F>();
         f(&vs).map(|v| v.eval(&flat, strategy))
+    }
+
+    /// Build a virtual setup, call `f` to obtain a list of per-item
+    /// verification equations, and check each of them in a way that batches
+    /// MSMs as much as possible.
+    ///
+    /// The strategy is:
+    ///
+    /// 1. Pre-scale every per-item equation by an independent random scalar
+    ///    so that scalar zero-ness is preserved with overwhelming
+    ///    probability and any subset sum is sound on its own.
+    /// 2. Sum every (scaled) equation into a single [`Synthetic`] and
+    ///    evaluate it with **one** MSM. If the result is the group
+    ///    identity, every item is valid.
+    /// 3. Otherwise, recursively split the failing range in half and
+    ///    re-evaluate the sum on each half (still one MSM per check). The
+    ///    recursion bottoms out at a single item, at which point any
+    ///    remaining failure is attributed to that item.
+    ///
+    /// This costs one MSM in the all-valid case and `O(k log n)` MSMs when
+    /// `k` items are invalid (vs. `n` MSMs for naive per-item checking).
+    ///
+    /// Returning `None` from `f` indicates that the whole batch is malformed
+    /// and produces an outer `None`. Individual `None` entries within the
+    /// returned `Vec` indicate that the corresponding item is structurally
+    /// invalid; they are reported as `false` in the result without ever
+    /// being included in any subset sum.
+    pub fn eval_check_batched<F: Field + Random, R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        f: impl FnOnce(&Setup<Synthetic<F, G>>, &mut R) -> Option<Vec<Option<Synthetic<F, G>>>>,
+        strategy: &impl Strategy,
+    ) -> Option<Vec<bool>>
+    where
+        G: Space<F> + PartialEq,
+    {
+        let (vs, flat) = self.build_virtual::<F>();
+        let synths = f(&vs, &mut *rng)?;
+        let n = synths.len();
+
+        // Pre-scale each present synthetic by an independent random scalar.
+        // None entries stay None; they are reported as `false` and never
+        // contribute to any subset sum.
+        let scaled: Vec<Option<Synthetic<F, G>>> = synths
+            .into_iter()
+            .map(|opt| opt.map(|s| s * &F::random(&mut *rng)))
+            .collect();
+
+        // Indices of items eligible for batched checking.
+        let active: Vec<usize> = (0..n).filter(|&i| scaled[i].is_some()).collect();
+
+        // Sum the scaled synthetics for `range` and evaluate to a single MSM.
+        let check = |range: &[usize]| -> bool {
+            let mut acc = Synthetic::<F, G>::default();
+            for &i in range {
+                acc += scaled[i].as_ref().expect("active indices are Some");
+            }
+            acc.eval(&flat, strategy) == G::zero()
+        };
+
+        // Iterative DFS over contiguous index ranges. A range that checks
+        // out marks every contained item as valid; a failing range of
+        // length > 1 splits in half; a failing range of length 1 leaves
+        // its (single) item marked invalid.
+        let mut valid = vec![false; n];
+        let mut stack: Vec<&[usize]> = Vec::new();
+        if !active.is_empty() {
+            stack.push(&active);
+        }
+        while let Some(range) = stack.pop() {
+            if check(range) {
+                for &i in range {
+                    valid[i] = true;
+                }
+            } else if range.len() > 1 {
+                let mid = range.len() / 2;
+                let (left, right) = range.split_at(mid);
+                stack.push(right);
+                stack.push(left);
+            }
+        }
+        Some(valid)
     }
 }
 
 impl<G: Write> Write for Setup<G> {
     fn write(&self, buf: &mut impl BufMut) {
         self.ipa.write(buf);
-        self.pedersen_value.write(buf);
-        self.pedersen_blinding.write(buf);
+        self.value_generator.write(buf);
+        self.blinding_generator.write(buf);
     }
 }
 
 impl<G: EncodeSize> EncodeSize for Setup<G> {
     fn encode_size(&self) -> usize {
         self.ipa.encode_size()
-            + self.pedersen_value.encode_size()
-            + self.pedersen_blinding.encode_size()
+            + self.value_generator.encode_size()
+            + self.blinding_generator.encode_size()
     }
 }
 
@@ -390,9 +746,9 @@ where
 
     fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
         let ipa = ipa::Setup::read_cfg(buf, &(*max_len, cfg.clone()))?;
-        let pedersen_value = G::read_cfg(buf, cfg)?;
-        let pedersen_blinding = G::read_cfg(buf, cfg)?;
-        Ok(Self::new(ipa, pedersen_value, pedersen_blinding))
+        let value_generator = G::read_cfg(buf, cfg)?;
+        let blinding_generator = G::read_cfg(buf, cfg)?;
+        Ok(Self::new(ipa, value_generator, blinding_generator))
     }
 }
 
@@ -437,6 +793,22 @@ impl<F> Witness<F> {
         })
     }
 
+    pub fn values(&self) -> &[F] {
+        &self.values
+    }
+
+    /// Check whether this witness's wires satisfy the given [`Circuit`].
+    ///
+    /// Useful as a debugging aid: if this returns `false`, the prover and
+    /// circuit are inconsistent and any [`prove`] result will not verify.
+    #[must_use]
+    pub fn is_satisfied(&self, circuit: &Circuit<F>) -> bool
+    where
+        F: Ring,
+    {
+        circuit.is_satisfied(&self.values, &self.left, &self.right)
+    }
+
     /// Create the public claim corresponding to this witness for the given setup.
     ///
     /// The resulting claim contains Pedersen commitments to the witness's
@@ -448,8 +820,8 @@ impl<F> Witness<F> {
                 .iter()
                 .zip(&self.blinding)
                 .map(|(value, blind)| {
-                    setup.pedersen_value.clone() * value
-                        + &(setup.pedersen_blinding.clone() * blind)
+                    setup.value_generator.clone() * value
+                        + &(setup.blinding_generator.clone() * blind)
                 })
                 .collect(),
         }
@@ -495,6 +867,74 @@ pub struct Proof<F, G> {
     t_tilde_x: F,
     p_big: G,
     ipa_proof: ipa::Proof<F, G>,
+}
+
+impl<F: Write, G: Write> Write for Proof<F, G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.m_big.write(buf);
+        self.o_big.write(buf);
+        self.m_big_tilde.write(buf);
+        for t in &self.t_big {
+            t.write(buf);
+        }
+        self.s_tilde.write(buf);
+        self.t_x.write(buf);
+        self.t_tilde_x.write(buf);
+        self.p_big.write(buf);
+        self.ipa_proof.write(buf);
+    }
+}
+
+impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
+    fn encode_size(&self) -> usize {
+        self.m_big.encode_size()
+            + self.o_big.encode_size()
+            + self.m_big_tilde.encode_size()
+            + self.t_big.iter().map(|t| t.encode_size()).sum::<usize>()
+            + self.s_tilde.encode_size()
+            + self.t_x.encode_size()
+            + self.t_tilde_x.encode_size()
+            + self.p_big.encode_size()
+            + self.ipa_proof.encode_size()
+    }
+}
+
+impl<F: Read, G: Read> Read for Proof<F, G>
+where
+    F::Cfg: Clone,
+    G::Cfg: Clone,
+{
+    /// `(max_len, (g_cfg, f_cfg))` where `max_len` bounds the IPA round count.
+    type Cfg = (usize, (G::Cfg, F::Cfg));
+
+    fn read_cfg(buf: &mut impl Buf, cfg @ (_, (g_cfg, f_cfg)): &Self::Cfg) -> Result<Self, Error> {
+        let m_big = G::read_cfg(buf, g_cfg)?;
+        let o_big = G::read_cfg(buf, g_cfg)?;
+        let m_big_tilde = G::read_cfg(buf, g_cfg)?;
+        let t_big = [
+            G::read_cfg(buf, g_cfg)?,
+            G::read_cfg(buf, g_cfg)?,
+            G::read_cfg(buf, g_cfg)?,
+            G::read_cfg(buf, g_cfg)?,
+            G::read_cfg(buf, g_cfg)?,
+        ];
+        let s_tilde = F::read_cfg(buf, f_cfg)?;
+        let t_x = F::read_cfg(buf, f_cfg)?;
+        let t_tilde_x = F::read_cfg(buf, f_cfg)?;
+        let p_big = G::read_cfg(buf, g_cfg)?;
+        let ipa_proof = ipa::Proof::read_cfg(buf, cfg)?;
+        Ok(Self {
+            m_big,
+            o_big,
+            m_big_tilde,
+            t_big,
+            s_tilde,
+            t_x,
+            t_tilde_x,
+            p_big,
+            ipa_proof,
+        })
+    }
 }
 
 /// Prove that a given [`Witness`] satisfies a [`Circuit`] and matches a [`Claim`].
@@ -745,12 +1185,12 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let h_internal = &setup.ipa.h()[..circuit.internal_vars];
     let m_big = G::msm(g_internal, &witness.left, strategy)
         + &G::msm(h_internal, &witness.right, strategy)
-        + &(setup.pedersen_blinding.clone() * &m);
+        + &(setup.blinding_generator.clone() * &m);
     let o_big =
-        G::msm(g_internal, &witness.out, strategy) + &(setup.pedersen_blinding.clone() * &o_tilde);
+        G::msm(g_internal, &witness.out, strategy) + &(setup.blinding_generator.clone() * &o_tilde);
     let m_big_tilde = G::msm(g_internal, &l_tilde, strategy)
         + &G::msm(h_internal, &r_tilde, strategy)
-        + &(setup.pedersen_blinding.clone() * &m_tilde);
+        + &(setup.blinding_generator.clone() * &m_tilde);
     // Now, commit to all the this information.
     circuit.commit(transcript);
     transcript.commit(claim.encode());
@@ -877,10 +1317,16 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let t_big = std::array::from_fn::<_, 5, _>(|i| {
         // Skip the second element
         let i = if i >= 1 { i + 1 } else { i };
-        setup.pedersen_value.clone() * &t[i] + &(setup.pedersen_blinding.clone() * &t_tilde[i])
+        setup.value_generator.clone() * &t[i] + &(setup.blinding_generator.clone() * &t_tilde[i])
     });
 
-    let p_0 = G::msm(setup.ipa.h(), &y_inv_omega_minus_y, strategy);
+    // The IPA generators may be larger than `padded_vars` for setups that
+    // support multiple circuit sizes. Restrict to the prefix actually used.
+    let p_0 = G::msm(
+        &setup.ipa.h()[..padded_vars],
+        &y_inv_omega_minus_y,
+        strategy,
+    );
     let h_internal = &setup.ipa.h()[..circuit.internal_vars];
     let p_1 =
         G::msm(g_internal, &y_inv_rho, strategy) + &G::msm(h_internal, &y_inv_lambda, strategy);
@@ -893,7 +1339,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let x = F::random(transcript.noise(b"x"));
     let x = powers(x.clone(), &x).take(6).collect::<Vec<_>>();
     let s_tilde = m * &x[0] + &(o_tilde * &x[1]) + &(m_tilde * &x[2]);
-    let p = setup.pedersen_blinding.clone() * &(-s_tilde.clone())
+    let p = setup.blinding_generator.clone() * &(-s_tilde.clone())
         + &p_0
         + &((p_1 + &m_big) * &x[0])
         + &(o_big.clone() * &x[1])
@@ -1051,20 +1497,21 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let ipa_g = setup.ipa.g();
     let ipa_h = setup.ipa.h();
 
-    let pedersen_value = &setup.pedersen_value;
-    let pedersen_blinding = &setup.pedersen_blinding;
+    let value_generator = &setup.value_generator;
+    let blinding_generator = &setup.blinding_generator;
 
     let t_check = Synthetic::msm(
-        &[pedersen_value.clone(), pedersen_blinding.clone()],
+        &[value_generator.clone(), blinding_generator.clone()],
         &[t_x.clone(), t_tilde_x],
         &Sequential,
-    ) - &(pedersen_value.clone() * &((-kappa + &delta_y_z) * &x[1]))
+    ) - &(value_generator.clone() * &((-kappa + &delta_y_z) * &x[1]))
         + &(Synthetic::concrete(theta.iter().cloned().zip(claim.commitments.iter().cloned()))
             * &x[1])
         - &Synthetic::concrete(std::iter::once(&x[0]).chain(&x[2..]).cloned().zip(t_big));
 
     let p_check = {
-        let p_0 = Synthetic::msm(ipa_h, &y_inv_omega_minus_y, &Sequential);
+        // Match the prover: only the first `padded_vars` generators are used.
+        let p_0 = Synthetic::msm(&ipa_h[..padded_vars], &y_inv_omega_minus_y, &Sequential);
         let p_1 = Synthetic::msm(&ipa_g[..circuit.internal_vars], &y_inv_rho, &Sequential)
             + &Synthetic::msm(&ipa_h[..circuit.internal_vars], &y_inv_lambda, &Sequential);
         Synthetic::concrete([
@@ -1074,7 +1521,7 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
             (-x[2].clone(), m_big_tilde),
         ]) - &p_0
             - &(p_1 * &x[0])
-            + &(pedersen_blinding.clone() * &s_tilde)
+            + &(blinding_generator.clone() * &s_tilde)
     };
 
     let ipa_claim = ipa::Claim {
