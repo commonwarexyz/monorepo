@@ -1,44 +1,154 @@
 mod bandersnatch;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, G1},
+    bls12381::{
+        golden_dkg::evrf::bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv},
+        primitives::group::{Scalar, G1},
+    },
     transcript::{Summary, Transcript},
+    zk::{
+        bulletproofs::circuit::{self, prove, verify},
+        pedersen_to_plain,
+    },
     Secret,
 };
 use bandersnatch::{F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
-use commonware_utils::{hex, ordered::Map, Array, Span, TryCollect};
+use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
+use commonware_parallel::Strategy;
+use commonware_utils::{hex, ordered::Map, Array, Span, TryCollect, TryFromIterator};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use std::{num::NonZeroU32, sync::LazyLock};
+use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 
 const SCHNORR_NS: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BANDERSNATCH_SCHNORR";
 
-const POINT_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_POINT_HASH";
+const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROOFS";
 
-static GOLDEN_BETA: LazyLock<Scalar> =
-    LazyLock::new(|| Scalar::map(b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BETA", b""));
+// Linear fit, measured by `vrf_batch_checked_circuit`:
+//
+//     internal_vars(n) = WIRES_PER_PLAYER * n + WIRES_BASE
+//
+// (See `bandersnatch::tests::measure_circuit_size_per_receiver` for the
+// raw data this fit was derived from.)
+//
+// TODO: with a hand-tailored scalar-mul gadget the per-receiver constant
+// could drop to ~2.5k (Golden paper, eprint 2025/1924), letting us hit a much
+// larger receiver count with the same (or smaller) setup.
+const WIRES_PER_PLAYER: usize = 8664;
+const WIRES_BASE: usize = 3065;
 
-fn point_hash(pk1: &PublicKey, pk2: &PublicKey, msg: &[u8]) -> (G, G) {
-    let msg0 = [pk1, pk2, msg, &[0]].concat();
-    let t0 = G::hash_to_group(POINT_DST, &msg0);
-    let msg1 = {
-        let mut out = msg0;
-        out.pop();
-        out.push(1);
-        out
-    };
-    let t1 = G::hash_to_group(POINT_DST, &msg1);
-    (t0, t1)
+/// `ceil(log2(WIRES_PER_PLAYER * num_players + WIRES_BASE))`.
+///
+/// Returns the log2 of the smallest power of two that fits the VRF circuit
+/// for `num_players` receivers, which is what [`Setup::new`] uses to size
+/// the underlying bulletproofs setup.
+const fn lg_len_for_players(num_players: u32) -> u8 {
+    let internal = WIRES_PER_PLAYER * (num_players as usize) + WIRES_BASE;
+    // ceil(log2(internal))
+    let mut padded: usize = 1;
+    let mut lg: u8 = 0;
+    while padded < internal {
+        padded <<= 1;
+        lg += 1;
+    }
+    lg
+}
+
+/// A bulletproofs setup for the golden DKG eVRF circuit.
+///
+/// Each setup is created for a specific maximum number of players (passed to
+/// [`Setup::new`]). All public DKG operations that consume a setup
+/// ([`super::deal`], [`super::observe`], and [`super::play`]) require that the
+/// configured number of players fits within this maximum; [`Setup::supports`]
+/// is the must-use predicate that callers can query in advance.
+///
+/// # Cost
+///
+/// Creating a [`Setup`] is **expensive**: it deterministically hashes
+/// roughly `2 * 2^lg_len` curve points, where `lg_len` grows logarithmically
+/// with `max_players`. However, it only needs to be done **once**: the same
+/// [`Setup`] can be reused across any number of DKG/Reshare rounds, and is
+/// intended to be shared by all participants (it is publicly derivable and
+/// contains no secrets).
+pub struct Setup {
+    inner: circuit::Setup<G1>,
+    max_players: NonZeroU32,
+}
+
+impl Setup {
+    /// Build a new [`Setup`] supporting DKG rounds with up to `max_players`
+    /// players.
+    ///
+    /// This is **expensive** (see the type-level docs); generate one setup and
+    /// reuse it across all DKG rounds rather than rebuilding it each time.
+    pub fn new(max_players: NonZeroU32) -> Self {
+        let lg_len = lg_len_for_players(max_players.get());
+        // Use the BLS12-381 G1 generator as the value generator so that
+        // `value * G1::generator()` (computed by the DKG layer) matches the
+        // Pedersen commitments produced by `Witness::claim`.
+        let inner = circuit::Setup::hashed(BULLETPROOFS_DST, lg_len, G1::generator());
+        Self { inner, max_players }
+    }
+
+    /// Return whether this [`Setup`] supports a DKG round with `num_players`
+    /// players.
+    #[must_use]
+    pub const fn supports(&self, num_players: u32) -> bool {
+        num_players <= self.max_players.get()
+    }
+
+    /// The maximum number of players this setup was constructed for.
+    pub(super) const fn max_players(&self) -> NonZeroU32 {
+        self.max_players
+    }
+
+    pub(super) const fn inner(&self) -> &circuit::Setup<G1> {
+        &self.inner
+    }
+}
+
+impl Write for Setup {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.max_players.get().write(buf);
+        self.inner.write(buf);
+    }
+}
+
+impl EncodeSize for Setup {
+    fn encode_size(&self) -> usize {
+        self.max_players.get().encode_size() + self.inner.encode_size()
+    }
+}
+
+impl Read for Setup {
+    /// The exact `max_players` this setup was created for. Decoding fails if
+    /// the encoded value does not match.
+    type Cfg = NonZeroU32;
+
+    fn read_cfg(buf: &mut impl Buf, expected_max_players: &Self::Cfg) -> Result<Self, CodecError> {
+        let max_players_raw = u32::read(buf)?;
+        let max_players = NonZeroU32::new(max_players_raw)
+            .ok_or(CodecError::Invalid("Setup", "max_players must be nonzero"))?;
+        if max_players != *expected_max_players {
+            return Err(CodecError::Invalid("Setup", "max_players mismatch"));
+        }
+        let lg_len = lg_len_for_players(max_players.get());
+        let max_len = 1usize << lg_len;
+        let inner = circuit::Setup::<G1>::read_cfg(buf, &(max_len, ()))?;
+        if !inner.supports(lg_len) {
+            return Err(CodecError::Invalid("Setup", "inner setup too small"));
+        }
+        Ok(Self { inner, max_players })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -97,63 +207,93 @@ impl PrivateKey {
         crate::Signer::public_key(self)
     }
 
-    /// Compute the VRF output between ourselves and the other party, for a given message.
+    /// Compute the VRF output between ourselves (as receiver) and a `sender`, for a given message.
     ///
-    /// `SENDER` indicates whether we are the sender (dealer) or receiver. Both
-    /// sides derive the same value because the ECDH secret is symmetric, and
-    /// `SENDER` ensures `point_hash` receives the keys in a canonical order
-    /// (sender first, receiver second).
+    /// Both sides derive the same value because the underlying ECDH secret is symmetric.
     ///
     /// Changing the message in any way will produce a completely different output.
     ///
     /// Without knowing either [`PrivateKey`], the output is indistinguishable from
     /// a random value.
-    pub(super) fn vrf<const SENDER: bool>(&self, msg: &Summary, other: &PublicKey) -> Scalar {
-        let me = self.public();
-        let (sender, receiver) = if SENDER { (&me, other) } else { (other, &me) };
-        let (t0, t1) = point_hash(sender, receiver, msg);
-        let s = self.inner.expose(|x| {
-            let raw = other.point.clone() * x;
-            raw.clear_cofactor()
-        });
-        let k = s.x_as_f();
-        GOLDEN_BETA.clone() * &(t0 * &k).x_as_scalar() + &(t1 * &k).x_as_scalar()
+    pub(super) fn vrf_recv(&self, msg: &Summary, sender: &PublicKey) -> Scalar {
+        self.inner
+            .expose(|inner| vrf_recv(msg, sender.point.clone(), inner))
     }
 
-    /// Compute several [`Self::vrf`] outputs, along with commitments to these outputs.
-    ///
-    /// We take in several receivers now, and associate each of them with their output.
-    ///
-    /// We also produce [`VrfCommitments`], which contain commitments.
+    /// Compute the VRF output for each receiver, along with [`VrfCommitments`]
+    /// that bind those outputs and prove they were evaluated correctly.
     ///
     /// # Panics
     ///
     /// Panics if `receivers` contains duplicate public keys.
     pub(super) fn vrf_batch_checked(
         &self,
+        rng: &mut impl CryptoRngCore,
+        setup: &Setup,
+        transcript: &mut Transcript,
         msg: &Summary,
         receivers: impl IntoIterator<Item = PublicKey>,
+        strategy: &impl Strategy,
     ) -> (Map<PublicKey, Scalar>, VrfCommitments) {
-        let scalars: Map<PublicKey, Scalar> = receivers
-            .into_iter()
-            .map(|receiver| {
-                let s = self.vrf::<true>(msg, &receiver);
-                (receiver, s)
-            })
-            .try_collect()
-            .expect("receivers must be unique");
-        let commitments: Map<PublicKey, G1> = scalars
-            .iter_pairs()
-            .map(|(pk, s)| (pk.clone(), G1::generator() * s))
-            .try_collect()
-            .expect("keys are unique");
-        (
-            scalars,
-            VrfCommitments {
-                proof: Proof { key: self.clone() },
-                commitments,
-            },
+        let receivers = Map::from_iter_dedup(receivers.into_iter().map(|x| {
+            let point = x.point.clone();
+            (x, point)
+        }));
+        let (circuit, witness) = self
+            .inner
+            .expose(|x| vrf_batch_checked(msg, x, receivers.values()));
+        let claim = witness.claim(setup.inner());
+        let circuit_proof = prove(
+            &mut *rng,
+            transcript,
+            setup.inner(),
+            &circuit,
+            &claim,
+            &witness,
+            strategy,
         )
+        .expect("proving should succeed");
+        let outputs = Map::try_from_iter(
+            receivers
+                .into_iter()
+                .zip(witness.values())
+                .map(|((receiver, _), output)| (receiver, output.clone())),
+        )
+        .expect("receivers was already deduplicated");
+        let commitments = Map::try_from_iter(outputs.keys().iter().cloned().zip(claim.commitments))
+            .expect("receivers was already deduplicated");
+        let pedersen_to_plain = {
+            let setup = pedersen_to_plain::Setup {
+                value_generator: *setup.inner().value_generator(),
+                blinding_generator: *setup.inner().blinding_generator(),
+            };
+            let mut out = Vec::new();
+            for (receiver, output) in outputs.iter_pairs() {
+                let commitment = *commitments
+                    .get_value(receiver)
+                    .expect("output should have commitment");
+                let proof = pedersen_to_plain::prove(
+                    &mut *rng,
+                    transcript,
+                    &setup,
+                    &pedersen_to_plain::Claim {
+                        plain: commitment,
+                        pedersen: commitment,
+                    },
+                    &pedersen_to_plain::Witness {
+                        value: output.clone(),
+                        blinding: Scalar::zero(),
+                    },
+                );
+                out.push(proof);
+            }
+            out
+        };
+        let proof = Proof {
+            circuit_proof,
+            pedersen_to_plain,
+        };
+        (outputs, VrfCommitments { proof, commitments })
     }
 }
 
@@ -377,47 +517,45 @@ impl Display for PublicKey {
     }
 }
 
-/// An insecure "proof" that simply contains the sender's private key.
-///
-/// This is NOT a real zero-knowledge proof. It reveals the private key,
-/// completely breaking the VRF's secrecy property. We use this placeholder
-/// so that commitment checking works while the real ZK proof is being developed.
+/// Proves that the VRF was correctly evaluated for each receiver and that the
+/// resulting outputs are bound to the accompanying [`VrfCommitments`].
 #[derive(Clone)]
 struct Proof {
-    key: PrivateKey,
-}
-
-impl Proof {
-    /// Check that each commitment matches the VRF output for the corresponding receiver.
-    fn check(&self, msg: &Summary, sender: &PublicKey, commitments: &Map<PublicKey, G1>) -> bool {
-        if self.key.public() != *sender {
-            return false;
-        }
-        commitments.iter_pairs().all(|(receiver, commitment)| {
-            let expected = G1::generator() * &self.key.vrf::<true>(msg, receiver);
-            *commitment == expected
-        })
-    }
+    circuit_proof: circuit::Proof<Scalar, G1>,
+    pedersen_to_plain: Vec<pedersen_to_plain::Proof<Scalar, G1>>,
 }
 
 impl Write for Proof {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.write(buf);
+        self.circuit_proof.write(buf);
+        self.pedersen_to_plain.write(buf);
+    }
+}
+
+impl EncodeSize for Proof {
+    fn encode_size(&self) -> usize {
+        self.circuit_proof.encode_size() + self.pedersen_to_plain.encode_size()
     }
 }
 
 impl Read for Proof {
-    type Cfg = ();
+    /// `max_players` bounds both the number of `pedersen_to_plain` proofs (one
+    /// per receiver) and, via [`lg_len_for_players`], the number of IPA rounds
+    /// admissible in the inner circuit proof.
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
+        let max_proof_len = 1usize << lg_len_for_players(max_players.get());
+        let circuit_proof =
+            circuit::Proof::<Scalar, G1>::read_cfg(buf, &(max_proof_len, ((), ())))?;
+        let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
+        let pedersen_to_plain =
+            Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(buf, &(range, ((), ())))?;
         Ok(Self {
-            key: PrivateKey::read(buf)?,
+            circuit_proof,
+            pedersen_to_plain,
         })
     }
-}
-
-impl FixedSize for Proof {
-    const SIZE: usize = PrivateKey::SIZE;
 }
 
 impl Write for VrfCommitments {
@@ -437,14 +575,14 @@ impl Read for VrfCommitments {
     type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
-        let proof: Proof = ReadExt::read(buf)?;
+        let proof = Proof::read_cfg(buf, max_players)?;
         let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
         let commitments = Read::read_cfg(buf, &(range, (), ()))?;
         Ok(Self { proof, commitments })
     }
 }
 
-/// Commitments to the output of [`PrivateKey::vrf`] for several receivers.
+/// Commitments to the output of [`PrivateKey::vrf_recv`] for several receivers.
 ///
 /// These commitments bind the output value for each receiver, without revealing
 /// what it is.
@@ -455,10 +593,8 @@ pub struct VrfCommitments {
 }
 
 impl VrfCommitments {
-    /// Shift the commitment for `receiver` by `delta`.
-    ///
-    /// This exists to allow tests to simulate an adversary who provides
-    /// fake mask commitments (exploiting the empty proof).
+    /// Shift the commitment for `receiver` by `delta`, producing a tampered
+    /// [`VrfCommitments`] that should fail [`Self::check_batch`].
     #[cfg(any(feature = "arbitrary", test))]
     pub(super) fn perturb(&mut self, receiver: &PublicKey, delta: &G1) {
         if let Some(c) = self.commitments.get_value_mut(receiver) {
@@ -466,39 +602,289 @@ impl VrfCommitments {
         }
     }
 
-    /// Extract the VRF output commitments, after checking their integrity.
+    /// Verify a batch of [`VrfCommitments`] in a single combined check.
     ///
-    /// For a given message and sender, we can check that the commitments contain
-    /// what [`PrivateKey::vrf`] would produce for that receiver.
-    pub fn check(self, msg: &Summary, sender: &PublicKey) -> Option<Map<PublicKey, G1>> {
-        if !self.proof.check(msg, sender, &self.commitments) {
-            return None;
-        }
-        Some(self.commitments)
-    }
-
-    /// Compute [`Self::check`] for an entire batch.
+    /// Each entry in `outputs` is a `(sender, msg, commitments)` triple where
+    /// `msg` is the same nonce ([`Summary`]) the dealer passed to
+    /// [`PrivateKey::vrf_batch_checked`], and `commitments` is what they
+    /// produced. `transcript` must match the outer transcript the dealers used
+    /// when proving (typically `Transcript::resume(*info.summary())`).
     ///
-    /// `rng` is needed to allow to optimize this check, making it potentially
-    /// faster than checking each value in isolation.
-    ///
-    /// A sender will only appear in the output if their output is correct.
+    /// On success, returns each sender's verified commitments. If the
+    /// combined batch check fails, falls back to checking each sender's
+    /// equation individually and returns the subset that verified
+    /// successfully.
     ///
     /// # Panics
     ///
     /// Panics if `outputs` contains duplicate sender public keys.
     pub fn check_batch(
-        _rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRngCore,
+        setup: &Setup,
+        transcript: &Transcript,
         outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
+        strategy: &impl Strategy,
     ) -> Map<PublicKey, Map<PublicKey, G1>> {
+        // Materialize the batch up front. Each sender's `msg` must parse as a
+        // `Summary` (the format the prover passed in); senders whose `msg` is
+        // malformed are dropped before we touch the proof system.
+        let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
+            .into_iter()
+            .filter_map(|(sender, msg, commitments)| {
+                let mut buf: &[u8] = msg.as_ref();
+                let _: Summary = ReadExt::read(&mut buf).ok()?;
+                Some((sender, msg, commitments))
+            })
+            .collect();
+
+        // Build one verification equation per sender; the batched checker
+        // sums them (with independent random scalars) into a single MSM and
+        // performs a binary-tree fallback to identify any culprits.
+        let per_sender = setup.inner().eval_check_batched(
+            rng,
+            |vs, rng| {
+                // Pedersen-to-plain proves and verifies use the value/blinding
+                // generators of the bulletproofs setup, so build a matching
+                // synthetic-flavored setup once for reuse below.
+                let pp_setup = pedersen_to_plain::Setup {
+                    value_generator: vs.value_generator().clone(),
+                    blinding_generator: vs.blinding_generator().clone(),
+                };
+
+                let mut per_sender = Vec::with_capacity(outputs.len());
+                for (sender, msg, commitments) in &outputs {
+                    // Reconstruct the per-sender circuit. Receivers are taken
+                    // from the (sorted) commitment map so they line up with the
+                    // order the prover used.
+                    let receivers: Vec<G> = commitments
+                        .commitments
+                        .keys()
+                        .iter()
+                        .map(|pk| pk.point.clone())
+                        .collect();
+                    let circuit =
+                        vrf_batch_checked_circuit(msg.as_ref(), sender.point.clone(), &receivers);
+                    let claim = circuit::Claim {
+                        commitments: commitments.commitments.values().to_vec(),
+                    };
+
+                    // Per-sender forked transcript matches what the prover used
+                    // when calling `circuit::prove` and the chained
+                    // `pedersen_to_plain::prove` calls.
+                    let mut t = transcript.fork(b"dealer vrf");
+                    t.commit(sender.encode());
+
+                    let Some(circuit_synth) = verify(
+                        &mut *rng,
+                        &mut t,
+                        vs,
+                        &circuit,
+                        &claim,
+                        commitments.proof.circuit_proof.clone(),
+                        strategy,
+                    ) else {
+                        // Structural failure for this sender: record `None`
+                        // so the batched checker excludes it from any subset
+                        // sum without spoiling the rest of the batch.
+                        per_sender.push(None);
+                        continue;
+                    };
+                    let mut sender_acc = circuit_synth * &Scalar::random(&mut *rng);
+
+                    // Pedersen-to-plain proofs were appended in the same order
+                    // as `commitments.iter_pairs()` on the prover side.
+                    for ((_, comm), pp_proof) in commitments
+                        .commitments
+                        .iter_pairs()
+                        .zip(commitments.proof.pedersen_to_plain.iter().cloned())
+                    {
+                        let pp_claim = pedersen_to_plain::Claim {
+                            plain: *comm,
+                            pedersen: *comm,
+                        };
+                        let pp_synth = pedersen_to_plain::verify(
+                            &mut *rng, &mut t, &pp_setup, &pp_claim, pp_proof,
+                        );
+                        sender_acc += &(pp_synth * &Scalar::random(&mut *rng));
+                    }
+                    per_sender.push(Some(sender_acc));
+                }
+                Some(per_sender)
+            },
+            strategy,
+        );
+
+        let Some(per_sender) = per_sender else {
+            return Map::default();
+        };
+
         outputs
             .into_iter()
-            .filter_map(|(sender, mut msg, commitments)| {
-                let summary: Summary = ReadExt::read(&mut msg).ok()?;
-                let checked = commitments.check(&summary, &sender)?;
-                Some((sender, checked))
+            .zip(per_sender)
+            .filter_map(|((sender, _, commitments), valid)| {
+                valid.then_some((sender, commitments.commitments))
             })
             .try_collect()
             .expect("senders must be unique")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+    use std::sync::LazyLock;
+
+    /// Cached setup used by tests in this module. Sized for 3 receivers since
+    /// every test in this module uses 3.
+    static TEST_SETUP: LazyLock<Setup> = LazyLock::new(|| Setup::new(NonZeroU32::new(3).unwrap()));
+
+    #[test]
+    fn vrf_batch_checked_roundtrips_through_check_batch() {
+        let mut rng = test_rng();
+
+        let sender_sk = PrivateKey::random(&mut rng);
+        let sender_pk = sender_sk.public();
+        let receiver_pks: Vec<PublicKey> = (0..3)
+            .map(|_| PrivateKey::random(&mut rng).public())
+            .collect();
+
+        let nonce = Summary::random(&mut rng);
+        let msg = Bytes::copy_from_slice(nonce.as_ref());
+
+        // The outer transcript both sides agree on. The prover forks it the
+        // same way `golden_dkg::deal` does, and `check_batch` re-forks it
+        // internally per sender.
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+
+        let mut prover_t = outer_transcript.fork(b"dealer vrf");
+        prover_t.commit(sender_pk.encode());
+        let (_outputs, commitments) = sender_sk.vrf_batch_checked(
+            &mut rng,
+            &TEST_SETUP,
+            &mut prover_t,
+            &nonce,
+            receiver_pks.iter().cloned(),
+            &Sequential,
+        );
+
+        let result = VrfCommitments::check_batch(
+            &mut rng,
+            &TEST_SETUP,
+            &outer_transcript,
+            std::iter::once((sender_pk.clone(), msg, commitments.clone())),
+            &Sequential,
+        );
+
+        assert_eq!(result.len(), 1);
+        let checked = result
+            .get_value(&sender_pk)
+            .expect("sender should appear in batch result");
+        assert_eq!(checked, &commitments.commitments);
+    }
+
+    #[test]
+    fn check_batch_rejects_perturbed_commitments() {
+        let mut rng = test_rng();
+
+        let sender_sk = PrivateKey::random(&mut rng);
+        let sender_pk = sender_sk.public();
+        let receiver_pks: Vec<PublicKey> = (0..3)
+            .map(|_| PrivateKey::random(&mut rng).public())
+            .collect();
+
+        let nonce = Summary::random(&mut rng);
+        let msg = Bytes::copy_from_slice(nonce.as_ref());
+
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+
+        let mut prover_t = outer_transcript.fork(b"dealer vrf");
+        prover_t.commit(sender_pk.encode());
+        let (_outputs, mut commitments) = sender_sk.vrf_batch_checked(
+            &mut rng,
+            &TEST_SETUP,
+            &mut prover_t,
+            &nonce,
+            receiver_pks.iter().cloned(),
+            &Sequential,
+        );
+
+        // Tamper with one commitment so the bulletproofs check should fail.
+        commitments.perturb(&receiver_pks[0], &G1::generator());
+
+        let result = VrfCommitments::check_batch(
+            &mut rng,
+            &TEST_SETUP,
+            &outer_transcript,
+            std::iter::once((sender_pk, msg, commitments)),
+            &Sequential,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn check_batch_falls_back_to_per_sender_on_failure() {
+        let mut rng = test_rng();
+
+        // Two independent senders with disjoint commitments.
+        let senders: Vec<(PrivateKey, PublicKey)> = (0..2)
+            .map(|_| {
+                let sk = PrivateKey::random(&mut rng);
+                let pk = sk.public();
+                (sk, pk)
+            })
+            .collect();
+        let receiver_pks: Vec<PublicKey> = (0..3)
+            .map(|_| PrivateKey::random(&mut rng).public())
+            .collect();
+
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+
+        let mut prepared = Vec::new();
+        for (sk, pk) in &senders {
+            let nonce = Summary::random(&mut rng);
+            let msg = Bytes::copy_from_slice(nonce.as_ref());
+            let mut prover_t = outer_transcript.fork(b"dealer vrf");
+            prover_t.commit(pk.encode());
+            let (_outputs, commitments) = sk.vrf_batch_checked(
+                &mut rng,
+                &TEST_SETUP,
+                &mut prover_t,
+                &nonce,
+                receiver_pks.iter().cloned(),
+                &Sequential,
+            );
+            prepared.push((pk.clone(), msg, commitments));
+        }
+
+        // Tamper with the *second* sender's commitments so the batched check
+        // fails and we exercise the per-sender fallback path.
+        prepared[1].2.perturb(&receiver_pks[0], &G1::generator());
+
+        let result = VrfCommitments::check_batch(
+            &mut rng,
+            &TEST_SETUP,
+            &outer_transcript,
+            prepared.iter().cloned(),
+            &Sequential,
+        );
+
+        // The honest sender should still be present; the perturbed one should not.
+        assert_eq!(result.len(), 1);
+        let good_pk = &senders[0].1;
+        let bad_pk = &senders[1].1;
+        assert_eq!(result.get_value(good_pk), Some(&prepared[0].2.commitments));
+        assert!(result.get_value(bad_pk).is_none());
+    }
+
+    #[test]
+    fn setup_codec_roundtrip() {
+        let s = Setup::new(NonZeroU32::new(3).unwrap());
+        let bytes = s.encode();
+        let decoded = Setup::read_cfg(&mut bytes.as_ref(), &NonZeroU32::new(3).unwrap()).unwrap();
+        assert_eq!(decoded.max_players(), s.max_players());
+        // Re-encode and compare to make sure the roundtrip is bit-exact.
+        assert_eq!(decoded.encode(), bytes);
     }
 }

@@ -4,7 +4,12 @@
 //! field. This module wraps the arkworks implementation to conform to the
 //! codebase's algebra trait hierarchy.
 
-use crate::bls12381::primitives::group::Scalar;
+use crate::{
+    bls12381::primitives::group::Scalar,
+    zk::bulletproofs::circuit::{
+        r1cs_to_circuit, r1cs_to_circuit_and_witness, Circuit, R1cs, SparseMatrix, Witness,
+    },
+};
 use ark_ec::{
     hashing::{
         curve_maps::elligator2::Elligator2Map, map_to_curve_hasher::MapToCurveBasedHasher,
@@ -13,14 +18,28 @@ use ark_ec::{
     twisted_edwards::Projective,
     AdditiveGroup, CurveGroup, PrimeGroup, VariableBaseMSM,
 };
-use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Fr};
+use ark_ed_on_bls12_381_bandersnatch::{
+    constraints::EdwardsVar, BandersnatchConfig, EdwardsAffine, Fq, Fr,
+};
 use ark_ff::{
     field_hashers::DefaultFieldHasher, BigInteger, Field as ArkField, PrimeField, UniformRand,
     Zero as ArkZero,
 };
+use ark_r1cs_std::{
+    alloc::{AllocVar, AllocationMode},
+    eq::EqGadget,
+    fields::fp::{AllocatedFp, FpVar},
+    groups::CurveVar,
+    prelude::{Boolean, ToBitsGadget},
+    R1CSVar,
+};
+use ark_relations::r1cs::{
+    ConstraintMatrices, ConstraintSystem, ConstraintSystemRef, OptimizationGoal, SynthesisError,
+    SynthesisMode,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
@@ -29,8 +48,10 @@ use core::{
     fmt::{Debug, Formatter},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+use rand::rngs::StdRng;
 use rand_core::CryptoRngCore;
 use sha2::Sha256;
+use std::sync::LazyLock;
 
 /// A scalar in the Bandersnatch scalar field.
 #[derive(Clone, Eq, PartialEq)]
@@ -50,6 +71,10 @@ impl F {
         let fr = Fr::deserialize_with_mode(&bytes[..], Compress::Yes, Validate::Yes)
             .map_err(|_| CodecError::Invalid("bandersnatch::F", "invalid"))?;
         Ok(Self(fr))
+    }
+
+    fn bits_le(&self) -> Vec<bool> {
+        self.0.into_bigint().to_bits_le()
     }
 }
 
@@ -170,6 +195,14 @@ impl arbitrary::Arbitrary<'_> for F {
     }
 }
 
+fn fq_to_scalar(x: &Fq) -> Scalar {
+    Scalar::from_limbs(x.into_bigint().0)
+}
+
+fn scalar_to_fq(x: &Scalar) -> Fq {
+    Fq::from_be_bytes_mod_order(&x.encode())
+}
+
 /// A point on the Bandersnatch curve (twisted Edwards form).
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
@@ -178,7 +211,7 @@ pub struct G(Projective<BandersnatchConfig>);
 impl G {
     /// Returns the affine x-coordinate as the shared BLS12-381 scalar type.
     pub fn x_as_scalar(&self) -> Scalar {
-        Scalar::from_limbs(self.0.into_affine().x.into_bigint().0)
+        fq_to_scalar(&self.0.into_affine().x)
     }
 
     /// Returns the affine x-coordinate as a Bandersnatch scalar.
@@ -320,7 +353,10 @@ impl HashToGroup for G {
         // cannot fail. The Result comes from the generic MapToCurve trait which
         // also covers partial maps like try-and-increment.
         let affine = hasher.hash(message).expect("Elligator2 is a total map");
-        Self(affine.into())
+        // Clear the cofactor so the result is in the prime-order subgroup.
+        // Elligator2 maps onto the full Bandersnatch curve (cofactor 4); a
+        // hash-to-group primitive must land in the prime subgroup.
+        Self(affine.into()).clear_cofactor()
     }
 }
 
@@ -350,6 +386,207 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
+static GOLDEN_BETA: LazyLock<Scalar> =
+    LazyLock::new(|| Scalar::map(b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BETA", b""));
+
+const POINT_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_POINT_HASH";
+
+fn point_hash(pk1: &G, pk2: &G, msg: &[u8]) -> (G, G) {
+    let msg0 = [&pk1.to_bytes(), &pk2.to_bytes(), msg, &[0]].concat();
+    let t0 = G::hash_to_group(POINT_DST, &msg0);
+    let msg1 = {
+        let mut out = msg0;
+        out.pop();
+        out.push(1);
+        out
+    };
+    let t1 = G::hash_to_group(POINT_DST, &msg1);
+    // `hash_to_group` returns prime-order-subgroup points. This is required so
+    // that the gadget (which computes `t0 * k_int` via `scalar_mul_le` over
+    // full bit-strings of the x-coordinate) and `vrf_recv` (which computes
+    // `t0 * (k_int mod r)` via Fr scalar multiplication) agree.
+    (t0, t1)
+}
+
+type GVar = EdwardsVar;
+
+fn vrf_gadget(
+    x_bits_le: &[Boolean<Fq>],
+    receiver: &GVar,
+    t0: &GVar,
+    t1: &GVar,
+    beta: &FpVar<Fq>,
+) -> Result<FpVar<Fq>, SynthesisError> {
+    let s = {
+        let mut out = receiver.scalar_mul_le(x_bits_le.iter())?;
+        out.double_in_place()?;
+        out.double_in_place()?;
+        out
+    };
+    // Use only the x-coordinate bits as the scalar. `AffineVar::to_bits_le`
+    // returns `x_bits ++ y_bits`, which would not match `vrf_recv` (which
+    // scalar-multiplies by `s.x_as_f()`).
+    let k = s.x.to_bits_le()?;
+    Ok(t0.scalar_mul_le(k.iter())?.x * beta + t1.scalar_mul_le(k.iter())?.x)
+}
+
+fn vrf_batch_circuit(
+    msg: &[u8],
+    cs: ConstraintSystemRef<Fq>,
+    beta: &Fq,
+    sender: &G,
+    receivers: &[G],
+    x: Option<&F>,
+) -> Result<Vec<usize>, SynthesisError> {
+    let beta = FpVar::new_constant(cs.clone(), beta)?;
+    // The witness shape (the number of scalar bits) must be the same for
+    // setup-mode synthesis (no `x`) as it is for proving. When `x` is missing,
+    // we fall back to a fixed-length all-zero bit vector matching `F`'s bigint
+    // representation.
+    let x_bits_le = Vec::<Boolean<_>>::new_witness(cs.clone(), || {
+        Ok::<_, SynthesisError>(x.map(F::bits_le).unwrap_or_else(|| F::zero().bits_le()))
+    })?;
+    let sender_var = GVar::new_variable_omit_on_curve_check(
+        cs.clone(),
+        || Ok(sender.0),
+        AllocationMode::Constant,
+    )?;
+    let generator = GVar::new_variable_omit_on_curve_check(
+        cs.clone(),
+        || Ok(G::generator().0),
+        AllocationMode::Constant,
+    )?;
+    sender_var.enforce_equal(&generator.scalar_mul_le(x_bits_le.iter())?)?;
+    let mut out = Vec::new();
+    for receiver in receivers {
+        let (t0, t1) = point_hash(sender, receiver, msg);
+        let t0 = GVar::new_variable_omit_on_curve_check(
+            cs.clone(),
+            || Ok(t0.0),
+            AllocationMode::Constant,
+        )?;
+        let t1 = GVar::new_variable_omit_on_curve_check(
+            cs.clone(),
+            || Ok(t1.0),
+            AllocationMode::Constant,
+        )?;
+        let receiver = GVar::new_variable_omit_on_curve_check(
+            cs.clone(),
+            || Ok(receiver.0),
+            AllocationMode::Constant,
+        )?;
+        let out_i = vrf_gadget(&x_bits_le, &receiver, &t0, &t1, &beta)?;
+        // In setup mode, `out_i.value()` is unavailable; fall back to zero so
+        // synthesis can still produce the correct constraint matrices.
+        let out_i_witness = AllocatedFp::new_witness(cs.clone(), || {
+            Ok::<_, SynthesisError>(out_i.value().unwrap_or(Fq::ZERO))
+        })?;
+        out_i.enforce_equal(&out_i_witness.clone().into())?;
+        // The R1CS matrix lays out columns as
+        // `[instance_assignment | witness_assignment]`, so witness variables
+        // start at column `num_instance_variables`. Use that offset so the
+        // returned indices match the matrix column space.
+        out.push(
+            out_i_witness
+                .variable
+                .get_index_unchecked(cs.num_instance_variables())
+                .expect("new_witness returns witness"),
+        );
+    }
+    Ok(out)
+}
+
+fn constraint_matrices_to_r1cs(matrices: ConstraintMatrices<Fq>) -> R1cs<Scalar> {
+    fn convert_matrix(m: Vec<Vec<(Fq, usize)>>) -> SparseMatrix<Scalar> {
+        let mut out = SparseMatrix::default();
+        for (i, m_i) in m.into_iter().enumerate() {
+            for (m_ij, j) in m_i {
+                out[(i, j)] = fq_to_scalar(&m_ij);
+            }
+        }
+        out
+    }
+    R1cs {
+        a: convert_matrix(matrices.a),
+        b: convert_matrix(matrices.b),
+        c: convert_matrix(matrices.c),
+    }
+}
+
+fn vrf_batch_checked_inner(
+    msg: &[u8],
+    x: Option<&F>,
+    sender: G,
+    receivers: &[G],
+) -> (Circuit<Scalar>, Option<Witness<Scalar>>) {
+    let cs = ConstraintSystem::new_ref();
+    cs.set_optimization_goal(OptimizationGoal::Constraints);
+    if x.is_some() {
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+    } else {
+        cs.set_mode(SynthesisMode::Setup);
+    }
+    let output_indices = vrf_batch_circuit(
+        msg,
+        cs.clone(),
+        &scalar_to_fq(&GOLDEN_BETA),
+        &sender,
+        receivers,
+        x,
+    )
+    .expect("constraint synthesization should not fail");
+    cs.finalize();
+    if x.is_some() {
+        debug_assert!(
+            cs.is_satisfied().unwrap_or(false),
+            "arkworks constraint system unsatisfied"
+        );
+    }
+    let cs = cs
+        .into_inner()
+        .expect("constraint system should have only one ref");
+    let matrices = cs
+        .to_matrices()
+        .expect("constraint system should have generated matrices");
+    let r1cs = constraint_matrices_to_r1cs(matrices);
+    if x.is_some() {
+        // Concatenate instance and witness assignments so the resulting vector
+        // is column-aligned with the R1CS matrix
+        // (`[instance_assignment | witness_assignment]`). The first instance
+        // entry is the constant `1`.
+        let witness = cs
+            .instance_assignment
+            .into_iter()
+            .chain(cs.witness_assignment)
+            .map(|x| fq_to_scalar(&x))
+            .collect::<Vec<_>>();
+        let (c, w) =
+            r1cs_to_circuit_and_witness(None::<&mut StdRng>, r1cs, witness, &output_indices);
+        (c, Some(w))
+    } else {
+        let c = r1cs_to_circuit(r1cs, &output_indices);
+        (c, None)
+    }
+}
+
+pub fn vrf_batch_checked_circuit(msg: &[u8], sender: G, receivers: &[G]) -> Circuit<Scalar> {
+    vrf_batch_checked_inner(msg, None, sender, receivers).0
+}
+
+pub fn vrf_batch_checked(msg: &[u8], x: &F, receivers: &[G]) -> (Circuit<Scalar>, Witness<Scalar>) {
+    let (c, w) = vrf_batch_checked_inner(msg, Some(x), G::generator() * x, receivers);
+    (c, w.expect("witness should not be None"))
+}
+
+pub fn vrf_recv(msg: &[u8], sender: G, receiver: &F) -> Scalar {
+    let (t0, t1) = point_hash(&sender, &(G::generator() * receiver), msg);
+    let s = (sender * receiver).clear_cofactor();
+    let k = s.x_as_f();
+    GOLDEN_BETA.clone() * &(t0 * &k).x_as_scalar() + &(t1 * &k).x_as_scalar()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +606,24 @@ mod tests {
     #[test]
     fn test_hash_to_group() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G>);
+    }
+
+    /// Diagnostic: print circuit `internal_vars` (and `padded = next_pow2`) as
+    /// a function of the number of receivers, so we can size
+    /// `BULLETPROOFS_LG_LEN` appropriately.
+    #[test]
+    #[ignore = "diagnostic; run with `--ignored` to print circuit sizes"]
+    fn measure_circuit_size_per_receiver() {
+        for n in [1usize, 2, 3, 5, 7, 10, 16] {
+            let receivers: Vec<G> = (0..n).map(|_| G::generator()).collect();
+            let circuit = vrf_batch_checked_circuit(b"measure", G::generator(), &receivers);
+            let internal = circuit.internal_vars();
+            let padded = internal.next_power_of_two();
+            eprintln!(
+                "receivers={n:2} internal_vars={internal} padded={padded} (per_receiver={})",
+                if n == 0 { 0 } else { internal / n },
+            );
+        }
     }
 
     #[test]
