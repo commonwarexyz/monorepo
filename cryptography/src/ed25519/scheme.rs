@@ -1,7 +1,6 @@
-use crate::BatchVerifier;
 use crate::{
     ed25519::core::{self as ed_core, VerificationKey},
-    Secret,
+    BatchVerifier, Secret,
 };
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};

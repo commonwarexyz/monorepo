@@ -6,12 +6,10 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-use super::Batch;
-use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
-use crate::{certificate::Verification, BatchVerifier};
+use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
-    certificate::{Attestation, Namespace, Scheme, Signers, Subject},
-    Digest, Signer as _, Verifier as _,
+    certificate::{Attestation, Namespace, Scheme, Signers, Subject, Verification},
+    BatchVerifier, Digest, Signer as _, Verifier as _,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
