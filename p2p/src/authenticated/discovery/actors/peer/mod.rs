@@ -6,7 +6,7 @@ use crate::authenticated::discovery::{
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
-use prometheus_client::metrics::{counter::Counter, family::Family};
+use commonware_runtime::telemetry::metrics::CounterFamily;
 use std::{num::NonZeroUsize, time::Duration};
 use thiserror::Error;
 
@@ -24,10 +24,10 @@ pub struct Config<C: PublicKey> {
     pub peer_gossip_max_count: usize,
     pub info_verifier: InfoVerifier<C>,
 
-    pub sent_messages: Family<metrics::Message, Counter>,
-    pub received_messages: Family<metrics::Message, Counter>,
-    pub dropped_messages: Family<metrics::Message, Counter>,
-    pub rate_limited: Family<metrics::Message, Counter>,
+    pub sent_messages: CounterFamily<metrics::Message<C>>,
+    pub received_messages: CounterFamily<metrics::Message<C>>,
+    pub dropped_messages: CounterFamily<metrics::Message<C>>,
+    pub rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
 #[derive(Error, Debug)]

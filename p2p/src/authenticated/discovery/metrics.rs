@@ -1,19 +1,12 @@
 use crate::Channel;
-use commonware_utils::Array;
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
-use std::fmt::Write;
+use commonware_cryptography::PublicKey;
+use commonware_runtime::telemetry::metrics::EncodeStruct;
+use std::fmt;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
-    pub peer: String,
-}
-
-impl Peer {
-    pub fn new(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-        }
-    }
+/// Per-peer label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Peer<P: PublicKey> {
+    pub peer: P,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -25,53 +18,45 @@ pub enum MessageType {
     Invalid,
 }
 
-impl EncodeLabelValue for MessageType {
-    fn encode(&self, encoder: &mut LabelValueEncoder<'_>) -> Result<(), std::fmt::Error> {
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Data(channel) => encoder.write_str(&format!("data_{channel}")),
-            Self::Greeting => encoder.write_str("greeting"),
-            Self::BitVec => encoder.write_str("bit_vec"),
-            Self::Peers => encoder.write_str("peers"),
-            Self::Invalid => encoder.write_str("invalid"),
+            Self::Data(channel) => write!(f, "data_{channel}"),
+            Self::Greeting => f.write_str("greeting"),
+            Self::BitVec => f.write_str("bit_vec"),
+            Self::Peers => f.write_str("peers"),
+            Self::Invalid => f.write_str("invalid"),
         }
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Message {
-    pub peer: String,
+/// Per-peer, per-message-type label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Message<P: PublicKey> {
+    pub peer: P,
     pub message: MessageType,
 }
 
-impl Message {
-    pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
+impl<P: PublicKey> Message<P> {
+    fn new(peer: &P, message: MessageType) -> Self {
         Self {
-            peer: peer.to_string(),
-            message: MessageType::Data(channel),
+            peer: peer.clone(),
+            message,
         }
     }
-    pub fn new_greeting(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Greeting,
-        }
+    pub fn new_data(peer: &P, channel: Channel) -> Self {
+        Self::new(peer, MessageType::Data(channel))
     }
-    pub fn new_bit_vec(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::BitVec,
-        }
+    pub fn new_greeting(peer: &P) -> Self {
+        Self::new(peer, MessageType::Greeting)
     }
-    pub fn new_peers(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Peers,
-        }
+    pub fn new_bit_vec(peer: &P) -> Self {
+        Self::new(peer, MessageType::BitVec)
     }
-    pub fn new_invalid(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Invalid,
-        }
+    pub fn new_peers(peer: &P) -> Self {
+        Self::new(peer, MessageType::Peers)
+    }
+    pub fn new_invalid(peer: &P) -> Self {
+        Self::new(peer, MessageType::Invalid)
     }
 }

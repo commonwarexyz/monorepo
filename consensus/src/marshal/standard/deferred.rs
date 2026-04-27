@@ -95,7 +95,10 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    telemetry::metrics::histogram::{Buckets, Timed},
+    telemetry::metrics::{
+        histogram::{Buckets, Timed},
+        MetricsExt as _,
+    },
     Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
@@ -164,13 +167,10 @@ where
 {
     /// Creates a new [`Deferred`] wrapper.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
-        use prometheus_client::metrics::histogram::Histogram;
-
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let build_histogram = context.histogram(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Buckets::LOCAL,
         );
         let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
 

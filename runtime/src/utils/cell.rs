@@ -1,6 +1,9 @@
-use crate::{signal, Error, Handle};
+use crate::{
+    signal,
+    telemetry::metrics::{Metric, Registered},
+    Error, Handle,
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
 use std::{
     future::Future,
@@ -153,15 +156,16 @@ where
         Self::Present(self.as_present().with_attribute(key, value))
     }
 
-    fn with_scope(&self) -> Self {
-        Self::Present(self.as_present().with_scope())
-    }
-
     fn with_span(&self) -> Self {
         Self::Present(self.as_present().with_span())
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
         self.as_present().register(name, help, metric)
     }
 

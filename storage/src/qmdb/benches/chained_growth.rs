@@ -159,6 +159,7 @@ async fn run_chained_growth<
     fork_child: Fork,
 ) -> Duration {
     seed_db(&mut db, NUM_KEYS).await;
+    db.sync().await.unwrap();
     let mut rng = StdRng::seed_from_u64(99);
 
     // Pre-build a deep chain (untimed).

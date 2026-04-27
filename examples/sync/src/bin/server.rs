@@ -8,6 +8,7 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
+    telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
     Spawner, Storage, StreamOf,
 };
@@ -29,7 +30,6 @@ use commonware_utils::{
     sync::{AsyncRwLock, Mutex},
     DurationExt,
 };
-use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
     future::Future,
@@ -88,25 +88,16 @@ impl<DB> State<DB> {
     where
         E: Metrics,
     {
-        let state = Self {
+        Self {
             database: Arc::new(AsyncRwLock::new(database)),
-            request_counter: Counter::default(),
-            error_counter: Counter::default(),
-            ops_counter: Counter::default(),
+            request_counter: context.counter("requests", "Number of requests received"),
+            error_counter: context.counter("error", "Number of errors"),
+            ops_counter: context.counter(
+                "ops_added",
+                "Number of operations added since server start, not including the initial operations",
+            ),
             last_operation_time: Mutex::new(SystemTime::now()),
-        };
-        context.register(
-            "requests",
-            "Number of requests received",
-            state.request_counter.clone(),
-        );
-        context.register("error", "Number of errors", state.error_counter.clone());
-        context.register(
-            "ops_added",
-            "Number of operations added since server start, not including the initial operations",
-            state.ops_counter.clone(),
-        );
-        state
+        }
     }
 }
 

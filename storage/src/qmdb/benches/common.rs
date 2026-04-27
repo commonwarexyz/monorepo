@@ -35,7 +35,7 @@ pub const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
-pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 // -- Fixed value (Digest), fixed storage layout --
 
@@ -499,8 +499,7 @@ pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
     Sha256::hash(&rng.next_u32().to_be_bytes())
 }
 
-/// Pre-populate the database with `num_keys` unique keys, then commit and sync so that
-/// seed-phase buffered writes are flushed before the caller starts timing.
+/// Pre-populate the database with `num_keys` unique keys, then commit.
 pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     db: &mut C,
     num_keys: u64,
@@ -514,7 +513,6 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     let merkleized = batch.merkleize(db, None).await.unwrap();
     db.apply_batch(merkleized).await.unwrap();
     db.commit().await.unwrap();
-    db.sync().await.unwrap();
 }
 
 /// Write `num_updates` random key updates into a batch.
