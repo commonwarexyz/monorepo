@@ -1008,6 +1008,145 @@ where
     });
 }
 
+async fn wait_for_reached_progress<F: merkle::Family>(
+    context: deterministic::Context,
+    target: &Target<F, Digest>,
+) {
+    let target_end = *target.range.end();
+    let journal_size = format!("client_journal_size {target_end}");
+    let target_end = format!("client_target_end {target_end}");
+    loop {
+        let metrics = context.encode();
+        if metrics.contains(&journal_size) && metrics.contains(&target_end) {
+            return;
+        }
+        context.sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// Test progress metrics for reached targets across target updates and explicit finish.
+pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_finish<
+    H: SyncTestHarness,
+>()
+where
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+
+        target_db = H::apply_ops(target_db, H::create_ops(8)).await;
+        let initial_target = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(
+                target_db.sync_boundary().await,
+                target_db.bounds().await.end
+            ),
+        };
+
+        target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
+        let first_update = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(
+                target_db.sync_boundary().await,
+                target_db.bounds().await.end
+            ),
+        };
+
+        target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 2)).await;
+        let second_update = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(
+                target_db.sync_boundary().await,
+                target_db.bounds().await.end
+            ),
+        };
+        let final_root = target_db.root();
+
+        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (finish_sender, finish_receiver) = mpsc::channel(1);
+        let target_db = Arc::new(target_db);
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(2),
+            target: initial_target.clone(),
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: Some(update_receiver),
+            finish_rx: Some(finish_receiver),
+            reached_target_tx: None,
+            max_retained_roots: 1,
+        };
+
+        let sync_handle = sync::sync(config);
+        pin_mut!(sync_handle);
+
+        select! {
+            _ = sync_handle.as_mut() => {
+                panic!("sync completed before explicit finish signal");
+            },
+            _ = wait_for_reached_progress(context.clone(), &initial_target) => {},
+        }
+        assert!(
+            sync_handle.as_mut().now_or_never().is_none(),
+            "sync must wait for a target update or explicit finish after reaching the initial target"
+        );
+
+        update_sender
+            .send(first_update.clone())
+            .await
+            .expect("target update channel should be open");
+        select! {
+            _ = sync_handle.as_mut() => {
+                panic!("sync completed before explicit finish signal after first update");
+            },
+            _ = wait_for_reached_progress(context.clone(), &first_update) => {},
+        }
+        assert!(
+            sync_handle.as_mut().now_or_never().is_none(),
+            "sync must wait for another update or explicit finish after reaching the first update"
+        );
+
+        update_sender
+            .send(second_update.clone())
+            .await
+            .expect("target update channel should be open");
+        select! {
+            _ = sync_handle.as_mut() => {
+                panic!("sync completed before explicit finish signal after second update");
+            },
+            _ = wait_for_reached_progress(context.clone(), &second_update) => {},
+        }
+        assert!(
+            sync_handle.as_mut().now_or_never().is_none(),
+            "sync must wait for explicit finish after reporting final progress"
+        );
+
+        finish_sender
+            .send(())
+            .await
+            .expect("finish signal channel should be open");
+
+        let synced_db: H::Db = sync_handle
+            .await
+            .expect("sync should succeed after finish signal");
+        assert_eq!(synced_db.root(), final_root);
+        assert_eq!(synced_db.bounds().await.end, *second_update.range.end());
+        assert_eq!(synced_db.sync_boundary().await, *second_update.range.start());
+
+        synced_db.destroy().await.unwrap();
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
@@ -2748,6 +2887,13 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_waits_for_explicit_finish() {
                 super::test_sync_waits_for_explicit_finish::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_reports_progress_for_reached_targets_before_explicit_finish() {
+                super::test_sync_reports_progress_for_reached_targets_before_explicit_finish::<
+                    $harness,
+                >();
             }
 
             #[test_traced]
