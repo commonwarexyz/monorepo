@@ -83,7 +83,7 @@ impl Configuration {
     /// number of faulty and correct nodes satisfy the protocol fault tolerance constraints.
     /// A valid configuration is required for the protocol to make progress in periods of synchrony (liveness).
     pub fn is_valid(&self) -> bool {
-        self.faults <= bounds::max_faults(self.n)
+        self.faults <= bounds::max_faults(self.n) && self.n == self.faults + self.correct
     }
 }
 
@@ -91,6 +91,8 @@ impl Configuration {
 pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
+/// 4 nodes, 0 faulty, 4 correct (all nodes are correct)
+pub const N4F0C4: Configuration = Configuration::new(4, 0, 4);
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,
@@ -182,10 +184,10 @@ impl Arbitrary<'_> for FuzzInput {
         Ok(Self {
             raw_bytes,
             partition,
+            configuration,
             degraded_network,
             required_containers,
             strategy,
-            configuration,
         })
     }
 }
@@ -220,7 +222,7 @@ async fn setup_network<P: simplex::Simplex>(
         schemes,
         verifier: _,
         ..
-    } = P::fixture(context, NAMESPACE, N4F1C3.n);
+    } = P::fixture(context, NAMESPACE, input.configuration.n);
     let (network, mut oracle) = Network::new_with_peers(
         context.with_label("network"),
         NetworkConfig {
@@ -248,7 +250,10 @@ async fn setup_network<P: simplex::Simplex>(
     )
     .await;
 
-    if input.partition == Partition::Connected && input.degraded_network {
+    if input.partition == Partition::Connected
+        && input.configuration == N4F1C3
+        && input.degraded_network
+    {
         setup_degraded_network(&mut oracle, &participants).await;
     }
 
@@ -469,8 +474,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         if config.is_valid() {
-            let states = invariants::extract(reporters, N4F1C3.n as usize);
-            invariants::check::<P>(N4F1C3.n, states);
+            let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
         }
     });
 }

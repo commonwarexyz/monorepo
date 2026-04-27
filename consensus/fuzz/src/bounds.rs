@@ -122,4 +122,27 @@ mod tests {
         assert_eq!(max_faults(7), 2); // 3f+1 = 7, so f=2
         assert_eq!(max_faults(10), 3); // 3f+1 = 10, so f=3
     }
+
+    #[test]
+    fn test_is_valid_logic() {
+        use crate::{Configuration, N4F0C4, N4F1C3, N4F3C1};
+
+        // N4F0C4: 4 nodes, 0 faulty, protocol invariants must hold
+        assert!(N4F0C4.is_valid());
+
+        // N4F1C3: 4 nodes, 1 faulty, protocol invariants must hold
+        assert!(N4F1C3.is_valid());
+
+        // N4F3C1: 4 nodes, 3 faulty, protocol invariants can be violated
+        assert!(!N4F3C1.is_valid());
+        // Boundary: f == max_faults(n) is allowed
+        assert!(Configuration::new(4, 1, 3).is_valid());
+
+        // Boundary: f == max_faults(n) + 1 is rejected
+        assert!(!Configuration::new(4, 2, 2).is_valid());
+
+        // n != faults + correct must be rejected
+        assert!(!Configuration::new(4, 1, 2).is_valid());
+        assert!(!Configuration::new(4, 1, 4).is_valid());
+    }
 }
