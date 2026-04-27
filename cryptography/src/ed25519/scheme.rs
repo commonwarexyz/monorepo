@@ -380,12 +380,11 @@ impl Batch {
         let payload = namespace
             .map(|ns| Cow::Owned(union_unique(ns, message)))
             .unwrap_or_else(|| Cow::Borrowed(message));
-        let item = ed_core::batch::Item::from((
-            public_key.key.into(),
+        self.verifier.queue((
+            public_key.key,
             ed_core::Signature::from(signature.raw),
             &payload,
         ));
-        self.verifier.queue(item);
         true
     }
 }

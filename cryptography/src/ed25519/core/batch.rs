@@ -34,7 +34,7 @@
 //!
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
-use super::{Error, Signature, VerificationKeyBytes};
+use super::{Error, Signature, VerificationKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap as Map, vec::Vec};
 use curve25519_dalek::{
@@ -63,22 +63,21 @@ fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
 /// in an async context.
 #[derive(Clone, Debug)]
 pub struct Item {
-    vk_bytes: VerificationKeyBytes,
+    vk: VerificationKey,
     sig: Signature,
     k: Scalar,
 }
 
-impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKeyBytes, Signature, &'msg M)> for Item {
-    fn from(tup: (VerificationKeyBytes, Signature, &'msg M)) -> Self {
-        let (vk_bytes, sig, msg) = tup;
-        // Compute k now to avoid dependency on the msg lifetime.
+impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKey, Signature, &'msg M)> for Item {
+    fn from(tup: (VerificationKey, Signature, &'msg M)) -> Self {
+        let (vk, sig, msg) = tup;
         let k = Scalar::from_hash(
             Sha512::default()
                 .chain(&sig.R_bytes[..])
-                .chain(&vk_bytes.0[..])
+                .chain(vk.as_bytes())
                 .chain(msg),
         );
-        Self { vk_bytes, sig, k }
+        Self { vk, sig, k }
     }
 }
 
@@ -86,7 +85,7 @@ impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKeyBytes, Signature, &'msg
 #[derive(Default)]
 pub struct Verifier {
     /// Signature data queued for verification.
-    signatures: Map<VerificationKeyBytes, Vec<(Scalar, Signature)>>,
+    signatures: Map<VerificationKey, Vec<(Scalar, Signature)>>,
     /// Caching this count avoids a map traversal to figure out
     /// how much to preallocate.
     batch_size: usize,
@@ -98,12 +97,12 @@ impl Verifier {
         Self::default()
     }
 
-    /// Queue a (key, signature, message) tuple for verification.
+    /// Queue a `(key, signature, message)` tuple for verification.
     pub fn queue<I: Into<Item>>(&mut self, item: I) {
-        let Item { vk_bytes, sig, k } = item.into();
+        let Item { vk, sig, k } = item.into();
 
         self.signatures
-            .entry(vk_bytes)
+            .entry(vk)
             // The common case is 1 signature per public key.
             // We could also consider using a smallvec here.
             .or_insert_with(|| Vec::with_capacity(1))
@@ -141,10 +140,11 @@ impl Verifier {
         //
         // For n signatures from m verification keys, this approach instead
         // requires a multiscalar multiplication of size n + m + 1 together with
-        // n + m point decompressions. When m = n, so all signatures are from
-        // distinct verification keys, this is as efficient as the usual method.
-        // However, when m = 1 and all signatures are from a single verification
-        // key, this is nearly twice as fast.
+        // only n point decompressions because verification keys are decompressed
+        // before they are queued. When m = n, so all signatures are from
+        // distinct verification keys, this saves n decompressions relative to
+        // the usual method. However, when m = 1 and all signatures are from a
+        // single verification key, this is nearly twice as fast.
 
         let m = self.signatures.len();
 
@@ -154,11 +154,8 @@ impl Verifier {
         let mut Rs = Vec::with_capacity(self.batch_size);
         let mut B_coeff = Scalar::ZERO;
 
-        for (vk_bytes, sigs) in self.signatures.iter() {
-            let A = CompressedEdwardsY(vk_bytes.0)
-                .decompress()
-                .ok_or(Error::InvalidSignature)?;
-
+        for (vk, sigs) in self.signatures.iter() {
+            let A = -vk.minus_A;
             let mut A_coeff = Scalar::ZERO;
 
             for (k, sig) in sigs.iter() {
