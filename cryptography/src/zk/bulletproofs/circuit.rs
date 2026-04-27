@@ -39,11 +39,10 @@
 //! [`Proof`] with [`prove`].
 //!
 //! The proof is bound to the current [`Transcript`] state. The verifier must
-//! replay the same transcript history before calling [`verify`] or
-//! [`batch_verify`].
+//! replay the same transcript history before calling [`verify`].
 //!
-//! Use [`verify`] if you need the returned [`Synthetic`] verification equation
-//! for a single proof, or [`batch_verify`] to check many proofs at once.
+//! Use [`verify`] to construct the returned [`Synthetic`] verification equation
+//! and [`Setup::eval`] to evaluate it against the concrete setup.
 //!
 //! ## Example
 //!
@@ -704,7 +703,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     //
     // (Rather than the verifier calculating this, the prover can provide it, and the verifier
     // can check this equation. This turns it into an MSM check, which can be more efficiently
-    // batched with other such checks).
+    // combined with other such checks).
     //
     // Finally, we run the IPA protocol, using t(x) as the claimed inner product,
     // and P as the commitment to the vectors, and G_i, H'_i as the generators
@@ -1095,88 +1094,6 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     Some(final_check)
 }
 
-/// Like [`verify`], but efficiently checking multiple proofs at once.
-///
-/// On success this returns `Ok(())`. Otherwise it returns the indices of the
-/// proofs that were rejected.
-pub fn batch_verify<
-    'p,
-    F: Field + Random + Encode + 'p,
-    G: CryptoGroup<Scalar = F> + Encode + 'p,
->(
-    rng: &mut impl CryptoRngCore,
-    setup: &Setup<G>,
-    work: impl IntoIterator<Item = (Transcript, &'p Circuit<F>, &'p Claim<G>, Proof<F, G>)>,
-    strategy: &impl Strategy,
-) -> Result<(), Vec<usize>> {
-    // Build the virtual setup and flat generators for evaluation.
-    let n = setup.ipa.g().len();
-    let mut vgens = Synthetic::<F, G>::generators();
-    let vg: Vec<_> = (0..n)
-        .map(|_| vgens.next().expect("generators is infinite"))
-        .collect();
-    let vh: Vec<_> = (0..n)
-        .map(|_| vgens.next().expect("generators is infinite"))
-        .collect();
-    let vq = vgens.next().expect("generators is infinite");
-    let ipa_vs = ipa::Setup::new(vq, vg.into_iter().zip(vh));
-    let pv = vgens.next().expect("generators is infinite");
-    let pb = vgens.next().expect("generators is infinite");
-    let vs = Setup::new(ipa_vs, pv, pb);
-    let mut flat = Vec::with_capacity(2 * n + 3);
-    flat.extend_from_slice(setup.ipa.g());
-    flat.extend_from_slice(setup.ipa.h());
-    flat.push(setup.ipa.product_generator().clone());
-    flat.push(setup.pedersen_value.clone());
-    flat.push(setup.pedersen_blinding.clone());
-
-    let mut invalid = Vec::new();
-    let (indices, checks) = work
-        .into_iter()
-        .map(|(mut transcript, circuit, claim, proof)| {
-            let log_len: u8 = circuit
-                .internal_vars
-                .next_power_of_two()
-                .ilog2()
-                .try_into()
-                .ok()?;
-            if !vs.supports(log_len) {
-                return None;
-            }
-            verify(rng, &mut transcript, &vs, circuit, claim, proof, strategy)
-        })
-        .enumerate()
-        .filter_map(|(i, x)| {
-            if x.is_none() {
-                invalid.push(i);
-            }
-            x.map(|check_i| (i, check_i))
-        })
-        .collect::<(Vec<_>, Vec<_>)>();
-    if checks.is_empty() {
-        return if invalid.is_empty() {
-            Ok(())
-        } else {
-            Err(invalid)
-        };
-    }
-    let weights: Vec<F> = checks.iter().map(|_| F::random(&mut *rng)).collect();
-    let global_check = Synthetic::msm(&checks, &weights, strategy);
-    let all_ok = global_check.eval(&flat, strategy) == G::zero();
-    if !all_ok {
-        for (i, check_i) in indices.into_iter().zip(checks) {
-            if check_i.eval(&flat, strategy) != G::zero() {
-                invalid.push(i);
-            }
-        }
-    }
-    if invalid.is_empty() {
-        Ok(())
-    } else {
-        Err(invalid)
-    }
-}
-
 #[commonware_macros::stability(ALPHA)]
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
@@ -1191,7 +1108,6 @@ pub mod fuzz {
     use std::sync::OnceLock;
 
     const NUM_GENERATORS: usize = 5;
-    const MAX_BATCH_CASES: usize = 4;
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
 
     pub(super) fn test_setup() -> &'static Setup<G> {
@@ -1237,12 +1153,12 @@ pub mod fuzz {
         Circuit::new(2, weights).expect("quadratic circuit layout should be valid")
     }
 
-    struct BatchCase {
+    struct Case {
         circuit: Circuit<F>,
         witness: Witness<F>,
     }
 
-    impl BatchCase {
+    impl Case {
         fn prove(&self, setup: &Setup<G>) -> (Claim<G>, Proof<F, G>) {
             let mut rng = test_rng();
             let mut transcript = Transcript::new(NAMESPACE);
@@ -1256,7 +1172,7 @@ pub mod fuzz {
                 &self.witness,
                 &Sequential,
             )
-            .expect("generated batch case should always create a proof");
+            .expect("generated case should always create a proof");
             (claim, proof)
         }
 
@@ -1268,10 +1184,10 @@ pub mod fuzz {
             )
         }
 
-        fn arbitrary(i: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
             let a = u.arbitrary::<F>()?;
             let b = u.arbitrary::<F>()?;
-            let c = F::from(u64::try_from(i + 1).expect("batch case index should fit in u64"));
+            let c = u.arbitrary::<F>()?;
             let x = u.arbitrary::<F>()?;
             let valid = u.arbitrary::<bool>()?;
             let mut y = quadratic_value(a, b, c, x);
@@ -1297,91 +1213,52 @@ pub mod fuzz {
             assert_eq!(
                 out.is_satisfied(),
                 valid,
-                "quadratic batch case should match requested validity",
+                "quadratic case should match requested validity",
             );
             Ok(out)
         }
     }
 
     pub struct Plan {
-        cases: Vec<BatchCase>,
+        case: Case,
     }
 
     impl<'a> Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            let num_proofs = u.int_in_range(0..=MAX_BATCH_CASES)?;
-            let cases = (0..num_proofs)
-                .map(|i| BatchCase::arbitrary(i, u))
-                .collect::<arbitrary::Result<Vec<_>>>()?;
-            Ok(Self { cases })
+            Ok(Self {
+                case: Case::arbitrary(u)?,
+            })
         }
     }
 
-    fn assert_batch_verify_matches_individual(cases: &[BatchCase]) {
+    fn assert_verify_matches_satisfaction(case: &Case) {
         let mut rng = test_rng();
         let setup = test_setup();
-        let proved_cases = cases
-            .iter()
-            .map(|case| {
-                let (claim, proof) = case.prove(setup);
-                let satisfied = case.is_satisfied();
-                (claim, proof, satisfied)
-            })
-            .collect::<Vec<_>>();
-        let expected_invalid = cases
-            .iter()
-            .zip(&proved_cases)
-            .enumerate()
-            .filter_map(|(i, (case, (claim, proof, satisfied)))| {
-                let mut transcript = Transcript::new(NAMESPACE);
-                let verified = setup
-                    .eval(
-                        |vs| {
-                            verify(
-                                &mut rng,
-                                &mut transcript,
-                                vs,
-                                &case.circuit,
-                                claim,
-                                proof.clone(),
-                                &Sequential,
-                            )
-                        },
+        let (claim, proof) = case.prove(setup);
+        let mut transcript = Transcript::new(NAMESPACE);
+        let verified = setup
+            .eval(
+                |vs| {
+                    verify(
+                        &mut rng,
+                        &mut transcript,
+                        vs,
+                        &case.circuit,
+                        &claim,
+                        proof,
                         &Sequential,
                     )
-                    .map(|g| g == G::zero())
-                    .unwrap_or(false);
-                assert_eq!(verified, *satisfied);
-                (!verified).then_some(i)
-            })
-            .collect::<Vec<_>>();
-
-        let mut batch_rng = test_rng();
-        let actual_invalid = batch_verify(
-            &mut batch_rng,
-            setup,
-            cases
-                .iter()
-                .zip(&proved_cases)
-                .map(|(case, (claim, proof, _))| {
-                    (
-                        Transcript::new(NAMESPACE),
-                        &case.circuit,
-                        claim,
-                        proof.clone(),
-                    )
-                }),
-            &Sequential,
-        )
-        .err()
-        .unwrap_or_default();
-
-        assert_eq!(actual_invalid, expected_invalid);
+                },
+                &Sequential,
+            )
+            .map(|g| g == G::zero())
+            .unwrap_or(false);
+        assert_eq!(verified, case.is_satisfied());
     }
 
     impl Plan {
         pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-            assert_batch_verify_matches_individual(&self.cases);
+            assert_verify_matches_satisfaction(&self.case);
             Ok(())
         }
     }
