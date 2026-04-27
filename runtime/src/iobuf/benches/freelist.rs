@@ -35,6 +35,7 @@ const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
+
 #[derive(Debug)]
 struct Entry {
     slot: u32,
