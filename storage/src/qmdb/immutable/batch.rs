@@ -93,6 +93,11 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
     pub(super) ancestor_diff_ends: Vec<u64>,
 
+    /// Each ancestor's `new_inactivity_floor_loc`, stored in parallel with
+    /// `ancestor_diff_ends` (same order, newest-first: parent, grandparent, ...).
+    /// Used by `apply_batch` to enforce per-commit floor monotonicity across the chain.
+    pub(super) ancestor_new_inactivity_floor_locs: Vec<Location<F>>,
+
     /// The inactivity floor declared by this batch's commit operation.
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
@@ -276,12 +281,15 @@ where
 
         let mut ancestor_diffs = Vec::new();
         let mut ancestor_diff_ends = Vec::new();
+        let mut ancestor_new_inactivity_floor_locs = Vec::new();
         if let Some(parent) = &self.parent {
             ancestor_diffs.push(Arc::clone(&parent.diff));
             ancestor_diff_ends.push(parent.total_size);
+            ancestor_new_inactivity_floor_locs.push(parent.new_inactivity_floor_loc);
             for batch in parent.ancestors() {
                 ancestor_diffs.push(Arc::clone(&batch.diff));
                 ancestor_diff_ends.push(batch.total_size);
+                ancestor_new_inactivity_floor_locs.push(batch.new_inactivity_floor_loc);
             }
         }
 
@@ -294,6 +302,7 @@ where
             db_size: self.db_size,
             ancestor_diffs,
             ancestor_diff_ends,
+            ancestor_new_inactivity_floor_locs,
             new_inactivity_floor_loc: inactivity_floor,
         })
     }
@@ -444,6 +453,7 @@ where
             db_size: journal_size,
             ancestor_diffs: Vec::new(),
             ancestor_diff_ends: Vec::new(),
+            ancestor_new_inactivity_floor_locs: Vec::new(),
             new_inactivity_floor_loc: self.inactivity_floor_loc,
         })
     }

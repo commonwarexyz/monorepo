@@ -745,6 +745,26 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_variable_ancestor_floor_regression_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_ancestor_floor_regression_rejected(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_variable_ancestor_floor_beyond_commit_loc_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_ancestor_floor_beyond_commit_loc_rejected(
+                ctx,
+                open::<mmr::Family>,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_variable_rewind_restores_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
@@ -781,6 +801,26 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_floor_beyond_size(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_variable_ancestor_floor_regression_rejected_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_ancestor_floor_regression_rejected(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_variable_ancestor_floor_beyond_commit_loc_rejected_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_ancestor_floor_beyond_commit_loc_rejected(
+                ctx,
+                open::<mmb::Family>,
+            )
+            .await;
         });
     }
 

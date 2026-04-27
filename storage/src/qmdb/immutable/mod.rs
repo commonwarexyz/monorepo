@@ -571,12 +571,15 @@ where
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
-    /// - [`Error::FloorRegressed`] if the batch's inactivity floor is below the
-    ///   database's current floor.
-    /// - [`Error::FloorBeyondSize`] if the batch's inactivity floor exceeds its
-    ///   commit operation's location. The maximum valid floor is
-    ///   `total_size - 1` (the commit operation's location); a floor past the
-    ///   commit would permit pruning the commit itself.
+    /// - [`Error::FloorRegressed`] if any unapplied commit's inactivity floor (an ancestor's
+    ///   or the tip's) drops below the previously validated floor.
+    /// - [`Error::FloorBeyondSize`] if any unapplied commit's inactivity floor exceeds its
+    ///   own commit operation's location. The maximum valid floor for a given commit is
+    ///   that commit's own location; a floor past the commit would permit pruning the
+    ///   commit itself.
+    ///
+    /// Floor validation walks every unapplied commit in the chain (ancestors first, then
+    /// the tip) before any journal mutation, so the database is untouched on floor errors.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably commit it. Call [`Immutable::commit`] or
@@ -596,10 +599,33 @@ where
                 batch_base_size: batch.base_size,
             });
         }
-        if batch.new_inactivity_floor_loc < self.inactivity_floor_loc {
+        // Validate every unapplied commit's floor (each ancestor in the chain, then the tip)
+        // before mutating the journal. The invariant is per-commit:
+        //   - floors are monotonically non-decreasing across the chain, and
+        //   - each floor is at most its own commit location (= total_size - 1 at that point).
+        // Ancestors are stored newest-first, so walk in reverse to get oldest-first.
+        let mut prev_floor = self.inactivity_floor_loc;
+        for i in (0..batch.ancestor_diff_ends.len()).rev() {
+            let ancestor_end = batch.ancestor_diff_ends[i];
+            if ancestor_end <= db_size {
+                // Already on disk — its floor was validated when it was first applied.
+                continue;
+            }
+            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
+            let ancestor_commit_loc = Location::new(ancestor_end - 1);
+            if ancestor_floor < prev_floor {
+                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
+            }
+            if ancestor_floor > ancestor_commit_loc {
+                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
+            }
+            prev_floor = ancestor_floor;
+        }
+        // Tip checks chain off the last validated ancestor floor.
+        if batch.new_inactivity_floor_loc < prev_floor {
             return Err(Error::FloorRegressed(
                 batch.new_inactivity_floor_loc,
-                self.inactivity_floor_loc,
+                prev_floor,
             ));
         }
         let tip_commit_loc = Location::new(batch.total_size - 1);
@@ -2557,6 +2583,104 @@ pub(super) mod test {
         )
         .await
         .unwrap();
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A chained batch that applies a tip with a floor *lower than* its parent's floor must
+    /// be rejected — the parent's `Commit` is written to the journal by the same
+    /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
+    /// invariant.
+    pub(crate) async fn test_immutable_ancestor_floor_regression_rejected<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("test")).await;
+
+        // parent: 1 set + commit at loc 2 with floor=2 (the parent's commit_loc).
+        let k1 = Sha256::fill(1u8);
+        let v1 = Sha256::fill(2u8);
+        let parent = db
+            .new_batch()
+            .set(k1, v1)
+            .merkleize(&db, None, Location::new(2));
+        // child: 1 set + commit at loc 4 with floor=1 (regressed from parent's floor=2).
+        let k2 = Sha256::fill(3u8);
+        let v2 = Sha256::fill(4u8);
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(k2, v2)
+            .merkleize(&db, None, Location::new(1));
+
+        let root_before = db.root();
+        let last_commit_before = db.last_commit_loc;
+        let floor_before = db.inactivity_floor_loc();
+
+        let err = db.apply_batch(child).await.unwrap_err();
+        assert!(
+            matches!(err, Error::FloorRegressed(new, prev) if new == Location::new(1) && prev == Location::new(2)),
+            "unexpected error: {err:?}"
+        );
+
+        // DB state untouched by the rejected chain.
+        assert_eq!(db.root(), root_before);
+        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.inactivity_floor_loc(), floor_before);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
+    /// rejected — identifying the ancestor's bound, not the tip's.
+    pub(crate) async fn test_immutable_ancestor_floor_beyond_commit_loc_rejected<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("test")).await;
+
+        // parent: 1 set + commit at loc 2. Declare floor = 3 (one past the commit).
+        let k1 = Sha256::fill(1u8);
+        let v1 = Sha256::fill(2u8);
+        let parent = db
+            .new_batch()
+            .set(k1, v1)
+            .merkleize(&db, None, Location::new(3));
+        // child: valid on its own (floor = 3 <= child's commit_loc = 4), but parent's floor
+        // is bad. The PoC: parent floor=3 vs commit_loc=2; child floor=3 vs commit_loc=4.
+        let k2 = Sha256::fill(3u8);
+        let v2 = Sha256::fill(4u8);
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(k2, v2)
+            .merkleize(&db, None, Location::new(3));
+
+        let root_before = db.root();
+        let last_commit_before = db.last_commit_loc;
+        let floor_before = db.inactivity_floor_loc();
+
+        let err = db.apply_batch(child).await.unwrap_err();
+        // Error must identify the ancestor's commit_loc (2), not the tip's.
+        assert!(
+            matches!(err, Error::FloorBeyondSize(floor, commit) if floor == Location::new(3) && commit == Location::new(2)),
+            "unexpected error: {err:?}"
+        );
+
+        // DB state untouched by the rejected chain.
+        assert_eq!(db.root(), root_before);
+        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
     }
