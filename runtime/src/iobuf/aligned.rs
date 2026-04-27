@@ -732,7 +732,7 @@ mod tests {
             max_size: NZUsize!(max_size),
             max_per_class: NZU32!(max_per_class),
             parallelism: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
+            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
             prefill: false,
             alignment: NZUsize!(page_size()),
         }
