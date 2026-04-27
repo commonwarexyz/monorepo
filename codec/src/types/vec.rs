@@ -71,7 +71,10 @@ impl<T: Read> Read for Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeRangeExt, Encode};
+    use crate::{
+        types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
+        DecodeRangeExt, Encode,
+    };
 
     #[test]
     fn test_vec() {
@@ -97,6 +100,27 @@ mod tests {
                 Err(Error::InvalidLength(_))
             ));
         }
+
+        // The length prefix advertises two payload bytes, but only one byte follows.
+        assert!(matches!(
+            Vec::<u8>::decode_range([0x02, 0x01].as_slice(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            Vec::<Byte>::decode_range([0x02, 0x01].as_slice(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+
+        // The length prefix advertises two payload bytes, and one extra byte remains after
+        // those two payload bytes are consumed.
+        assert!(matches!(
+            Vec::<u8>::decode_range([0x02, 0x01, 0x02, 0x03].as_slice(), ..),
+            Err(Error::ExtraData(1))
+        ));
+        assert!(matches!(
+            Vec::<Byte>::decode_range([0x02, 0x01, 0x02, 0x03].as_slice(), ..),
+            Err(Error::ExtraData(1))
+        ));
     }
 
     #[test]
@@ -124,6 +148,61 @@ mod tests {
                 Err(Error::InvalidLength(_))
             ));
         }
+    }
+
+    #[test]
+    fn test_specialization_selection() {
+        // `Vec<u8>` writes the length prefix, then the payload in one bulk write.
+        let mut buf = TrackingWriteBuf::new();
+        vec![1u8, 2, 3].write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 1);
+
+        // Other one-byte element types keep the generic per-element path.
+        let mut buf = TrackingWriteBuf::new();
+        vec![Byte(1), Byte(2), Byte(3)].write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 4);
+
+        // Slices use the same bulk payload path as vectors.
+        let values = [1u8, 2, 3];
+        let mut buf = TrackingWriteBuf::new();
+        values.as_slice().write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 1);
+
+        // Non-`u8` slices keep the generic per-element path.
+        let values = [Byte(1), Byte(2), Byte(3)];
+        let mut buf = TrackingWriteBuf::new();
+        values.as_slice().write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 4);
+
+        // `write_bufs` mirrors `write` for byte vectors.
+        let mut buf = TrackingWriteBuf::new();
+        vec![1u8, 2, 3].write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 1);
+
+        // The `write_bufs` fallback remains element-by-element.
+        let mut buf = TrackingWriteBuf::new();
+        vec![Byte(1), Byte(2), Byte(3)].write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 4);
+
+        // `Vec<u8>` reads the length prefix, then bulk-copies the payload.
+        let mut buf = TrackingReadBuf::new(&[0x03, 0x01, 0x02, 0x03]);
+        let value = Vec::<u8>::read_cfg(&mut buf, &((..).into(), ())).unwrap();
+        assert_eq!(value, vec![1, 2, 3]);
+        assert_eq!(buf.copy_to_slice_calls, 1);
+        assert_eq!(buf.get_u8_calls, 1);
+
+        // Other element types still read one element at a time.
+        let mut buf = TrackingReadBuf::new(&[0x03, 0x01, 0x02, 0x03]);
+        let value = Vec::<Byte>::read_cfg(&mut buf, &((..).into(), ())).unwrap();
+        assert_eq!(value, vec![Byte(1), Byte(2), Byte(3)]);
+        assert_eq!(buf.copy_to_slice_calls, 0);
+        assert_eq!(buf.get_u8_calls, 4);
     }
 
     #[test]
