@@ -16,7 +16,10 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics as _};
+use commonware_runtime::{
+    telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
+    Metrics as _,
+};
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -29,7 +32,6 @@ use futures::{
     StreamExt,
 };
 use mpsc::error::TryRecvError;
-use prometheus_client::metrics::gauge::Gauge;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fmt::Debug,
@@ -73,19 +75,9 @@ struct ProgressMetrics {
 impl ProgressMetrics {
     /// Register sync progress metrics on the provided context.
     fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size = Gauge::default();
-        context.register(
-            "journal_size",
-            "Current journal size (operations applied)",
-            journal_size.clone(),
-        );
-
-        let target_end = Gauge::default();
-        context.register(
-            "target_end",
-            "Target range end (operations needed)",
-            target_end.clone(),
-        );
+        let journal_size =
+            context.gauge("journal_size", "Current journal size (operations applied)");
+        let target_end = context.gauge("target_end", "Target range end (operations needed)");
 
         Self {
             journal_size,
@@ -526,7 +518,7 @@ where
     }
 
     /// Record a progress snapshot in metrics.
-    async fn record_progress(&mut self) {
+    async fn record_progress(&self) {
         self.progress_metrics
             .record(self.journal.size().await, *self.target.range.end());
     }
