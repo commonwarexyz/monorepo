@@ -81,6 +81,29 @@ where
 
     /// Streams all active (key, value) pairs in the database in key order, starting from the first
     /// active key greater than or equal to `start`.
+    ///
+    /// This currently does not compose cleanly with `Send`-required futures because the returned
+    /// stream borrows `&self`.
+    ///
+    /// ```compile_fail
+    /// use commonware_cryptography::{sha256::Digest, Sha256};
+    /// use commonware_runtime::deterministic;
+    /// use commonware_storage::{mmr, qmdb::current::ordered::variable::Db, translator::OneCap};
+    /// use futures::StreamExt;
+    ///
+    /// type CurrentTest =
+    ///     Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
+    ///
+    /// fn require_send_future<F: core::future::Future + Send>(_: F) {}
+    ///
+    /// fn check(db: &CurrentTest, start: Digest) {
+    ///     require_send_future(async move {
+    ///         let stream = db.stream_range(start).await.unwrap();
+    ///         futures::pin_mut!(stream);
+    ///         let _ = stream.next().await;
+    ///     });
+    /// }
+    /// ```
     pub async fn stream_range<'a>(
         &'a self,
         start: K,

@@ -119,6 +119,74 @@ mod test {
     type CurrentTest =
         super::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
+    #[allow(dead_code)]
+    type CurrentTokio = super::Db<
+        mmr::Family,
+        commonware_runtime::tokio::Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        32,
+    >;
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _check_current_ordered_send_sync() {
+        _assert_send::<CurrentTest>();
+        _assert_sync::<CurrentTest>();
+        _assert_send::<CurrentTokio>();
+        _assert_sync::<CurrentTokio>();
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+    fn require_send_future<F: core::future::Future + Send>(_: F) {}
+
+    #[allow(dead_code)]
+    fn _check_current_ordered_ref_send_and_futures(db: &CurrentTokio, key: &Digest) {
+        assert_send(db);
+        assert_send(db.get(key));
+        assert_send(db.get_metadata());
+        assert_send(db.bounds());
+        assert_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    async fn _current_ordered_pipeline_3_reads(
+        db: &CurrentTokio,
+        k1: &Digest,
+        k2: &Digest,
+        k3: &Digest,
+    ) {
+        let _ = db.get(k1).await;
+        let _ = db.get(k2).await;
+        let _ = db.get(k3).await;
+    }
+
+    #[allow(dead_code)]
+    async fn _current_ordered_pipeline_merkleize(db: &CurrentTokio, key: Digest, value: Digest) {
+        let batch = db.new_batch().write(key, Some(value));
+        let _ = batch.merkleize(db, None).await;
+    }
+
+    #[allow(dead_code)]
+    fn _check_current_ordered_pipeline_send(
+        db: &CurrentTokio,
+        k1: &Digest,
+        k2: &Digest,
+        k3: &Digest,
+    ) {
+        assert_send(_current_ordered_pipeline_3_reads(db, k1, k2, k3));
+        require_send_future(async move {
+            let _ = db.get(k1).await;
+            let _ = db.get(k2).await;
+        });
+        require_send_future(_current_ordered_pipeline_merkleize(
+            db,
+            k1.clone(),
+            k2.clone(),
+        ));
+    }
+
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = variable_config::<OneCap>(&partition_prefix, &context);
