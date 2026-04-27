@@ -124,23 +124,25 @@ mod tests {
     }
 
     #[test]
-    fn test_can_finalize_logic() {
-        use crate::{Configuration, N4F1C3, N4F3C1};
+    fn test_is_valid_logic() {
+        use crate::{Configuration, N4F0C4, N4F1C3, N4F3C1};
 
-        // N4F1C3: 4 nodes, 1 faulty - can finalize (1 <= 1)
-        assert!(N4F1C3.can_finalize());
+        // N4F0C4: 4 nodes, 0 faulty, protocol invariants must hold
+        assert!(N4F0C4.is_valid());
 
-        // N4F3C1: 4 nodes, 3 faulty - cannot finalize (3 > 1)
-        assert!(!N4F3C1.can_finalize());
+        // N4F1C3: 4 nodes, 1 faulty, protocol invariants must hold
+        assert!(N4F1C3.is_valid());
 
-        // Edge cases
-        let zero_faults = Configuration::new(4, 0, 4);
-        assert!(zero_faults.can_finalize()); // 0 <= 1
+        // N4F3C1: 4 nodes, 3 faulty, protocol invariants can be violated
+        assert!(!N4F3C1.is_valid());
+        // Boundary: f == max_faults(n) is allowed
+        assert!(Configuration::new(4, 1, 3).is_valid());
 
-        let exact_max = Configuration::new(4, 1, 3);
-        assert!(exact_max.can_finalize()); // 1 <= 1
+        // Boundary: f == max_faults(n) + 1 is rejected
+        assert!(!Configuration::new(4, 2, 2).is_valid());
 
-        let over_max = Configuration::new(4, 2, 2);
-        assert!(!over_max.can_finalize()); // 2 > 1
+        // n != faults + correct must be rejected
+        assert!(!Configuration::new(4, 1, 2).is_valid());
+        assert!(!Configuration::new(4, 1, 4).is_valid());
     }
 }
