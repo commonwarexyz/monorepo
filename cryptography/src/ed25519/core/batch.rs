@@ -32,23 +32,9 @@
 //! but could be useful in proof-of-stake systems where signatures come from a
 //! set of validators (provided that system uses the ZIP215 rules).
 //!
-//! # Example
-//! ```
-//! # use commonware_cryptography::ed25519::core::*;
-//! let mut batch = batch::Verifier::new();
-//! for _ in 0..32 {
-//!     let sk = SigningKey::new(rand::thread_rng());
-//!     let vk_bytes = VerificationKeyBytes::from(&sk);
-//!     let msg = b"BatchVerifyTest";
-//!     let sig = sk.sign(&msg[..]);
-//!     batch.queue((vk_bytes, sig, &msg[..]));
-//! }
-//! assert!(batch.verify(rand::thread_rng()).is_ok());
-//! ```
-//!
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
-use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
+use super::{Error, Signature, VerificationKeyBytes};
 use curve25519_dalek::{
     edwards::{CompressedEdwardsY, EdwardsPoint},
     scalar::Scalar,
@@ -56,7 +42,7 @@ use curve25519_dalek::{
 };
 use rand_core::{CryptoRng, RngCore};
 use sha2::{digest::Update, Sha512};
-use std::{collections::HashMap, convert::TryFrom};
+use std::collections::HashMap;
 
 // Shim to generate a u128 without importing `rand`.
 fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
@@ -88,20 +74,6 @@ impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKeyBytes, Signature, &'msg
                 .chain(msg),
         );
         Self { vk_bytes, sig, k }
-    }
-}
-
-impl Item {
-    /// Perform non-batched verification of this `Item`.
-    ///
-    /// This is useful (in combination with `Item::clone`) for implementing fallback
-    /// logic when batch verification fails. In contrast to
-    /// [`VerificationKey::verify`](super::VerificationKey::verify), which requires
-    /// borrowing the message data, the `Item` type is unlinked from the lifetime of
-    /// the message.
-    pub fn verify_single(self) -> Result<(), Error> {
-        VerificationKey::try_from(self.vk_bytes)
-            .and_then(|vk| vk.verify_prehashed(&self.sig, self.k))
     }
 }
 
