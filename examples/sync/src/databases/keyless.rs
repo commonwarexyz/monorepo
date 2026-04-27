@@ -59,9 +59,8 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
 /// Create deterministic test operations for demonstration purposes.
 ///
 /// Generates Append operations and periodic Commit operations. Every commit in the stream
-/// carries `starting_loc` as its inactivity floor; the caller is responsible for picking a
-/// `starting_loc` that is monotonically valid against the live db (see
-/// [`super::ExampleDatabase::current_floor`]).
+/// carries `starting_loc` as its inactivity floor. Pass `0` for a fresh db; for growth, pass
+/// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
 pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();

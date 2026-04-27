@@ -217,7 +217,11 @@ pub trait CompactSyncable: ExampleDatabase {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseType, SyncMode};
+    use super::{
+        immutable, immutable_compact, keyless, keyless_compact, DatabaseType, ExampleDatabase,
+        SyncMode,
+    };
+    use commonware_runtime::{deterministic, Metrics as _, Runner as _};
 
     #[test]
     fn test_supported_client_mode_matrix() {
@@ -240,5 +244,77 @@ mod tests {
         assert!(!DatabaseType::Current.supports_compact_storage());
         assert!(DatabaseType::Immutable.supports_compact_storage());
         assert!(DatabaseType::Keyless.supports_compact_storage());
+    }
+
+    #[test]
+    fn test_immutable_full_compact_root_floor_equivalence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut full = immutable::Database::init(
+                context.with_label("full"),
+                immutable::create_config(&context),
+            )
+            .await
+            .unwrap();
+            let mut compact = immutable_compact::Database::init(
+                context.with_label("compact"),
+                immutable_compact::create_config(&context),
+            )
+            .await
+            .unwrap();
+
+            for (count, seed) in [(12usize, 42u64), (15, 99)] {
+                let starting_loc = full.current_floor();
+                assert_eq!(starting_loc, compact.current_floor());
+
+                let ops = immutable::create_test_operations(count, seed, starting_loc);
+
+                full.add_operations(ops.clone()).await.unwrap();
+                compact.add_operations(ops).await.unwrap();
+
+                assert_eq!(full.root(), compact.root());
+                assert_eq!(full.current_floor(), compact.current_floor());
+                assert_eq!(compact.current_target().root, full.root());
+            }
+
+            full.destroy().await.unwrap();
+            compact.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_keyless_full_compact_root_floor_equivalence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut full = keyless::Database::init(
+                context.with_label("full"),
+                keyless::create_config(&context),
+            )
+            .await
+            .unwrap();
+            let mut compact = keyless_compact::Database::init(
+                context.with_label("compact"),
+                keyless_compact::create_config(&context),
+            )
+            .await
+            .unwrap();
+
+            for (count, seed) in [(12usize, 42u64), (15, 99)] {
+                let starting_loc = full.current_floor();
+                assert_eq!(starting_loc, compact.current_floor());
+
+                let ops = keyless::create_test_operations(count, seed, starting_loc);
+
+                full.add_operations(ops.clone()).await.unwrap();
+                compact.add_operations(ops).await.unwrap();
+
+                assert_eq!(full.root(), compact.root());
+                assert_eq!(full.current_floor(), compact.current_floor());
+                assert_eq!(compact.current_target().root, full.root());
+            }
+
+            full.destroy().await.unwrap();
+            compact.destroy().await.unwrap();
+        });
     }
 }

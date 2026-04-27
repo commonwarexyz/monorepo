@@ -40,7 +40,6 @@ where
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation> {
-        // Keep the compact example's operation stream aligned with the full variant.
         super::keyless::create_test_operations(count, seed, starting_loc)
     }
 
