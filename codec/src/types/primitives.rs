@@ -22,8 +22,12 @@ use crate::{
     util::at_least, varint::UInt, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt,
     Write,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 // Numeric types implementation
 macro_rules! impl_numeric {
@@ -50,7 +54,6 @@ macro_rules! impl_numeric {
     };
 }
 
-impl_numeric!(u8, get_u8, put_u8);
 impl_numeric!(u16, get_u16, put_u16);
 impl_numeric!(u32, get_u32, put_u32);
 impl_numeric!(u64, get_u64, put_u64);
@@ -62,6 +65,53 @@ impl_numeric!(i64, get_i64, put_i64);
 impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
+
+impl Write for u8 {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_u8(*self);
+    }
+
+    #[inline]
+    fn write_slice(values: &[Self], buf: &mut impl BufMut) {
+        buf.put_slice(values);
+    }
+
+    #[inline]
+    fn write_slice_bufs(values: &[Self], buf: &mut impl BufsMut) {
+        buf.put_slice(values);
+    }
+}
+
+impl Read for u8 {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        at_least(buf, 1)?;
+        Ok(buf.get_u8())
+    }
+
+    #[inline]
+    fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
+        at_least(buf, len)?;
+        let mut values = vec![0; len];
+        buf.copy_to_slice(&mut values);
+        Ok(values)
+    }
+
+    #[inline]
+    fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
+        at_least(buf, N)?;
+        let mut values = [0; N];
+        buf.copy_to_slice(&mut values);
+        Ok(values)
+    }
+}
+
+impl FixedSize for u8 {
+    const SIZE: usize = 1;
+}
 
 macro_rules! impl_nonzero {
     ($nz:ty, $inner:ty, $name:expr) => {
@@ -147,27 +197,29 @@ impl FixedSize for bool {
     const SIZE: usize = 1;
 }
 
-// Constant-size array implementation
-impl<const N: usize> Write for [u8; N] {
+// Arrays can always be written and read when their element can. This gives arrays
+// with variable-size elements `Write`, `Read`, and therefore `Decode`, but not
+// `Encode`. A generic `EncodeSize for [T; N]` would overlap with the blanket
+// `EncodeSize` implementation for all `FixedSize` types, so only arrays whose
+// elements are fixed-size become `FixedSize` and therefore `Encode`/`Codec`.
+impl<T: Write, const N: usize> Write for [T; N] {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put(&self[..]);
+        T::write_slice(self, buf);
     }
 }
 
-impl<const N: usize> Read for [u8; N] {
-    type Cfg = ();
+impl<T: Read, const N: usize> Read for [T; N] {
+    type Cfg = T::Cfg;
+
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        at_least(buf, N)?;
-        let mut dst = [0; N];
-        buf.copy_to_slice(&mut dst);
-        Ok(dst)
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        T::read_array(buf, cfg)
     }
 }
 
-impl<const N: usize> FixedSize for [u8; N] {
-    const SIZE: usize = N;
+impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
+    const SIZE: usize = T::SIZE * N;
 }
 
 impl Write for () {

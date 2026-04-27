@@ -36,33 +36,25 @@ impl<T: Write> Write for &[T] {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
-        for item in self.iter() {
-            item.write(buf);
-        }
+        T::write_slice(self, buf);
     }
 
     #[inline]
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         self.len().write(buf);
-        for item in self.iter() {
-            item.write_bufs(buf);
-        }
+        T::write_slice_bufs(self, buf);
     }
 }
 
 impl<T: EncodeSize> EncodeSize for &[T] {
     #[inline]
     fn encode_size(&self) -> usize {
-        self.len().encode_size() + self.iter().map(EncodeSize::encode_size).sum::<usize>()
+        self.len().encode_size() + T::encode_size_slice(self)
     }
 
     #[inline]
     fn encode_inline_size(&self) -> usize {
-        self.len().encode_size()
-            + self
-                .iter()
-                .map(EncodeSize::encode_inline_size)
-                .sum::<usize>()
+        self.len().encode_size() + T::encode_inline_size_slice(self)
     }
 }
 
@@ -72,11 +64,7 @@ impl<T: Read> Read for Vec<T> {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
-        let mut vec = Self::with_capacity(len);
-        for _ in 0..len {
-            vec.push(T::read_cfg(buf, cfg)?);
-        }
-        Ok(vec)
+        T::read_vec(buf, len, cfg)
     }
 }
 
