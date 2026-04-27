@@ -815,6 +815,22 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_fixed_chained_ancestor_floor_regression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_chained_ancestor_floor_regression(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_chained_ancestor_floor_beyond_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_chained_ancestor_floor_beyond_size(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_fixed_rewind_restores_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
@@ -851,6 +867,22 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_floor_beyond_size(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_chained_ancestor_floor_regression_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_chained_ancestor_floor_regression(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_chained_ancestor_floor_beyond_size_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_chained_ancestor_floor_beyond_size(ctx, open::<mmb::Family>).await;
         });
     }
 
