@@ -4,10 +4,14 @@ use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_consensus::simplex::{
     scheme::{
-        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, Scheme,
+        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
+        Scheme,
     },
     types::{Certificate, Vote},
 };
+#[cfg(feature = "mocks")]
+use commonware_consensus_fuzz::certificate_mock;
+use commonware_consensus_fuzz::id_mock;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     ed25519::PublicKey,
@@ -20,20 +24,33 @@ type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
 type Bls12381MultisigMinSig = bls12381_multisig::Scheme<PublicKey, MinSig>;
 type ThresholdSchemeMinPk = bls12381_threshold_vrf::Scheme<PublicKey, MinPk>;
 type ThresholdSchemeMinSig = bls12381_threshold_vrf::Scheme<PublicKey, MinSig>;
+type Secp256r1Scheme = secp256r1::Scheme<PublicKey>;
+type IdScheme = id_mock::Scheme;
+#[cfg(feature = "mocks")]
+type CertificateMockScheme = certificate_mock::Scheme<PublicKey, false>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     // Ed25519
     Ed25519Vote(Vec<u8>),
-    Ed25519Certificate { participants: u8, data: Vec<u8> },
+    Ed25519Certificate {
+        participants: u8,
+        data: Vec<u8>,
+    },
 
     // BLS12-381 Multisig MinPk
     MultisigMinPkVote(Vec<u8>),
-    MultisigMinPkCertificate { participants: u8, data: Vec<u8> },
+    MultisigMinPkCertificate {
+        participants: u8,
+        data: Vec<u8>,
+    },
 
     // BLS12-381 Multisig MinSig
     MultisigMinSigVote(Vec<u8>),
-    MultisigMinSigCertificate { participants: u8, data: Vec<u8> },
+    MultisigMinSigCertificate {
+        participants: u8,
+        data: Vec<u8>,
+    },
 
     // BLS12-381 Threshold MinPk
     ThresholdMinPkVote(Vec<u8>),
@@ -42,6 +59,26 @@ enum FuzzInput {
     // BLS12-381 Threshold MinSig
     ThresholdMinSigVote(Vec<u8>),
     ThresholdMinSigCertificate(Vec<u8>),
+
+    // Secp256r1
+    Secp256r1Vote(Vec<u8>),
+    Secp256r1Certificate {
+        participants: u8,
+        data: Vec<u8>,
+    },
+
+    // ID mock
+    IdVote(Vec<u8>),
+    IdCertificate {
+        participants: u8,
+        data: Vec<u8>,
+    },
+
+    // Certificate mock
+    #[cfg(feature = "mocks")]
+    CertificateMockVote(Vec<u8>),
+    #[cfg(feature = "mocks")]
+    CertificateMockCertificate(Vec<u8>),
 }
 
 fn roundtrip_vote<S: Scheme<sha256::Digest>>(data: &[u8]) {
@@ -92,6 +129,23 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::ThresholdMinSigVote(data) => roundtrip_vote::<ThresholdSchemeMinSig>(&data),
         FuzzInput::ThresholdMinSigCertificate(data) => {
             roundtrip_certificate::<ThresholdSchemeMinSig>(&data, &())
+        }
+
+        FuzzInput::Secp256r1Vote(data) => roundtrip_vote::<Secp256r1Scheme>(&data),
+        FuzzInput::Secp256r1Certificate { participants, data } => {
+            roundtrip_certificate::<Secp256r1Scheme>(&data, &participant_cfg(participants))
+        }
+
+        FuzzInput::IdVote(data) => roundtrip_vote::<IdScheme>(&data),
+        FuzzInput::IdCertificate { participants, data } => {
+            roundtrip_certificate::<IdScheme>(&data, &participant_cfg(participants))
+        }
+
+        #[cfg(feature = "mocks")]
+        FuzzInput::CertificateMockVote(data) => roundtrip_vote::<CertificateMockScheme>(&data),
+        #[cfg(feature = "mocks")]
+        FuzzInput::CertificateMockCertificate(data) => {
+            roundtrip_certificate::<CertificateMockScheme>(&data, &())
         }
     }
 }
