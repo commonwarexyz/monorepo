@@ -80,7 +80,7 @@ pub trait ReservationExt<T> {
     /// - `Ok(Some(_))` when the channel was full. Await the reservation and call
     ///   [`Reserved::send`] to deliver the value.
     /// - `Err(_)` when the receiver has been dropped.
-    #[must_use = "handle the result; if it contains a reservation, await it and call Reserved::send"]
+    #[must_use = "await and send any reservation"]
     fn send_or_reserve<'a>(
         &self,
         value: T,
