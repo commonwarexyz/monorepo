@@ -156,6 +156,10 @@ pub(crate) mod tests {
                 push_calls: 0,
             }
         }
+
+        pub fn freeze(self) -> Bytes {
+            self.inner.freeze()
+        }
     }
 
     // SAFETY: `TrackingWriteBuf` delegates storage and cursor management to

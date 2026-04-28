@@ -501,6 +501,27 @@ mod tests {
     }
 
     #[test]
+    fn test_array_write_bufs_equivalence() {
+        fn assert_equivalent<T: Write>(value: &T) {
+            let mut write = BytesMut::new();
+            value.write(&mut write);
+
+            let mut write_bufs = TrackingWriteBuf::new();
+            value.write_bufs(&mut write_bufs);
+
+            assert_eq!(write.freeze(), write_bufs.freeze());
+        }
+
+        assert_equivalent(&[1u8, 2, 3]);
+        assert_equivalent(&[0x0102u16, 0x0304, 0x0506]);
+        assert_equivalent(&[Byte(1), Byte(2), Byte(3)]);
+        assert_equivalent(&[
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ]);
+    }
+
+    #[test]
     fn test_option() {
         let option_values = [Some(42u32), None];
         for value in option_values {
