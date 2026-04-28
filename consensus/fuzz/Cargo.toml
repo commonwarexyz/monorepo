@@ -98,6 +98,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_bls12381_threshold_minpk_twin"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_bls12381_threshold_minsig_twin"
 path = "fuzz_targets/simplex_bls12381_threshold_minsig_twin.rs"
 test = false
@@ -245,6 +252,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_cert_mock_adv"
+path = "fuzz_targets/simplex_cert_mock_adv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id"
 path = "fuzz_targets/simplex_id.rs"
 test = false
@@ -252,8 +266,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_mock_cert"
-path = "fuzz_targets/simplex_mock_cert.rs"
+name = "simplex_cert_mock"
+path = "fuzz_targets/simplex_cert_mock.rs"
 test = false
 doc = false
 bench = false
