@@ -72,7 +72,7 @@ impl<T> Future for Reservation<'_, T> {
 }
 
 /// Extension trait for bounded channel sends that can reserve capacity.
-pub trait ChannelExt<T> {
+pub trait ReservationExt<T> {
     /// Attempts to send immediately, reserving the message when the channel is full.
     ///
     /// Returns:
@@ -89,7 +89,7 @@ pub trait ChannelExt<T> {
         T: 'a;
 }
 
-impl<T: Send> ChannelExt<T> for mpsc::Sender<T> {
+impl<T: Send> ReservationExt<T> for mpsc::Sender<T> {
     fn send_or_reserve<'a>(
         &self,
         value: T,

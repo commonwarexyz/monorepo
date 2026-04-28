@@ -5,5 +5,5 @@ mod reservation;
 pub mod ring;
 pub mod tracked;
 
-pub use reservation::{ChannelExt, Reservation, Reserved};
+pub use reservation::{Reservation, ReservationExt, Reserved};
 pub use tokio::sync::{mpsc, oneshot};
