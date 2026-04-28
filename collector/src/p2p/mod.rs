@@ -856,7 +856,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn spawn_engines_with_handles(
-        context: &deterministic::Context,
+        engine_context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         schemes: Vec<PrivateKey>,
         connections: Vec<(
@@ -873,7 +873,6 @@ mod tests {
         Vec<Mailbox<PublicKey, Request>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
-        let engine_context = context.child("engine");
         let mut mailboxes = Vec::new();
         let mut handles = Vec::new();
 
@@ -911,7 +910,8 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(&context, &oracle, schemes, connections);
+
+                spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
 
             // Abort all engines immediately
             for handle in handles {
@@ -944,7 +944,8 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(&context, &oracle, schemes, connections);
+
+                spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;

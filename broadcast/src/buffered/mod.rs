@@ -140,12 +140,11 @@ mod tests {
     }
 
     async fn spawn_peer_engines(
-        context: &deterministic::Context,
+        engine_context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         registrations: &mut Registrations,
     ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
-        let engine_context = context.child("engine");
         while let Some((peer, network)) = registrations.pop_first() {
             let context = engine_context
                 .child("peer")
@@ -165,7 +164,7 @@ mod tests {
         }
         // Let each engine run until it applies the peer set from `initialize_simulation` so
         // `latest_primary_peers` is populated before any broadcast.
-        context.sleep(A_JIFFY).await;
+        engine_context.sleep(A_JIFFY).await;
         mailboxes
     }
 
@@ -174,7 +173,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 4, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Send a single broadcast message from the first peer
             let message = TestMessage::shared(b"hello world test message");
@@ -227,7 +226,7 @@ mod tests {
         runner.start(|context| async move {
             // Initialize simulation with 1 peer
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 1, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Set up mailbox for Peer A
             let mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
@@ -280,7 +279,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 10, 0.1).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Create a message and grab an arbitrary mailbox
             let message = TestMessage::shared(b"hello world test message");
@@ -324,7 +323,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 2, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Broadcast a message
             let message = TestMessage::shared(b"cached message");
@@ -354,7 +353,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 2, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Request nonexistent message from two nodes
             let message = TestMessage::shared(b"future message");
@@ -387,7 +386,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 2, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Broadcast messages exceeding cache size
             let mailbox = mailboxes.get(&peers[0]).unwrap().clone();
@@ -426,7 +425,7 @@ mod tests {
         runner.start(|context| async move {
             // Initialize simulation with 3 peers
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 3, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             // Assign mailboxes for peers A, B, C
             let mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
@@ -494,7 +493,7 @@ mod tests {
             let target_peer = peers[1].clone();
             let non_target_peer = peers[2].clone();
 
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
             let sender_mb = mailboxes.get(&sender_pk).unwrap().clone();
 
             let msg = TestMessage::shared(b"selective-broadcast");
@@ -531,7 +530,7 @@ mod tests {
         runner.start(|context| async move {
             // three peers so we can observe from a third
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 3, 1.0).await;
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
             let p0 = peers[0].clone();
             let p1 = peers[1].clone();
@@ -587,7 +586,8 @@ mod tests {
             runner.start(|context| async move {
                 let (peers, mut registrations, oracle) =
                     initialize_simulation(&context, 1, 1.0).await;
-                let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+                let mailboxes =
+                    spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
 
                 let sender1 = peers[0].clone();
                 let mb1 = mailboxes.get(&sender1).unwrap().clone();
@@ -638,7 +638,7 @@ mod tests {
             let victim = peers[2].clone();
 
             let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
-            let mailboxes = spawn_peer_engines(&context, &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.child("engine"), &oracle, &mut registrations).await;
             let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
             let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
 
@@ -757,7 +757,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     async fn spawn_peer_engines_with_handles(
-        context: &deterministic::Context,
+        engine_context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         registrations: &mut Registrations,
     ) -> (
@@ -766,7 +766,6 @@ mod tests {
     ) {
         let mut mailboxes = BTreeMap::new();
         let mut handles = Vec::new();
-        let engine_context = context.child("engine");
         while let Some((peer, network)) = registrations.pop_first() {
             let ctx = engine_context
                 .child("peer")
@@ -783,7 +782,7 @@ mod tests {
             mailboxes.insert(peer.clone(), engine_mailbox);
             handles.push(engine.start(network));
         }
-        context.sleep(A_JIFFY).await;
+        engine_context.sleep(A_JIFFY).await;
         (mailboxes, handles)
     }
 
@@ -793,7 +792,7 @@ mod tests {
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 2, 1.0).await;
             let (mut mailboxes, handles) =
-                spawn_peer_engines_with_handles(&context, &oracle, &mut registrations).await;
+                spawn_peer_engines_with_handles(context.child("engine"), &oracle, &mut registrations).await;
 
             // Broadcast a message to verify network is functional
             let message = TestMessage::shared(b"test message");
@@ -846,7 +845,8 @@ mod tests {
             let (peers, mut registrations, oracle) = initialize_simulation(&context, 2, 1.0).await;
 
             let (mailboxes, handles) =
-                spawn_peer_engines_with_handles(&context, &oracle, &mut registrations).await;
+
+                spawn_peer_engines_with_handles(context.child("engine"), &oracle, &mut registrations).await;
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;
