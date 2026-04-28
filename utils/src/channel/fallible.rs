@@ -417,9 +417,15 @@ mod tests {
             .send_or_reserve_lossy(TestMessage::FireAndForget(2))
             .expect("receiver should be open");
 
-        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(1))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TestMessage::FireAndForget(1))
+        ));
         reservation.await.unwrap().send();
-        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(2))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TestMessage::FireAndForget(2))
+        ));
     }
 
     #[test_async]
@@ -431,12 +437,18 @@ mod tests {
             .send_or_reserve_lossy(TestMessage::FireAndForget(2))
             .expect("receiver should be open");
 
-        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(1))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TestMessage::FireAndForget(1))
+        ));
         assert!(reservation.await.is_ok_and(|reserved| {
             reserved.send();
             true
         }));
-        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(2))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TestMessage::FireAndForget(2))
+        ));
     }
 
     #[test_async]

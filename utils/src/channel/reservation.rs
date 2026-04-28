@@ -83,28 +83,21 @@ pub trait ReservationExt<T> {
     ///   [`Reserved::send`] to deliver the value.
     /// - `Err(_)` when the receiver has been dropped.
     #[must_use = "await and send any reservation"]
-    fn send_or_reserve<'a>(
-        &self,
-        value: T,
-    ) -> Result<Option<Reservation<'a, T>>, SendError<T>>
+    fn send_or_reserve<'a>(&self, value: T) -> Result<Option<Reservation<'a, T>>, SendError<T>>
     where
         T: 'a;
 }
 
 impl<T: Send> ReservationExt<T> for mpsc::Sender<T> {
-    fn send_or_reserve<'a>(
-        &self,
-        value: T,
-    ) -> Result<Option<Reservation<'a, T>>, SendError<T>>
+    fn send_or_reserve<'a>(&self, value: T) -> Result<Option<Reservation<'a, T>>, SendError<T>>
     where
         T: 'a,
     {
         match self.try_send(value) {
             Ok(()) => Ok(None),
-            Err(TrySendError::Full(value)) => Ok(Some(Reservation::new(
-                self.clone().reserve_owned(),
-                value,
-            ))),
+            Err(TrySendError::Full(value)) => {
+                Ok(Some(Reservation::new(self.clone().reserve_owned(), value)))
+            }
             Err(TrySendError::Closed(value)) => Err(SendError(value)),
         }
     }
@@ -204,7 +197,12 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(0));
         reservations.pop().unwrap().await.unwrap().send();
         assert_eq!(receiver.recv().await, Some(1));
-        reservation_map.remove("next").unwrap().await.unwrap().send();
+        reservation_map
+            .remove("next")
+            .unwrap()
+            .await
+            .unwrap()
+            .send();
         assert_eq!(receiver.recv().await, Some(2));
         pending.reservations.pop().unwrap().await.unwrap().send();
         assert_eq!(receiver.recv().await, Some(3));
