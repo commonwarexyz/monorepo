@@ -1,6 +1,6 @@
 use crate::{
     bounds,
-    simplex_protocol::Simplex,
+    simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
 use commonware_codec::{Encode, Read};

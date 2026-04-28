@@ -1,5 +1,5 @@
 use crate::{
-    simplex_protocol,
+    simplex,
     strategy::{SmallScope, Strategy},
     utils::Partition,
     FuzzInput, PublicKeyOf, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
@@ -1425,7 +1425,7 @@ where
     }
 }
 
-pub(crate) async fn run<P: simplex_protocol::Simplex>(
+pub(crate) async fn run<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &NodeFuzzInput,
 ) -> (Vec<PublicKeyOf<P>>, Vec<P::Scheme>)
@@ -1525,7 +1525,7 @@ where
     (participants, schemes)
 }
 
-pub(crate) fn run_recovery<P: simplex_protocol::Simplex>(
+pub(crate) fn run_recovery<P: simplex::Simplex>(
     checkpoint: deterministic::Checkpoint,
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<P::Scheme>,
@@ -1596,7 +1596,7 @@ mod tests {
                 },
             ],
         };
-        fuzz_node::<simplex_protocol::SimplexEd25519, WithoutRecovery>(input);
+        fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
     }
 
     #[test_group("slow")]
@@ -1619,6 +1619,6 @@ mod tests {
                 },
             ],
         };
-        fuzz_node::<simplex_protocol::SimplexEd25519, WithRecovery>(input);
+        fuzz_node::<simplex::SimplexEd25519, WithRecovery>(input);
     }
 }
