@@ -1,10 +1,11 @@
 //! Benchmarks for speculative batch merkleization.
 //!
-//! Measures the time required to create a speculative batch (applying random updates equal to 10%
-//! of the total key count, sampled with replacement), merkleize it, and compute its root. The
-//! database is initialized with N unique keys having random digests as values. Database
-//! initialization time is not included in the benchmark. The page cache is large enough to hold the
-//! entire active key set to eliminate disk access delays from affecting the results.
+//! Each iteration creates a speculative batch (10% random updates, sampled with replacement),
+//! merkleizes it, and reads the root. The DB is seeded with N unique keys; setup is not timed.
+//!
+//! - [`bench_merkleize`]: steady-state timing on a freshly seeded DB.
+//! - [`bench_merkleize_churned`]: timing after overwrite batches accumulate inactive update
+//!   operations above the inactivity floor for the floor-raise scan to skip.
 
 use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::Sha256;
@@ -252,7 +253,10 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+// Very large so all state is in memory.
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
+// Very small so most reads miss the cache.
+const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
 fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config {
@@ -286,16 +290,13 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
-}
-
 // -- DB constructors (eliminates repeated config boilerplate in match arms) --
 
 fn any_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
+    cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
-    let pc = pc(ctx);
+    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -305,8 +306,9 @@ fn any_fix_cfg(
 
 fn any_var_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
+    cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
-    let pc = pc(ctx);
+    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
@@ -316,8 +318,9 @@ fn any_var_cfg(
 
 fn cur_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
+    cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
-    let pc = pc(ctx);
+    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -328,8 +331,9 @@ fn cur_fix_cfg(
 
 fn cur_var_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
+    cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
-    let pc = pc(ctx);
+    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
@@ -358,6 +362,40 @@ async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>
     }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
+    let mut total = Duration::ZERO;
+    for _ in 0..iters {
+        let start = Instant::now();
+        let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        black_box(merkleized.root());
+        total += start.elapsed();
+    }
+    db.destroy().await.unwrap();
+    total
+}
+
+/// Apply overwrite batches before timing merkleization.
+///
+/// This leaves inactive update operations above the inactivity floor, matching
+/// the workload optimized by bitmap-backed floor raising.
+async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+    mut db: C,
+    num_keys: u64,
+    churn_batches: u64,
+    iters: u64,
+) -> Duration {
+    seed_db(&mut db, num_keys).await;
+    let num_updates = num_keys / 10;
+    let mut rng = StdRng::seed_from_u64(99);
+
+    for _ in 0..churn_batches {
+        let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+    }
+    db.commit().await.unwrap();
+    db.sync().await.unwrap();
+
     let mut total = Duration::ZERO;
     for _ in 0..iters {
         let start = Instant::now();
@@ -417,7 +455,7 @@ macro_rules! variants {
         $(
             $entry:ident {
                 name: $name:literal,
-                init: |$ctx:ident| $init:expr,
+                init: |$ctx:ident, $cache:ident| $init:expr,
             }
         )+
     ) => {
@@ -432,20 +470,26 @@ macro_rules! variants {
                     $(Self::$entry => $name),+
                 }
             }
+
+            /// Whether this is an `any::*` variant (vs `current::*`).
+            fn is_any(&self) -> bool {
+                self.name().starts_with("any::")
+            }
         }
 
         const VARIANTS: &[Variant] = &[
             $(Variant::$entry),+
         ];
 
-        /// Dispatch a variant to its concrete DB type and config, then execute `$body` with `db`
-        /// bound.
+        /// Dispatch a variant to its concrete DB type, initialize it with the given page-cache
+        /// size, and run `$body` with the resulting `db` in scope.
         macro_rules! dispatch_variant {
-            ($ctx_expr:expr, $variant_expr:expr, |$db_name:ident| $body:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $cache_size:expr, |$db_name:ident| $body:expr) => {
                 match $variant_expr {
                     $(
                         Variant::$entry => {
                             let $ctx = $ctx_expr;
+                            let $cache = $cache_size;
                             let $db_name = $init.await.unwrap();
                             $body
                         }
@@ -459,99 +503,99 @@ macro_rules! variants {
 variants! {
     AnyFixed {
         name: "any::unordered::fixed::mmr",
-        init: |ctx| AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, cache_size| AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
     }
     AnyVariable {
         name: "any::unordered::variable::mmr",
-        init: |ctx| AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, cache_size| AnyUVar::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
     }
     AnyFixedMmb {
         name: "any::unordered::fixed::mmb",
-        init: |ctx| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, cache_size| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
     }
     AnyVariableMmb {
         name: "any::unordered::variable::mmb",
-        init: |ctx| AnyUVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, cache_size| AnyUVarMmb::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
     }
     AnyOrderedFixed {
         name: "any::ordered::fixed::mmr",
-        init: |ctx| AnyOFix::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, cache_size| AnyOFix::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
     }
     AnyOrderedVariable {
         name: "any::ordered::variable::mmr",
-        init: |ctx| AnyOVar::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, cache_size| AnyOVar::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
     }
     AnyOrderedFixedMmb {
         name: "any::ordered::fixed::mmb",
-        init: |ctx| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, cache_size| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
     }
     AnyOrderedVariableMmb {
         name: "any::ordered::variable::mmb",
-        init: |ctx| AnyOVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, cache_size| AnyOVarMmb::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed32 {
         name: "current::unordered::fixed::mmr chunk=32",
-        init: |ctx| CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable32 {
         name: "current::unordered::variable::mmr chunk=32",
-        init: |ctx| CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed32Mmb {
         name: "current::unordered::fixed::mmb chunk=32",
-        init: |ctx| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable32Mmb {
         name: "current::unordered::variable::mmb chunk=32",
-        init: |ctx| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed256 {
         name: "current::unordered::fixed::mmr chunk=256",
-        init: |ctx| CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable256 {
         name: "current::unordered::variable::mmr chunk=256",
-        init: |ctx| CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed256Mmb {
         name: "current::unordered::fixed::mmb chunk=256",
-        init: |ctx| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable256Mmb {
         name: "current::unordered::variable::mmb chunk=256",
-        init: |ctx| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed32 {
         name: "current::ordered::fixed::mmr chunk=32",
-        init: |ctx| CurOFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurOFix32::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable32 {
         name: "current::ordered::variable::mmr chunk=32",
-        init: |ctx| CurOVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurOVar32::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed32Mmb {
         name: "current::ordered::fixed::mmb chunk=32",
-        init: |ctx| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable32Mmb {
         name: "current::ordered::variable::mmb chunk=32",
-        init: |ctx| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed256 {
         name: "current::ordered::fixed::mmr chunk=256",
-        init: |ctx| CurOFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurOFix256::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable256 {
         name: "current::ordered::variable::mmr chunk=256",
-        init: |ctx| CurOVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurOVar256::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed256Mmb {
         name: "current::ordered::fixed::mmb chunk=256",
-        init: |ctx| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, cache_size| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable256Mmb {
         name: "current::ordered::variable::mmb chunk=256",
-        init: |ctx| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, cache_size| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
     }
 }
 
@@ -578,7 +622,7 @@ fn bench_merkleize(c: &mut Criterion) {
                         |b| {
                             b.to_async(&runner).iter_custom(|iters| async move {
                                 let ctx = context::get::<Context>();
-                                dispatch_variant!(ctx, variant, |db| {
+                                dispatch_variant!(ctx, variant, LARGE_PAGE_CACHE_SIZE, |db| {
                                     if chained {
                                         run_chained_bench(db, num_keys, iters, seed_sync, |p| {
                                             p.new_batch()
@@ -597,8 +641,41 @@ fn bench_merkleize(c: &mut Criterion) {
     }
 }
 
+/// Overwrite batches applied before timing the churned benchmark.
+const CHURN_BATCHES: u64 = 50;
+
+/// Time merkleization after repeatedly overwriting existing keys.
+///
+/// The overwrite batches create inactive log entries that floor raising must
+/// scan past. The smaller cache makes unnecessary reads of those entries show
+/// up in the benchmark.
+fn bench_merkleize_churned(c: &mut Criterion) {
+    let runner = tokio::Runner::new(Config::default());
+    let cache_pages = SMALL_PAGE_CACHE_SIZE.get();
+    for num_keys in NUM_KEYS {
+        // `current::*` already used a bitmap; only `any::*` exercises the new scan path.
+        for variant in VARIANTS.iter().copied().filter(Variant::is_any) {
+            c.bench_function(
+                &format!(
+                    "{}/variant={} keys={num_keys} churn={CHURN_BATCHES} cache_pages={cache_pages}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        dispatch_variant!(ctx, variant, SMALL_PAGE_CACHE_SIZE, |db| {
+                            run_churned_bench(db, num_keys, CHURN_BATCHES, iters).await
+                        })
+                    });
+                },
+            );
+        }
+    }
+}
+
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(10);
-    targets = bench_merkleize
+    config = Criterion::default().sample_size(30);
+    targets = bench_merkleize, bench_merkleize_churned
 }

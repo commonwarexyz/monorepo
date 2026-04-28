@@ -12,10 +12,11 @@ use crate::{
     qmdb::{
         any::{
             self,
-            batch::{lookup_sorted, DiffEntry, FloorScan},
+            batch::{lookup_sorted, DiffEntry},
             operation::{update, Operation},
             ValueEncoding,
         },
+        bitmap::Shared,
         current::{
             db::{compute_db_root, compute_grafted_leaves},
             grafting,
@@ -28,10 +29,7 @@ use crate::{
 use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::{
-    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
-};
+use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use std::{
     collections::{BTreeSet, HashMap},
     hash::BuildHasherDefault,
@@ -113,48 +111,30 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
-/// Bitmap-accelerated floor scan. Skips locations where the bitmap bit is
-/// unset, avoiding I/O reads for inactive operations.
-pub(crate) struct BitmapScan<'a, B, const N: usize> {
-    bitmap: &'a B,
-}
-
-impl<'a, B: BitmapReadable<N>, const N: usize> BitmapScan<'a, B, N> {
-    pub(crate) const fn new(bitmap: &'a B) -> Self {
-        Self { bitmap }
-    }
-}
-
-impl<F: Graftable, B: BitmapReadable<N>, const N: usize> FloorScan<F> for BitmapScan<'_, B, N> {
-    fn next_candidate(&mut self, floor: Location<F>, tip: u64) -> Option<Location<F>> {
-        let loc = *floor;
-        if loc >= tip {
-            return None;
-        }
-        let bitmap_len = self.bitmap.len();
-        // Within the bitmap: find the next set bit at or after floor. ones_iter_from returns
-        // set indices in ascending order so the first result is the only possible candidate
-        // below bound. tip >= bitmap_len always holds (base_size == bitmap_parent.len()), so
-        // bound == bitmap_len and the length check inside the iterator prevents scanning past
-        // bound.
-        if loc < bitmap_len {
-            let bound = bitmap_len.min(tip);
-            if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
-                if idx < bound {
-                    return Some(Location::<F>::new(idx));
-                }
+/// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
+/// bitmap bit is unset, avoiding I/O reads for inactive operations.
+///
+/// Mirrors the contract on `any::batch::next_candidate`: may return only locations that are
+/// *possibly* active in `[floor, tip)`, may skip locations only when known inactive.
+/// `is_active_at` revalidates each candidate, so false positives are tolerated; false negatives
+/// are forbidden.
+pub(crate) fn next_candidate<F: Graftable, B: BitmapReadable<N>, const N: usize>(
+    bitmap: &B,
+    floor: Location<F>,
+    tip: u64,
+) -> Option<Location<F>> {
+    let floor = *floor;
+    let bitmap_len = bitmap.len();
+    let committed_end = bitmap_len.min(tip);
+    if floor < committed_end {
+        if let Some(idx) = bitmap.ones_iter_from(floor).next() {
+            if idx < committed_end {
+                return Some(Location::<F>::new(idx));
             }
         }
-        // Beyond the bitmap: uncommitted ops from prior batches in the chain that aren't
-        // tracked by the bitmap yet. Conservatively treat them as candidates.
-        if bitmap_len < tip {
-            let candidate = loc.max(bitmap_len);
-            if candidate < tip {
-                return Some(Location::<F>::new(candidate));
-            }
-        }
-        None
     }
+    let candidate = floor.max(bitmap_len);
+    (candidate < tip).then(|| Location::<F>::new(candidate))
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -421,9 +401,11 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let scan = BitmapScan::new(&bitmap_parent);
+        // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, scan)
+            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
+                next_candidate(&bitmap_parent, floor, tip)
+            })
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
@@ -484,9 +466,11 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let scan = BitmapScan::new(&bitmap_parent);
+        // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, scan)
+            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
+                next_candidate(&bitmap_parent, floor, tip)
+            })
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
@@ -706,95 +690,15 @@ where
     }))
 }
 
-/// The committed bitmap shared between the [`Db`](super::db::Db) and live batches.
-///
-/// Wrapped in a [`RwLock`] so that [`Db::apply_batch`](super::db::Db::apply_batch),
-/// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) can mutate
-/// the bitmap in place while live batches concurrently read through it.
-///
-/// # Why in-place mutation under a lock
-///
-/// Snapshot-based alternatives (per-apply clone, page-level copy-on-write, etc.) all require
-/// cloning at least the bitmap's top-level pointer structure on every apply. For large DBs that
-/// cost grows linearly with the total bit count and every live batch retains its snapshot's
-/// memory until dropped, so memory use would grow with both bitmap size and batch lifetime.
-/// Mutating in place keeps memory bounded by the actual bitmap size regardless of how many
-/// batches are alive or how long they live. The per-call read lock is the cost we pay for that.
-///
-/// # Reading through invalid batches
-///
-/// The bitmap behind this lock represents *committed* state. If a caller holds a
-/// [`MerkleizedBatch`] that has become invalid (see its "Branch validity" docs for the
-/// conditions), reads through that batch's chain will silently return inconsistent data (the
-/// chain's overlays mixed with post-divergence committed chunks). The library does not guard
-/// against this; callers must avoid reading through invalid batches.
-pub(crate) struct SharedBitmap<const N: usize> {
-    inner: RwLock<BitMap<N>>,
-}
-
-impl<const N: usize> SharedBitmap<N> {
-    pub(crate) const fn new(bitmap: BitMap<N>) -> Self {
-        Self {
-            inner: RwLock::new(bitmap),
-        }
-    }
-
-    /// Acquire a shared read guard over the committed bitmap. Kept private so external callers
-    /// go through [`BitmapReadable`] (which doesn't expose a guard across `.await`).
-    fn read(&self) -> RwLockReadGuard<'_, BitMap<N>> {
-        self.inner.read()
-    }
-
-    /// Acquire an exclusive write guard. By convention only
-    /// [`Db::apply_batch`](super::db::Db::apply_batch), [`Db::prune`](super::db::Db::prune), and
-    /// [`Db::rewind`](super::db::Db::rewind) mutate the shared bitmap.
-    pub(super) fn write(&self) -> RwLockWriteGuard<'_, BitMap<N>> {
-        self.inner.write()
-    }
-}
-
-impl<const N: usize> std::fmt::Debug for SharedBitmap<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedBitmap")
-            .field("bitmap_len", &BitmapReadable::<N>::len(&*self.read()))
-            .finish()
-    }
-}
-
-/// [`BitmapReadable`] over the DB's committed bitmap. Each call acquires the read lock briefly.
-impl<const N: usize> BitmapReadable<N> for SharedBitmap<N> {
-    fn complete_chunks(&self) -> usize {
-        self.read().complete_chunks()
-    }
-
-    fn get_chunk(&self, idx: usize) -> [u8; N] {
-        *self.read().get_chunk(idx)
-    }
-
-    fn last_chunk(&self) -> ([u8; N], u64) {
-        let guard = self.read();
-        let (chunk, bits) = guard.last_chunk();
-        (*chunk, bits)
-    }
-
-    fn pruned_chunks(&self) -> usize {
-        self.read().pruned_chunks()
-    }
-
-    fn len(&self) -> u64 {
-        BitmapReadable::<N>::len(&*self.read())
-    }
-}
-
 /// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
 ///
 /// The chain terminates in a `Base` that references the shared committed bitmap. No validity
 /// check is performed. Callers must ensure they only read through batches whose chains are
-/// still valid prefixes of committed state (see [`SharedBitmap`]'s docs).
+/// still valid prefixes of committed state (see [`Shared`]'s docs).
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the committed bitmap.
-    Base(Arc<SharedBitmap<N>>),
+    Base(Arc<Shared<N>>),
     /// Speculative layer on top of a parent batch.
     Layer(Arc<BitmapBatchLayer<N>>),
 }
@@ -805,16 +709,16 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
     pub(crate) parent: BitmapBatch<N>,
     /// Chunk-level overlay: materialized bytes for every chunk that differs from parent.
     pub(crate) overlay: Arc<ChunkOverlay<N>>,
-    /// Cached terminal [`SharedBitmap`] so [`BitmapBatch::shared`] and
+    /// Cached terminal [`Shared`] so [`BitmapBatch::shared`] and
     /// [`BitmapBatch::pruned_chunks`] answer in O(1) instead of walking the chain.
-    pub(crate) shared: Arc<SharedBitmap<N>>,
+    pub(crate) shared: Arc<Shared<N>>,
 }
 
 impl<const N: usize> BitmapBatch<N> {
     const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
-    /// Return the terminal [`SharedBitmap`] at the bottom of the chain.
-    fn shared(&self) -> &Arc<SharedBitmap<N>> {
+    /// Return the terminal [`Shared`] at the bottom of the chain.
+    fn shared(&self) -> &Arc<Shared<N>> {
         match self {
             Self::Base(s) => s,
             Self::Layer(layer) => &layer.shared,
@@ -826,7 +730,7 @@ impl<const N: usize> BitmapBatch<N> {
     /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
     fn trim_committed(&self) -> Self {
         let shared = self.shared();
-        let committed = shared.read().len();
+        let committed = BitmapReadable::<N>::len(shared.as_ref());
         let mut kept = Vec::new();
         let mut current = self;
         while let Self::Layer(layer) = current {
@@ -994,7 +898,7 @@ where
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,
-            bitmap: BitmapBatch::Base(Arc::clone(&self.status)),
+            bitmap: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
             canonical_root: self.root,
         })
     }
@@ -1324,115 +1228,68 @@ mod tests {
         assert_eq!(c0[2], 0x07);
     }
 
-    // ---- FloorScan tests ----
+    // ---- next_candidate tests ----
 
-    use crate::qmdb::any::batch::{FloorScan, SequentialScan};
-
-    #[test]
-    fn sequential_scan_returns_floor_when_below_tip() {
-        let mut scan = SequentialScan;
-        assert_eq!(
-            scan.next_candidate(Location::new(5), 10),
-            Some(Location::new(5))
-        );
-    }
-
-    #[test]
-    fn sequential_scan_returns_none_at_tip() {
-        let mut scan = SequentialScan;
-        assert_eq!(scan.next_candidate(Location::new(10), 10), None);
-        assert_eq!(scan.next_candidate(Location::new(11), 10), None);
+    fn nc(bm: &Bm, floor: u64, tip: u64) -> Option<Location> {
+        next_candidate::<mmr::Family, _, N>(bm, Location::new(floor), tip)
     }
 
     #[test]
     fn bitmap_scan_all_active() {
         let bm = make_bitmap(&[true; 8]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
         for i in 0..8 {
-            assert_eq!(
-                scan.next_candidate(Location::new(i), 8),
-                Some(Location::new(i))
-            );
+            assert_eq!(nc(&bm, i, 8), Some(Location::new(i)));
         }
-        assert_eq!(scan.next_candidate(Location::new(8), 8), None);
+        assert_eq!(nc(&bm, 8, 8), None);
     }
 
     #[test]
     fn bitmap_scan_all_inactive() {
         let bm = make_bitmap(&[false; 8]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-        assert_eq!(scan.next_candidate(Location::new(0), 8), None);
+        assert_eq!(nc(&bm, 0, 8), None);
     }
 
     #[test]
     fn bitmap_scan_skips_inactive() {
         // Pattern: inactive, inactive, active, inactive, active
         let bm = make_bitmap(&[false, false, true, false, true]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-
-        assert_eq!(
-            scan.next_candidate(Location::new(0), 5),
-            Some(Location::new(2))
-        );
-        assert_eq!(
-            scan.next_candidate(Location::new(3), 5),
-            Some(Location::new(4))
-        );
-        assert_eq!(scan.next_candidate(Location::new(5), 5), None);
+        assert_eq!(nc(&bm, 0, 5), Some(Location::new(2)));
+        assert_eq!(nc(&bm, 3, 5), Some(Location::new(4)));
+        assert_eq!(nc(&bm, 5, 5), None);
     }
 
     #[test]
     fn bitmap_scan_beyond_bitmap_len_returns_candidate() {
-        // Bitmap has 4 bits, but tip is 8. Locations 4..8 are beyond the
-        // bitmap and should be returned as candidates.
+        // Bitmap has 4 bits, but tip is 8. Locations 4..8 are beyond the bitmap and should be
+        // returned as candidates.
         let bm = make_bitmap(&[false; 4]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-
-        // All bitmap bits are unset, so 0..4 are skipped.
-        // Location 4 is beyond bitmap -> candidate.
-        assert_eq!(
-            scan.next_candidate(Location::new(0), 8),
-            Some(Location::new(4))
-        );
-        assert_eq!(
-            scan.next_candidate(Location::new(6), 8),
-            Some(Location::new(6))
-        );
+        // All bitmap bits are unset, so 0..4 are skipped; loc 4 is beyond bitmap -> candidate.
+        assert_eq!(nc(&bm, 0, 8), Some(Location::new(4)));
+        assert_eq!(nc(&bm, 6, 8), Some(Location::new(6)));
     }
 
     #[test]
     fn bitmap_scan_respects_tip() {
         let bm = make_bitmap(&[false, false, false, true]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-
         // Active bit at 3, but tip is 3 so it's excluded.
-        assert_eq!(scan.next_candidate(Location::new(0), 3), None);
+        assert_eq!(nc(&bm, 0, 3), None);
         // With tip=4, bit 3 is included.
-        assert_eq!(
-            scan.next_candidate(Location::new(0), 4),
-            Some(Location::new(3))
-        );
+        assert_eq!(nc(&bm, 0, 4), Some(Location::new(3)));
     }
 
     #[test]
     fn bitmap_scan_floor_at_tip() {
         let bm = make_bitmap(&[true; 4]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-        assert_eq!(scan.next_candidate(Location::new(4), 4), None);
+        assert_eq!(nc(&bm, 4, 4), None);
     }
 
     #[test]
     fn bitmap_scan_empty_bitmap() {
         let bm = Bm::new();
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-
         // Empty bitmap, but tip > 0: all locations are beyond bitmap.
-        assert_eq!(
-            scan.next_candidate(Location::new(0), 5),
-            Some(Location::new(0))
-        );
+        assert_eq!(nc(&bm, 0, 5), Some(Location::new(0)));
         // Empty bitmap, tip = 0: no candidates.
-        assert_eq!(scan.next_candidate(Location::new(0), 0), None);
+        assert_eq!(nc(&bm, 0, 0), None);
     }
 
     // ---- trim_committed tests ----
@@ -1447,7 +1304,7 @@ mod tests {
     /// Build a chain `Base(shared) -> Layer(len=L1) -> Layer(len=L2) -> ...` from a list of
     /// overlay lengths (bottom to top). Each constructed `Layer` caches `shared` per the
     /// struct's invariant.
-    fn make_chain(shared: &Arc<SharedBitmap<N>>, overlay_lens: &[u64]) -> BitmapBatch<N> {
+    fn make_chain(shared: &Arc<Shared<N>>, overlay_lens: &[u64]) -> BitmapBatch<N> {
         let mut chain = BitmapBatch::Base(Arc::clone(shared));
         for &len in overlay_lens {
             chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
@@ -1476,11 +1333,11 @@ mod tests {
 
     /// Input is already a bare `Base` with no speculative layers on top — the loop body never
     /// runs, `kept` stays empty, and the result is a freshly constructed `Base` pointing at the
-    /// same `SharedBitmap`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
+    /// same `Shared`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
     /// chain was previously trimmed flat (e.g., immediately after an apply collapsed everything).
     #[test]
     fn trim_committed_already_base() {
-        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let base = BitmapBatch::Base(Arc::clone(&shared));
         let result = base.trim_committed();
         // Still `Base`, pointing at the same shared terminal.
@@ -1498,7 +1355,7 @@ mod tests {
     #[test]
     fn trim_committed_all_committed() {
         // `shared.len() == 64`; the single layer's `overlay.len == 32 (<= 64)`, so it's committed.
-        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let chain = make_chain(&shared, &[32]);
         let result = chain.trim_committed();
         // Collapsed to a bare Base, pointing at the original shared.
@@ -1515,7 +1372,7 @@ mod tests {
     #[test]
     fn trim_committed_none_committed() {
         // `shared.len() == 32`; both overlays have `len > 32`, so neither is committed.
-        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 32])));
+        let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 32])));
         let chain = make_chain(&shared, &[64, 96]);
         let result = chain.trim_committed();
         // Structure must be preserved in bottom-to-top order.
@@ -1530,7 +1387,7 @@ mod tests {
     #[test]
     fn trim_committed_exactly_one_uncommitted() {
         // `shared.len() == 64`; committed layer (`overlay.len == 64`) + uncommitted (`96`).
-        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let chain = make_chain(&shared, &[64, 96]);
         let result = chain.trim_committed();
         // The committed layer is gone; only the uncommitted overlay remains.
@@ -1546,7 +1403,7 @@ mod tests {
     #[test]
     fn trim_committed_multiple_uncommitted() {
         // `shared.len() == 64`; committed layer (64), then two uncommitted (96, 128).
-        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let chain = make_chain(&shared, &[64, 96, 128]);
         let result = chain.trim_committed();
         // Committed layer dropped; uncommitted pair preserved in order.

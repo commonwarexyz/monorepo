@@ -47,6 +47,14 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
+//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though
+//!   a CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
+//!   0. Maintaining this makes the chunk containing the latest commit deterministic across
+//!   init and `apply_batch`.
+//!
+//!   The bitmap lives on the inner `any::Db.bitmap`; `current::Db` reads through it for
+//!   grafted-tree leaves and proofs.
+//!
 //! - **Grafted tree**: An in-memory Merkle structure of digests at and above the
 //!   _grafting height_ in the ops tree. This is the core of how bitmap and ops state are combined
 //!   into a single authenticated structure (see below).
@@ -337,30 +345,20 @@ where
     let (metadata, pruned_chunks, pinned_nodes) =
         db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
-    // Initialize the activity status bitmap.
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
+    // metadata, then hand it to `any` which becomes the sole owner. `any::init_from_log`
+    // populates it during snapshot rebuild.
+    let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+    let bitmap = Arc::new(crate::qmdb::bitmap::Shared::<N>::new(bitmap));
 
-    // Initialize the anydb with a callback that populates the status bitmap.
-    let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init(
-        context.with_label("any"),
-        config.into(),
-        Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location<F>>| {
-            status.push(append);
-            if let Some(loc) = loc {
-                status.set_bit(*loc, false);
-            }
-        },
-    )
-    .await?;
+    let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::new();
     let grafted_tree = db::build_grafted_tree::<F, H, N>(
         &hasher,
-        &status,
+        any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         thread_pool.as_ref(),
@@ -374,13 +372,19 @@ where
         &any.log.merkle,
         hasher.clone(),
     );
-    let partial_chunk = db::partial_chunk(&status);
+    let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(
+        &hasher,
+        any.bitmap.as_ref(),
+        &storage,
+        partial_chunk,
+        &ops_root,
+    )
+    .await?;
 
     Ok(db::Db {
         any,
-        status: Arc::new(batch::SharedBitmap::new(status)),
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
@@ -1009,7 +1013,7 @@ pub mod tests {
         });
     }
 
-    use crate::translator::OneCap;
+    use crate::{qmdb::bitmap::BitmapReadable, translator::OneCap};
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{test_group, test_traced};
 
@@ -3529,6 +3533,77 @@ pub mod tests {
 
             db.destroy().await.unwrap();
             ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: the bitmap chunks produced by the speculative `BitmapBatch` chain during
+    /// merkleize must equal the bytes that `any::Db::apply_batch` writes via diff-driven
+    /// updates. `current::Db::apply_batch` relies on this equivalence to install the precomputed
+    /// `batch.grafted` against the now-current bitmap.
+    #[test_traced("INFO")]
+    fn test_current_apply_chunks_match_speculative_chunks() {
+        const CHUNK_SIZE_BITS: u64 = commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("spec_eq", &ctx))
+                    .await
+                    .unwrap();
+
+            // Seed two committed batches so the chain has multiple ancestor diffs to merge.
+            for i in 0..4u64 {
+                let b = db
+                    .new_batch()
+                    .write(key(i), Some(val(i)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                db.apply_batch(b).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Build a chain: parent overwrites two keys, child overwrites two more.
+            let parent = db
+                .new_batch()
+                .write(key(0), Some(val(10)))
+                .write(key(1), Some(val(11)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key(2), Some(val(12)))
+                .write(key(3), Some(val(13)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Snapshot every chunk in the speculative `BitmapBatch` chain.
+            let speculative_chunks: Vec<[u8; 32]> = {
+                let len = BitmapReadable::<32>::len(&child.bitmap);
+                let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
+                (0..chunk_count)
+                    .map(|idx| BitmapReadable::<32>::get_chunk(&child.bitmap, idx))
+                    .collect()
+            };
+
+            // Apply and re-read the same chunks from the committed bitmap.
+            db.apply_batch(child).await.unwrap();
+            let committed_chunks: Vec<[u8; 32]> = {
+                let len = BitmapReadable::<32>::len(db.any.bitmap.as_ref());
+                let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
+                (0..chunk_count)
+                    .map(|idx| BitmapReadable::<32>::get_chunk(db.any.bitmap.as_ref(), idx))
+                    .collect()
+            };
+
+            assert_eq!(
+                speculative_chunks, committed_chunks,
+                "speculative chunks must equal post-apply committed chunks"
+            );
+
+            db.destroy().await.unwrap();
         });
     }
 }
