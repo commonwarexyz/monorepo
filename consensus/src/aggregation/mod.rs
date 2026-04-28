@@ -229,7 +229,7 @@ mod tests {
             // Create reporter with verifier scheme
             let (reporter, reporter_mailbox) =
                 mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-            context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
             reporters.insert(participant.clone(), reporter_mailbox.clone());
 
             // Create blocker
@@ -450,7 +450,7 @@ mod tests {
                     // We rely on replay to populate this reporter with a contiguous history of certificates.
                     let (reporter, mut reporter_mailbox) =
                         mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-                    context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
 
                     // Spawn validator engines
                     for (idx, participant) in fixture.participants.iter().enumerate() {
@@ -603,7 +603,7 @@ mod tests {
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
                     mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-                context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
 
                 // Start validator engines with Skip strategy for skip_height
                 for (idx, participant) in fixture.participants.iter().enumerate() {
@@ -690,7 +690,7 @@ mod tests {
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
                     mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-                context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
 
                 // Start validator engines with Correct strategy (will sign everything now)
                 for (idx, participant) in fixture.participants.iter().enumerate() {
@@ -1052,7 +1052,7 @@ mod tests {
                 // Create reporter with verifier scheme
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-                context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
                 reporters.insert(participant.clone(), reporter_mailbox.clone());
 
                 // Create blocker

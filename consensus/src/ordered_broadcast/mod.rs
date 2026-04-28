@@ -234,12 +234,12 @@ mod tests {
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             let chunk_verifier = ChunkVerifier::new(namespace);
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                context.child("reporter_rng"),
+                context.child("reporter"),
                 chunk_verifier.clone(),
                 fixture.verifier.clone(),
                 misses_allowed,
             );
-            context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
             reporters.insert(validator.clone(), reporter_mailbox);
 
             let engine = Engine::new(
@@ -763,12 +763,12 @@ mod tests {
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
                 let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                    context.child("reporter_rng"),
+                    context.child("reporter"),
                     chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
-                context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
                 reporters.insert(validator.clone(), reporter_mailbox);
 
                 let engine = Engine::new(
@@ -932,12 +932,12 @@ mod tests {
 
                 let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                    context.child("reporter_rng"),
+                    context.child("reporter"),
                     chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
-                context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
                 reporters.insert(validator.clone(), reporter_mailbox);
 
                 let engine = Engine::new(
@@ -980,12 +980,12 @@ mod tests {
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
                 let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                    context.child("reporter_rng"),
+                    context.child("reporter"),
                     chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
-                context.child("reporter").spawn(|_| reporter.run());
+            reporter.start();
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
 
                 // Sequencer doesn't need a scheme (it uses ed25519 signing directly)
