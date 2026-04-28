@@ -5,12 +5,14 @@ use super::mpsc::{
     error::{SendError, TrySendError},
     OwnedPermit,
 };
-use pin_project::pin_project;
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
+
+type ReserveFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + 'a>>;
 
 /// A reserved channel slot bundled with the value to send.
 #[must_use = "call send to deliver the reserved message"]
@@ -27,42 +29,41 @@ impl<T> Reserved<T> {
 }
 
 /// A future that waits for a channel slot and keeps ownership of the value.
-#[pin_project]
+///
+/// The lifetime tracks any borrows held by `T`; the reservation does not borrow
+/// the original sender.
 #[must_use = "await the reservation to acquire a channel slot"]
-pub struct Reservation<F, T>
-where
-    F: Future<Output = Result<OwnedPermit<T>, SendError<()>>>,
-{
-    #[pin]
-    future: F,
+pub struct Reservation<'a, T> {
+    future: ReserveFuture<'a, T>,
     value: Option<T>,
 }
 
-impl<F, T> From<(F, T)> for Reservation<F, T>
-where
-    F: Future<Output = Result<OwnedPermit<T>, SendError<()>>>,
-{
-    fn from((future, value): (F, T)) -> Self {
+impl<'a, T> Reservation<'a, T> {
+    fn new(
+        future: impl Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + 'a,
+        value: T,
+    ) -> Self {
         Self {
-            future,
+            future: Box::pin(future),
             value: Some(value),
         }
     }
 }
 
-impl<F, T> Future for Reservation<F, T>
-where
-    F: Future<Output = Result<OwnedPermit<T>, SendError<()>>>,
-{
+impl<T> Unpin for Reservation<'_, T> {}
+
+impl<T> Future for Reservation<'_, T> {
     type Output = Result<Reserved<T>, SendError<T>>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        let permit = match this.future.poll(cx) {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let permit = match self.future.as_mut().poll(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(permit) => permit,
         };
-        let value = this.value.take().expect("reservation polled after completion");
+        let value = self
+            .value
+            .take()
+            .expect("reservation polled after completion");
         Poll::Ready(match permit {
             Ok(permit) => Ok(Reserved { permit, value }),
             Err(SendError(())) => Err(SendError(value)),
@@ -79,38 +80,29 @@ pub trait ChannelExt<T> {
     /// - `Ok(Some(_))` when the channel was full. Await the reservation and call
     ///   [`Reserved::send`] to deliver the value.
     /// - `Err(_)` when the receiver has been dropped.
-    fn send_or_reserve(
+    #[must_use = "handle the result; if it contains a reservation, await it and call Reserved::send"]
+    fn send_or_reserve<'a>(
         &self,
         value: T,
-    ) -> Result<
-        Option<
-            Reservation<
-                impl Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + use<T, Self>,
-                T,
-            >,
-        >,
-        SendError<T>,
-    >;
+    ) -> Result<Option<Reservation<'a, T>>, SendError<T>>
+    where
+        T: 'a;
 }
 
 impl<T: Send> ChannelExt<T> for mpsc::Sender<T> {
-    fn send_or_reserve(
+    fn send_or_reserve<'a>(
         &self,
         value: T,
-    ) -> Result<
-        Option<
-            Reservation<
-                impl Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + use<T>,
-                T,
-            >,
-        >,
-        SendError<T>,
-    > {
+    ) -> Result<Option<Reservation<'a, T>>, SendError<T>>
+    where
+        T: 'a,
+    {
         match self.try_send(value) {
             Ok(()) => Ok(None),
-            Err(TrySendError::Full(value)) => {
-                Ok(Some((self.clone().reserve_owned(), value).into()))
-            }
+            Err(TrySendError::Full(value)) => Ok(Some(Reservation::new(
+                self.clone().reserve_owned(),
+                value,
+            ))),
             Err(TrySendError::Closed(value)) => Err(SendError(value)),
         }
     }
@@ -120,6 +112,11 @@ impl<T: Send> ChannelExt<T> for mpsc::Sender<T> {
 mod tests {
     use super::*;
     use commonware_macros::test_async;
+    use std::collections::BTreeMap;
+
+    struct Pending<'a, T> {
+        reservations: Vec<Reservation<'a, T>>,
+    }
 
     #[test]
     fn test_send_or_reserve_sends_immediately() {
@@ -168,5 +165,67 @@ mod tests {
             Ok(_) => panic!("reservation should fail"),
             Err(SendError(value)) => assert_eq!(value, 2),
         }
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_reservations_can_be_stored() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender.try_send(0).unwrap();
+
+        let mut reservations = Vec::new();
+        reservations.push(
+            sender
+                .send_or_reserve(1)
+                .unwrap()
+                .expect("channel should be full"),
+        );
+
+        let mut reservation_map = BTreeMap::new();
+        reservation_map.insert(
+            "next",
+            sender
+                .send_or_reserve(2)
+                .unwrap()
+                .expect("channel should be full"),
+        );
+
+        let mut pending: Pending<'_, i32> = Pending {
+            reservations: Vec::new(),
+        };
+        pending.reservations.push(
+            sender
+                .send_or_reserve(3)
+                .unwrap()
+                .expect("channel should be full"),
+        );
+
+        assert_eq!(receiver.recv().await, Some(0));
+        reservations.pop().unwrap().await.unwrap().send();
+        assert_eq!(receiver.recv().await, Some(1));
+        reservation_map.remove("next").unwrap().await.unwrap().send();
+        assert_eq!(receiver.recv().await, Some(2));
+        pending.reservations.pop().unwrap().await.unwrap().send();
+        assert_eq!(receiver.recv().await, Some(3));
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_reservation_can_hold_borrowed_value() {
+        let messages = [String::from("pending"), String::from("reserved")];
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender.try_send(messages[0].as_str()).unwrap();
+
+        let mut pending: Pending<'_, &str> = Pending {
+            reservations: Vec::new(),
+        };
+        pending.reservations.push(
+            sender
+                .send_or_reserve(messages[1].as_str())
+                .unwrap()
+                .expect("channel should be full"),
+        );
+
+        assert_eq!(receiver.recv().await, Some("pending"));
+        pending.reservations.pop().unwrap().await.unwrap().send();
+        assert_eq!(receiver.recv().await, Some("reserved"));
     }
 }
