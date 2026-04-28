@@ -16,6 +16,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
@@ -23,20 +24,21 @@ use commonware_utils::Array;
 pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
-pub type Db<F, E, K, V, H, T> =
-    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T>;
+pub type Db<F, E, K, V, H, T, S = Sequential> =
+    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
-pub type CompactDb<F, E, K, V, H> = super::CompactDb<F, E, K, FixedEncoding<V>, H>;
+pub type CompactDb<F, E, K, V, H, S = Sequential> =
+    super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, K, V, H> =
-    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H>;
+type Journal<F, E, K, V, H, S> =
+    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
 
 /// Configuration for a fixed-size immutable authenticated db.
-pub type Config<T> = BaseConfig<T, JournalConfig>;
+pub type Config<T, S = Sequential> = BaseConfig<T, JournalConfig, S>;
 
 /// Configuration for a fixed-size compact immutable db.
-pub type CompactConfig = super::CompactConfig<()>;
+pub type CompactConfig<S = Sequential> = super::CompactConfig<(), S>;
 
 impl<
         F: Family,
@@ -45,12 +47,13 @@ impl<
         V: FixedValue,
         H: Hasher,
         T: Translator,
-    > Db<F, E, K, V, H, T>
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H> = Journal::new(
+    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
+        let journal: Journal<F, E, K, V, H, S> = Journal::new(
             context.clone(),
             cfg.merkle_config,
             cfg.log,
@@ -61,11 +64,11 @@ impl<
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher>
-    CompactDb<F, E, K, V, H>
+impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, S: Strategy>
+    CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
         let merkle = crate::merkle::compact::Merkle::init(
             context,
             &crate::merkle::hasher::Standard::<H>::new(),
@@ -86,6 +89,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -102,7 +106,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {
@@ -128,7 +132,7 @@ mod tests {
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-immutable-fixed".into(),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: (),
         };

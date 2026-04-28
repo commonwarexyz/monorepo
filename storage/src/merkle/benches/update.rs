@@ -14,7 +14,7 @@ use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-enum Strategy {
+enum Mode {
     NoBatching,
     BatchedSerial,
     BatchedParallel,
@@ -33,23 +33,18 @@ const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
 fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, family: &str) {
     for updates in [1_000_000, 100_000] {
         for leaves in N_LEAVES {
-            for strategy in [
-                Strategy::NoBatching,
-                Strategy::BatchedSerial,
-                Strategy::BatchedParallel,
-            ] {
+            for mode in [Mode::NoBatching, Mode::BatchedSerial, Mode::BatchedParallel] {
                 c.bench_function(
                     &format!(
-                        "{}/updates={updates} leaves={leaves} strategy={strategy:?} family={family}",
+                        "{}/updates={updates} leaves={leaves} strategy={mode:?} family={family}",
                         module_path!(),
                     ),
                     |b| {
                         b.to_async(runner).iter_custom(|iters| async move {
-                            let pool = match strategy {
-                                Strategy::BatchedParallel => {
+                            let hash_mode = match mode {
+                                Mode::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                    let pool = ctx.create_thread_pool(THREADS).unwrap();
-                                    Some(pool)
+                                    Some(ctx.create_strategy(THREADS).unwrap())
                                 }
                                 _ => None,
                             };
@@ -85,8 +80,8 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     leaf_map.insert(rand_leaf_loc, *new_element);
                                 }
 
-                                match strategy {
-                                    Strategy::NoBatching => {
+                                match mode {
+                                    Mode::NoBatching => {
                                         for (loc, element) in &leaf_map {
                                             let batch = mem
                                                 .new_batch()
@@ -101,15 +96,23 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                             Location<F>,
                                             commonware_cryptography::sha256::Digest,
                                         )> = leaf_map.into_iter().collect();
-                                        let batch = {
-                                            let mut batch = mem.new_batch();
-                                            if let Some(ref p) = pool {
-                                                batch = batch.with_pool(Some(p.clone()));
+                                        match hash_mode {
+                                            Some(ref s) => {
+                                                let mut batch =
+                                                    mem.new_batch_with_strategy(s.clone());
+                                                batch =
+                                                    batch.update_leaf_batched(&updates).unwrap();
+                                                let batch = batch.merkleize(&mem, &h);
+                                                mem.apply_batch(&batch).unwrap();
                                             }
-                                            batch = batch.update_leaf_batched(&updates).unwrap();
-                                            batch.merkleize(&mem, &h)
+                                            None => {
+                                                let mut batch = mem.new_batch();
+                                                batch =
+                                                    batch.update_leaf_batched(&updates).unwrap();
+                                                let batch = batch.merkleize(&mem, &h);
+                                                mem.apply_batch(&batch).unwrap();
+                                            }
                                         };
-                                        mem.apply_batch(&batch).unwrap();
                                     }
                                 }
                             }

@@ -79,6 +79,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use tracing::warn;
 
 pub mod batch;
@@ -94,9 +95,9 @@ pub mod unordered;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J> {
+pub struct Config<T: Translator, J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -106,18 +107,18 @@ pub struct Config<T: Translator, J> {
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T> = Config<T, FConfig>;
+pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
+pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, Cb>(
+pub async fn init<F, E, U, H, T, I, J, Cb, S>(
     context: E,
-    cfg: Config<T, J::Config>,
+    cfg: Config<T, J::Config, S>,
     known_inactivity_floor: Option<Location<F>>,
     callback: Cb,
-) -> Result<db::Db<F, E, J, I, H, U>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
@@ -126,10 +127,11 @@ where
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
     Operation<F, U>: Committable + CodecShared,
     Cb: FnMut(bool, Option<Location<F>>),
 {
-    let mut log = J::init::<F, H>(
+    let mut log = J::init::<F, H, S>(
         context.with_label("log"),
         cfg.merkle_config,
         cfg.journal_config,
@@ -191,7 +193,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -215,7 +217,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: VConfig {

@@ -12,6 +12,7 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -19,15 +20,22 @@ pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T> =
-    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
+pub type Db<F, E, K, V, H, T, S = Sequential> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
 
-impl<F: merkle::Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<F, E, K, V, H, T>
+impl<
+        F: merkle::Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
     }
 
@@ -39,7 +47,7 @@ impl<F: merkle::Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Trans
     /// previous location (if any).
     pub(crate) async fn init_with_callback(
         context: E,
-        cfg: Config<T>,
+        cfg: Config<T, S>,
         known_inactivity_floor: Option<Location<F>>,
         callback: impl FnMut(bool, Option<Location<F>>),
     ) -> Result<Self, Error<F>> {
@@ -66,6 +74,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_cryptography::Hasher;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
@@ -77,13 +86,14 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<F, E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+    pub type Db<F, E, K, V, H, T, const P: usize, S = Sequential> = crate::qmdb::any::unordered::Db<
         F,
         E,
         Journal<E, Operation<F, K, V>>,
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
+        S,
     >;
 
     impl<
@@ -94,11 +104,12 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<F, E, K, V, H, T, P>
+            S: Strategy,
+        > Db<F, E, K, V, H, T, P, S>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
-        pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
+        pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
             Self::init_with_callback(context, cfg, None, |_, _| {}).await
         }
 
@@ -110,7 +121,7 @@ pub mod partitioned {
         /// previous location (if any).
         pub(crate) async fn init_with_callback(
             context: E,
-            cfg: Config<T>,
+            cfg: Config<T, S>,
             known_inactivity_floor: Option<Location<F>>,
             callback: impl FnMut(bool, Option<Location<F>>),
         ) -> Result<Self, Error<F>> {
@@ -120,14 +131,16 @@ pub mod partitioned {
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
+        use super::Sequential;
         /// Fixed-value DB with 256 partitions.
-        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 1>;
+        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
+        use super::Sequential;
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 2>;
+        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 2, S>;
     }
 }
 

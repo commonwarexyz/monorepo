@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -197,7 +198,7 @@ fn test_config(
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         log: VConfig {

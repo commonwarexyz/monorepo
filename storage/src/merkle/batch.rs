@@ -89,17 +89,8 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Digest;
+use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use commonware_parallel::ThreadPool;
-        use rayon::prelude::*;
-    }
-}
-
-/// Minimum number of digest computations required to trigger parallelization.
-#[cfg(feature = "std")]
-pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -116,8 +107,8 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, D: Digest> {
-    parent: Arc<MerkleizedBatch<F, D>>,
+pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
+    parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
     overwrites: BTreeMap<Position<F>, D>,
     /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
@@ -125,34 +116,22 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest> {
     /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
     /// in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
     dirty_nodes: Vec<Vec<Position<F>>>,
-    #[cfg(feature = "std")]
-    pool: Option<ThreadPool>,
 }
 
-impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
+impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Create a new batch from `parent`.
-    pub const fn new(parent: Arc<MerkleizedBatch<F, D>>) -> Self {
+    pub const fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
         Self {
             parent,
             appended: Vec::new(),
             overwrites: BTreeMap::new(),
             dirty_nodes: Vec::new(),
-            #[cfg(feature = "std")]
-            pool: None,
         }
     }
 
-    /// Set a thread pool for parallel merkleization.
-    #[cfg(feature = "std")]
-    pub fn with_pool(mut self, pool: Option<ThreadPool>) -> Self {
-        self.pool = pool;
-        self
-    }
-
-    /// Return a reference to the thread pool, if any.
-    #[cfg(feature = "std")]
-    pub const fn pool(&self) -> Option<&ThreadPool> {
-        self.pool.as_ref()
+    /// Return a reference to the batch's strategy.
+    pub fn strategy(&self) -> &S {
+        &self.parent.strategy
     }
 
     /// The total number of nodes visible through this batch.
@@ -317,7 +296,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         mut self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
-    ) -> Arc<MerkleizedBatch<F, D>> {
+    ) -> Arc<MerkleizedBatch<F, D, S>> {
         // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
         // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
         // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
@@ -326,21 +305,12 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             bucket.sort();
             bucket.dedup();
         }
-        #[cfg(feature = "std")]
-        if let Some(pool) = self.pool.take() {
-            let total: usize = buckets.iter().map(Vec::len).sum();
-            if total >= MIN_TO_PARALLELIZE {
-                self.merkleize_parallel(base, hasher, &pool, &buckets);
-            } else {
-                self.merkleize_serial(base, hasher, &buckets);
+        for (height, positions) in buckets.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
             }
-            self.pool = Some(pool);
-        } else {
-            self.merkleize_serial(base, hasher, &buckets);
+            self.merkleize_bucket(base, hasher, positions, height as u32);
         }
-
-        #[cfg(not(feature = "std"))]
-        self.merkleize_serial(base, hasher, &buckets);
 
         // Compute root from peaks.
         let leaves = self.leaves();
@@ -363,88 +333,29 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             pruning_boundary: self.parent.pruning_boundary(),
             ancestor_appended,
             ancestor_overwrites,
-            #[cfg(feature = "std")]
-            pool: self.pool,
+            strategy: self.parent.strategy.clone(),
         })
     }
 
-    /// Compute digests for dirty internal nodes, bottom-up by height.
-    fn merkleize_serial(
-        &mut self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        buckets: &[Vec<Position<F>>],
-    ) {
-        for (height, positions) in buckets.iter().enumerate() {
-            self.merkleize_bucket_serial(base, hasher, positions, height as u32);
-        }
-    }
-
-    /// Compute digests for one height's dirty nodes serially.
-    fn merkleize_bucket_serial(
+    /// Compute digests for one height's dirty nodes via the configured strategy.
+    fn merkleize_bucket(
         &mut self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
     ) {
-        for &pos in positions {
-            let (left, right) = F::children(pos, height);
-            let left_d = self.get_node(base, left).expect("left child missing");
-            let right_d = self.get_node(base, right).expect("right child missing");
-            let digest = hasher.node_digest(pos, &left_d, &right_d);
-            self.store_node(pos, digest);
-        }
-    }
-
-    /// Process dirty nodes in parallel, one height bucket at a time. Falls back to serial
-    /// for buckets below the parallelization threshold.
-    #[cfg(feature = "std")]
-    fn merkleize_parallel(
-        &mut self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        pool: &ThreadPool,
-        buckets: &[Vec<Position<F>>],
-    ) {
-        for (height, positions) in buckets.iter().enumerate() {
-            if positions.is_empty() {
-                continue;
-            }
-            let height = height as u32;
-            if positions.len() < MIN_TO_PARALLELIZE {
-                self.merkleize_bucket_serial(base, hasher, positions, height);
-            } else {
-                self.compute_height_parallel(base, hasher, pool, positions, height);
-            }
-        }
-    }
-
-    /// Compute digests for nodes at the same height in parallel, then store sequentially.
-    #[cfg(feature = "std")]
-    fn compute_height_parallel(
-        &mut self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        pool: &ThreadPool,
-        same_height: &[Position<F>],
-        height: u32,
-    ) {
-        let computed: Vec<(Position<F>, D)> = pool.install(|| {
-            same_height
-                .par_iter()
-                .map_init(
-                    || hasher.clone(),
-                    |hasher, &pos| {
-                        let (left, right) = F::children(pos, height);
-                        let left_d = self.get_node(base, left).expect("left child missing");
-                        let right_d = self.get_node(base, right).expect("right child missing");
-                        let digest = hasher.node_digest(pos, &left_d, &right_d);
-                        (pos, digest)
-                    },
-                )
-                .collect()
-        });
+        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
+            positions,
+            || hasher.clone(),
+            |hasher, &pos| {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let digest = hasher.node_digest(pos, &left_d, &right_d);
+                (pos, digest)
+            },
+        );
         for (pos, digest) in computed {
             self.store_node(pos, digest);
         }
@@ -455,8 +366,8 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
 /// Returns (appended, overwrites) in root-to-tip order. Skips empty batches
 /// (e.g. root batches from `from_mem`).
 #[allow(clippy::type_complexity)]
-fn collect_ancestor_batches<F: Family, D: Digest>(
-    parent: &Arc<MerkleizedBatch<F, D>>,
+fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
+    parent: &Arc<MerkleizedBatch<F, D, S>>,
 ) -> (Vec<Arc<Vec<D>>>, Vec<Arc<BTreeMap<Position<F>, D>>>) {
     let mut appended = Vec::new();
     let mut overwrites = Vec::new();
@@ -489,7 +400,7 @@ fn collect_ancestor_batches<F: Family, D: Digest>(
 /// A speculative batch whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Debug)]
-pub struct MerkleizedBatch<F: Family, D: Digest> {
+pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
 
@@ -521,13 +432,21 @@ pub struct MerkleizedBatch<F: Family, D: Digest> {
     /// ancestors are alive. Root-to-tip order.
     pub(crate) ancestor_overwrites: Vec<Arc<BTreeMap<Position<F>, D>>>,
 
-    #[cfg(feature = "std")]
-    pub(crate) pool: Option<ThreadPool>,
+    pub(crate) strategy: S,
 }
 
-impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
-    /// Create a root batch representing the committed state of `mem`.
+impl<F: Family, D: Digest> MerkleizedBatch<F, D, Sequential> {
+    /// Create a root batch representing the committed state of `mem`, with the default
+    /// [`Sequential`] strategy.
     pub fn from_mem(mem: &Mem<F, D>) -> Arc<Self> {
+        Self::from_mem_with_strategy(mem, Sequential)
+    }
+}
+
+impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
+    /// Create a root batch representing the committed state of `mem`, using `strategy`
+    /// for merkleization.
+    pub fn from_mem_with_strategy(mem: &Mem<F, D>, strategy: S) -> Arc<Self> {
         Arc::new(Self {
             parent: None,
             appended: Arc::new(Vec::new()),
@@ -538,8 +457,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
             pruning_boundary: Readable::pruning_boundary(mem),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
-            #[cfg(feature = "std")]
-            pool: None,
+            strategy,
         })
     }
 
@@ -598,20 +516,22 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
     ///
     /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
     /// fork has been applied.
-    pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D> {
-        let batch = UnmerkleizedBatch::new(Arc::clone(self));
-        #[cfg(feature = "std")]
-        let batch = batch.with_pool(self.pool.clone());
-        batch
+    pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D, S> {
+        UnmerkleizedBatch::new(Arc::clone(self))
     }
 
     /// Number of nodes in the committed Mem when the batch chain was forked.
     pub const fn base_size(&self) -> Position<F> {
         self.base_size
     }
+
+    /// Return a reference to the batch's strategy.
+    pub const fn strategy(&self) -> &S {
+        &self.strategy
+    }
 }
 
-impl<F: Family, D: Digest> Readable for MerkleizedBatch<F, D> {
+impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
     type Family = F;
     type Digest = D;
     type Error = Error<F>;

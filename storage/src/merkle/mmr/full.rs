@@ -14,12 +14,13 @@
 pub use crate::merkle::full::Config;
 pub use crate::merkle::full::UnmerkleizedBatch;
 use crate::merkle::mmr::Family;
+use commonware_parallel::Sequential;
 
 /// Configuration for initializing a full MMR for synchronization.
-pub type SyncConfig<D> = crate::merkle::full::SyncConfig<Family, D>;
+pub type SyncConfig<D, S = Sequential> = crate::merkle::full::SyncConfig<Family, D, S>;
 
 /// A MMR backed by a fixed-item-length journal.
-pub type Mmr<E, D> = crate::merkle::full::Merkle<Family, E, D>;
+pub type Mmr<E, D, S = Sequential> = crate::merkle::full::Merkle<Family, E, D, S>;
 
 #[cfg(test)]
 mod tests {
@@ -30,6 +31,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
     };
@@ -49,7 +51,7 @@ mod tests {
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -315,7 +317,7 @@ mod tests {
                 metadata_partition: "ref-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut ref_mmr = Mmr::<_, Digest>::init(context.with_label("ref"), &hasher, ref_cfg)

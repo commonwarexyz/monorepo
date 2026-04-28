@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -105,7 +106,7 @@ fn db_config(
             metadata_partition: format!("metadata-{suffix}"),
             items_per_blob: NZU64!(ITEMS_PER_BLOB),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         log: VConfig {
