@@ -119,7 +119,6 @@ where
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
-        // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(&context);
 
         let result = Self {

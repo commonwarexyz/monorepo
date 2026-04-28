@@ -108,7 +108,6 @@ impl<
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
-        // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
             context.child("fetcher"),

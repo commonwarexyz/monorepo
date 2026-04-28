@@ -114,7 +114,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         peers.insert(myself.public_key.clone(), Record::myself(myself));
 
         // Other initialization.
-        // TODO(#1833): Metrics should use the post-start context
         let metrics = Metrics::init(&context);
         let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
