@@ -1,0 +1,67 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: codspeed-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_CODSPEED_VERSION: 4.6.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  Benchmarks:
+    name: "${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: commonware-cryptography
+            package: commonware-cryptography
+            cargo_flags: ""
+          - name: commonware-storage bmt
+            package: commonware-storage
+            cargo_flags: "--bench bmt"
+          - name: commonware-coding
+            package: commonware-coding
+            cargo_flags: ""
+          - name: commonware-math
+            package: commonware-math
+            cargo_flags: ""
+          - name: commonware-utils
+            package: commonware-utils
+            cargo_flags: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          additional-cache-key: codspeed-${{ matrix.package }}-${{ matrix.cargo_flags || 'default' }}
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+        with:
+          tool: cargo-binstall@1.15.5
+      - name: Install cargo-codspeed
+        run: cargo binstall cargo-codspeed --version "$CARGO_CODSPEED_VERSION" --no-confirm
+      - name: Build benchmarks
+        run: cargo codspeed build -p ${{ matrix.package }} ${{ matrix.cargo_flags }}
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@c381be0bfd20e844fb45594f6aa182ffcd94545c # v4.15.0
+        with:
+          mode: simulation
+          run: cargo codspeed run
