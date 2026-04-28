@@ -9,7 +9,7 @@ use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
-    tokio, Buf, Quota, Runner, Spawner,
+    tokio, Buf, Quota, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
