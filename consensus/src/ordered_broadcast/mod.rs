@@ -768,7 +768,7 @@ mod tests {
                     fixture.verifier.clone(),
                     Some(5),
                 );
-            reporter.start();
+                reporter.start();
                 reporters.insert(validator.clone(), reporter_mailbox);
 
                 let engine = Engine::new(
@@ -937,7 +937,7 @@ mod tests {
                     fixture.verifier.clone(),
                     Some(5),
                 );
-            reporter.start();
+                reporter.start();
                 reporters.insert(validator.clone(), reporter_mailbox);
 
                 let engine = Engine::new(
@@ -985,7 +985,7 @@ mod tests {
                     fixture.verifier.clone(),
                     Some(5),
                 );
-            reporter.start();
+                reporter.start();
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
 
                 // Sequencer doesn't need a scheme (it uses ed25519 signing directly)

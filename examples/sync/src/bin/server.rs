@@ -10,7 +10,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf,
+    Spawner, Storage, StreamOf, Supervisor as _,
 };
 use commonware_storage::{
     mmr,

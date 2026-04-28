@@ -910,7 +910,6 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-
                 spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
 
             // Abort all engines immediately
@@ -944,7 +943,6 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-
                 spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
 
             // Allow tasks to start

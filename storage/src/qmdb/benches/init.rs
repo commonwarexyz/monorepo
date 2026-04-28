@@ -10,7 +10,7 @@ use crate::common::{
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Runner as _,
+    Runner as _, Supervisor as _,
 };
 use commonware_storage::{merkle::Family, qmdb::any::traits::DbAny};
 use criterion::{criterion_group, Criterion};

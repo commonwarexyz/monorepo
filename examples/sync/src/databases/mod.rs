@@ -221,7 +221,7 @@ mod tests {
         immutable, immutable_compact, keyless, keyless_compact, DatabaseType, ExampleDatabase,
         SyncMode,
     };
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     #[test]
     fn test_supported_client_mode_matrix() {

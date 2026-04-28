@@ -7,6 +7,7 @@ use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
+    Supervisor as _,
 };
 use commonware_storage::{
     mmr,

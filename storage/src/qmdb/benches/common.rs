@@ -2,9 +2,7 @@
 //! macros, and the common `gen_random_kv` helper.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{
-    buffer::paged::CacheRef, tokio::Context, BufferPooler, Supervisor as _, ThreadPooler,
-};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full::Config as MerkleConfig, Family},
