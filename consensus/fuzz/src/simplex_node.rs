@@ -1496,9 +1496,7 @@ where
         pending,
         recovered,
         resolver,
-    )
-    .with_strict(false);
-
+    );
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
     let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
 
@@ -1565,8 +1563,7 @@ pub(crate) fn run_recovery<P: simplex_protocol::Simplex>(
             pending,
             recovered,
             resolver,
-        )
-        .with_strict(false);
+        );
 
         let _ = reporter.subscribe().await;
         context.sleep(std::time::Duration::from_millis(50)).await;

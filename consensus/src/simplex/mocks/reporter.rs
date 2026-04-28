@@ -64,7 +64,6 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
-    strict: Arc<Mutex<bool>>,
 }
 
 impl<E, S, L, D> Reporter<E, S, L, D>
@@ -96,13 +95,7 @@ where
             invalid_certificates: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
-            strict: Arc::new(Mutex::new(true)),
         }
-    }
-
-    pub fn with_strict(self, strict: bool) -> Self {
-        *self.strict.lock() = strict;
-        self
     }
 
     fn certified(&self, round: Round, certificate: &S::Certificate) {
@@ -144,13 +137,9 @@ where
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
-        let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
                 if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -176,9 +165,6 @@ where
                     &notarization.certificate,
                     &Sequential,
                 ) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_certificates.lock() += 1;
                     return;
                 }
@@ -190,9 +176,6 @@ where
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -216,9 +199,6 @@ where
                     &nullification.certificate,
                     &Sequential,
                 ) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_certificates.lock() += 1;
                     return;
                 }
@@ -232,9 +212,6 @@ where
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut self.context, &self.scheme, &Sequential) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -260,9 +237,6 @@ where
                     &finalization.certificate,
                     &Sequential,
                 ) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_certificates.lock() += 1;
                     return;
                 }
@@ -282,9 +256,6 @@ where
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -302,9 +273,6 @@ where
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -322,9 +290,6 @@ where
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
-                    if *self.strict.lock() {
-                        assert!(!verified);
-                    }
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
