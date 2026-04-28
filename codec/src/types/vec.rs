@@ -75,6 +75,7 @@ mod tests {
         types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
         DecodeRangeExt, Encode,
     };
+    use bytes::{Bytes, BytesMut};
 
     #[test]
     fn test_vec() {
@@ -203,6 +204,42 @@ mod tests {
         assert_eq!(value, vec![Byte(1), Byte(2), Byte(3)]);
         assert_eq!(buf.copy_to_slice_calls, 0);
         assert_eq!(buf.get_u8_calls, 4);
+    }
+
+    #[test]
+    fn test_write_bufs_equivalence() {
+        fn assert_equivalent<T: Write>(value: &T) {
+            let mut write = BytesMut::new();
+            value.write(&mut write);
+
+            let mut write_bufs = TrackingWriteBuf::new();
+            value.write_bufs(&mut write_bufs);
+
+            assert_eq!(write.freeze(), write_bufs.freeze());
+        }
+
+        assert_equivalent(&vec![1u8, 2, 3]);
+        assert_equivalent(&vec![0x0102u16, 0x0304, 0x0506]);
+        assert_equivalent(&vec![Byte(1), Byte(2), Byte(3)]);
+        assert_equivalent(&vec![
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ]);
+
+        let values = [1u8, 2, 3];
+        assert_equivalent(&values.as_slice());
+
+        let values = [0x0102u16, 0x0304, 0x0506];
+        assert_equivalent(&values.as_slice());
+
+        let values = [Byte(1), Byte(2), Byte(3)];
+        assert_equivalent(&values.as_slice());
+
+        let values = [
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ];
+        assert_equivalent(&values.as_slice());
     }
 
     #[test]
