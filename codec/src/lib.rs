@@ -32,7 +32,7 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
-//! # Implementation Notes
+//! # Specialization
 //!
 //! Byte-oriented container paths use hidden trait hooks on [Write], [Read], and [EncodeSize] to
 //! select bulk-copy implementations while keeping generic fallbacks. Container implementations
@@ -56,13 +56,8 @@
 //!   [u8], [u16], [u32], [u64], [u128],
 //!   [i8], [i16], [i32], [i64], [i128],
 //!   [f32], [f64], and [usize] (must fit within a [u32] for cross-platform compatibility).
-//! - Arrays: `[T; N]` implements [Write] and [Read] when `T` does. That means arrays with
-//!   variable-size elements, such as `[Vec<u8>; N]`, can be written, read, and decoded through
-//!   [Decode]. Arrays implement [FixedSize] only when `T: FixedSize`, preserving [Encode],
-//!   [Codec], [EncodeFixed], and [CodecFixed] for `[u8; N]` and other fixed-size arrays.
-//!   Variable-size arrays do not implement [Encode] or [Codec], because a generic array
-//!   [EncodeSize] implementation would overlap with the blanket [EncodeSize] implementation for
-//!   all [FixedSize] types.
+//! - Arrays: `[T; N]` supports [Write] and [Read] when `T` does, and supports [FixedSize],
+//!   [Encode], [Codec], [EncodeFixed], and [CodecFixed] when `T: FixedSize`.
 //! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Common External Types: [::bytes::Bytes]
