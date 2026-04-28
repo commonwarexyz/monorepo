@@ -1584,6 +1584,7 @@ dependencies = [
  "console-subscriber",
  "criterion",
  "crossbeam-queue",
+ "crossbeam-utils",
  "futures",
  "getrandom 0.2.16",
  "governor",

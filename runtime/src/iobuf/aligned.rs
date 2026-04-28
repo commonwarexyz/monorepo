@@ -26,7 +26,7 @@ use std::{
 ///
 /// This is the raw storage primitive used by both untracked aligned buffers
 /// and pooled buffers.
-pub(crate) struct AlignedBuffer {
+pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
 }
@@ -49,7 +49,8 @@ impl AlignedBuffer {
     /// Panics if:
     /// - `capacity == 0`
     /// - `alignment` is not a power of two
-    pub(crate) fn new(capacity: usize, alignment: usize) -> Self {
+    #[inline]
+    pub fn new(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
         assert!(
             alignment.is_power_of_two(),
@@ -69,6 +70,7 @@ impl AlignedBuffer {
     /// Panics if:
     /// - `capacity == 0`
     /// - `alignment` is not a power of two
+    #[inline]
     pub(crate) fn new_zeroed(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
         assert!(
@@ -126,12 +128,13 @@ impl Owner for UntrackedOwner {
 #[derive(Clone)]
 pub(crate) struct TrackedOwner {
     class: Arc<SizeClass>,
+    slot: u32,
 }
 
 impl Owner for TrackedOwner {
     #[inline]
     fn release(self, buffer: AlignedBuffer) {
-        BufferPoolThreadCache::push(self.class, buffer);
+        BufferPoolThreadCache::push(self.class, self.slot, buffer);
     }
 }
 
@@ -154,6 +157,7 @@ unsafe impl<O: Owner> Send for BufInner<O> {}
 unsafe impl<O: Owner> Sync for BufInner<O> {}
 
 impl<O: Owner> BufInner<O> {
+    #[inline]
     const fn new(buffer: AlignedBuffer, owner: O) -> Self {
         Self {
             buffer: ManuallyDrop::new(buffer),
@@ -678,9 +682,9 @@ impl std::fmt::Debug for BufMut<TrackedOwner> {
 
 impl BufMut<TrackedOwner> {
     #[inline]
-    pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>) -> Self {
+    pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>, slot: u32) -> Self {
         Self {
-            inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class })),
+            inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class, slot })),
             cursor: 0,
             len: 0,
         }
@@ -709,7 +713,7 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU32};
     use std::ops::Bound;
 
     fn page_size() -> usize {
@@ -721,13 +725,14 @@ mod tests {
         BufferPool::new(config, &mut registry)
     }
 
-    fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {
+    fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
         BufferPoolConfig {
             pool_min_size: 0,
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
-            max_per_class: NZUsize!(max_per_class),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            max_per_class: NZU32!(max_per_class),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
             prefill: false,
             alignment: NZUsize!(page_size()),
         }
@@ -796,6 +801,17 @@ mod tests {
         // Empty aligned owners should detach into empty Bytes cleanly.
         let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page)).into_bytes();
         assert!(empty_bytes.is_empty());
+        let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page))
+            .into_aligned()
+            .into_bytes();
+        assert!(empty_bytes.is_empty());
+
+        // Non-empty mutable owners should hand their readable window to Bytes
+        // without copying.
+        let mut bytes_mut_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
+        bytes_mut_source.put_slice(b"data");
+        let owned_bytes = bytes_mut_source.into_bytes();
+        assert_eq!(owned_bytes.as_ref(), b"data");
 
         // Cover immutable debug/view/slice paths on the aligned wrapper.
         let mut aligned = aligned_mut.into_aligned();
@@ -804,6 +820,7 @@ mod tests {
         assert_eq!(aligned.as_ptr(), aligned.as_ref().as_ptr());
         assert_eq!(aligned.as_ref(), b"wxyz");
         assert_eq!(aligned.slice(..2).unwrap().as_ref(), b"wx");
+        assert_eq!(aligned.slice(..=2).unwrap().as_ref(), b"wxy");
         assert_eq!(aligned.slice(1..).unwrap().as_ref(), b"xyz");
         assert_eq!(aligned.slice(1..=2).unwrap().as_ref(), b"xy");
         assert_eq!(
@@ -869,6 +886,8 @@ mod tests {
         // Slicing the frozen buffer works.
         let slice = iobuf.slice(0..5);
         assert_eq!(slice.len(), 5);
+        let slice = iobuf.slice(1..=4);
+        assert_eq!(slice.as_ref(), &[2, 3, 4, 5]);
     }
 
     #[test]
