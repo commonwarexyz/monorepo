@@ -1230,32 +1230,37 @@ mod tests {
 
     // ---- next_candidate tests ----
 
-    fn nc(bm: &Bm, floor: u64, tip: u64) -> Option<Location> {
-        next_candidate::<mmr::Family, _, N>(bm, Location::new(floor), tip)
-    }
-
     #[test]
     fn bitmap_scan_all_active() {
         let bm = make_bitmap(&[true; 8]);
         for i in 0..8 {
-            assert_eq!(nc(&bm, i, 8), Some(Location::new(i)));
+            assert_eq!(
+                next_candidate(&bm, Location::new(i), 8),
+                Some(Location::new(i))
+            );
         }
-        assert_eq!(nc(&bm, 8, 8), None);
+        assert_eq!(next_candidate(&bm, Location::new(8), 8), None);
     }
 
     #[test]
     fn bitmap_scan_all_inactive() {
         let bm = make_bitmap(&[false; 8]);
-        assert_eq!(nc(&bm, 0, 8), None);
+        assert_eq!(next_candidate(&bm, Location::new(0), 8), None);
     }
 
     #[test]
     fn bitmap_scan_skips_inactive() {
         // Pattern: inactive, inactive, active, inactive, active
         let bm = make_bitmap(&[false, false, true, false, true]);
-        assert_eq!(nc(&bm, 0, 5), Some(Location::new(2)));
-        assert_eq!(nc(&bm, 3, 5), Some(Location::new(4)));
-        assert_eq!(nc(&bm, 5, 5), None);
+        assert_eq!(
+            next_candidate(&bm, Location::new(0), 5),
+            Some(Location::new(2))
+        );
+        assert_eq!(
+            next_candidate(&bm, Location::new(3), 5),
+            Some(Location::new(4))
+        );
+        assert_eq!(next_candidate(&bm, Location::new(5), 5), None);
     }
 
     #[test]
@@ -1264,32 +1269,44 @@ mod tests {
         // returned as candidates.
         let bm = make_bitmap(&[false; 4]);
         // All bitmap bits are unset, so 0..4 are skipped; loc 4 is beyond bitmap -> candidate.
-        assert_eq!(nc(&bm, 0, 8), Some(Location::new(4)));
-        assert_eq!(nc(&bm, 6, 8), Some(Location::new(6)));
+        assert_eq!(
+            next_candidate(&bm, Location::new(0), 8),
+            Some(Location::new(4))
+        );
+        assert_eq!(
+            next_candidate(&bm, Location::new(6), 8),
+            Some(Location::new(6))
+        );
     }
 
     #[test]
     fn bitmap_scan_respects_tip() {
         let bm = make_bitmap(&[false, false, false, true]);
         // Active bit at 3, but tip is 3 so it's excluded.
-        assert_eq!(nc(&bm, 0, 3), None);
+        assert_eq!(next_candidate(&bm, Location::new(0), 3), None);
         // With tip=4, bit 3 is included.
-        assert_eq!(nc(&bm, 0, 4), Some(Location::new(3)));
+        assert_eq!(
+            next_candidate(&bm, Location::new(0), 4),
+            Some(Location::new(3))
+        );
     }
 
     #[test]
     fn bitmap_scan_floor_at_tip() {
         let bm = make_bitmap(&[true; 4]);
-        assert_eq!(nc(&bm, 4, 4), None);
+        assert_eq!(next_candidate(&bm, Location::new(4), 4), None);
     }
 
     #[test]
     fn bitmap_scan_empty_bitmap() {
         let bm = Bm::new();
         // Empty bitmap, but tip > 0: all locations are beyond bitmap.
-        assert_eq!(nc(&bm, 0, 5), Some(Location::new(0)));
+        assert_eq!(
+            next_candidate(&bm, Location::new(0), 5),
+            Some(Location::new(0))
+        );
         // Empty bitmap, tip = 0: no candidates.
-        assert_eq!(nc(&bm, 0, 0), None);
+        assert_eq!(next_candidate(&bm, Location::new(0), 0), None);
     }
 
     // ---- trim_committed tests ----
