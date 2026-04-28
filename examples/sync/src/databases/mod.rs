@@ -221,7 +221,7 @@ mod tests {
         immutable, immutable_compact, keyless, keyless_compact, DatabaseType, ExampleDatabase,
         SyncMode,
     };
-    use commonware_runtime::{deterministic, Metrics as _, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _};
 
     #[test]
     fn test_supported_client_mode_matrix() {
@@ -251,13 +251,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut full = immutable::Database::init(
-                context.with_label("full"),
+                context.child("full"),
                 immutable::create_config(&context),
             )
             .await
             .unwrap();
             let mut compact = immutable_compact::Database::init(
-                context.with_label("compact"),
+                context.child("compact"),
                 immutable_compact::create_config(&context),
             )
             .await
@@ -286,14 +286,12 @@ mod tests {
     fn test_keyless_full_compact_root_floor_equivalence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut full = keyless::Database::init(
-                context.with_label("full"),
-                keyless::create_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut full =
+                keyless::Database::init(context.child("full"), keyless::create_config(&context))
+                    .await
+                    .unwrap();
             let mut compact = keyless_compact::Database::init(
-                context.with_label("compact"),
+                context.child("compact"),
                 keyless_compact::create_config(&context),
             )
             .await

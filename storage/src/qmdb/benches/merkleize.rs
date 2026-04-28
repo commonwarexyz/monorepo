@@ -12,7 +12,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler,
+    BufferPooler, Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -459,99 +459,99 @@ macro_rules! variants {
 variants! {
     AnyFixed {
         name: "any::unordered::fixed::mmr",
-        init: |ctx| AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx| AnyUFix::init(ctx.child("storage"), any_fix_cfg(&ctx)),
     }
     AnyVariable {
         name: "any::unordered::variable::mmr",
-        init: |ctx| AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx| AnyUVar::init(ctx.child("storage"), any_var_cfg(&ctx)),
     }
     AnyFixedMmb {
         name: "any::unordered::fixed::mmb",
-        init: |ctx| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx| AnyUFixMmb::init(ctx.child("storage"), any_fix_cfg(&ctx)),
     }
     AnyVariableMmb {
         name: "any::unordered::variable::mmb",
-        init: |ctx| AnyUVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx| AnyUVarMmb::init(ctx.child("storage"), any_var_cfg(&ctx)),
     }
     AnyOrderedFixed {
         name: "any::ordered::fixed::mmr",
-        init: |ctx| AnyOFix::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx| AnyOFix::init(ctx.child("storage"), any_fix_cfg(&ctx)),
     }
     AnyOrderedVariable {
         name: "any::ordered::variable::mmr",
-        init: |ctx| AnyOVar::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx| AnyOVar::init(ctx.child("storage"), any_var_cfg(&ctx)),
     }
     AnyOrderedFixedMmb {
         name: "any::ordered::fixed::mmb",
-        init: |ctx| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx| AnyOFixMmb::init(ctx.child("storage"), any_fix_cfg(&ctx)),
     }
     AnyOrderedVariableMmb {
         name: "any::ordered::variable::mmb",
-        init: |ctx| AnyOVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx| AnyOVarMmb::init(ctx.child("storage"), any_var_cfg(&ctx)),
     }
     CurrentFixed32 {
         name: "current::unordered::fixed::mmr chunk=32",
-        init: |ctx| CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurUFix32::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentVariable32 {
         name: "current::unordered::variable::mmr chunk=32",
-        init: |ctx| CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurUVar32::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentFixed32Mmb {
         name: "current::unordered::fixed::mmb chunk=32",
-        init: |ctx| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurUFix32Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentVariable32Mmb {
         name: "current::unordered::variable::mmb chunk=32",
-        init: |ctx| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurUVar32Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentFixed256 {
         name: "current::unordered::fixed::mmr chunk=256",
-        init: |ctx| CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurUFix256::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentVariable256 {
         name: "current::unordered::variable::mmr chunk=256",
-        init: |ctx| CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurUVar256::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentFixed256Mmb {
         name: "current::unordered::fixed::mmb chunk=256",
-        init: |ctx| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurUFix256Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentVariable256Mmb {
         name: "current::unordered::variable::mmb chunk=256",
-        init: |ctx| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurUVar256Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentOrderedFixed32 {
         name: "current::ordered::fixed::mmr chunk=32",
-        init: |ctx| CurOFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurOFix32::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentOrderedVariable32 {
         name: "current::ordered::variable::mmr chunk=32",
-        init: |ctx| CurOVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurOVar32::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentOrderedFixed32Mmb {
         name: "current::ordered::fixed::mmb chunk=32",
-        init: |ctx| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurOFix32Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentOrderedVariable32Mmb {
         name: "current::ordered::variable::mmb chunk=32",
-        init: |ctx| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurOVar32Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentOrderedFixed256 {
         name: "current::ordered::fixed::mmr chunk=256",
-        init: |ctx| CurOFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurOFix256::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentOrderedVariable256 {
         name: "current::ordered::variable::mmr chunk=256",
-        init: |ctx| CurOVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurOVar256::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
     CurrentOrderedFixed256Mmb {
         name: "current::ordered::fixed::mmb chunk=256",
-        init: |ctx| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx| CurOFix256Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx)),
     }
     CurrentOrderedVariable256Mmb {
         name: "current::ordered::variable::mmb chunk=256",
-        init: |ctx| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx| CurOVar256Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx)),
     }
 }
 

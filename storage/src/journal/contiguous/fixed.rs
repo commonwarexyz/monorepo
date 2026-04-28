@@ -66,6 +66,8 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use commonware_utils::sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -416,8 +418,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut journal =
-            SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
+        let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
         // Initialize metadata store
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
@@ -425,7 +426,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg).await?;
+            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
 
         // Parse metadata if present
         let meta_pruning_boundary = match metadata.get(&PRUNING_BOUNDARY_KEY) {
@@ -647,9 +648,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg).await?;
-        let mut journal =
-            SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
+            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
+        let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
 
         // Clear blobs before updating metadata.
         // This ordering is critical for crash safety:
@@ -1046,7 +1046,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, BufferPooler, Error as RuntimeError, Metrics, Runner, Storage,
+        Blob, BufferPooler, Error as RuntimeError, Runner, Storage,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -1112,8 +1112,7 @@ mod tests {
                 .expect("Failed to write new blob");
             new_blob.sync().await.expect("Failed to sync new blob");
 
-            let result =
-                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1140,7 +1139,7 @@ mod tests {
                 .await
                 .expect("Failed to sync legacy blob");
 
-            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(&test_digest(1)).await.unwrap();
@@ -1162,7 +1161,7 @@ mod tests {
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(&test_digest(1)).await.unwrap();
@@ -1185,7 +1184,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1201,7 +1200,7 @@ mod tests {
             drop(journal);
 
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 1);
@@ -1332,7 +1331,7 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Append 2 blobs worth of items.
@@ -1345,7 +1344,7 @@ mod tests {
             // Sync, reopen, then read back.
             journal.sync().await.expect("failed to sync journal");
             drop(journal);
-            let journal = Journal::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             for i in 0u64..10000 {
@@ -1366,7 +1365,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1431,7 +1430,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1479,7 +1478,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1507,7 +1506,7 @@ mod tests {
 
             // The segmented journal will trim the incomplete blob on init, resulting in the blob
             // missing one item. This should be detected as corruption during replay.
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1536,7 +1535,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for i in 0u64..5 {
@@ -1554,7 +1553,7 @@ mod tests {
                 .expect("failed to remove blob");
 
             // Init won't detect the corruption.
-            let result = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("init shouldn't fail");
 
@@ -1584,7 +1583,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1609,7 +1608,7 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1635,7 +1634,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1697,7 +1696,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
             let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -1720,7 +1719,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // The truncation invalidates the last page, which is removed. This loses one item.
@@ -1734,7 +1733,7 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
 
-            let journal = Journal::<_, Digest>::init(context.with_label("third"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // Only the first blob remains
@@ -1750,7 +1749,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .expect("failed to initialize journal at size");
 
@@ -1774,8 +1773,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to corrupt blob");
             blob.sync().await.expect("failed to sync blob");
 
-            let result =
-                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1786,7 +1784,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -1808,7 +1806,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1834,7 +1832,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1859,7 +1857,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1883,7 +1881,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -1939,7 +1937,7 @@ mod tests {
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(&context, NZU64!(3));
             cfg.partition = "test-partition-2".into();
-            let journal = Journal::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
@@ -1957,10 +1955,9 @@ mod tests {
             drop(journal);
 
             // Make sure re-opened journal is as expected
-            let journal: Journal<_, Digest> =
-                Journal::init(context.with_label("third"), cfg.clone())
-                    .await
-                    .expect("failed to re-initialize journal");
+            let journal: Journal<_, Digest> = Journal::init(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -1995,7 +1992,7 @@ mod tests {
         executor.start(|context: Context| async move {
             // Use a small items_per_blob to keep the test focused on a single blob
             let cfg = test_cfg(&context, NZU64!(100));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2035,7 +2032,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal - it should recover by truncating to valid data
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal after page truncation");
 
@@ -2082,7 +2079,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2180,7 +2177,7 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per blob ===
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
 
@@ -2206,7 +2203,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index ===
             // Fresh journal for this test
-            let journal = Journal::init(context.with_label("third"), cfg.clone())
+            let journal = Journal::init(context.child("third"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2226,7 +2223,7 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let journal = Journal::<_, Digest>::init(context.with_label("fourth"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("fourth"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
 
@@ -2247,7 +2244,7 @@ mod tests {
             journal.destroy().await.expect("failed to destroy journal");
 
             // === Test 6: Prune all items (edge case) ===
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2283,9 +2280,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 0)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 0);
@@ -2308,9 +2306,10 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 10);
@@ -2338,9 +2337,10 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at position 7 (middle of section 1 with items_per_blob=5)
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 7);
@@ -2371,7 +2371,7 @@ mod tests {
 
             // Initialize at position 15
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 15)
                     .await
                     .unwrap();
 
@@ -2387,7 +2387,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2418,7 +2418,7 @@ mod tests {
 
             // Initialize at position 15
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 15)
                     .await
                     .unwrap();
 
@@ -2430,7 +2430,7 @@ mod tests {
             drop(journal);
 
             // Reopen and verify size persisted
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2454,9 +2454,10 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at a large position (position 1000)
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 1000)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 1000);
@@ -2478,9 +2479,10 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at position 20
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 20)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 20)
+                    .await
+                    .unwrap();
 
             // Append items 20-29
             for i in 0..10u64 {
@@ -2514,7 +2516,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.with_label("journal"), cfg.clone())
+            let journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2537,7 +2539,7 @@ mod tests {
             // Verify size persists after restart without writing any data
             drop(journal);
             let journal =
-                Journal::<_, Digest>::init(context.with_label("journal_after_clear"), cfg.clone())
+                Journal::<_, Digest>::init(context.child("journal_after_clear"), cfg.clone())
                     .await
                     .expect("failed to re-initialize journal after clear");
             assert_eq!(journal.size().await, 100);
@@ -2558,7 +2560,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("journal_reopened"), cfg)
+            let journal = Journal::<_, Digest>::init(context.child("journal_reopened"), cfg)
                 .await
                 .expect("failed to re-initialize journal");
 
@@ -2577,7 +2579,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2590,7 +2592,7 @@ mod tests {
             drop(inner);
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds().await;
@@ -2607,7 +2609,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..3u64 {
@@ -2626,8 +2628,7 @@ mod tests {
             // Section 1 has items 7,8,9 but metadata is missing, so falls back to blob-based boundary.
             // Section 1 has 3 items, but recovery thinks it should have 5 because metadata deletion
             // causes us to forget that section 1 starts at logical position 7.
-            let result =
-                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
             context.remove(&blob_partition(&cfg), None).await.unwrap();
             context
@@ -2644,7 +2645,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..3u64 {
@@ -2656,7 +2657,7 @@ mod tests {
             drop(inner);
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds().await;
@@ -2672,7 +2673,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..10u64 {
@@ -2687,7 +2688,7 @@ mod tests {
             drop(inner);
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds().await;
@@ -2706,7 +2707,7 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
             // init_at_size(7) sets pruning_boundary = 7 (mid-section in section 1)
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             // Append 5 items at positions 7-11, filling section 1 and part of section 2
@@ -2730,9 +2731,10 @@ mod tests {
 
             // Initialize at position 7 (mid-section with items_per_blob=5)
             // Section 1 (positions 5-9) begins mid-section: only positions 7, 8, 9 have data
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Append 13 items (positions 7-19), spanning sections 1, 2, 3
             for i in 0..13u64 {
@@ -2795,9 +2797,10 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             // Append a few items (positions 10, 11, 12)
             for i in 0..3u64 {
@@ -2829,7 +2832,7 @@ mod tests {
 
             // Setup: Create a journal with some data and mid-section metadata
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..5u64 {
@@ -2844,7 +2847,7 @@ mod tests {
             context.remove(&blob_part, None).await.unwrap();
 
             // Recovery should see no blobs and return empty journal, ignoring metadata
-            let journal = Journal::<_, Digest>::init(context.with_label("crash1"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("crash1"), cfg.clone())
                 .await
                 .expect("init failed after clear crash");
             let bounds = journal.bounds().await;
@@ -2857,12 +2860,10 @@ mod tests {
                 partition: format!("{}-metadata", cfg.partition),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(
-                context.with_label("restore_meta"),
-                meta_cfg.clone(),
-            )
-            .await
-            .unwrap();
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.child("restore_meta"), meta_cfg.clone())
+                    .await
+                    .unwrap();
             metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
             metadata.sync().await.unwrap();
 
@@ -2882,7 +2883,7 @@ mod tests {
             blob.sync().await.unwrap(); // Ensure it exists
 
             // Recovery should warn "metadata ahead" and use blob state (0, 0)
-            let journal = Journal::<_, Digest>::init(context.with_label("crash2"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("crash2"), cfg.clone())
                 .await
                 .expect("init failed after create crash");
 
@@ -2904,7 +2905,7 @@ mod tests {
             // Setup: Init at 12 (Section 2, offset 2)
             // Metadata = 12
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 12)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 12)
                     .await
                     .unwrap();
             journal.sync().await.unwrap();
@@ -2925,10 +2926,9 @@ mod tests {
             // Blob is Section 0
             // Metadata (12 -> sec 2) > Blob (sec 0) -> Ahead warning
 
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("crash_clear"), cfg.clone())
-                    .await
-                    .expect("init failed after clear_to_size crash");
+            let journal = Journal::<_, Digest>::init(context.child("crash_clear"), cfg.clone())
+                .await
+                .expect("init failed after clear_to_size crash");
 
             // Should fallback to blobs
             let bounds = journal.bounds().await;
@@ -2943,7 +2943,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::<_, Digest>::init(context.with_label("j"), cfg)
+            let journal = Journal::<_, Digest>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
 
@@ -2960,7 +2960,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -2980,7 +2980,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3001,7 +3001,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3029,7 +3029,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3049,7 +3049,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(4));
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {
                 journal.append(&test_digest(i)).await.unwrap();

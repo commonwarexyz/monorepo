@@ -206,7 +206,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
         cfg: Config,
     ) -> Result<Self, Error<F>> {
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.with_label("compact_metadata"),
+            context.child("compact_metadata"),
             MConfig {
                 partition: cfg.partition,
                 codec_config: ((0..).into(), ()),
@@ -265,7 +265,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
         }
 
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.with_label("compact_metadata"),
+            context.child("compact_metadata"),
             MConfig {
                 partition: cfg.partition,
                 codec_config: ((0..).into(), ()),
@@ -512,7 +512,7 @@ mod tests {
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     type TestMerkle<F> =
         Merkle<F, deterministic::Context, <Sha256 as commonware_cryptography::Hasher>::Digest>;
@@ -553,7 +553,7 @@ mod tests {
             thread_pool: None,
         };
 
-        let mut merkle = TestMerkle::<F>::init(context.with_label("first"), &hasher, cfg.clone())
+        let mut merkle = TestMerkle::<F>::init(context.child("first"), &hasher, cfg.clone())
             .await
             .unwrap();
         let batch = {
@@ -566,7 +566,7 @@ mod tests {
         merkle.sync().await.unwrap();
         drop(merkle);
 
-        let mut reopened = TestMerkle::<F>::init(context.with_label("second"), &hasher, cfg)
+        let mut reopened = TestMerkle::<F>::init(context.child("second"), &hasher, cfg)
             .await
             .unwrap();
         assert_eq!(reopened.root(), root_before);
@@ -689,7 +689,7 @@ mod tests {
                 thread_pool: None,
             };
 
-            let mut merkle = open::<mmr::Family>(context.with_label("first"), partition).await;
+            let mut merkle = open::<mmr::Family>(context.child("first"), partition).await;
             append_and_sync(&mut merkle, &[b"a"]).await;
             let root_after_first = merkle.root();
             append_and_sync(&mut merkle, &[b"b"]).await;
@@ -697,7 +697,7 @@ mod tests {
             drop(merkle);
 
             let reopened: TestMerkle<mmr::Family> =
-                Merkle::<mmr::Family, _, _>::init(context.with_label("second"), &hasher, cfg)
+                Merkle::<mmr::Family, _, _>::init(context.child("second"), &hasher, cfg)
                     .await
                     .unwrap();
             assert_eq!(reopened.root(), root_after_first);
@@ -755,7 +755,7 @@ mod tests {
             };
 
             let mut merkle =
-                TestMerkle::<mmr::Family>::init(context.with_label("first"), &hasher, cfg.clone())
+                TestMerkle::<mmr::Family>::init(context.child("first"), &hasher, cfg.clone())
                     .await
                     .unwrap();
             append_and_sync(&mut merkle, &[b"a"]).await;
@@ -763,7 +763,7 @@ mod tests {
             drop(merkle);
 
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-                context.with_label("tamper"),
+                context.child("tamper"),
                 MConfig {
                     partition: partition.into(),
                     codec_config: ((0..).into(), ()),
@@ -780,7 +780,7 @@ mod tests {
             metadata.sync().await.unwrap();
 
             let reopened =
-                TestMerkle::<mmr::Family>::init(context.with_label("second"), &hasher, cfg).await;
+                TestMerkle::<mmr::Family>::init(context.child("second"), &hasher, cfg).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"))

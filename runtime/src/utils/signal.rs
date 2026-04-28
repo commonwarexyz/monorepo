@@ -61,7 +61,7 @@ use std::{
 ///
 ///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
-///     context.with_label("waiter").spawn(|context| async move {
+///     context.child("waiter").spawn(|context| async move {
 ///         // Wait for signal or sleep
 ///         loop {
 ///             select! {

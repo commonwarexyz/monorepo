@@ -6,7 +6,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
 };
 use commonware_storage::merkle::{
     full::Config, hasher::Standard as StandardHasher, mmb, mmr, Family as MerkleFamily, Location,
@@ -236,7 +236,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let hasher = StandardHasher::<Sha256>::new();
             let mut merkle = Merkle::<F>::init(
-                ctx.with_label("merkle"),
+                ctx.child("merkle"),
                 &hasher,
                 merkle_config(
                     &partition_suffix,
@@ -268,7 +268,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
         let hasher = StandardHasher::<Sha256>::new();
         let mut merkle = Merkle::<F>::init(
-            ctx.with_label("recovered"),
+            ctx.child("recovered"),
             &hasher,
             merkle_config(
                 &partition_suffix,

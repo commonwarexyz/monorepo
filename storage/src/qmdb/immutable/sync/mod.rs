@@ -76,7 +76,7 @@ where
 
         // Initialize Merkle structure for sync
         let merkle = Merkle::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
                 range,
@@ -95,7 +95,7 @@ where
         .await?;
 
         let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+            Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
@@ -176,7 +176,7 @@ where
                 .encode()
                 .to_vec();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.with_label("merkle"),
+            context.child("merkle"),
             &StandardHasher::<H>::new(),
             config.merkle,
             leaf_count,

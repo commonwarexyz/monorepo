@@ -286,7 +286,7 @@ mod test {
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Context, Metrics};
+    use commonware_runtime::{deterministic::Context, Supervisor as _};
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
 
@@ -311,7 +311,7 @@ mod test {
             let _batch = db.new_batch().write(d1, Some(d2));
             // Don't merkleize/apply -- simulates uncommitted write
         }
-        let mut db = reopen_db(context.with_label("reopen1")).await;
+        let mut db = reopen_db(context.child("reopen1")).await;
         assert_eq!(db.root(), root);
 
         // Test applying an empty batch on an empty db.
@@ -325,7 +325,7 @@ mod test {
         assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
-        let mut db = reopen_db(context.with_label("reopen2")).await;
+        let mut db = reopen_db(context.child("reopen2")).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
@@ -463,7 +463,7 @@ mod test {
         db.commit().await.unwrap();
         let op_count = db.bounds().await.end;
         let root = db.root();
-        let mut db = reopen_db(context.with_label("reopen1")).await;
+        let mut db = reopen_db(context.child("reopen1")).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
 
@@ -521,7 +521,7 @@ mod test {
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.bounds().await.end;
         let root = db.root();
-        let mut db = reopen_db(context.with_label("reopen2")).await;
+        let mut db = reopen_db(context.child("reopen2")).await;
 
         assert_eq!(db.root(), root);
         assert_eq!(db.bounds().await.end, op_count);

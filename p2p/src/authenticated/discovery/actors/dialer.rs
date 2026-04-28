@@ -99,7 +99,7 @@ impl<
         self.attempts.get_or_create_by(&peer).inc();
 
         // Spawn dialer to connect to peer
-        self.context.with_label("dialer").spawn({
+        self.context.child("dialer").spawn({
             let config = self.stream_cfg.clone();
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
@@ -168,7 +168,7 @@ impl<
                 if self.queue.is_empty() {
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
-                    self.queue.shuffle(&mut self.context);
+                    self.queue.shuffle(self.context.as_mut());
                     next_query_at = dialable.next_query_at;
                 }
 
@@ -205,7 +205,7 @@ mod tests {
     };
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_stream::encrypted::Config as StreamConfig;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -237,7 +237,7 @@ mod tests {
                 allow_private_ips: true,
             };
 
-            let dialer = Actor::new(context.with_label("dialer"), dialer_cfg);
+            let dialer = Actor::new(context.child("dialer"), dialer_cfg);
 
             let (tracker_mailbox, mut tracker_rx) =
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
@@ -256,7 +256,7 @@ mod tests {
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
-                .with_label("supervisor")
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             // Start the dialer
@@ -308,7 +308,7 @@ mod tests {
             let dial_frequency = Duration::from_millis(500);
 
             let dialer = Actor::new(
-                context.with_label("dialer"),
+                context.child("dialer"),
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
@@ -322,7 +322,7 @@ mod tests {
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
-                .with_label("supervisor")
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             let _handle = dialer.start(tracker_mailbox, supervisor);
@@ -363,7 +363,7 @@ mod tests {
             let dial_frequency = Duration::from_millis(100);
 
             let dialer = Actor::new(
-                context.with_label("dialer"),
+                context.child("dialer"),
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
@@ -386,7 +386,7 @@ mod tests {
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
-                .with_label("supervisor")
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             let _handle = dialer.start(tracker_mailbox, supervisor);
@@ -435,7 +435,7 @@ mod tests {
             let dial_frequency = Duration::from_millis(200);
 
             let dialer = Actor::new(
-                context.with_label("dialer"),
+                context.child("dialer"),
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
@@ -449,7 +449,7 @@ mod tests {
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
-                .with_label("supervisor")
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             let _handle = dialer.start(tracker_mailbox, supervisor);

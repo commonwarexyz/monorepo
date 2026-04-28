@@ -279,7 +279,7 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{deterministic, Metrics, Runner, Spawner};
+    use crate::{deterministic, Observer as _, Runner, Spawner, Supervisor as _};
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
@@ -302,8 +302,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move { "done" });
+            let handle = context.child(LABEL).spawn(|_| async move { "done" });
 
             let metrics = context.encode();
             assert_eq!(
@@ -330,8 +329,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move {
+            let handle = context.child(LABEL).spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -359,8 +357,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move {
+            let handle = context.child(LABEL).spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -388,9 +385,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-
-            let blocking_handle = context.clone().shared(true).spawn(|_| async move {
+            let blocking_handle = context.child(LABEL).shared(true).spawn(|_| async move {
                 // Simulate some blocking work
                 42
             });
@@ -420,8 +415,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move {
+            let handle = context.child(LABEL).spawn(|_| async move {
                 future::pending::<()>().await;
             });
 

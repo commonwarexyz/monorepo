@@ -23,6 +23,8 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random;
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
 };
@@ -104,7 +106,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(target_db_ops);
         let target_db =
             H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
@@ -130,7 +132,7 @@ where
                 root: target_root,
                 range: non_empty_range!(target_oldest_retained_loc, target_op_count),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -175,7 +177,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_db = H::apply_ops(target_db, vec![], Some(H::sample_metadata())).await;
 
         let bounds = H::bounds(&target_db).await;
@@ -192,7 +194,7 @@ where
                 root: target_root,
                 range: non_empty_range!(target_oldest_retained_loc, target_op_count),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -223,7 +225,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(10);
         let target_db =
             H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
@@ -234,7 +236,7 @@ where
         let op_count = bounds.end;
 
         let db_config = H::config("persistence-test", &context);
-        let client_context = context.with_label("client");
+        let client_context = context.child("client");
         let target_db = Arc::new(target_db);
         let config = Config {
             db_config: db_config.clone(),
@@ -243,7 +245,7 @@ where
                 root: target_root,
                 range: non_empty_range!(lower_bound, op_count),
             },
-            context: client_context.clone(),
+            context: client_context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -262,7 +264,7 @@ where
 
         H::db_sync(&synced_db).await;
         drop(synced_db);
-        let reopened_db = H::init_db_with_config(context.with_label("reopened"), db_config).await;
+        let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
 
         assert_eq!(H::db_root(&reopened_db), expected_root);
         let bounds = H::bounds(&reopened_db).await;
@@ -291,7 +293,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let initial_ops = H::create_ops(50);
         let target_db = H::apply_ops(target_db, initial_ops.clone(), None).await;
 
@@ -310,7 +312,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let client = {
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: H::config(&format!("update_test_{}", context.next_u64()), &context),
                 target: Target {
                     root: initial_root,
@@ -379,7 +381,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(30);
         let target_db = H::apply_ops(target_db, target_ops[..29].to_vec(), None).await;
 
@@ -398,7 +400,7 @@ where
                 root: target_root,
                 range: non_empty_range!(lower_bound, op_count),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -428,10 +430,11 @@ where
     executor.start(|mut context| async move {
         let original_ops = H::create_ops(50);
 
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let sync_db_config = H::config(&format!("partial_{}", context.next_u64()), &context);
-        let client_context = context.with_label("client");
-        let sync_db = H::init_db_with_config(client_context.clone(), sync_db_config.clone()).await;
+        let client_context = context.child("client");
+        let sync_db =
+            H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, original_ops.clone(), None).await;
         let sync_db = H::apply_ops(sync_db, original_ops, None).await;
@@ -452,7 +455,7 @@ where
                 root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: context.with_label("sync"),
+            context: context.child("sync"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -482,10 +485,11 @@ where
     executor.start(|mut context| async move {
         let target_ops = H::create_ops(40);
 
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let sync_config = H::config(&format!("exact_{}", context.next_u64()), &context);
-        let client_context = context.with_label("client");
-        let sync_db = H::init_db_with_config(client_context.clone(), sync_config.clone()).await;
+        let client_context = context.child("client");
+        let sync_db =
+            H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, target_ops.clone(), None).await;
         let sync_db = H::apply_ops(sync_db, target_ops, None).await;
@@ -504,7 +508,7 @@ where
                 root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: context.with_label("sync"),
+            context: context.child("sync"),
             resolver: resolver.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -532,7 +536,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(100);
         let mut target_db = H::apply_ops(target_db, target_ops, None).await;
 
@@ -546,7 +550,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&format!("lb-dec-{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -595,7 +599,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(50);
         let target_db = H::apply_ops(target_db, target_ops, None).await;
 
@@ -607,7 +611,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&format!("ub-dec-{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -653,7 +657,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(100);
         let target_db = H::apply_ops(target_db, target_ops, None).await;
 
@@ -679,7 +683,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&format!("bounds_inc_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(1),
             target: Target {
@@ -724,7 +728,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
 
         // First batch with floor=0.
         let early_ops = H::create_ops(50);
@@ -757,7 +761,7 @@ where
                 root: target_root,
                 range: non_empty_range!(bounds.start, bounds.end),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -802,7 +806,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(10);
         let target_db = H::apply_ops(target_db, target_ops, None).await;
 
@@ -814,7 +818,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&format!("done_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(20),
             target: Target {
@@ -872,7 +876,7 @@ pub(crate) mod harnesses {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache =
-            CacheRef::from_pooler(&pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(&pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1167,7 +1171,7 @@ mod compact_variable_mmr {
         pooler: &(impl BufferPooler + Metrics),
     ) -> immutable::variable::Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
         let page_cache =
-            CacheRef::from_pooler(&pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(&pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1246,12 +1250,10 @@ mod compact_variable_mmr {
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let metadata = vec![8, 8, 8];
             let floor = Location::new(1);
             let key_a = sha256::Digest::from([1; 32]);
@@ -1272,7 +1274,7 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: source.clone(),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
@@ -1285,7 +1287,7 @@ mod compact_variable_mmr {
             assert_eq!(client.inactivity_floor_loc(), floor);
             drop(client);
 
-            let reopened = ClientDb::init(context.with_label("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1302,12 +1304,10 @@ mod compact_variable_mmr {
     fn test_compact_sync_rejects_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-proof-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
@@ -1327,7 +1327,7 @@ mod compact_variable_mmr {
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: StaticResolver { state },
                 target,
                 db_config: client_config(&suffix),
@@ -1347,12 +1347,10 @@ mod compact_variable_mmr {
     fn test_compact_sync_rejects_tampered_pinned_nodes_without_persisting() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-pins-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let key_a = sha256::Digest::from([1; 32]);
             let key_b = sha256::Digest::from([2; 32]);
             let batch = source
@@ -1376,7 +1374,7 @@ mod compact_variable_mmr {
 
             let client_cfg = client_config(&suffix);
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: StaticResolver {
                     state: state.clone(),
                 },
@@ -1389,7 +1387,7 @@ mod compact_variable_mmr {
                 Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
             ));
 
-            let reopened = ClientDb::init(context.with_label("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
             assert_eq!(reopened.last_commit_loc(), Location::new(0));
@@ -1408,7 +1406,7 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-leaf-count-{}", context.next_u64());
             let mut source = SourceDb::init(
-                context.with_label("source"),
+                context.child("source"),
                 source_config(&suffix, &context),
             )
             .await
@@ -1432,7 +1430,7 @@ mod compact_variable_mmr {
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: StaticResolver { state },
                 target: target.clone(),
                 db_config: client_config(&suffix),
@@ -1455,12 +1453,10 @@ mod compact_variable_mmr {
     fn test_compact_full_source_rejects_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-stale-full-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let batch1 = source
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
@@ -1503,7 +1499,7 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"));
-            let mut source = ClientDb::init(context.with_label("source_init"), source_cfg.clone())
+            let mut source = ClientDb::init(context.child("source_init"), source_cfg.clone())
                 .await
                 .unwrap();
 
@@ -1518,13 +1514,13 @@ mod compact_variable_mmr {
             let target1 = source.current_target();
             drop(source);
 
-            let source = ClientDb::init(context.with_label("source_reopen"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(source.current_target(), target1);
 
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("serve1"),
+                context: context.child("serve1"),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1")),
@@ -1536,10 +1532,9 @@ mod compact_variable_mmr {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let mut source =
-                ClientDb::init(context.with_label("source_resume"), source_cfg.clone())
-                    .await
-                    .unwrap();
+            let mut source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+                .await
+                .unwrap();
             let metadata2 = vec![2, 2, 2];
             let floor2 = Location::new(2);
             let batch2 = source
@@ -1555,7 +1550,7 @@ mod compact_variable_mmr {
             assert_eq!(source.current_target(), target1);
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("serve2"),
+                context: context.child("serve2"),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2")),
@@ -1567,10 +1562,9 @@ mod compact_variable_mmr {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let mut source =
-                ClientDb::init(context.with_label("source_regrow"), source_cfg.clone())
-                    .await
-                    .unwrap();
+            let mut source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+                .await
+                .unwrap();
             assert_eq!(source.current_target(), target1);
             let metadata3 = vec![3, 3, 3];
             let floor3 = Location::new(2);
@@ -1585,7 +1579,7 @@ mod compact_variable_mmr {
             assert_ne!(target3, target2);
 
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("serve3"),
+                context: context.child("serve3"),
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3")),
@@ -1598,12 +1592,12 @@ mod compact_variable_mmr {
             served3.destroy().await.unwrap();
 
             let source = Arc::new(
-                ClientDb::init(context.with_label("source_stale"), source_cfg.clone())
+                ClientDb::init(context.child("source_stale"), source_cfg.clone())
                     .await
                     .unwrap(),
             );
             let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("stale_client"),
+                context: context.child("stale_client"),
                 resolver: source.clone(),
                 target: target2.clone(),
                 db_config: client_config(&format!("{suffix}-stale")),
@@ -1650,7 +1644,7 @@ mod compact_variable_mmb {
         pooler: &(impl BufferPooler + Metrics),
     ) -> immutable::variable::Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
         let page_cache =
-            CacheRef::from_pooler(&pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(&pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1729,12 +1723,10 @@ mod compact_variable_mmb {
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let metadata = vec![4, 4, 4];
             let floor = Location::new(1);
             let key_a = sha256::Digest::from([1; 32]);
@@ -1755,7 +1747,7 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: source.clone(),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
@@ -1768,7 +1760,7 @@ mod compact_variable_mmb {
             assert_eq!(client.inactivity_floor_loc(), floor);
             drop(client);
 
-            let reopened = ClientDb::init(context.with_label("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1785,12 +1777,10 @@ mod compact_variable_mmb {
     fn test_compact_sync_rejects_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-bad-proof-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
@@ -1810,7 +1800,7 @@ mod compact_variable_mmb {
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: StaticResolver { state },
                 target,
                 db_config: client_config(&suffix),
@@ -1830,12 +1820,10 @@ mod compact_variable_mmb {
     fn test_compact_sync_rejects_tampered_pinned_nodes_without_persisting() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-bad-pins-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let key_a = sha256::Digest::from([1; 32]);
             let key_b = sha256::Digest::from([2; 32]);
             let batch = source
@@ -1859,7 +1847,7 @@ mod compact_variable_mmb {
 
             let client_cfg = client_config(&suffix);
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: StaticResolver {
                     state: state.clone(),
                 },
@@ -1872,7 +1860,7 @@ mod compact_variable_mmb {
                 Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
             ));
 
-            let reopened = ClientDb::init(context.with_label("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
             assert_eq!(reopened.last_commit_loc(), Location::new(0));
@@ -1891,7 +1879,7 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-bad-leaf-count-{}", context.next_u64());
             let mut source = SourceDb::init(
-                context.with_label("source"),
+                context.child("source"),
                 source_config(&suffix, &context),
             )
             .await
@@ -1915,7 +1903,7 @@ mod compact_variable_mmb {
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: StaticResolver { state },
                 target: target.clone(),
                 db_config: client_config(&suffix),
@@ -1938,12 +1926,10 @@ mod compact_variable_mmb {
     fn test_compact_full_source_rejects_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-stale-full-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.with_label("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let batch1 = source
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
@@ -1986,7 +1972,7 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"));
-            let mut source = ClientDb::init(context.with_label("source_init"), source_cfg.clone())
+            let mut source = ClientDb::init(context.child("source_init"), source_cfg.clone())
                 .await
                 .unwrap();
 
@@ -2001,13 +1987,13 @@ mod compact_variable_mmb {
             let target1 = source.current_target();
             drop(source);
 
-            let source = ClientDb::init(context.with_label("source_reopen"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(source.current_target(), target1);
 
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("serve1"),
+                context: context.child("serve1"),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1")),
@@ -2019,10 +2005,9 @@ mod compact_variable_mmb {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let mut source =
-                ClientDb::init(context.with_label("source_resume"), source_cfg.clone())
-                    .await
-                    .unwrap();
+            let mut source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+                .await
+                .unwrap();
             let metadata2 = vec![2, 2, 2];
             let floor2 = Location::new(2);
             let batch2 = source
@@ -2038,7 +2023,7 @@ mod compact_variable_mmb {
             assert_eq!(source.current_target(), target1);
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("serve2"),
+                context: context.child("serve2"),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2")),
@@ -2050,10 +2035,9 @@ mod compact_variable_mmb {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let mut source =
-                ClientDb::init(context.with_label("source_regrow"), source_cfg.clone())
-                    .await
-                    .unwrap();
+            let mut source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+                .await
+                .unwrap();
             assert_eq!(source.current_target(), target1);
             let metadata3 = vec![3, 3, 3];
             let floor3 = Location::new(2);
@@ -2068,7 +2052,7 @@ mod compact_variable_mmb {
             assert_ne!(target3, target2);
 
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("serve3"),
+                context: context.child("serve3"),
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3")),
@@ -2081,13 +2065,13 @@ mod compact_variable_mmb {
             served3.destroy().await.unwrap();
 
             let source = Arc::new(
-                ClientDb::init(context.with_label("source_stale"), source_cfg.clone())
+                ClientDb::init(context.child("source_stale"), source_cfg.clone())
                     .await
                     .unwrap(),
             );
             assert_eq!(source.current_target(), target3);
             let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.with_label("stale_client"),
+                context: context.child("stale_client"),
                 resolver: source.clone(),
                 target: target2.clone(),
                 db_config: client_config(&format!("{suffix}-stale")),

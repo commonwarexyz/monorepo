@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::cache::{Cache, Config};
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::{
@@ -145,7 +145,7 @@ fn fuzz(input: FuzzInput) {
         };
 
         let mut cache_opt = Some(
-            Cache::<_, u32>::init(context.clone(), cfg.clone())
+            Cache::<_, u32>::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache"),
         );
@@ -264,7 +264,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Reinit => {
                     if cache_opt.is_none() {
-                        let cache = Cache::<_, u32>::init(context.clone(), cfg.clone())
+                        let cache = Cache::<_, u32>::init(context.child("storage"), cfg.clone())
                             .await
                             .expect("Failed to reinitialize cache");
 

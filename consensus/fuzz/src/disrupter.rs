@@ -186,8 +186,32 @@ where
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
-        let context = self.context.clone();
-        context.spawn(|_| self.run(vote_network, certificate_network, resolver_network))
+        let Self {
+            context,
+            scheme,
+            strategy,
+            fault_offset,
+            last_vote_view,
+            last_finalized_view,
+            last_nullified_view,
+            last_notarized_view,
+            latest_proposals,
+        } = self;
+        context.spawn(move |context| async move {
+            Self {
+                context,
+                scheme,
+                strategy,
+                fault_offset,
+                last_vote_view,
+                last_finalized_view,
+                last_nullified_view,
+                last_notarized_view,
+                latest_proposals,
+            }
+            .run(vote_network, certificate_network, resolver_network)
+            .await
+        })
     }
 
     async fn run(

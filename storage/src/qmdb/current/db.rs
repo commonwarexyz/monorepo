@@ -31,6 +31,8 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     bitmap::{Prunable as BitMap, Readable as BitmapReadable},
     sequence::prefixed_u64::U64,
@@ -1000,7 +1002,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         codec_config: ((0..).into(), ()),
     };
     let metadata =
-        Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+        Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
 
     let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
     let pruned_chunks = match metadata.get(&key) {
@@ -1168,7 +1170,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let mut db = MmrDb::init(
-                ctx.clone(),
+                ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-full", &ctx),
             )
             .await
@@ -1206,7 +1208,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let mut db = MmbDb::init(
-                ctx.clone(),
+                ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
             )
             .await
@@ -1246,7 +1248,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let mut db = MmrDb::init(
-                ctx.clone(),
+                ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-pruned", &ctx),
             )
             .await
@@ -1283,7 +1285,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let db = MmrDb::init(
-                ctx.clone(),
+                ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-fresh", &ctx),
             )
             .await

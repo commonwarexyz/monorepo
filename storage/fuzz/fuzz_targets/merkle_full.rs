@@ -2,7 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+};
 use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Error, Family as MerkleFamily, Location,
     LocationRangeExt as _, Position,
@@ -115,10 +117,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut leaves = Vec::new();
             let hasher = Standard::<Sha256>::new();
-            let mut merkle =
-                Merkle::<F, _, _>::init(context.clone(), &hasher, test_config(suffix, &context))
-                    .await
-                    .unwrap();
+            let mut merkle = Merkle::<F, _, _>::init(
+                context.child("storage"),
+                &hasher,
+                test_config(suffix, &context),
+            )
+            .await
+            .unwrap();
 
             // Historical leaf counts that are valid for proofs against the current lineage.
             let mut historical_sizes: Vec<Location<F>> = Vec::new();
@@ -324,9 +329,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         // Init a new merkle structure.
                         drop(merkle);
                         merkle = Merkle::<F, _, _>::init(
-                            context
-                                .with_label("merkle")
-                                .with_attribute("instance", restarts),
+                            context.child("merkle").with_attribute("instance", restarts),
                             &hasher,
                             test_config(suffix, &context),
                         )
@@ -361,9 +364,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         };
 
                         if let Ok(sync_merkle) = Merkle::<F, _, _>::init_sync(
-                            context
-                                .with_label("sync")
-                                .with_attribute("instance", restarts),
+                            context.child("sync").with_attribute("instance", restarts),
                             sync_config,
                             &hasher,
                         )

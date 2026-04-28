@@ -33,7 +33,7 @@ use rand_core::CryptoRngCore;
 /// all activities are cryptographically valid before reporting.
 #[derive(Clone)]
 pub struct AttributableReporter<
-    E: Clone + CryptoRngCore + Send + 'static,
+    E: CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
     T: Strategy,
@@ -52,7 +52,7 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: Clone + CryptoRngCore + Send + 'static,
+        E: CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
         T: Strategy,
@@ -72,7 +72,7 @@ impl<
 }
 
 impl<
-        E: Clone + CryptoRngCore + Send + 'static,
+        E: CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
         T: Strategy,

@@ -9,7 +9,7 @@ use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
-    tokio, Buf, Metrics, Quota, Runner, Spawner,
+    tokio, Buf, Quota, Runner, Spawner,
 };
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
@@ -84,7 +84,7 @@ fn main() {
             None
         };
         tokio::telemetry::init(
-            context.with_label("telemetry"),
+            context.child("telemetry"),
             tokio::telemetry::Logging {
                 level: Level::DEBUG,
                 json: true,
@@ -135,8 +135,7 @@ fn main() {
         p2p_cfg.mailbox_size = config.mailbox_size;
 
         // Start p2p
-        let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
         // Provide authorized peers
         oracle.track(0, peer_keys.clone()).await;
@@ -153,7 +152,7 @@ fn main() {
 
         // Create flood
         let flood_sender = context
-            .with_label("flood_sender")
+            .child("flood_sender")
             .spawn(move |context| async move {
                 let mut rng = SmallRng::seed_from_u64(0);
                 let messages = context.counter("messages", "Sent messages");
@@ -174,28 +173,27 @@ fn main() {
                     messages.inc();
                 }
             });
-        let flood_receiver =
-            context
-                .with_label("flood_receiver")
-                .spawn(move |context| async move {
-                    let latency =
-                        context.histogram("latency", "Message latency in seconds", LATENCY_BUCKETS);
-                    loop {
-                        match flood_receiver.recv().await {
-                            Ok((_sender, mut msg)) => {
-                                if msg.len() < 8 {
-                                    continue;
-                                }
-                                let sent_ns = msg.get_u64_le();
-                                let sent_time = UNIX_EPOCH + Duration::from_nanos(sent_ns);
-                                latency.observe_between(sent_time, SystemTime::now());
+        let flood_receiver = context
+            .child("flood_receiver")
+            .spawn(move |context| async move {
+                let latency =
+                    context.histogram("latency", "Message latency in seconds", LATENCY_BUCKETS);
+                loop {
+                    match flood_receiver.recv().await {
+                        Ok((_sender, mut msg)) => {
+                            if msg.len() < 8 {
+                                continue;
                             }
-                            Err(e) => {
-                                error!(?e, "could not receive flood message");
-                            }
+                            let sent_ns = msg.get_u64_le();
+                            let sent_time = UNIX_EPOCH + Duration::from_nanos(sent_ns);
+                            latency.observe_between(sent_time, SystemTime::now());
+                        }
+                        Err(e) => {
+                            error!(?e, "could not receive flood message");
                         }
                     }
-                });
+                }
+            });
 
         // Wait for any task to error
         if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver]).await {

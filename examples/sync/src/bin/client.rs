@@ -124,7 +124,7 @@ async fn run_full_sync<DB, Op, E, SyncOnce, SyncFut>(
     label: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
     Op: Clone + Read + EncodeShared + 'static,
     Op::Cfg: commonware_codec::IsUnit,
     SyncOnce: Fn(
@@ -141,7 +141,7 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<Op, Key>::connect(context.with_label("resolver"), config.server).await?;
+            Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
@@ -150,7 +150,7 @@ where
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
+            context.child("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -162,7 +162,7 @@ where
         };
 
         sync_once(
-            context.with_label("sync"),
+            context.child("sync"),
             config.clone(),
             resolver,
             initial_target,
@@ -179,7 +179,7 @@ where
 /// Repeatedly sync an Any database to the server's state.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     run_full_sync::<any::Database<_>, any::Operation, _, _, _>(
         context,
@@ -220,7 +220,7 @@ where
 /// the bitmap and grafted MMR are reconstructed from the synced operations.
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     run_full_sync::<current::Database<_>, current::Operation, _, _, _>(
         context,
@@ -259,7 +259,7 @@ where
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     run_full_sync::<immutable::Database<_>, immutable::Operation, _, _, _>(
         context,
@@ -299,7 +299,7 @@ where
 /// Repeatedly sync a Keyless database to the server's state.
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     run_full_sync::<keyless::Database<_>, keyless::Operation, _, _, _>(
         context,
@@ -342,7 +342,7 @@ async fn run_compact_sync<DB, Op, E, MakeConfig>(
     label: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
     DB: compact::Database<Family = mmr::Family, Context = E, Digest = Key, Op = Op>,
     Op: Clone + Read + EncodeShared + 'static,
     Op::Cfg: commonware_codec::IsUnit,
@@ -352,10 +352,10 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<Op, Key>::connect(context.with_label("resolver"), config.server).await?;
+            Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
         let target = resolver.get_compact_target().await?;
         let sync_config = compact::Config::<DB, Resolver<Op, Key>> {
-            context: context.with_label("sync"),
+            context: context.child("sync"),
             resolver,
             target,
             db_config: make_db_config(&context),
@@ -390,7 +390,7 @@ async fn run_immutable_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     run_compact_sync::<immutable_compact::Database<_>, immutable_compact::Operation, _, _>(
         context,
@@ -406,7 +406,7 @@ async fn run_keyless_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     run_compact_sync::<keyless_compact::Database<_>, keyless_compact::Operation, _, _>(
         context,
@@ -586,7 +586,7 @@ fn main() {
     let executor = tokio_runtime::Runner::new(executor_config);
     executor.start(|context| async move {
         tokio_runtime::telemetry::init(
-            context.with_label("telemetry"),
+            context.child("telemetry"),
             tokio_runtime::telemetry::Logging {
                 level: tracing::Level::INFO,
                 json: false,
@@ -610,23 +610,21 @@ fn main() {
 
         // Dispatch based on sync mode and database family.
         let result = match (config.sync_mode, config.family) {
-            (SyncMode::Full, DatabaseType::Any) => {
-                run_any(context.with_label("sync"), config).await
-            }
+            (SyncMode::Full, DatabaseType::Any) => run_any(context.child("sync"), config).await,
             (SyncMode::Full, DatabaseType::Current) => {
-                run_current(context.with_label("sync"), config).await
+                run_current(context.child("sync"), config).await
             }
             (SyncMode::Full, DatabaseType::Immutable) => {
-                run_immutable(context.with_label("sync"), config).await
+                run_immutable(context.child("sync"), config).await
             }
             (SyncMode::Full, DatabaseType::Keyless) => {
-                run_keyless(context.with_label("sync"), config).await
+                run_keyless(context.child("sync"), config).await
             }
             (SyncMode::Compact, DatabaseType::Immutable) => {
-                run_immutable_compact(context.with_label("sync"), config).await
+                run_immutable_compact(context.child("sync"), config).await
             }
             (SyncMode::Compact, DatabaseType::Keyless) => {
-                run_keyless_compact(context.with_label("sync"), config).await
+                run_keyless_compact(context.child("sync"), config).await
             }
             _ => Err(Box::<dyn std::error::Error>::from(format!(
                 "unsupported combination: mode={} family={}",

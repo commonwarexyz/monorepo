@@ -67,7 +67,7 @@ where
 {
     let hasher = StandardHasher::<H>::new();
     let peek = full::Merkle::<F, _, _>::peek_root(
-        context.with_label("local_target_probe"),
+        context.child("local_target_probe"),
         merkle_config,
         &hasher,
     )
@@ -104,7 +104,7 @@ where
     let hasher = StandardHasher::<H>::new();
 
     let merkle = full::Merkle::<F, _, _>::init_sync(
-        context.with_label("merkle"),
+        context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
@@ -114,7 +114,7 @@ where
     )
     .await?;
 
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _>::from_components(
         merkle,

@@ -16,6 +16,7 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{
+    shared::Shared,
     types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
@@ -51,8 +52,8 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
-struct Verify<C: PublicKey, D: Digest, E: Clock> {
-    timer: histogram::Timer<E>,
+struct Verify<C: PublicKey, D: Digest> {
+    timer: histogram::Timer,
     context: Context<C>,
     payload: D,
     result: Result<bool, Error>,
@@ -65,7 +66,7 @@ pub struct Engine<
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
     D: Digest,
-    A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
+    A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
@@ -78,7 +79,7 @@ pub struct Engine<
     sequencer_signer: Option<ChunkSigner<C>>,
     sequencers_provider: S,
     validators_provider: P,
-    automaton: A,
+    automaton: Shared<A>,
     relay: R,
     monitor: M,
     reporter: Z,
@@ -130,7 +131,7 @@ pub struct Engine<
     //
     // There is no limit to the number of futures in this pool, so the automaton
     // can apply backpressure by dropping the verification requests if necessary.
-    pending_verifies: FuturesPool<Verify<C::PublicKey, D, E>>,
+    pending_verifies: FuturesPool<Verify<C::PublicKey, D>>,
 
     ////////////////////////////////////////
     // Storage
@@ -191,10 +192,10 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // Metrics
-    metrics: metrics::Metrics<E, C::PublicKey>,
+    metrics: metrics::Metrics<C::PublicKey>,
 
     // The timer of my last new proposal
-    propose_timer: Option<histogram::Timer<E>>,
+    propose_timer: Option<histogram::Timer>,
 }
 
 impl<
@@ -203,7 +204,7 @@ impl<
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
-        A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
+        A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
         R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
@@ -212,15 +213,14 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(&context);
 
         Self {
             context: ContextCell::new(context),
             sequencer_signer: cfg.sequencer_signer,
             sequencers_provider: cfg.sequencers_provider,
             validators_provider: cfg.validators_provider,
-            automaton: cfg.automaton,
+            automaton: Shared::new(cfg.automaton),
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
@@ -471,7 +471,7 @@ impl<
                     payload,
                     result,
                 } = verify;
-                drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
+                timer.observe(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, ?context, "verified returned error");
@@ -603,7 +603,9 @@ impl<
         // If the certificate is for my sequencer, record metric
         if let Some(ref signer) = self.sequencer_signer {
             if chunk.sequencer == signer.public_key() {
-                self.propose_timer.take();
+                if let Some(timer) = self.propose_timer.take() {
+                    timer.observe(self.context.as_ref());
+                }
             }
         }
 
@@ -668,7 +670,7 @@ impl<
         };
         let payload = node.chunk.payload;
         let mut automaton = self.automaton.clone();
-        let timer = self.metrics.verify_duration.timer();
+        let timer = self.metrics.verify_duration.timer(self.context.as_ref());
         self.pending_verifies.push(async move {
             let receiver = automaton.verify(context.clone(), payload).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
@@ -773,7 +775,7 @@ impl<
         self.journal_sync(&me, height).await;
 
         // Record the start time of the proposal
-        self.propose_timer = Some(self.metrics.e2e_duration.timer());
+        self.propose_timer = Some(self.metrics.e2e_duration.timer(self.context.as_ref()));
 
         // Broadcast to network
         if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
@@ -899,7 +901,7 @@ impl<
 
         // Verify the node
         node.verify(
-            &mut self.context,
+            self.context.as_mut(),
             &self.chunk_verifier,
             &self.validators_provider,
             &self.strategy,
@@ -960,7 +962,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref(), &self.strategy) {
+        if !ack.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -1033,9 +1035,8 @@ impl<
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
-                .with_label("journal")
-                .with_attribute("sequencer", sequencer)
-                .into_present(),
+                .child("journal")
+                .with_attribute("sequencer", sequencer),
             cfg,
         )
         .await

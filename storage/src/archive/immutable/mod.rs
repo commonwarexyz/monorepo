@@ -67,6 +67,8 @@
 
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
@@ -133,7 +135,7 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -166,13 +168,13 @@ mod tests {
 
             // First initialization
             let archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("first"), cfg.clone())
+                Archive::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
             drop(archive);
 
             // Second initialization
-            let mut archive = Archive::init(context.with_label("second"), cfg.clone())
+            let mut archive = Archive::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -187,9 +189,7 @@ mod tests {
             drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
-            let archive = Archive::init(context.with_label("third"), cfg)
-                .await
-                .unwrap();
+            let archive = Archive::init(context.child("third"), cfg).await.unwrap();
 
             // Verify data persisted
             assert_eq!(
@@ -235,7 +235,7 @@ mod tests {
 
             // Initialize archive, sync without writing anything, then drop
             let mut archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("first"), cfg.clone())
+                Archive::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
             archive.sync().await.unwrap();
@@ -243,7 +243,7 @@ mod tests {
 
             // Re-initialize -- should not fail with SectionOutOfRange(0)
             let mut archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("second"), cfg.clone())
+                Archive::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -254,9 +254,8 @@ mod tests {
             drop(archive);
 
             // Third init to verify persistence
-            let archive: Archive<_, Digest, i32> = Archive::init(context.with_label("third"), cfg)
-                .await
-                .unwrap();
+            let archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("third"), cfg).await.unwrap();
             assert_eq!(
                 archive
                     .get(crate::archive::Identifier::Key(&key))

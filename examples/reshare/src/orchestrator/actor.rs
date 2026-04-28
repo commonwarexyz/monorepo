@@ -7,6 +7,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
+    shared::Shared,
     simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
@@ -75,7 +76,7 @@ where
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
-    application: A,
+    application: Shared<A>,
 
     oracle: B,
     marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
@@ -119,7 +120,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                application: config.application,
+                application: Shared::new(config.application),
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,
@@ -169,7 +170,7 @@ where
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut vote_mux, mut vote_backup) = Muxer::builder(
-            self.context.with_label("vote_mux"),
+            self.context.child("vote_mux"),
             vote_sender,
             vote_receiver,
             self.muxer_size,
@@ -178,7 +179,7 @@ where
         .build();
         mux.start();
         let (mux, mut certificate_mux) = Muxer::builder(
-            self.context.with_label("certificate_mux"),
+            self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
             self.muxer_size,
@@ -186,7 +187,7 @@ where
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
-            self.context.with_label("resolver_mux"),
+            self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
             self.muxer_size,
@@ -303,7 +304,7 @@ where
         let elector = L::default();
         let context = self
             .context
-            .with_label("consensus_engine")
+            .child("consensus_engine")
             .with_attribute("epoch", epoch);
         let engine = simplex::Engine::new(
             context,

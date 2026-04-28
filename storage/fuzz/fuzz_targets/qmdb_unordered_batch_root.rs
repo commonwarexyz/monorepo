@@ -2,7 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
@@ -111,7 +113,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let cfg = test_config(suffix, &context);
-        let mut db: Db<F> = Db::init(context.clone(), cfg)
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("init unordered any db");
 

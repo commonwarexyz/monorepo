@@ -27,12 +27,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, Metrics};
+//! use commonware_runtime::{Spawner, Runner, deterministic, Metrics, Supervisor};
 //!
 //! let executor =  deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     println!("Parent started");
-//!     let result = context.with_label("child").spawn(|_| async move {
+//!     let result = context.child("child").spawn(|_| async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -63,8 +63,8 @@ use crate::{
         supervision::Tree,
         Panicker,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
-    Panicked, Spawner as _, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
+    Spawner as _, Supervisor as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -883,25 +883,6 @@ pub struct Context {
     traced: bool,
 }
 
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        let (child, _) = Tree::child(&self.tree);
-        Self {
-            name: self.name.clone(),
-            attributes: self.attributes.clone(),
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
-
-            tree: child,
-            execution: Execution::default(),
-            traced: false,
-        }
-    }
-}
-
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
@@ -1109,22 +1090,23 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
-    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.spawn_with(Execution::default(), f)
+    }
+
+    fn spawn_with<F, Fut, T>(mut self, execution: Execution, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.execution = execution;
+
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
@@ -1211,7 +1193,7 @@ impl crate::ThreadPooler for Context {
 
         builder
             .spawn_handler(move |thread| {
-                self.with_label("rayon_thread")
+                self.child("rayon_thread")
                     .dedicated()
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
@@ -1221,39 +1203,43 @@ impl crate::ThreadPooler for Context {
     }
 }
 
-impl crate::Metrics for Context {
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn with_label(&self, label: &str) -> Self {
+impl crate::Supervisor for Context {
+    fn child(&self, label: &'static str) -> Self {
+        let (tree, _) = Tree::child(&self.tree);
         Self {
             name: child_label(&self.name, label),
-            ..self.clone()
+            attributes: self.attributes.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
+            tree,
+            execution: Execution::default(),
+            traced: false,
         }
     }
 
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(key);
 
-        // Add the attribute to the list of attributes
-        let mut attributes = self.attributes.clone();
-        assert!(
-            add_attribute(&mut attributes, key, value),
-            "duplicate attribute key: {key}"
-        );
-        Self {
-            attributes,
-            ..self.clone()
-        }
+        add_attribute(&mut self.attributes, key, value);
+        self
     }
 
-    fn with_span(&self) -> Self {
-        Self {
-            traced: true,
-            ..self.clone()
+    fn name(&self) -> Name {
+        Name {
+            label: self.name.clone(),
+            attributes: self.attributes.clone(),
         }
+    }
+}
+
+impl crate::Observer for Context {
+    fn with_span(mut self) -> Self {
+        self.traced = true;
+        self
     }
 
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
@@ -1590,9 +1576,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "external")]
     use crate::FutureExt;
-    #[cfg(feature = "external")]
-    use crate::Spawner;
-    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
+    use crate::{deterministic, reschedule, Blob, Observer as _, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
@@ -1616,7 +1600,7 @@ mod tests {
         runner.start(|context| async move {
             let mut handles = FuturesUnordered::new();
             for i in 0..=tasks - 1 {
-                handles.push(context.clone().spawn(move |_| task(i)));
+                handles.push(context.child("task").spawn(move |_| task(i)));
             }
 
             let mut outputs = Vec::new();
@@ -1788,7 +1772,6 @@ mod tests {
 
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(0, data).await.unwrap();
         });
@@ -2002,7 +1985,7 @@ mod tests {
             });
 
             // Wait for a delay sampled before the external send occurs
-            let first = context.clone().spawn({
+            let first = context.child("sample_before_send").spawn({
                 let results_tx = results_tx.clone();
                 move |context| async move {
                     first_rx.pace(&context, Duration::ZERO).await.unwrap();
@@ -2015,14 +1998,16 @@ mod tests {
             });
 
             // Wait for a delay sampled after the external send occurs
-            let second = context.clone().spawn(move |context| async move {
-                second_rx.pace(&context, first_wait).await.unwrap();
-                let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
-                assert!(elapsed_real >= first_wait);
-                let elapsed_sim = context.current().duration_since(start_sim).unwrap();
-                assert!(elapsed_sim >= first_wait);
-                results_tx.send(2).await.unwrap();
-            });
+            let second = context
+                .child("sample_after_send")
+                .spawn(move |context| async move {
+                    second_rx.pace(&context, first_wait).await.unwrap();
+                    let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                    assert!(elapsed_real >= first_wait);
+                    let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                    assert!(elapsed_sim >= first_wait);
+                    results_tx.send(2).await.unwrap();
+                });
 
             // Wait for both tasks to complete
             second.await.unwrap();
@@ -2088,7 +2073,7 @@ mod tests {
     fn test_metrics_label_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label("");
+            let _ = context.child("");
         });
     }
 
@@ -2097,7 +2082,7 @@ mod tests {
     fn test_metrics_label_invalid_first_char() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label("1invalid");
+            let _ = context.child("1invalid");
         });
     }
 
@@ -2106,7 +2091,7 @@ mod tests {
     fn test_metrics_label_invalid_char() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label("invalid-label");
+            let _ = context.child("invalid-label");
         });
     }
 
@@ -2115,7 +2100,7 @@ mod tests {
     fn test_metrics_label_reserved_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label(METRICS_PREFIX);
+            let _ = context.child(METRICS_PREFIX);
         });
     }
 
@@ -2125,7 +2110,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let _ = context
-                .with_label("test")
+                .child("test")
                 .with_attribute("epoch", "old")
                 .with_attribute("epoch", "new");
         });
@@ -2255,7 +2240,7 @@ mod tests {
                 // Spawn multiple tasks that do storage operations
                 let mut handles = Vec::new();
                 for i in 0..5 {
-                    let ctx = ctx.clone();
+                    let ctx = ctx.child("task");
                     handles.push(ctx.spawn(move |ctx| async move {
                         let mut successes = 0u32;
                         for j in 0..4 {

@@ -18,6 +18,8 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Type alias for a variable-size operation.
@@ -55,7 +57,7 @@ impl<
         cfg: Config<T, <Operation<F, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, K, V, H> = Journal::new(
-            context.clone(),
+            context.child("journal"),
             cfg.merkle_config,
             cfg.log,
             Operation::<F, K, V>::is_commit,
@@ -283,8 +285,8 @@ mod tests {
     }
 
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
-        let mut db = open_db::<F>(ctx.with_label("db")).await;
-        let mut compact = open_compact::<F>(ctx.with_label("compact")).await;
+        let mut db = open_db::<F>(ctx.child("db")).await;
+        let mut compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let k1 = Sha256::fill(1u8);
@@ -317,7 +319,7 @@ mod tests {
         assert_eq!(compact.get_metadata(), Some(metadata));
 
         drop(compact);
-        let reopened = open_compact::<F>(ctx.with_label("reopen")).await;
+        let reopened = open_compact::<F>(ctx.child("reopen")).await;
         assert_eq!(db.root(), reopened.root());
         assert_eq!(reopened.get_metadata(), Some(metadata));
 

@@ -55,6 +55,8 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -500,7 +502,7 @@ pub(crate) mod tests {
         Persistable,
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, Metrics};
+    use commonware_runtime::deterministic;
     use commonware_utils::NZU64;
     use std::{future::Future, pin::Pin};
 
@@ -548,7 +550,7 @@ pub(crate) mod tests {
         }
         drop(db);
 
-        let mut db = reopen(context.with_label("db2")).await;
+        let mut db = reopen(context.child("db2")).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.bounds().await.end, 1);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -569,7 +571,7 @@ pub(crate) mod tests {
         let root = db.root();
 
         // Commit op should remain after reopen even without clean shutdown.
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db3")).await;
         assert_eq!(db.bounds().await.end, 2); // commit op should remain after re-open.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
@@ -613,7 +615,7 @@ pub(crate) mod tests {
         db.sync().await.unwrap();
         drop(db);
 
-        let db = reopen(context.with_label("db2")).await;
+        let db = reopen(context.child("db2")).await;
         assert_eq!(db.bounds().await.end, 4);
         assert_eq!(db.root(), root);
         assert_eq!(db.get(Location::new(1)).await.unwrap().unwrap(), v1);
@@ -621,7 +623,7 @@ pub(crate) mod tests {
 
         // Make sure commit operation remains after drop/reopen.
         drop(db);
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db3")).await;
         assert_eq!(db.bounds().await.end, 4);
         assert_eq!(db.root(), root);
 
@@ -651,7 +653,7 @@ pub(crate) mod tests {
         }
         drop(db);
         // Should rollback to the previous root.
-        let mut db = reopen(context.with_label("db2")).await;
+        let mut db = reopen(context.child("db2")).await;
         assert_eq!(root, db.root());
 
         // Apply the updates and commit them this time.
@@ -677,7 +679,7 @@ pub(crate) mod tests {
         }
         drop(db);
         // Should rollback to the previous root.
-        let mut db = reopen(context.with_label("db3")).await;
+        let mut db = reopen(context.child("db3")).await;
         assert_eq!(root, db.root());
 
         // Apply the updates and commit them this time.
@@ -695,7 +697,7 @@ pub(crate) mod tests {
 
         // Make sure we can reopen and get back to the same state.
         drop(db);
-        let db = reopen(context.with_label("db4")).await;
+        let db = reopen(context.child("db4")).await;
         assert_eq!(db.bounds().await.end, 2 * ELEMENTS + 3);
         assert_eq!(db.root(), root);
 
@@ -832,7 +834,7 @@ pub(crate) mod tests {
         const ELEMENTS: u64 = 200;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
-        let db = reopen(context.with_label("db2")).await;
+        let db = reopen(context.child("db2")).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
 
@@ -845,7 +847,7 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db3")).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
 
@@ -858,7 +860,7 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = reopen(context.with_label("db4")).await;
+        let db = reopen(context.child("db4")).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
 
@@ -871,7 +873,7 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let mut db = reopen(context.with_label("db5")).await;
+        let mut db = reopen(context.child("db5")).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
         assert_eq!(db.last_commit_loc(), Location::new(0));
@@ -887,7 +889,7 @@ pub(crate) mod tests {
                 .unwrap();
         }
         db.commit().await.unwrap();
-        let db = reopen(context.with_label("db6")).await;
+        let db = reopen(context.child("db6")).await;
         assert!(db.bounds().await.end > 1);
         assert_ne!(db.root(), root);
 
@@ -926,7 +928,7 @@ pub(crate) mod tests {
         drop(db);
 
         // Reopen and verify correct recovery.
-        let mut db = reopen(context.with_label("db2")).await;
+        let mut db = reopen(context.child("db2")).await;
         assert_eq!(
             db.bounds().await.end,
             committed_size,
@@ -971,7 +973,7 @@ pub(crate) mod tests {
         drop(db);
 
         // Reopen and verify correct recovery.
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db3")).await;
         assert_eq!(
             db.bounds().await.end,
             new_committed_size,
@@ -1199,14 +1201,14 @@ pub(crate) mod tests {
         let op_count = db.bounds().await.end;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
-        let db = reopen(context.with_label("db2")).await;
+        let db = reopen(context.child("db2")).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         assert_eq!(db.last_commit_loc(), op_count - 1);
         drop(db);
 
         // Insert many operations without commit, then simulate failure.
-        let db = reopen(context.with_label("recovery_a")).await;
+        let db = reopen(context.child("recovery_a")).await;
         {
             let mut batch = db.new_batch();
             for i in 0..ELEMENTS {
@@ -1215,20 +1217,20 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = reopen(context.with_label("recovery_b")).await;
+        let db = reopen(context.child("recovery_b")).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         drop(db);
 
         // Repeat after pruning to the last commit.
-        let mut db = reopen(context.with_label("db3")).await;
+        let mut db = reopen(context.child("db3")).await;
         db.prune(db.last_commit_loc()).await.unwrap();
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         db.sync().await.unwrap();
         drop(db);
 
-        let db = reopen(context.with_label("recovery_c")).await;
+        let db = reopen(context.child("recovery_c")).await;
         {
             let mut batch = db.new_batch();
             for i in 0..ELEMENTS {
@@ -1236,13 +1238,13 @@ pub(crate) mod tests {
             }
         }
         drop(db);
-        let db = reopen(context.with_label("recovery_d")).await;
+        let db = reopen(context.child("recovery_d")).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         drop(db);
 
         // Apply the ops one last time but fully commit them this time, then clean up.
-        let mut db = reopen(context.with_label("db4")).await;
+        let mut db = reopen(context.child("db4")).await;
         {
             let mut batch = db.new_batch();
             for i in 0..ELEMENTS {
@@ -1253,7 +1255,7 @@ pub(crate) mod tests {
                 .unwrap();
         }
         db.commit().await.unwrap();
-        let db = reopen(context.with_label("db5")).await;
+        let db = reopen(context.child("db5")).await;
         let bounds = db.bounds().await;
         assert!(bounds.end > op_count);
         assert_ne!(db.root(), root);
@@ -1957,7 +1959,7 @@ pub(crate) mod tests {
 
         db.commit().await.unwrap();
         drop(db);
-        let mut db = reopen(context.with_label("reopen")).await;
+        let mut db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().await.end, size_before);
         assert_eq!(db.last_commit_loc(), commit_before);
@@ -1986,7 +1988,7 @@ pub(crate) mod tests {
 
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen(context.with_label("reopen_initial_boundary")).await;
+        let db = reopen(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.bounds().await.end, initial_size);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -2074,7 +2076,7 @@ pub(crate) mod tests {
 
         // Reopen: floor should survive restart (it's part of the last commit operation).
         drop(db);
-        let mut db = reopen(context.with_label("reopen")).await;
+        let mut db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 
         // Floor may stay the same across a commit (monotonic non-decreasing).
@@ -2317,7 +2319,7 @@ pub(crate) mod tests {
 
         // Drop & reopen to simulate a crash after both commits were durable.
         drop(db);
-        let mut db = reopen(context.with_label("reopen")).await;
+        let mut db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_b);
 
         // Rewind to the first commit; floor should restore to floor_a.
@@ -2328,7 +2330,7 @@ pub(crate) mod tests {
         // Commit the rewind so it's durable, then reopen and confirm the floor again.
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen(context.with_label("reopen2")).await;
+        let db = reopen(context.child("reopen2")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 
         db.destroy().await.unwrap();
@@ -2473,7 +2475,7 @@ pub(crate) mod tests {
         // the last commit op.
         db.sync().await.unwrap();
         drop(db);
-        let mut db = reopen(context.with_label("reopened")).await;
+        let mut db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds().await;
         assert_eq!(reopened_bounds.end, Location::new(*commit_loc + 1));
         assert_eq!(db.last_commit_loc(), commit_loc);

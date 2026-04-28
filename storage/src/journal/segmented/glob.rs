@@ -30,6 +30,8 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use commonware_runtime::{BufMut, BufferPooler, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
@@ -231,7 +233,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZUsize;
 
     fn test_cfg() -> Config<()> {
@@ -247,7 +249,7 @@ mod tests {
     fn test_glob_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -273,7 +275,7 @@ mod tests {
     fn test_glob_multiple_values() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -306,7 +308,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
             };
-            let mut glob: Glob<_, [u8; 100]> = Glob::init(context.clone(), cfg)
+            let mut glob: Glob<_, [u8; 100]> = Glob::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -329,7 +331,7 @@ mod tests {
     fn test_glob_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -361,7 +363,7 @@ mod tests {
     fn test_glob_checksum_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -390,7 +392,7 @@ mod tests {
     fn test_glob_rewind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -433,7 +435,7 @@ mod tests {
             let cfg = test_cfg();
 
             // Create and populate glob
-            let mut glob: Glob<_, i32> = Glob::init(context.with_label("first"), cfg.clone())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to init glob");
 
@@ -443,7 +445,7 @@ mod tests {
             drop(glob);
 
             // Reopen and verify
-            let glob: Glob<_, i32> = Glob::init(context.with_label("second"), cfg)
+            let glob: Glob<_, i32> = Glob::init(context.child("second"), cfg)
                 .await
                 .expect("Failed to reinit glob");
 
@@ -458,7 +460,7 @@ mod tests {
     fn test_glob_get_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -485,7 +487,7 @@ mod tests {
     fn test_glob_get_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 

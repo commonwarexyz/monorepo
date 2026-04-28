@@ -6,7 +6,9 @@ use crate::{
 };
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -34,7 +36,7 @@ impl Conformance for QueueConformance {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed, &context))
+                Queue::<_, Vec<u8>>::init(context.child("queue"), config(seed, &context))
                     .await
                     .unwrap();
 
@@ -63,7 +65,7 @@ impl Conformance for QueueConformance {
 
             // Re-open and verify surviving items are readable
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed, &context))
+                Queue::<_, Vec<u8>>::init(context.child("queue2"), config(seed, &context))
                     .await
                     .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {

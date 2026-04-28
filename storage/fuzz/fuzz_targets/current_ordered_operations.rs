@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
@@ -135,7 +135,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             translator: TwoCap,
         };
 
-        let mut db: Db<F> = Db::init(context.clone(), cfg)
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("Failed to initialize Current database");
 

@@ -2,7 +2,9 @@
 
 use crate::freezer::Config;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use core::num::{NonZeroU16, NonZeroUsize};
 use rand::Rng;
@@ -32,12 +34,10 @@ impl Conformance for Freezer {
                 table_replay_buffer: WRITE_BUFFER,
                 codec_config: (),
             };
-            let mut freezer = super::Freezer::<_, FixedBytes<64>, i32>::init(
-                context.with_label("freezer"),
-                config,
-            )
-            .await
-            .unwrap();
+            let mut freezer =
+                super::Freezer::<_, FixedBytes<64>, i32>::init(context.child("freezer"), config)
+                    .await
+                    .unwrap();
 
             // Insert random key-value pairs to trigger resizes
             for i in 0..64 {

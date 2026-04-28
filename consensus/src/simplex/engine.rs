@@ -5,6 +5,7 @@ use super::{
     types::{Activity, Context},
 };
 use crate::{
+    shared::Shared,
     simplex::{scheme::Scheme, Plan},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -32,10 +33,10 @@ pub struct Engine<
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, L, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, Shared<R>, Shared<F>>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, F, R, T>,
+    batcher: batcher::Actor<E, S, B, D, Shared<F>, Shared<R>, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
     resolver: resolver::Actor<E, S, B, D, T>,
@@ -58,15 +59,17 @@ impl<
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
+        let reporter = Shared::new(cfg.reporter);
+        let relay = Shared::new(cfg.relay);
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(
-            context.with_label("batcher"),
+            context.child("batcher"),
             batcher::Config {
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
-                reporter: cfg.reporter.clone(),
-                relay: cfg.relay.clone(),
+                reporter: reporter.clone(),
+                relay: relay.clone(),
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
@@ -78,14 +81,14 @@ impl<
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            context.with_label("voter"),
+            context.child("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
                 elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
-                relay: cfg.relay,
-                reporter: cfg.reporter,
+                relay,
+                reporter,
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
@@ -101,7 +104,7 @@ impl<
 
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            context.with_label("resolver"),
+            context.child("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,

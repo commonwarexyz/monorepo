@@ -117,7 +117,7 @@ where
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();
     let merkle = Merkle::<F, _, _>::init_sync(
-        context.with_label("merkle"),
+        context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
@@ -126,7 +126,7 @@ where
         &hasher,
     )
     .await?;
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _>::from_components(
         merkle,
         log,
@@ -223,7 +223,7 @@ where
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =
-        db::init_metadata::<F, E, DigestOf<H>>(context.with_label("metadata"), &metadata_partition)
+        db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
     let current_db = db::Db {
@@ -298,7 +298,7 @@ macro_rules! impl_current_sync_database {
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
                 if !qmdb::any::sync::has_local_target_state::<F, _, H>(
-                    context.with_label("local_target_merkle_probe"),
+                    context.child("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
                 )
@@ -308,7 +308,7 @@ macro_rules! impl_current_sync_database {
                 }
 
                 let Ok(journal) = <$journal>::init(
-                    context.with_label("local_target_journal_probe"),
+                    context.child("local_target_journal_probe"),
                     config.journal_config(),
                 )
                 .await

@@ -191,7 +191,7 @@ pub fn add_attribute(
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Spawn a task under a labeled context
-///     let handle = context.with_label("worker").spawn(|ctx| async move {
+///     let handle = context.child("worker").spawn(|ctx| async move {
 ///         ctx.sleep(Duration::from_secs(100)).await;
 ///     });
 ///
@@ -811,7 +811,7 @@ impl Register for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Metrics, Runner, Spawner};
+    use crate::{deterministic, Observer as _, Runner, Spawner, Supervisor as _};
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};
@@ -828,8 +828,7 @@ mod tests {
             );
 
             // Spawn a task under a labeled context that stays running
-            let worker_ctx = context.with_label("worker");
-            let handle1 = worker_ctx.clone().spawn(|_| async move {
+            let handle1 = context.child("worker").spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -845,9 +844,12 @@ mod tests {
             );
 
             // Spawn a nested task (worker_child)
-            let handle2 = worker_ctx.with_label("child").spawn(|_| async move {
-                future::pending::<()>().await;
-            });
+            let handle2 = context
+                .child("worker")
+                .child("child")
+                .spawn(|_| async move {
+                    future::pending::<()>().await;
+                });
 
             // Count should include both parent and nested tasks
             let count = count_running_tasks(&context, "worker");
@@ -880,9 +882,9 @@ mod tests {
         executor.start(|context| async move {
             // Register metrics under different labels (no duplicates)
             let c1 = raw::Counter::<u64>::default();
-            let _metric_a = context.with_label("a").register("test", "help", c1);
+            let _metric_a = context.child("a").register("test", "help", c1);
             let c2 = raw::Counter::<u64>::default();
-            let _metric_b = context.with_label("b").register("test", "help", c2);
+            let _metric_b = context.child("b").register("test", "help", c2);
         });
         // Test passes if runtime doesn't panic on shutdown
     }
@@ -892,9 +894,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let c1 = raw::Counter::<u64>::default();
-            let metric_a = context.with_label("a").register("test", "help", c1);
+            let metric_a = context.child("a").register("test", "help", c1);
             let c2 = raw::Counter::<u64>::default();
-            let metric_b = context.with_label("a").register("test", "help", c2);
+            let metric_b = context.child("a").register("test", "help", c2);
 
             assert!(std::ptr::eq(metric_a.metric(), metric_b.metric()));
 
@@ -969,9 +971,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let counter = raw::Counter::<u64>::default();
-            let _metric_a = context.with_label("a").register("test", "help", counter);
+            let _metric_a = context.child("a").register("test", "help", counter);
             let gauge = raw::Gauge::<i64>::default();
-            let _metric_b = context.with_label("a").register("test", "help", gauge);
+            let _metric_b = context.child("a").register("test", "help", gauge);
         });
     }
 

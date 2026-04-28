@@ -13,7 +13,7 @@
 //! let executor = tokio::Runner::default();
 //! executor.start(|context| async move {
 //!     println!("Parent started");
-//!     let result = context.with_label("child").spawn(|_| async move {
+//!     let result = context.child("child").spawn(|_| async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });

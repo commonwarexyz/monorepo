@@ -68,7 +68,7 @@ where
         let hasher = StandardHasher::<H>::new();
 
         let merkle = Merkle::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             full::SyncConfig {
                 config: config.merkle.clone(),
                 range,
@@ -153,7 +153,7 @@ where
                 .encode()
                 .to_vec();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.with_label("merkle"),
+            context.child("merkle"),
             &StandardHasher::<H>::new(),
             config.merkle,
             leaf_count,

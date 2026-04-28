@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     aggregation::{scheme, types::Certificate},
+    shared::Shared,
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
     Automaton, Monitor, Reporter,
 };
@@ -55,7 +56,7 @@ enum Pending<S: Scheme, D: Digest> {
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
 /// associated with the given height.
-struct DigestRequest<D: Digest, E: Clock> {
+struct DigestRequest<D: Digest> {
     /// The height in question.
     height: Height,
 
@@ -63,7 +64,7 @@ struct DigestRequest<D: Digest, E: Clock> {
     result: Result<D, Error>,
 
     /// Records the time taken to get the digest.
-    timer: histogram::Timer<E>,
+    timer: histogram::Timer,
 }
 
 /// Instance of the engine.
@@ -71,7 +72,7 @@ pub struct Engine<
     E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
     P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Height, Digest = D> + Clone,
+    A: Automaton<Context = Height, Digest = D>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
@@ -79,7 +80,7 @@ pub struct Engine<
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
-    automaton: A,
+    automaton: Shared<A>,
     monitor: M,
     provider: P,
     reporter: Z,
@@ -104,7 +105,7 @@ pub struct Engine<
 
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
-    digest_requests: FuturesPool<DigestRequest<D, E>>,
+    digest_requests: FuturesPool<DigestRequest<D>>,
 
     // State
     /// The current epoch.
@@ -147,14 +148,14 @@ pub struct Engine<
 
     // ---------- Metrics ----------
     /// Metrics
-    metrics: metrics::Metrics<E>,
+    metrics: metrics::Metrics,
 }
 
 impl<
         E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
-        A: Automaton<Context = Height, Digest = D> + Clone,
+        A: Automaton<Context = Height, Digest = D>,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
@@ -163,12 +164,11 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, D, A, Z, M, B, T>) -> Self {
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(&context);
 
         Self {
             context: ContextCell::new(context),
-            automaton: cfg.automaton,
+            automaton: Shared::new(cfg.automaton),
             reporter: cfg.reporter,
             monitor: cfg.monitor,
             provider: cfg.provider,
@@ -250,12 +250,9 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(
-            self.context.with_label("journal").into_present(),
-            journal_cfg,
-        )
-        .await
-        .expect("init failed");
+        let journal = Journal::init(self.context.child("journal"), journal_cfg)
+            .await
+            .expect("init failed");
         let unverified_heights = self.replay(&journal).await;
         self.journal = Some(journal);
 
@@ -338,7 +335,7 @@ impl<
                     result,
                     timer,
                 } = request;
-                drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
+                timer.observe(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, %height, "automaton returned error");
@@ -676,7 +673,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut self.context, &*scheme, &self.strategy) {
+        if !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -691,7 +688,7 @@ impl<
     fn get_digest(&mut self, height: Height) {
         assert!(self.pending.contains_key(&height));
         let mut automaton = self.automaton.clone();
-        let timer = self.metrics.digest_duration.timer();
+        let timer = self.metrics.digest_duration.timer(self.context.as_ref());
         self.digest_requests.push(async move {
             let receiver = automaton.propose(height).await;
             let result = receiver.await.map_err(Error::AppProposeCanceled);

@@ -6,7 +6,9 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -35,7 +37,7 @@ impl Conformance for ArchivePrunable {
                 replay_buffer: WRITE_BUFFER,
             };
             let mut archive = prunable::Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.with_label("archive"),
+                context.child("archive"),
                 config,
             )
             .await
@@ -83,7 +85,7 @@ impl Conformance for ArchiveImmutable {
                 codec_config: (),
             };
             let mut archive = immutable::Archive::<_, FixedBytes<64>, i32>::init(
-                context.with_label("archive"),
+                context.child("archive"),
                 config,
             )
             .await

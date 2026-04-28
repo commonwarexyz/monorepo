@@ -46,6 +46,8 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
+#[cfg(test)]
+use commonware_runtime::Supervisor as _;
 use commonware_runtime::{BufferPooler, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
@@ -114,7 +116,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
-        let index = FixedJournal::init(context.with_label("index"), index_cfg).await?;
+        let index = FixedJournal::init(context.child("index"), index_cfg).await?;
 
         let value_cfg = GlobConfig {
             partition: cfg.value_partition,
@@ -122,7 +124,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             codec_config: cfg.codec_config,
             write_buffer: cfg.value_write_buffer,
         };
-        let values = Glob::init(context.with_label("values"), value_cfg).await?;
+        let values = Glob::init(context.child("values"), value_cfg).await?;
 
         let mut oversized = Self { index, values };
 
@@ -459,8 +461,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Metrics,
-        Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Runner,
     };
     use commonware_utils::{NZUsize, NZU16};
 
@@ -582,7 +583,7 @@ mod tests {
 
             // Create and populate oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -614,7 +615,7 @@ mod tests {
 
             // Reinitialize - should recover and rewind index
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -647,7 +648,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -662,7 +663,7 @@ mod tests {
 
             // Reopen and verify
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -722,7 +723,7 @@ mod tests {
 
             // Create oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -738,7 +739,7 @@ mod tests {
 
             // Reinitialize - recovery should handle the empty/non-existent section 1
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -758,7 +759,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -785,7 +786,7 @@ mod tests {
 
             // Reinitialize - should recover and rewind index to 0
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -822,7 +823,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -888,7 +889,7 @@ mod tests {
 
             // Reinitialize
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -935,7 +936,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -970,7 +971,7 @@ mod tests {
 
             // Reinitialize - should detect page corruption and truncate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -1012,7 +1013,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1032,7 +1033,7 @@ mod tests {
 
             // Reinitialize with no corruption - should be fast
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -1059,7 +1060,7 @@ mod tests {
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1083,7 +1084,7 @@ mod tests {
 
             // Reinitialize
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -1102,7 +1103,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1135,7 +1136,7 @@ mod tests {
 
             // Reinitialize
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -1175,7 +1176,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1198,7 +1199,7 @@ mod tests {
 
             // Reinitialize - glob size will be 0, all entries invalid
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -1219,7 +1220,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1248,7 +1249,7 @@ mod tests {
 
             // Reinitialize
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1289,7 +1290,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1313,7 +1314,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
             glob.prune(2).await.expect("Failed to prune glob");
@@ -1323,7 +1324,7 @@ mod tests {
             // Reinitialize - should recover gracefully with warning
             // Index section 1 will be rewound to 0 entries
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1346,7 +1347,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1370,7 +1371,7 @@ mod tests {
             // Reinitialize - should handle gracefully
             // Section 2 is gone from index, orphan data in glob is acceptable
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1393,7 +1394,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1435,7 +1436,7 @@ mod tests {
 
             // Reinitialize - should rewind index to match glob
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -1475,7 +1476,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1511,7 +1512,7 @@ mod tests {
 
             // Reinitialize - glob has orphan data from entry 3
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1562,7 +1563,7 @@ mod tests {
 
             // Reinitialize after adding data on top of orphan glob data
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("third"), cfg)
+                Oversized::init(context.child("third"), cfg)
                     .await
                     .expect("Failed to reinit after append");
 
@@ -1611,7 +1612,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1641,7 +1642,7 @@ mod tests {
 
             // Reinitialize - should handle partial entry gracefully
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1684,7 +1685,7 @@ mod tests {
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1708,7 +1709,7 @@ mod tests {
 
             // Reinitialize - should handle gracefully (rewind to 0)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1760,7 +1761,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1793,7 +1794,7 @@ mod tests {
 
             // Reinitialize - recovery should succeed (glob has orphan data)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1826,7 +1827,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1856,7 +1857,7 @@ mod tests {
 
             // Reinitialize - recovery should detect index entries pointing beyond glob
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -1969,7 +1970,7 @@ mod tests {
 
             // Create and populate with sections 1 and 2
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -1991,7 +1992,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
             let orphan_value: TestValue = [99; 16];
@@ -2003,7 +2004,7 @@ mod tests {
 
             // Reinitialize - should detect and remove the orphan section
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2026,7 +2027,7 @@ mod tests {
 
             // Create and populate with only section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2046,7 +2047,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -2061,7 +2062,7 @@ mod tests {
 
             // Reinitialize - should detect and remove all orphan sections
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2088,7 +2089,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -2103,7 +2104,7 @@ mod tests {
 
             // Initialize oversized - should remove all orphan value sections
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2123,7 +2124,7 @@ mod tests {
 
             // Create and populate with section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2143,7 +2144,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -2158,7 +2159,7 @@ mod tests {
 
             // Reinitialize - should remove orphan sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2194,7 +2195,7 @@ mod tests {
             drop(oversized);
 
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("third"), cfg)
+                Oversized::init(context.child("third"), cfg)
                     .await
                     .expect("Failed to reinit after append");
 
@@ -2215,7 +2216,7 @@ mod tests {
 
             // Create and populate with sections 1, 2, 3 (no orphans)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2232,7 +2233,7 @@ mod tests {
 
             // Reinitialize - no orphan cleanup needed
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -2255,7 +2256,7 @@ mod tests {
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2275,7 +2276,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
             let orphan_value: TestValue = [2; 16];
@@ -2296,7 +2297,7 @@ mod tests {
 
             // Reinitialize - should handle empty index section and remove orphan value section
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -2320,7 +2321,7 @@ mod tests {
 
             // Create index with sections 1, 3, 5 (gaps)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2342,7 +2343,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -2357,7 +2358,7 @@ mod tests {
 
             // Reinitialize - should remove orphan sections 2, 4, 6
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg)
+                Oversized::init(context.child("second"), cfg)
                     .await
                     .expect("Failed to reinit");
 
@@ -2386,7 +2387,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2432,7 +2433,7 @@ mod tests {
 
             // Reinitialize - should truncate the trailing garbage
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2487,7 +2488,7 @@ mod tests {
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2538,7 +2539,7 @@ mod tests {
             // Reinitialize - recovery should detect the invalid entry
             // (offset + size would overflow, and even with saturating_add it exceeds glob_size)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2572,7 +2573,7 @@ mod tests {
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2607,7 +2608,7 @@ mod tests {
 
             // First restart - recovery should handle empty section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2650,7 +2651,7 @@ mod tests {
 
             // Second restart - verify persistence
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("third"), cfg.clone())
+                Oversized::init(context.child("third"), cfg.clone())
                     .await
                     .expect("Failed to reinit again");
 
@@ -2733,7 +2734,7 @@ mod tests {
 
             // Create and populate with large section numbers
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2762,7 +2763,7 @@ mod tests {
 
             // Reinitialize - should recover without overflow panics
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
@@ -2805,7 +2806,7 @@ mod tests {
 
             // Phase 1: Create valid data with 5 entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2852,7 +2853,7 @@ mod tests {
             // Phase 4: Second recovery attempt should handle the inconsistent state
             // Index has 4 entries, but glob only supports 3.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit after nested crash");
 
@@ -2898,7 +2899,7 @@ mod tests {
 
             // Phase 1: Create valid data in section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("first"), cfg.clone())
+                Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to init");
 
@@ -2918,7 +2919,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -2940,7 +2941,7 @@ mod tests {
 
             // Phase 4: Recovery should complete the cleanup
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("second"), cfg.clone())
+                Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 

@@ -1,9 +1,8 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::{histogram, status, Counter, EncodeStruct, GaugeFamily, MetricsExt as _},
-    Clock, Metrics as RuntimeMetrics,
+    Metrics as RuntimeMetrics,
 };
-use std::sync::Arc;
 
 /// Per-sequencer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
@@ -12,7 +11,7 @@ pub struct Sequencer<P: PublicKey> {
 }
 
 /// Metrics for the [super::Engine]
-pub struct Metrics<E: RuntimeMetrics + Clock, P: PublicKey> {
+pub struct Metrics<P: PublicKey> {
     /// Height per sequencer
     pub sequencer_heights: GaugeFamily<Sequencer<P>>,
     /// Number of acks processed by status
@@ -28,14 +27,14 @@ pub struct Metrics<E: RuntimeMetrics + Clock, P: PublicKey> {
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
-    pub verify_duration: histogram::Timed<E>,
+    pub verify_duration: histogram::Timed,
     /// Histogram of time from new proposal to certificate generation
-    pub e2e_duration: histogram::Timed<E>,
+    pub e2e_duration: histogram::Timed,
 }
 
-impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
+impl<P: PublicKey> Metrics<P> {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: E) -> Self {
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         let sequencer_heights = context.family("sequencer_heights", "Height per sequencer tracked");
         let acks = context.family("acks", "Number of acks processed by status");
         let nodes = context.family("nodes", "Number of nodes processed by status");
@@ -53,7 +52,6 @@ impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
             "Histogram of time from new proposal to certificate generation",
             histogram::Buckets::NETWORK,
         );
-        let clock = Arc::new(context);
 
         Self {
             sequencer_heights,
@@ -63,8 +61,8 @@ impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
             certificates,
             propose,
             rebroadcast,
-            verify_duration: histogram::Timed::new(verify_duration, clock.clone()),
-            e2e_duration: histogram::Timed::new(e2e_duration, clock),
+            verify_duration: histogram::Timed::new(verify_duration),
+            e2e_duration: histogram::Timed::new(e2e_duration),
         }
     }
 }

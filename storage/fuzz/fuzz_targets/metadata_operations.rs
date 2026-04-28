@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::sequence::U64;
 use libfuzzer_sys::fuzz_target;
@@ -38,7 +38,7 @@ fn fuzz(input: FuzzInput) {
             partition: "metadata-operations-fuzz-test".into(),
             codec_config: ((0..).into(), ()),
         };
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg)
             .await
             .unwrap();
 

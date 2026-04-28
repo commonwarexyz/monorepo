@@ -216,7 +216,7 @@ where
 
         // Initialize persistent state
         let mut storage = Storage::init(
-            self.context.with_label("storage"),
+            self.context.child("storage"),
             &self.partition_prefix,
             max_read_size,
             self.max_supported_mode,
@@ -225,7 +225,7 @@ where
         if storage.epoch().is_none() {
             let initial_state = EpochState {
                 round: 0,
-                rng_seed: Summary::random(&mut self.context),
+                rng_seed: Summary::random(self.context.as_present_mut()),
                 output,
                 share,
             };
@@ -233,8 +233,7 @@ where
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
-        let (mux, mut dkg_mux) =
-            Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
+        let (mux, mut dkg_mux) = Muxer::new(self.context.child("dkg_mux"), sender, receiver, 100);
         mux.start();
 
         'actor: loop {
@@ -502,7 +501,11 @@ where
                         let (success, next_round, next_output, next_share) = if let Some(ps) =
                             player_state.take()
                         {
-                            match ps.finalize::<N3f1, Batch>(&mut self.context, logs, &Sequential) {
+                            match ps.finalize::<N3f1, Batch>(
+                                self.context.as_present_mut(),
+                                logs,
+                                &Sequential,
+                            ) {
                                 Ok((new_output, new_share)) => (
                                     true,
                                     epoch_state.round + 1,
@@ -517,8 +520,11 @@ where
                                 ),
                             }
                         } else {
-                            match observe::<_, _, N3f1, Batch>(&mut self.context, logs, &Sequential)
-                            {
+                            match observe::<_, _, N3f1, Batch>(
+                                self.context.as_present_mut(),
+                                logs,
+                                &Sequential,
+                            ) {
                                 Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                 Err(_) => (
                                     false,
@@ -548,7 +554,7 @@ where
                                 epoch.next(),
                                 EpochState {
                                     round: next_round,
-                                    rng_seed: Summary::random(&mut self.context),
+                                    rng_seed: Summary::random(self.context.as_present_mut()),
                                     output: next_output.clone(),
                                     share: next_share.clone(),
                                 },
@@ -592,7 +598,7 @@ where
 
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
-        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
+        storage: &mut Storage<E, V, C::PublicKey>,
         epoch: Epoch,
         dealer_state: &mut Dealer<V, C>,
         mut player_state: Option<&mut Player<V, C>>,
@@ -653,7 +659,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, N3f1, TryCollect, NZU32};
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
@@ -741,7 +747,7 @@ mod tests {
             // Seed durable state that looks like a completed reshare several rounds in, even
             // though the restarted actor will be given stale bootstrap inputs below.
             let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
-                context.with_label("seed_storage"),
+                context.child("seed_storage"),
                 &partition_prefix,
                 NZU32!(peer_config.max_participants_per_round()),
                 crate::dkg::MAX_SUPPORTED_MODE,
@@ -763,7 +769,7 @@ mod tests {
             // Restart the actor with stale bootstrap inputs (output=None, share=None). The
             // recovered epoch must override these.
             let (actor, _mailbox) = Actor::<_, _, Sha256, _, MinSig>::new(
-                context.with_label("actor"),
+                context.child("actor"),
                 Config {
                     manager: NoopManager::<Ed25519PublicKey>::default(),
                     signer,

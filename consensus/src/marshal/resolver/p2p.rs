@@ -67,7 +67,7 @@ where
     let (sender, receiver) = mpsc::channel(config.mailbox_size);
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
-        ctx.with_label("resolver"),
+        ctx.child("resolver"),
         p2p::Config {
             peer_provider: config.peer_provider,
             blocker: config.blocker,

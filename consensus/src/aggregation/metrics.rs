@@ -1,11 +1,10 @@
 use commonware_runtime::{
     telemetry::metrics::{histogram, status, Counter, Gauge, MetricsExt as _},
-    Clock, Metrics as RuntimeMetrics,
+    Metrics as RuntimeMetrics,
 };
-use std::sync::Arc;
 
 /// Metrics for the [super::Engine].
-pub struct Metrics<E: RuntimeMetrics + Clock> {
+pub struct Metrics {
     /// Lowest height without a certificate
     pub tip: Gauge,
     /// Number of digests returned by the automaton by status
@@ -15,12 +14,12 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of certificates produced
     pub certificates: Counter,
     /// Histogram of application digest durations
-    pub digest_duration: histogram::Timed<E>,
+    pub digest_duration: histogram::Timed,
 }
 
-impl<E: RuntimeMetrics + Clock> Metrics<E> {
+impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: E) -> Self {
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         let tip = context.gauge("tip", "Lowest height without a certificate");
         let digest = context.family(
             "digest",
@@ -33,14 +32,13 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of application digest durations",
             histogram::Buckets::LOCAL,
         );
-        let clock = Arc::new(context);
 
         Self {
             tip,
             digest,
             acks,
             certificates,
-            digest_duration: histogram::Timed::new(digest_duration, clock),
+            digest_duration: histogram::Timed::new(digest_duration),
         }
     }
 }

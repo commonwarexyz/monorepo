@@ -12,7 +12,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler,
+    BufferPooler, Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -130,7 +130,7 @@ macro_rules! with_current_db {
         macro_rules! init_db {
             ($DbType:ty) => {{
                 #[allow(unused_mut)]
-                let mut $db = <$DbType>::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx))
                     .await
                     .unwrap();
                 $body
@@ -209,7 +209,7 @@ fn bench_chained_growth(c: &mut Criterion) {
                         let ctx = context::get::<Context>();
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
-                            with_current_db!(ctx.clone(), variant, |mut db| {
+                            with_current_db!(ctx.child("storage"), variant, |mut db| {
                                 total += run_chained_growth(db, batches, |p| p.new_batch()).await;
                             });
                         }

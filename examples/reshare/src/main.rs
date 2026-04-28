@@ -11,7 +11,7 @@ use commonware_consensus::simplex::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
-    Metrics, Runner,
+    Runner, Supervisor as _,
 };
 use commonware_utils::{hex, NZU64};
 use std::{future::Future, num::NonZeroU64, path::PathBuf, pin::Pin};
@@ -158,7 +158,7 @@ fn main() {
     runner.start(|context| async move {
         // Initialize telemetry.
         tokio::telemetry::init(
-            context.with_label("telemetry"),
+            context.child("telemetry"),
             Logging {
                 level: app.log_level,
                 json: false,

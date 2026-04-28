@@ -168,6 +168,8 @@
 
 use crate::translator::Translator;
 use commonware_runtime::buffer::paged::CacheRef;
+#[cfg(test)]
+use commonware_runtime::{Observer as _, Supervisor as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
@@ -222,7 +224,7 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
@@ -259,7 +261,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.with_label("first"), cfg.clone())
+            let mut archive = Archive::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -290,12 +292,10 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.with_label("second"),
-                cfg.clone(),
-            )
-            .await
-            .unwrap();
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Getting the value should fail because compression settings mismatch.
             // Without compression, the codec sees extra bytes after decoding the value
@@ -328,7 +328,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -393,7 +393,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -452,7 +452,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -540,7 +540,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(context.with_label("init1"), cfg.clone())
+            let mut archive = Archive::init(context.child("init1"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -601,12 +601,10 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
-                context.with_label("init2"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, _, FixedBytes<1024>>::init(context.child("init2"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -707,7 +705,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -758,7 +756,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -795,7 +793,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 

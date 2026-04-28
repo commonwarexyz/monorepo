@@ -55,7 +55,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics, Quota, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, tokio, Quota, Runner};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -162,8 +162,7 @@ fn main() {
     // Start context
     executor.start(async |context| {
         // Initialize network
-        let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -196,7 +195,7 @@ fn main() {
         let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
             .expect("private key must be in participants");
         let (application, scheme, reporter, mailbox) = application::Application::new(
-            context.with_label("application"),
+            context.child("application"),
             application::Config {
                 hasher: Sha256::default(),
                 scheme,
@@ -228,7 +227,7 @@ fn main() {
             strategy: Sequential,
             forwarding: simplex::ForwardingPolicy::Disabled,
         };
-        let engine = simplex::Engine::new(context.with_label("engine"), cfg);
+        let engine = simplex::Engine::new(context.child("engine"), cfg);
 
         // Start consensus
         application.start();
@@ -240,7 +239,7 @@ fn main() {
         );
 
         // Block on GUI
-        let gui = gui::Gui::new(context.with_label("gui"));
+        let gui = gui::Gui::new(context.child("gui"));
         gui.run().await;
     });
 }

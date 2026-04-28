@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_cryptography::{ed25519::PrivateKey, handshake::TAG_SIZE, Signer};
-use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
+use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner, Supervisor as _};
 use commonware_stream::{
     encrypted::{dial, listen, Config, Error, Receiver, Sender},
     utils::codec::{recv_frame, send_frame},
@@ -118,7 +118,7 @@ fn fuzz(input: FuzzInput) {
             handshake_timeout: Duration::from_secs(1),
         };
 
-        let dialer_handle = context.clone().spawn(move |context| async move {
+        let dialer_handle = context.child("dialer").spawn(move |context| async move {
             dial(
                 context,
                 dialer_config,
@@ -128,7 +128,7 @@ fn fuzz(input: FuzzInput) {
             )
             .await
         });
-        let listener_handle = context.clone().spawn(move |context| async move {
+        let listener_handle = context.child("listener").spawn(move |context| async move {
             listen(
                 context,
                 |_| async { true },
@@ -139,57 +139,59 @@ fn fuzz(input: FuzzInput) {
             .await
         });
         let adversary_handle: Handle<Result<_, Error>> =
-            context.clone().spawn(move |_context| async move {
-                let mut corruption_i = 0;
+            context
+                .child("adversary")
+                .spawn(move |_context| async move {
+                    let mut corruption_i = 0;
 
-                let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
-                send_frame(&mut adversary_d_sink, announce, MAX_MESSAGE_SIZE).await?;
+                    let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
+                    send_frame(&mut adversary_d_sink, announce, MAX_MESSAGE_SIZE).await?;
 
-                let mut m1: Vec<u8> = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
-                    .await?
-                    .coalesce()
-                    .into();
-                for byte in m1.iter_mut() {
-                    if corruption_i < setup_corruption.len() {
-                        *byte ^= setup_corruption[corruption_i];
-                        corruption_i += 1;
+                    let mut m1: Vec<u8> = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                        .await?
+                        .coalesce()
+                        .into();
+                    for byte in m1.iter_mut() {
+                        if corruption_i < setup_corruption.len() {
+                            *byte ^= setup_corruption[corruption_i];
+                            corruption_i += 1;
+                        }
                     }
-                }
-                send_frame(&mut adversary_d_sink, m1, MAX_MESSAGE_SIZE).await?;
+                    send_frame(&mut adversary_d_sink, m1, MAX_MESSAGE_SIZE).await?;
 
-                let mut m2: Vec<u8> = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
-                    .await?
-                    .coalesce()
-                    .into();
-                for byte in m2.iter_mut() {
-                    if corruption_i < setup_corruption.len() {
-                        *byte ^= setup_corruption[corruption_i];
-                        corruption_i += 1;
+                    let mut m2: Vec<u8> = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
+                        .await?
+                        .coalesce()
+                        .into();
+                    for byte in m2.iter_mut() {
+                        if corruption_i < setup_corruption.len() {
+                            *byte ^= setup_corruption[corruption_i];
+                            corruption_i += 1;
+                        }
                     }
-                }
-                send_frame(&mut adversary_l_sink, m2, MAX_MESSAGE_SIZE).await?;
+                    send_frame(&mut adversary_l_sink, m2, MAX_MESSAGE_SIZE).await?;
 
-                let mut m3: Vec<u8> = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
-                    .await?
-                    .coalesce()
-                    .into();
-                for byte in m3.iter_mut() {
-                    if corruption_i < setup_corruption.len() {
-                        *byte ^= setup_corruption[corruption_i];
-                        corruption_i += 1;
+                    let mut m3: Vec<u8> = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                        .await?
+                        .coalesce()
+                        .into();
+                    for byte in m3.iter_mut() {
+                        if corruption_i < setup_corruption.len() {
+                            *byte ^= setup_corruption[corruption_i];
+                            corruption_i += 1;
+                        }
                     }
-                }
-                let sent_corrupted_data =
-                    setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
-                send_frame(&mut adversary_d_sink, m3, MAX_MESSAGE_SIZE).await?;
-                Ok((
-                    sent_corrupted_data,
-                    adversary_d_stream,
-                    adversary_d_sink,
-                    adversary_l_stream,
-                    adversary_l_sink,
-                ))
-            });
+                    let sent_corrupted_data =
+                        setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
+                    send_frame(&mut adversary_d_sink, m3, MAX_MESSAGE_SIZE).await?;
+                    Ok((
+                        sent_corrupted_data,
+                        adversary_d_stream,
+                        adversary_d_sink,
+                        adversary_l_stream,
+                        adversary_l_sink,
+                    ))
+                });
         // We need to do a selection to correctly assert the errors, avoiding deadlock.
         //
         // A deadlock might happen if one side asserts an error, and then we're foolishly waiting

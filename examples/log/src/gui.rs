@@ -158,7 +158,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
         // Listen for input
         let (tx, mut rx) = mpsc::channel(100);
-        self.context.with_label("keyboard").spawn(|_| async move {
+        self.context.child("keyboard").spawn(|_| async move {
             loop {
                 match event::poll(Duration::from_millis(500)) {
                     Ok(true) => {}
