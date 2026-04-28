@@ -8,10 +8,10 @@ license.workspace = true
 [features]
 default = [ "mocks" ]
 mocks = [
-    "commonware-consensus/mocks",
-    "commonware-cryptography/mocks",
-    "commonware-p2p/mocks",
-    "commonware-resolver/mocks",
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks",
+	"commonware-p2p/mocks",
+	"commonware-resolver/mocks",
 ]
 
 [package.metadata]
