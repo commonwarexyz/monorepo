@@ -70,6 +70,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_twin"
+path = "fuzz_targets/simplex_ed25519_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_ed25519_shuffled_twin"
 path = "fuzz_targets/simplex_ed25519_shuffled_twin.rs"
 test = false
