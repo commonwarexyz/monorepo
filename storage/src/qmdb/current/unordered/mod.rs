@@ -348,8 +348,8 @@ pub mod tests {
             // commit op.
             let proof = RangeProof {
                 proof: Proof::default(),
-                pre_prefix_acc: None,
                 unfolded_prefix_peaks: vec![],
+                unfolded_suffix_peaks: vec![],
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };

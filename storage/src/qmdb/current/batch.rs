@@ -7,7 +7,8 @@ use crate::{
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
         self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
-        mem::Mem, storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
+        mem::Mem, storage::Storage as MerkleStorage, Bagging, Graftable, Location, Position,
+        Readable,
     },
     qmdb::{
         any::{
@@ -609,7 +610,7 @@ where
         (idx, chunk)
     });
 
-    let hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
         &hasher,
         &ops_tree_adapter,
@@ -669,6 +670,7 @@ where
         &bitmap_batch,
         &grafted_storage,
         partial,
+        inner.new_inactivity_floor_loc,
         &ops_root,
     )
     .await?;
@@ -937,12 +939,12 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        fn merkleize(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(db, metadata)
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            Self::merkleize(self, db, metadata).await
         }
     }
 
@@ -971,12 +973,12 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        fn merkleize(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(db, metadata)
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            Self::merkleize(self, db, metadata).await
         }
     }
 
@@ -1018,7 +1020,7 @@ mod trait_impls {
         type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>, N, S>;
 
         fn new_batch(&self) -> Self::Batch {
-            self.new_batch()
+            Self::new_batch(self)
         }
 
         fn apply_batch(
@@ -1026,7 +1028,7 @@ mod trait_impls {
             batch: Self::Merkleized,
         ) -> impl Future<Output = Result<core::ops::Range<Location<F>>, crate::qmdb::Error<F>>>
         {
-            self.apply_batch(batch)
+            Self::apply_batch(self, batch)
         }
     }
 
@@ -1051,7 +1053,7 @@ mod trait_impls {
         type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>, N, S>;
 
         fn new_batch(&self) -> Self::Batch {
-            self.new_batch()
+            Self::new_batch(self)
         }
 
         fn apply_batch(
@@ -1059,7 +1061,7 @@ mod trait_impls {
             batch: Self::Merkleized,
         ) -> impl Future<Output = Result<core::ops::Range<Location<F>>, crate::qmdb::Error<F>>>
         {
-            self.apply_batch(batch)
+            Self::apply_batch(self, batch)
         }
     }
 }

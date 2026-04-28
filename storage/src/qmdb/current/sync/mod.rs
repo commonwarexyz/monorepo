@@ -3,20 +3,21 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db](crate::qmdb::current::db::Db)
 //! variants (ordered/unordered, fixed/variable).
 //!
-//! The canonical root of a `current` database combines the ops root, grafted tree root, and
+//! The canonical root of a `current` database combines the QMDB ops root, grafted tree root, and
 //! optional partial chunk into a single hash (see the [Root structure](super) section in the
-//! module documentation). The sync engine operates on the **ops root**, not the canonical root:
-//! it downloads operations and verifies each batch against the ops root using standard merkle
-//! range proofs (identical to `any` sync). [crate::qmdb::current::proof::OpsRootWitness] can be
-//! used by callers that need to authenticate the synced ops root against a trusted canonical root;
-//! the sync engine does not perform this check itself.
+//! module documentation). The sync engine operates on the **QMDB ops root**, not the canonical
+//! root: it downloads operations and verifies each batch against the QMDB ops-root spec for the
+//! Merkle family.
+//! [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need to authenticate
+//! the synced ops root against a trusted canonical root; the sync engine does not perform this
+//! check itself.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed
 //! deterministically from the operations. The canonical root is then computed from the
-//! ops root, the reconstructed grafted tree root, and any partial chunk.
+//! QMDB ops root, the reconstructed grafted tree root, and any partial chunk.
 //!
 //! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
-//! implementation returns the **ops root** (not the canonical root) because that is what the
+//! implementation returns the **QMDB ops root** (not the canonical root) because that is what the
 //! sync engine verifies against.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are
@@ -51,7 +52,6 @@ use crate::{
             },
             FixedValue, VariableValue,
         },
-        bitmap::Shared,
         current::{
             db, grafting,
             ordered::{
@@ -62,7 +62,7 @@ use crate::{
             },
             FixedConfig, VariableConfig,
         },
-        operation::{Committable, Key},
+        operation::{Committable, Key, Operation as _},
         sync::{Database, DatabaseConfig as Config},
     },
     translator::Translator,
@@ -118,7 +118,7 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.with_label("merkle"),
         full::SyncConfig {
@@ -137,21 +137,20 @@ where
     )
     .await?;
 
-    // Initialize bitmap with pruned chunks.
-    //
-    // Floor division is intentional: chunks entirely below range.start are pruned.
-    // If range.start is not chunk-aligned, the partial leading chunk is reconstructed by
-    // init_from_log, which pads the gap between `pruned_chunks * CHUNK_SIZE_BITS` and the
-    // journal's inactivity floor with inactive (false) bits.
+    // Pre-build the activity-status bitmap with the pruned-chunk count derived from the sync
+    // range, then hand it to `any::Db::init_from_log` which becomes the sole owner. Floor
+    // division is intentional: chunks entirely below range.start are pruned. If range.start
+    // is not chunk-aligned, the partial leading chunk is reconstructed by `init_from_log`,
+    // which pads the gap between `pruned_chunks * CHUNK_SIZE_BITS` and the journal's
+    // inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start() / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(Shared::<N>::new(bitmap));
+    let bitmap = Arc::new(qmdb::bitmap::Shared::<N>::new(bitmap));
 
-    // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
-    // during replay.
+    // `current` always uses split bagging at the underlying ops tree.
     let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), false).await?;
+        AnyDb::init_from_log(index, log, Some(bitmap), true).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -178,7 +177,7 @@ where
     };
 
     // Build grafted tree.
-    let hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
@@ -198,7 +197,13 @@ where
         hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(&hasher, any.bitmap.as_ref(), &storage).await?;
+    let grafted_root = db::compute_grafted_root(
+        &hasher,
+        any.bitmap.as_ref(),
+        &storage,
+        any.inactivity_floor_loc,
+    )
+    .await?;
     let ops_root = any.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
@@ -256,7 +261,7 @@ macro_rules! impl_current_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-            const ROOT_BAGGING: Bagging = Bagging::ForwardFold;
+            const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
             async fn from_sync_result(
                 context: Self::Context,
@@ -289,18 +294,6 @@ macro_rules! impl_current_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
-                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context.with_label("local_target_merkle_probe"),
-                    config.merkle_config.clone(),
-                    target,
-                    0,
-                    Bagging::ForwardFold,
-                )
-                .await
-                {
-                    return false;
-                }
-
                 let Ok(journal) = <$journal>::init(
                     context.with_label("local_target_journal_probe"),
                     config.journal_config(),
@@ -309,12 +302,41 @@ macro_rules! impl_current_sync_database {
                 else {
                     return false;
                 };
-                let bounds = journal.reader().await.bounds();
+                let reader = journal.reader().await;
+                let bounds = reader.bounds();
+                if Location::new(bounds.start) > target.range.start() {
+                    return false;
+                }
+                let Some(last_loc) = bounds.end.checked_sub(1) else {
+                    return false;
+                };
+                let Ok(last_op) = reader.read(last_loc).await else {
+                    return false;
+                };
+                let Some(inactivity_floor) = last_op.has_floor() else {
+                    return false;
+                };
 
-                Location::new(bounds.start) <= target.range.start()
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    inactivity_floor,
+                );
+                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
+                    context.with_label("local_target_merkle_probe"),
+                    config.merkle_config.clone(),
+                    target,
+                    inactive_peaks,
+                    Bagging::BackwardFold,
+                )
+                .await
+                {
+                    return false;
+                }
+
+                true
             }
 
-            /// Returns the ops root (not the canonical root), since the sync engine verifies
+            /// Returns the QMDB ops root (not the canonical root), since the sync engine verifies
             /// batches against the ops tree.
             fn root(&self) -> Self::Digest {
                 self.any.root()
@@ -354,7 +376,7 @@ impl_current_sync_database!(
 // --- Resolver implementations ---
 //
 // The resolver for `current` databases serves ops-level proofs (not grafted proofs) from
-// the inner `any` db. The sync engine verifies each batch against the ops root.
+// the inner `any` db. The sync engine verifies each batch against the QMDB ops root.
 
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {

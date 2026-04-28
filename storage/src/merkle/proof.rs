@@ -592,6 +592,74 @@ impl<F: Family, D: Digest> Proof<F, D> {
             )
             .ok_or(ReconstructionError::InvalidProof)
     }
+
+    /// Authenticate the proven range without reconstructing the full generic Merkle root.
+    ///
+    /// This consumes only the sibling digests needed to rebuild the proven range peaks, then returns
+    /// those peak digests in `collected`. It deliberately does not consume peak-bagging witnesses
+    /// such as prefix peaks, after peaks, or backward-fold suffix accumulators.
+    ///
+    /// Current QMDB grafted proofs use this path because their final root is rebuilt by the wrapper
+    /// from the collected range peaks plus grafted prefix/suffix witnesses. Including generic
+    /// peak-bagging witnesses here would create proof bytes that the wrapper root ignores, making
+    /// those bytes malleable.
+    #[cfg(feature = "std")]
+    pub(crate) fn reconstruct_range_collecting<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        collected: &mut Vec<(Position<F>, D)>,
+    ) -> Result<(), ReconstructionError>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        if elements.is_empty() {
+            return Err(ReconstructionError::MissingElements);
+        }
+        if !start_loc.is_valid_index() {
+            return Err(ReconstructionError::InvalidStartLoc);
+        }
+        let end_loc = start_loc
+            .checked_add(elements.len() as u64)
+            .ok_or(ReconstructionError::InvalidEndLoc)?;
+        if end_loc > self.leaves {
+            return Err(ReconstructionError::InvalidEndLoc);
+        }
+
+        let range = start_loc..end_loc;
+        // Bagging only governs the prefix/suffix accumulator layout, which this method
+        // deliberately ignores; `range_peaks` and `fetch_nodes` are bagging-independent. Pass
+        // ForwardFold as a placeholder.
+        let bp = Blueprint::new(
+            self.leaves,
+            self.inactive_peaks,
+            Bagging::ForwardFold,
+            range,
+        )
+        .map_err(|_| ReconstructionError::InvalidSize)?;
+
+        let mut sibling_cursor = 0usize;
+        let mut elements_iter = elements.iter();
+        for peak in &bp.range_peaks {
+            let peak_digest = peak.reconstruct_digest(
+                hasher,
+                &bp.range,
+                &mut elements_iter,
+                &self.digests,
+                &mut sibling_cursor,
+                None,
+            )?;
+            collected.push((peak.pos, peak_digest));
+        }
+
+        if elements_iter.next().is_some() || sibling_cursor != self.digests.len() {
+            return Err(ReconstructionError::ExtraDigests);
+        }
+
+        Ok(())
+    }
 }
 
 /// A perfect binary subtree within a peak, identified by its root position, height,
@@ -1064,6 +1132,56 @@ where
         get_node,
         element_pruned,
     )
+}
+
+/// Return the node positions needed by [`build_range_collection_proof`].
+///
+/// Bagging only governs prefix/suffix accumulator layout, which this helper does not consult; the
+/// `range_peaks` siblings it collects are bagging-independent. ForwardFold is passed as a
+/// placeholder.
+#[cfg(feature = "std")]
+pub(crate) fn range_collection_nodes<F: Family>(
+    leaves: Location<F>,
+    inactive_peaks: usize,
+    range: Range<Location<F>>,
+) -> Result<Vec<Position<F>>, super::Error<F>> {
+    let bp = Blueprint::new(leaves, inactive_peaks, Bagging::ForwardFold, range)?;
+    let mut fetch_nodes = Vec::new();
+    for peak in &bp.range_peaks {
+        peak.collect_siblings(&bp.range, &mut fetch_nodes);
+    }
+    Ok(fetch_nodes)
+}
+
+/// Build a proof containing only the sibling digests needed to authenticate the requested range.
+///
+/// The resulting proof cannot reconstruct a complete generic Merkle root on its own. It is intended
+/// for wrappers that rebuild a custom root from separately supplied peak witnesses, such as current
+/// QMDB grafted proofs.
+#[cfg(feature = "std")]
+pub(crate) fn build_range_collection_proof<F, D, E>(
+    leaves: Location<F>,
+    inactive_peaks: usize,
+    range: Range<Location<F>>,
+    get_node: impl Fn(Position<F>) -> Option<D>,
+    element_pruned: impl Fn(Position<F>) -> E,
+) -> Result<Proof<F, D>, E>
+where
+    F: Family,
+    D: Digest,
+    E: From<super::Error<F>>,
+{
+    let fetch_nodes = range_collection_nodes(leaves, inactive_peaks, range)?;
+    let mut digests = Vec::with_capacity(fetch_nodes.len());
+    for pos in fetch_nodes {
+        digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
+    }
+
+    Ok(Proof {
+        leaves,
+        inactive_peaks,
+        digests,
+    })
 }
 
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
