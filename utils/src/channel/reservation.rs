@@ -11,6 +11,8 @@ use std::{
     task::{Context, Poll},
 };
 
+// Tokio's `reserve_owned` future is not nameable, so box it to keep
+// `Reservation` storable without exposing a future type parameter.
 type ReserveFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + 'a>>;
 
