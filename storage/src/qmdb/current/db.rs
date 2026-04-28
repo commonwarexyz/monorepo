@@ -374,6 +374,44 @@ where
         Self::pair_absorption_threshold(self.any.bitmap.pruned_chunks() as u64)
     }
 
+    /// Prune the grafted tree to match the committed bitmap's pruned chunks.
+    fn prune_grafted_tree_to_bitmap(&mut self) -> Result<(), Error<F>> {
+        let pruned_chunks = self.any.bitmap.pruned_chunks() as u64;
+        if pruned_chunks == 0 {
+            return Ok(());
+        }
+
+        let prune_loc = Location::<F>::new(pruned_chunks);
+        if prune_loc <= self.grafted_tree.bounds().start {
+            return Ok(());
+        }
+
+        let prune_pos = Position::try_from(prune_loc).expect("valid leaf count");
+        let root = *self.grafted_tree.root();
+        let size = self.grafted_tree.size();
+
+        let mut pinned = BTreeMap::new();
+        for pos in F::nodes_to_pin(prune_loc) {
+            let digest = self
+                .grafted_tree
+                .get_node(pos)
+                .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
+            pinned.insert(pos, digest);
+        }
+
+        let mut retained = Vec::with_capacity((*size - *prune_pos) as usize);
+        for p in *prune_pos..*size {
+            let digest = self
+                .grafted_tree
+                .get_node(Position::new(p))
+                .ok_or(Error::<F>::DataCorrupted("missing retained grafted node"))?;
+            retained.push(digest);
+        }
+
+        self.grafted_tree = Mem::from_pruned_with_retained(root, prune_pos, pinned, retained);
+        Ok(())
+    }
+
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -394,39 +432,7 @@ where
 
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
-
-        // Prune the grafted tree to match the bitmap's pruned chunks.
-        let pruned_chunks = self.any.bitmap.pruned_chunks() as u64;
-        if pruned_chunks > 0 {
-            let prune_loc_grafted = Location::<F>::new(pruned_chunks);
-            let bounds_start = self.grafted_tree.bounds().start;
-            let grafted_prune_pos =
-                Position::try_from(prune_loc_grafted).expect("valid leaf count");
-            if prune_loc_grafted > bounds_start {
-                let root = *self.grafted_tree.root();
-                let size = self.grafted_tree.size();
-
-                let mut pinned = BTreeMap::new();
-                for pos in F::nodes_to_pin(prune_loc_grafted) {
-                    pinned.insert(
-                        pos,
-                        self.grafted_tree
-                            .get_node(pos)
-                            .expect("pinned peak must exist"),
-                    );
-                }
-                let mut retained = Vec::with_capacity((*size - *grafted_prune_pos) as usize);
-                for p in *grafted_prune_pos..*size {
-                    retained.push(
-                        self.grafted_tree
-                            .get_node(Position::new(p))
-                            .expect("retained node must exist"),
-                    );
-                }
-                self.grafted_tree =
-                    Mem::from_pruned_with_retained(root, grafted_prune_pos, pinned, retained);
-            }
-        }
+        self.prune_grafted_tree_to_bitmap()?;
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune_log` fails, the metadata is ahead of the log, which is safe: on recovery,
