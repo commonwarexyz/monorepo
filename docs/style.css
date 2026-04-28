@@ -369,6 +369,20 @@ details.podcast-episode summary.podcast-title {
     font-size: 1.0em !important;
 }
 
+/* Prevent raw and rendered display math from widening the page on mobile. */
+.math.display,
+.katex-display {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+}
+
+.katex-display {
+    padding-bottom: 0.25rem;
+}
+
 /* MCP page styles */
 #tool-selector {
     margin: 20px 0;

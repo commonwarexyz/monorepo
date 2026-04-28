@@ -24,7 +24,7 @@ use commonware_consensus::{
         config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
-        Engine,
+        Engine, ForwardingPolicy,
     },
     types::{Delta, Epoch, View},
     Monitor, Viewable,
@@ -56,7 +56,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
 pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -87,9 +86,11 @@ impl Configuration {
         Self { n, faults, correct }
     }
 
-    /// Returns true if this configuration can make progress (liveness).
-    pub fn can_finalize(&self) -> bool {
-        self.faults <= bounds::max_faults(self.n)
+    /// Returns true if this configuration is valid:
+    /// number of faulty and correct nodes satisfy the protocol fault tolerance constraints.
+    /// A valid configuration is required for the protocol to make progress in periods of synchrony (liveness).
+    pub fn is_valid(&self) -> bool {
+        self.faults <= bounds::max_faults(self.n) && self.n == self.faults + self.correct
     }
 }
 
@@ -97,6 +98,8 @@ impl Configuration {
 pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
+/// 4 nodes, 0 faulty, 4 correct (all nodes are correct)
+pub const N4F0C4: Configuration = Configuration::new(4, 0, 4);
 
 async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     oracle: &mut Oracle<P, E>,
@@ -229,17 +232,18 @@ async fn setup_network<P: simplex_protocol::Simplex>(
     Vec<P::Scheme>,
     HashMap<PublicKeyOf<P>, NetworkChannels<PublicKeyOf<P>>>,
 ) {
-    let (network, mut oracle) = Network::new(
+    let (participants, schemes) = P::setup(context, NAMESPACE, input.configuration.n);
+    let (network, mut oracle) = Network::new_with_peers(
         context.with_label("network"),
         NetworkConfig {
             max_size: 1024 * 1024,
             disconnect_on_block: false,
-            tracked_peer_sets: None,
+            tracked_peer_sets: NZUsize!(1),
         },
-    );
+        participants.clone(),
+    )
+    .await;
     network.start();
-
-    let (participants, schemes) = P::setup(context, NAMESPACE, input.configuration.n);
 
     let registrations = register(&mut oracle, &participants).await;
 
@@ -389,7 +393,7 @@ where
         propose_latency: (10.0, 5.0),
         verify_latency: (10.0, 5.0),
         certify_latency: (10.0, 5.0),
-        should_certify: application::Certifier::Sometimes,
+        should_certify: application::Certifier::Always,
     };
     let (actor, application) =
         application::Application::new(context.with_label("application"), app_cfg);
@@ -417,6 +421,7 @@ where
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
+        forwarding: ForwardingPolicy::Disabled,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
     engine.start(
@@ -525,8 +530,7 @@ fn run<P: simplex_protocol::Simplex>(input: FuzzInput) {
             reporters.push(reporter);
         }
 
-        // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.can_finalize() {
+        if input.partition == Partition::Connected && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -542,8 +546,11 @@ fn run<P: simplex_protocol::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        if config.is_valid() {
+            invariants::check_vote_invariants(config.faults as usize, &reporters);
+            let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
+        }
     });
 }
 
@@ -601,7 +608,7 @@ fn run_with_adversarial_network<P: simplex_protocol::Simplex>(mut input: FuzzInp
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.can_finalize() {
+        if input.partition == Partition::Connected && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -616,9 +623,11 @@ fn run_with_adversarial_network<P: simplex_protocol::Simplex>(mut input: FuzzInp
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
-
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        if config.is_valid() {
+            invariants::check_vote_invariants(config.faults as usize, &reporters);
+            let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
+        }
     });
 }
 
@@ -756,7 +765,7 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: application::Certifier::Always,
             };
             let (actor, application) =
                 application::Application::new(primary_context.with_label("application"), app_cfg);
@@ -784,6 +793,7 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
             engine.start(
@@ -826,7 +836,7 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.can_finalize() {
+        if input.partition == Partition::Connected && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -842,8 +852,11 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        if config.is_valid() {
+            invariants::check_vote_invariants(config.faults as usize, &reporters);
+            let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
+        }
     });
 }
 

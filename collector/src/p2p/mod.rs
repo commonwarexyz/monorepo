@@ -58,10 +58,12 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Recipients, Sender as _,
+        Blocker, Manager as _, Recipients, Sender as _,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::NZU32;
+    use commonware_runtime::{
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Quota, Runner,
+    };
+    use commonware_utils::{ordered::Set, NZUsize, NZU32};
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -102,7 +104,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();
@@ -120,6 +122,10 @@ mod tests {
             let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
+        oracle
+            .manager()
+            .track(0, Set::from_iter_dedup(peers.clone()))
+            .await;
 
         (oracle, schemes, peers, connections)
     }
@@ -797,7 +803,7 @@ mod tests {
             let conn3 = connections.next().unwrap();
             let mut res_conn3 = conn3.1;
 
-            // Send request from peer 1 to peer 2 (this gets tracked)
+            // Send request from peer 1 to peer 2 (collector records the in-flight request)
             let request_to_peer2 = Request { id: 42, data: 42 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())

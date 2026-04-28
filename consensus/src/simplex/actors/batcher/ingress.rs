@@ -1,5 +1,8 @@
 use crate::{
-    simplex::{metrics::TimeoutReason, types::Vote},
+    simplex::{
+        metrics::TimeoutReason,
+        types::{Proposal, Vote},
+    },
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -12,6 +15,7 @@ pub enum Message<S: Scheme, D: Digest> {
         current: View,
         leader: Participant,
         finalized: View,
+        forwardable_proposal: Option<Proposal<D>>,
 
         response: oneshot::Sender<Option<TimeoutReason>>,
     },
@@ -39,6 +43,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         current: View,
         leader: Participant,
         finalized: View,
+        forwardable_proposal: Option<Proposal<D>>,
     ) -> Option<TimeoutReason> {
         self.sender
             .request_or(
@@ -46,6 +51,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                     current,
                     leader,
                     finalized,
+                    forwardable_proposal,
                     response,
                 },
                 None,

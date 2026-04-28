@@ -1,6 +1,6 @@
 use crate::simplex::types::Proposal;
 use commonware_cryptography::Digest;
-use tracing::debug;
+use tracing::warn;
 
 /// Proposal verification status within a round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -8,7 +8,7 @@ pub enum Status {
     #[default]
     None,
     Unverified,
-    Verified,
+    Verified(bool),
     Equivocated,
 }
 
@@ -60,6 +60,16 @@ where
         self.status
     }
 
+    /// Returns whether the slot contains a concrete proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.is_some() && self.status != Status::Equivocated
+    }
+
+    /// Returns whether the current proposal was built locally.
+    pub const fn is_local(&self) -> bool {
+        matches!(self.status, Status::Verified(true))
+    }
+
     pub const fn should_build(&self) -> bool {
         !self.requested_build && self.proposal.is_none()
     }
@@ -68,26 +78,38 @@ where
         self.requested_build = true;
     }
 
-    /// Records the proposal in this slot and flips the build/verify flags.
+    /// Records a proposal that has already been verified.
     ///
-    /// If the slot is already populated, we ignore the proposal.
-    pub fn built(&mut self, proposal: Proposal<D>) {
+    /// Additional observations of the same proposal are ignored here.
+    /// Conflicting proposals are handled separately as equivocation.
+    fn verified(&mut self, proposal: Proposal<D>, local: bool) {
         if let Some(existing) = &self.proposal {
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
-            debug!(
+            warn!(
                 ?existing,
                 ?proposal,
-                "ignoring local proposal because slot already populated"
+                ?local,
+                "ignoring verified proposal because slot already populated"
             );
             return;
         }
 
         // Otherwise, we record the proposal and flip the build/verify flags.
         self.proposal = Some(proposal);
-        self.status = Status::Verified;
+        self.status = Status::Verified(local);
         self.requested_build = true;
         self.requested_verify = true;
+    }
+
+    /// Records a proposal built locally by this participant.
+    pub fn built(&mut self, proposal: Proposal<D>) {
+        self.verified(proposal, true);
+    }
+
+    /// Records a proposal we verified and voted for, but did not build locally.
+    pub fn notarized(&mut self, proposal: Proposal<D>) {
+        self.verified(proposal, false);
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -102,7 +124,7 @@ where
         if self.status != Status::Unverified {
             return false;
         }
-        self.status = Status::Verified;
+        self.status = Status::Verified(false);
         true
     }
 
@@ -112,22 +134,17 @@ where
         if self.status == Status::Equivocated {
             return Change::Skipped;
         }
+
+        // Recovered certificates authenticate the proposal, but they do not
+        // automatically confer verification status (which may require ensuring
+        // additional data is available).
         match &self.proposal {
             None => {
                 self.proposal = Some(proposal.clone());
-                self.status = if recovered {
-                    Status::Verified
-                } else {
-                    Status::Unverified
-                };
+                self.status = Status::Unverified;
                 Change::New
             }
-            Some(existing) if existing == proposal => {
-                if recovered {
-                    self.status = Status::Verified;
-                }
-                Change::Unchanged
-            }
+            Some(existing) if existing == proposal => Change::Unchanged,
             Some(existing) => {
                 let mut dropped = existing.clone();
                 let mut retained = proposal.clone();
@@ -185,9 +202,10 @@ mod tests {
             Some(stored) => assert_eq!(stored, &proposal),
             None => panic!("proposal missing after recording"),
         }
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified(true));
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
+        assert!(slot.is_local());
     }
 
     #[test]
@@ -199,9 +217,10 @@ mod tests {
         slot.built(proposal.clone());
 
         assert_eq!(slot.proposal(), Some(&proposal));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified(true));
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
+        assert!(slot.is_local());
     }
 
     #[test]
@@ -214,8 +233,9 @@ mod tests {
         slot.built(proposal.clone());
 
         assert!(!slot.should_build());
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified(true));
         assert_eq!(slot.proposal(), Some(&proposal));
+        assert!(slot.is_local());
     }
 
     #[test]
@@ -226,7 +246,13 @@ mod tests {
 
         assert!(matches!(slot.update(&proposal, false), Change::New));
         assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
+        assert!(!slot.is_local());
+
+        assert!(slot.mark_verified());
+        assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
+        assert_eq!(slot.status(), Status::Verified(false));
+        assert!(!slot.is_local());
     }
 
     #[test]
@@ -247,6 +273,7 @@ mod tests {
         }
         assert_eq!(slot.status(), Status::Equivocated);
         assert_eq!(slot.proposal(), Some(&proposal_a));
+        assert!(!slot.is_local());
     }
 
     #[test]
@@ -262,15 +289,17 @@ mod tests {
 
         // Compromised node produces a certificate before our local propose returns.
         assert!(matches!(slot.update(&compromised, true), Change::New));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
+        assert!(!slot.is_local());
 
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
         slot.built(honest);
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
+        assert!(!slot.is_local());
     }
 
     #[test]
@@ -294,6 +323,7 @@ mod tests {
             other => panic!("expected equivocation, got {other:?}"),
         }
         assert_eq!(slot.status(), Status::Equivocated);
+        assert!(!slot.is_local());
         // Verifier completion arriving afterwards must be ignored.
         assert!(!slot.mark_verified());
         assert!(matches!(slot.update(&conflicting, true), Change::Skipped));
@@ -317,6 +347,7 @@ mod tests {
         assert_eq!(slot.status(), Status::Equivocated);
         assert_eq!(slot.proposal(), Some(&proposal_b));
         assert!(!slot.should_build());
+        assert!(!slot.is_local());
     }
 
     #[test]
@@ -333,5 +364,30 @@ mod tests {
         ));
         assert!(matches!(slot.update(&proposal_b, true), Change::Skipped));
         assert_eq!(slot.status(), Status::Equivocated);
+        assert!(!slot.is_local());
+    }
+
+    #[test]
+    fn has_unequivocated_proposal_allows_recovered_unverified_and_blocks_equivocation() {
+        let round = Rnd::new(Epoch::new(30), View::new(10));
+        let proposal_a = Proposal::new(round, View::new(9), Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(9), Sha256Digest::from([22u8; 32]));
+
+        // Empty slots should not report a usable proposal.
+        let mut slot = Slot::<Sha256Digest>::new();
+        assert!(!slot.has_unequivocated_proposal());
+
+        // Recovering a proposal from a certificate makes it available for finalize
+        // gating even before the follower-side verify path runs.
+        assert!(matches!(slot.update(&proposal_a, true), Change::New));
+        assert!(slot.has_unequivocated_proposal());
+        assert!(!slot.is_local());
+
+        // A conflicting proposal immediately revokes that property.
+        assert!(matches!(
+            slot.update(&proposal_b, false),
+            Change::Equivocated { .. }
+        ));
+        assert!(!slot.has_unequivocated_proposal());
     }
 }

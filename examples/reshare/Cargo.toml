@@ -29,7 +29,6 @@ commonware-runtime.workspace = true
 commonware-storage.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-prometheus-client.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 serde.workspace = true
@@ -38,6 +37,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-p2p = { workspace = true, features = ["mocks"] }
 tracing-subscriber.workspace = true
 
 [[bin]]

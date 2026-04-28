@@ -13,6 +13,7 @@ use crate::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
         },
+        Plan,
     },
     types::{Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
@@ -22,8 +23,10 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Spawner, Storage,
+    buffer::paged::CacheRef,
+    spawn_cell,
+    telemetry::metrics::{CounterFamily, Histogram, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -31,8 +34,10 @@ use commonware_utils::{
     futures::AbortablePool,
 };
 use core::{future::Future, panic};
-use futures::{pin_mut, StreamExt};
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
+use futures::{
+    future::{ready, Either},
+    pin_mut, StreamExt,
+};
 use rand_core::CryptoRngCore;
 use std::{
     num::NonZeroUsize,
@@ -115,7 +120,7 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    outbound_messages: Family<Outbound, Counter>,
+    outbound_messages: CounterFamily<Outbound>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
 }
@@ -127,7 +132,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, S, L, B, D, A, R, F>
 {
@@ -138,24 +143,11 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY);
-        let finalization_latency = Histogram::new(LATENCY);
-        context.register(
-            "outbound_messages",
-            "number of outbound messages",
-            outbound_messages.clone(),
-        );
-        context.register(
-            "notarization_latency",
-            "notarization latency",
-            notarization_latency.clone(),
-        );
-        context.register(
-            "finalization_latency",
-            "finalization latency",
-            finalization_latency.clone(),
-        );
+        let outbound_messages = context.family("outbound_messages", "number of outbound messages");
+        let notarization_latency =
+            context.histogram("notarization_latency", "notarization latency", LATENCY);
+        let finalization_latency =
+            context.histogram("finalization_latency", "finalization latency", LATENCY);
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -322,7 +314,7 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Records a locally verified nullify vote and ensures the round exists.
+    /// Persists our nullify vote to the journal for crash recovery.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         self.append_journal(nullify.view(), Artifact::Nullify(nullify))
             .await;
@@ -361,10 +353,7 @@ impl<
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
         let view = self.state.current_view();
-        let Some(retry) = self
-            .try_broadcast_nullify(batcher, vote_sender, view, true)
-            .await
-        else {
+        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
             return;
         };
 
@@ -534,17 +523,13 @@ impl<
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
-    ///
-    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
-    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
     async fn try_broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-        timeout: bool,
     ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
+        let (was_retry, nullify) = self.state.construct_nullify(view)?;
         self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
             .await;
         Some(was_retry)
@@ -677,8 +662,7 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_nullify(batcher, vote_sender, view, false)
-            .await;
+        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
@@ -698,7 +682,6 @@ impl<
         spawn_cell!(
             self.context,
             self.run(batcher, resolver, vote_sender, certificate_sender)
-                .await
         )
     }
 
@@ -800,6 +783,14 @@ impl<
                             .await;
                     }
                 }
+
+                // We deliberately avoid re-seeding the batcher with our
+                // own votes (or the votes of other peers) on replay. We assume that
+                // whatever view we were in during shutdown is no longer the latest
+                // and we'll quickly jump ahead to a new view.
+                //
+                // If this is not the case (cluster-wide shutdown), we will recover
+                // when timing out.
             }
         }
         self.journal = Some(journal);
@@ -820,7 +811,7 @@ impl<
             .leader_index(observed_view)
             .expect("leader not set");
         if let Some(reason) = batcher
-            .update(observed_view, leader, self.state.last_finalized())
+            .update(observed_view, leader, self.state.last_finalized(), None)
             .await
         {
             debug!(%observed_view, %leader, ?reason, "nullifying round");
@@ -858,12 +849,17 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for proposal in self.state.certify_candidates() {
+                for (proposal, is_local) in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let receiver = self.automaton.certify(round, proposal.payload).await;
-                    let handle = certify_pool.push(async move { (round, receiver.await) });
+                    let result = if is_local {
+                        Either::Left(ready(Ok(true)))
+                    } else {
+                        let receiver = self.automaton.certify(round, proposal.payload).await;
+                        Either::Right(receiver)
+                    };
+                    let handle = certify_pool.push(async move { (round, result.await) });
                     self.state.set_certify_handle(view, handle);
                 }
 
@@ -880,14 +876,6 @@ impl<
             },
             on_stopped => {
                 debug!("context shutdown, stopping voter");
-
-                // Sync and drop journal
-                self.journal
-                    .take()
-                    .unwrap()
-                    .sync_all()
-                    .await
-                    .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
                 // Process the timeout
@@ -926,8 +914,15 @@ impl<
                 }
                 view = self.state.current_view();
 
-                // Notify application of proposal
-                self.relay.broadcast(proposed).await;
+                // Notify application of proposal.
+                self.relay
+                    .broadcast(
+                        proposed,
+                        Plan::Propose {
+                            round: context.round,
+                        },
+                    )
+                    .await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter
@@ -1076,10 +1071,21 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
+                    // If we skip a view, we don't worry about forwarding our latest certified proposal
+                    // because the network has already moved on
+                    let forwardable_proposal = current_view
+                        .previous()
+                        .and_then(|view| self.state.forwardable_proposal(view));
+
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
                     if let Some(reason) = batcher
-                        .update(current_view, leader, self.state.last_finalized())
+                        .update(
+                            current_view,
+                            leader,
+                            self.state.last_finalized(),
+                            forwardable_proposal,
+                        )
                         .await
                     {
                         debug!(%current_view, %leader, ?reason, "nullifying round");
@@ -1088,5 +1094,13 @@ impl<
                 }
             },
         }
+
+        // Sync and drop the journal
+        self.journal
+            .take()
+            .expect("journal missing on voter exit")
+            .sync_all()
+            .await
+            .expect("unable to sync journal");
     }
 }

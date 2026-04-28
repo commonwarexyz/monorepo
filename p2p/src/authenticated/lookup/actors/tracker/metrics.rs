@@ -1,64 +1,54 @@
 use crate::authenticated::lookup::metrics;
-use commonware_runtime::Metrics as RuntimeMetrics;
-use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
+use commonware_cryptography::PublicKey;
+use commonware_runtime::{
+    telemetry::metrics::{CounterFamily, Gauge, GaugeFamily, MetricsExt as _},
+    Metrics as RuntimeMetrics,
+};
 
 /// Metrics for the [super::Actor]
-#[derive(Default)]
-pub struct Metrics {
+pub struct Metrics<P: PublicKey> {
     /// The total number of unique peers in all peer sets being tracked.
     /// Does not include self, despite having a record for it.
     pub tracked: Gauge,
 
     /// Blocked peers (value = expiry time as epoch millis).
-    pub blocked: Family<metrics::Peer, Gauge>,
+    pub blocked: GaugeFamily<metrics::Peer<P>>,
 
     /// The total number of outstanding reservations.
     pub reserved: Gauge,
 
     /// Unix timestamp in milliseconds when each connected peer became active.
-    pub connected: Family<metrics::Peer, Gauge>,
+    pub connected: GaugeFamily<metrics::Peer<P>>,
 
-    /// A count of the number of rate-limited connection events for each peer.
-    pub limits: Family<metrics::Peer, Counter>,
+    /// A count of the number of rate-limited reservation events for each peer.
+    pub limits: CounterFamily<metrics::Peer<P>>,
 
     /// A count of the number of updates for each peer.
-    pub updates: Family<metrics::Peer, Counter>,
+    pub updates: CounterFamily<metrics::Peer<P>>,
 }
 
-impl Metrics {
+impl<P: PublicKey> Metrics<P> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
-        let metrics = Self::default();
-        context.register(
-            "tracked",
-            "Total number of unique peers in all peer sets being tracked",
-            metrics.tracked.clone(),
-        );
-        context.register(
-            "blocked",
-            "Blocked peers (value = expiry time as epoch millis)",
-            metrics.blocked.clone(),
-        );
-        context.register(
-            "reserved",
-            "Total number of outstanding reservations",
-            metrics.reserved.clone(),
-        );
-        context.register(
-            "connected",
-            "Unix timestamp in milliseconds when each connected peer became active",
-            metrics.connected.clone(),
-        );
-        context.register(
-            "limits",
-            "Count of the number of rate-limited connection events for each peer",
-            metrics.limits.clone(),
-        );
-        context.register(
-            "updates",
-            "Count of the number of updates for each peer",
-            metrics.updates.clone(),
-        );
-        metrics
+        Self {
+            tracked: context.gauge(
+                "tracked",
+                "Total number of unique peers in all peer sets being tracked",
+            ),
+            blocked: context.family(
+                "blocked",
+                "Blocked peers (value = expiry time as epoch millis)",
+            ),
+            reserved: context.gauge("reserved", "Total number of outstanding reservations"),
+            connected: context.family(
+                "connected",
+                "Unix timestamp in milliseconds when each connected peer became active",
+            ),
+            limits: context.family(
+                "limits",
+                "Count of the number of rate-limited reservation events for each peer",
+            ),
+            updates: context.family("updates", "Count of the number of updates for each peer"),
+        }
     }
 }

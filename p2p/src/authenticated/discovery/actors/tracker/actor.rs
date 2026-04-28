@@ -3,12 +3,15 @@ use super::{
     ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::{
-    discovery::{
-        actors::tracker::ingress::Releaser,
-        types::{self, Info, InfoVerifier},
+use crate::{
+    authenticated::{
+        discovery::{
+            actors::tracker::ingress::Releaser,
+            types::{self, Info, InfoVerifier},
+        },
+        mailbox::UnboundedMailbox,
     },
-    mailbox::UnboundedMailbox,
+    PeerSetUpdate,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -17,7 +20,6 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc},
-    ordered::Set,
     union, SystemTimeExt,
 };
 use rand::{seq::SliceRandom, Rng};
@@ -53,8 +55,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     directory: Directory<E, C::PublicKey>,
 
     /// Subscribers to peer set updates.
-    #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -81,7 +82,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             allow_dns: cfg.allow_dns,
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
-            rate_limit: cfg.allowed_connection_rate_per_peer,
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             block_duration: cfg.block_duration,
         };
 
@@ -125,7 +126,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(mut self) {
@@ -150,34 +151,41 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Ensure that peer set is not too large.
+                // Ensure that the primary peer set is not too large.
                 // Panic since there is no way to recover from this.
-                let len = peers.len();
+                //
+                // Secondary peers are not checked here because max_peer_set_size
+                // exists to cap the bitvec size, which only covers primary peers.
                 let max = self.max_peer_set_size;
-                assert!(len as u64 <= max, "peer set too large: {len} > {max}");
+                assert!(
+                    peers.primary.len() as u64 <= max,
+                    "primary peer set too large: {} > {max}",
+                    peers.primary.len()
+                );
 
-                // Attempt to add the peer set
-                if !self.directory.add_set(index, peers.clone()) {
+                // Attempt to update peer set membership.
+                if !self.directory.track(index, peers) {
                     return;
                 }
 
                 // Notify all subscribers about the new peer set
-                self.subscribers.retain(|subscriber| {
-                    subscriber.send_lossy((index, peers.clone(), self.directory.tracked()))
-                });
+                let update = self
+                    .directory
+                    .latest_update()
+                    .expect("latest update missing after successful track");
+                self.subscribers
+                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
             }
             Message::PeerSet { index, responder } => {
-                // Send the peer set at the given index.
-                let _ = responder.send(self.directory.get_set(&index).cloned());
+                let _ = responder.send(self.directory.get_peer_set(&index));
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded_channel();
 
                 // Send the latest peer set immediately
-                if let Some(latest_set_id) = self.directory.latest_set_index() {
-                    let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.send_lossy((latest_set_id, latest_set, self.directory.tracked()));
+                if let Some(update) = self.directory.latest_update() {
+                    sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
 
@@ -286,15 +294,15 @@ mod tests {
             },
             Mailbox,
         },
-        Ingress, Manager,
+        Ingress, Manager, Provider, TrackedPeers,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
-    use commonware_runtime::{deterministic, Clock, Quota, Runner};
-    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
+    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
     use futures::future::Either;
     use std::{
         collections::HashSet,
@@ -316,8 +324,8 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
-            tracked_peer_sets: 2,
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
+            tracked_peer_sets: NZUsize!(2),
+            peer_connection_cooldown: Duration::from_millis(200),
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,
@@ -411,8 +419,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "peer set too large")]
-    fn test_register_peer_set_too_large() {
+    #[should_panic(expected = "primary peer set too large")]
+    fn test_register_primary_peer_set_too_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
@@ -428,6 +436,33 @@ mod tests {
                 .unwrap();
             oracle.track(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
+            let _ = mailbox.dialable().await;
+        });
+    }
+
+    #[test]
+    fn test_register_large_secondary_peer_set_accepted() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut oracle,
+                cfg,
+                mut mailbox,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            // Create a secondary set larger than max_peer_set_size.
+            // This should not panic because the limit only applies to
+            // primary peers (bitvec size).
+            let large_secondary: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
+                .map(|i| new_signer_and_pk(i).1)
+                .try_collect()
+                .unwrap();
+            let primary: Set<PublicKey> = Set::default();
+            oracle
+                .track(0, TrackedPeers::new(primary, large_secondary))
+                .await;
             let _ = mailbox.dialable().await;
         });
     }
@@ -473,7 +508,10 @@ mod tests {
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk.clone(), auth_pk.clone()].try_into().unwrap())
+                .track(
+                    0,
+                    Set::try_from([tracker_pk.clone(), auth_pk.clone()]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -490,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_no_sets_registered() {
+    fn test_construct_no_sets_tracked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
@@ -536,7 +574,7 @@ mod tests {
 
             let (_, pk1) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk, pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk, pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -570,7 +608,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -586,7 +624,7 @@ mod tests {
             ));
 
             let dialable_peers = mailbox.dialable().await;
-            assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
+            assert!(!dialable_peers.peers.iter().any(|peer| peer == &pk1));
         });
     }
 
@@ -604,7 +642,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -653,7 +691,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             oracle
-                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -803,7 +841,10 @@ mod tests {
             assert!(!mailbox.acceptable(peer_pk3.clone()).await);
 
             oracle
-                .track(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
+                .track(
+                    0,
+                    Set::try_from([peer_pk.clone(), peer_pk2.clone()]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -832,7 +873,9 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.track(0, [peer_pk.clone()].try_into().unwrap()).await;
+            oracle
+                .track(0, Set::try_from([peer_pk.clone()]).unwrap())
+                .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.acceptable(peer_pk.clone()).await);
@@ -866,8 +909,108 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
-            assert_eq!(dialable_peers.len(), 1);
-            assert_eq!(dialable_peers[0], boot_pk);
+            assert_eq!(dialable_peers.peers.len(), 1);
+            assert_eq!(dialable_peers.peers[0], boot_pk);
+        });
+    }
+
+    #[test]
+    fn test_secondary_peers_are_connectable_but_not_primary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ip_namespace,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let mut subscription = oracle.subscribe().await;
+
+            let (_primary_signer, primary_pk) = new_signer_and_pk(1);
+            let (mut secondary_signer, secondary_pk) = new_signer_and_pk(2);
+            oracle
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::try_from([primary_pk.clone()]).unwrap(),
+                        Set::try_from([secondary_pk.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 0);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert!(update.latest.primary.position(&primary_pk).is_some());
+            assert!(update.latest.primary.position(&secondary_pk).is_none());
+            assert_eq!(
+                update.latest.secondary,
+                Set::try_from([secondary_pk.clone()]).unwrap()
+            );
+            assert_eq!(update.all.primary, update.latest.primary);
+            assert_eq!(
+                update.all.secondary,
+                Set::try_from([secondary_pk.clone()]).unwrap()
+            );
+            assert!(mailbox.acceptable(secondary_pk.clone()).await);
+
+            let secondary_info = new_peer_info(
+                &mut secondary_signer,
+                &ip_namespace,
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002),
+                context.current().epoch_millis(),
+                Some(secondary_pk.clone()),
+                false,
+            );
+            mailbox.peers(vec![secondary_info]);
+            context.sleep(Duration::from_millis(10)).await;
+
+            let dialable = mailbox.dialable().await;
+            assert!(!dialable.peers.iter().any(|peer| peer == &secondary_pk));
+        });
+    }
+
+    #[test]
+    fn test_overlapping_primary_secondary_no_duplicate_in_subscription() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Same key in both sets; deduplicated as primary only.
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let mut subscription = oracle.subscribe().await;
+
+            let (_signer, pk) = new_signer_and_pk(1);
+            oracle
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::try_from([pk.clone()]).unwrap(),
+                        Set::try_from([pk.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 0);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert!(update.latest.primary.position(&pk).is_some());
+            assert!(
+                update.latest.secondary.is_empty(),
+                "overlap peer is deduplicated as primary only"
+            );
+            assert_eq!(update.all.primary, update.latest.primary);
+            assert!(
+                update.all.secondary.is_empty(),
+                "aggregate secondary excludes keys that are primary"
+            );
+            assert!(mailbox.acceptable(pk).await);
         });
     }
 
@@ -922,7 +1065,7 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [tracker_pk, pk1.clone(), pk2.clone()].try_into().unwrap(),
+                    Set::try_from([tracker_pk, pk1.clone(), pk2.clone()]).unwrap(),
                 )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
@@ -1045,7 +1188,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Peer1 was only in set 0, which is now evicted.
-            // Construct for peer1 should now result in Kill because it's not in any active tracked set.
+            // Construct for peer1 should now result in Kill because it's not in any active peer set.
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             assert!(
                 matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),

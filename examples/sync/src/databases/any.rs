@@ -4,7 +4,8 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::{self, full::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         any::{
@@ -22,34 +23,41 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
+    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        mmr_journal_partition: "mmr-journal".into(),
-        mmr_metadata_partition: "mmr-metadata".into(),
-        mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(4096),
-        log_journal_partition: "log-journal".into(),
-        log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(4096),
+        merkle_config: MmrConfig {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FConfig {
+            partition: "log-journal".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            page_cache,
+        },
         translator: Translator::default(),
-        thread_pool: None,
-        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
     }
 }
 
-impl<E> crate::databases::Syncable for Database<E>
+impl<E> crate::databases::ExampleDatabase for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+    fn create_test_operations(count: usize, seed: u64, _starting_loc: u64) -> Vec<Self::Operation> {
         let mut hasher = <Hasher as CryptoHasher>::new();
         let mut operations = Vec::new();
         for i in 0..count {
@@ -80,7 +88,7 @@ where
     async fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
+    ) -> Result<(), qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
@@ -97,8 +105,8 @@ where
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let finalized = batch.merkleize(metadata).await?.finalize();
-                    self.apply_batch(finalized).await?;
+                    let merkleized = batch.merkleize(self, metadata).await?;
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }
@@ -107,25 +115,14 @@ where
         Ok(())
     }
 
+    fn current_floor(&self) -> u64 {
+        // `any`'s `merkleize` derives the floor internally; the `starting_loc` passed to
+        // `create_test_operations` is unused, so any value is safe.
+        0
+    }
+
     fn root(&self) -> Key {
         self.root()
-    }
-
-    async fn size(&self) -> Location {
-        self.bounds().await.end
-    }
-
-    async fn inactivity_floor(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    fn historical_proof(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
@@ -133,17 +130,47 @@ where
     }
 }
 
+impl<E> crate::databases::Syncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    async fn size(&self) -> Location {
+        self.bounds().await.end
+    }
+
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
+    }
+
+    fn historical_proof(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
+        self.historical_proof(op_count, start_loc, max_ops)
+    }
+
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
+        self.pinned_nodes_at(loc)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::databases::Syncable;
+    use crate::databases::ExampleDatabase;
     use commonware_runtime::deterministic;
 
     type AnyDb = Database<deterministic::Context>;
 
     #[test]
     fn test_create_test_operations() {
-        let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
+        let ops = <AnyDb as ExampleDatabase>::create_test_operations(5, 12345, 0);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
         if let Operation::CommitFloor(_, loc) = &ops[5] {
@@ -156,12 +183,12 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Operations should be deterministic based on seed
-        let ops1 = <AnyDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <AnyDb as Syncable>::create_test_operations(3, 12345);
+        let ops1 = <AnyDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
+        let ops2 = <AnyDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
         assert_eq!(ops1, ops2);
 
         // Different seeds should produce different operations
-        let ops3 = <AnyDb as Syncable>::create_test_operations(3, 54321);
+        let ops3 = <AnyDb as ExampleDatabase>::create_test_operations(3, 54321, 0);
         assert_ne!(ops1, ops3);
     }
 }

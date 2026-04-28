@@ -22,8 +22,9 @@ commonware-conformance = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
+commonware-runtime-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
-crossbeam-queue.workspace = true
+crossbeam-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
@@ -50,9 +51,15 @@ features = ["js"]
 axum.workspace = true
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
+crossbeam-queue = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+rand = { workspace = true, features = ["small_rng"] }
+serde_json.workspace = true
 
 [features]
 default = []
@@ -63,6 +70,7 @@ arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",
 ]
+bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
 test-utils = []
 iouring = [ "iouring-network", "iouring-storage" ]
@@ -74,6 +82,17 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 bench = false
 
 [[bench]]
+name = "storage"
+harness = false
+path = "src/storage/benches/main.rs"
+
+[[bench]]
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"
+
+[[bench]]
+name = "buffer_pool"
+harness = false
+path = "src/iobuf/benches/bench.rs"
+required-features = ["bench"]

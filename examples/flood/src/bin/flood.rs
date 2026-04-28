@@ -6,19 +6,18 @@ use commonware_cryptography::{
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
+use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    telemetry::metrics::histogram::HistogramExt, tokio, Buf, Metrics, Quota, Runner, Spawner,
+    telemetry::metrics::{HistogramExt as _, MetricsExt as _},
+    tokio, Buf, Metrics, Quota, Runner, Spawner,
 };
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
-use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
-    sync::atomic::AtomicU64,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, info, Level};
@@ -157,8 +156,7 @@ fn main() {
             .with_label("flood_sender")
             .spawn(move |context| async move {
                 let mut rng = SmallRng::seed_from_u64(0);
-                let messages: Counter<u64, AtomicU64> = Counter::default();
-                context.register("messages", "Sent messages", messages.clone());
+                let messages = context.counter("messages", "Sent messages");
                 loop {
                     // Create message with timestamp in first 8 bytes
                     let mut msg = vec![0u8; config.message_size as usize];
@@ -180,8 +178,8 @@ fn main() {
             context
                 .with_label("flood_receiver")
                 .spawn(move |context| async move {
-                    let latency = Histogram::new(LATENCY_BUCKETS);
-                    context.register("latency", "Message latency in seconds", latency.clone());
+                    let latency =
+                        context.histogram("latency", "Message latency in seconds", LATENCY_BUCKETS);
                     loop {
                         match flood_receiver.recv().await {
                             Ok((_sender, mut msg)) => {

@@ -1,12 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use bytes::BytesMut;
+use commonware_codec::{EncodeSize, ReadExt, Write};
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Faults, N3f1, NZDuration,
-    NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
+    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Faults, N3f1, N5f1, NZDuration,
+    NZUsize, NonZeroDuration, Participant, SystemTimeExt, NZU16, NZU32, NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
@@ -18,81 +20,60 @@ enum FuzzInput {
     Union { a: Vec<u8>, b: Vec<u8> },
     UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
     Modulo { bytes: Vec<u8>, n: u64 },
+    Participant { index: u32 },
+    ParticipantFromUsize { index: usize },
+    NonZeroDuration { secs: u64, nanos: u32 },
+    NZDuration { secs: u64, nanos: u32 },
     NZUsize { v: usize },
     NZU8 { v: u8 },
     NZU16 { v: u16 },
     NZU32 { v: u32 },
     NZU64 { v: u64 },
-    NonZeroDuration { millis: u64 },
-    NZDurationMacro { millis: u64 },
+    SystemTimeEpoch { secs_since_epoch: u64 },
+    SystemTimeEpochMillis { secs_since_epoch: u64 },
 }
 
 fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::NZUsize { v } => {
             if v != 0 {
-                let _ = NZUsize!(v).get() == v;
-            }
-        }
-
-        FuzzInput::NZU8 { v } => {
-            if v != 0 {
-                let _ = NZU8!(v).get() == v;
-            }
-        }
-
-        FuzzInput::NZU16 { v } => {
-            if v != 0 {
-                let _ = NZU16!(v).get() == v;
+                assert_eq!(NZUsize!(v).get(), v);
             }
         }
 
         FuzzInput::NZU32 { v } => {
             if v != 0 {
-                let _ = NZU32!(v).get() == v;
+                assert_eq!(NZU32!(v).get(), v);
+            }
+        }
+
+        FuzzInput::NZU8 { v } => {
+            if v != 0 {
+                assert_eq!(NZU8!(v).get(), v);
+            }
+        }
+
+        FuzzInput::NZU16 { v } => {
+            if v != 0 {
+                assert_eq!(NZU16!(v).get(), v);
             }
         }
 
         FuzzInput::NZU64 { v } => {
             if v != 0 {
-                let _ = NZU64!(v).get() == v;
-            }
-        }
-
-        FuzzInput::NonZeroDuration { millis } => {
-            let duration = Duration::from_millis(millis);
-
-            let nz_duration = NonZeroDuration::new(duration);
-            if let Some(nz_duration) = nz_duration {
-                assert_eq!(nz_duration.get(), duration);
-
-                let converted: Duration = nz_duration.into();
-                assert_eq!(converted, duration);
-
-                let nz_duration = NonZeroDuration::new_panic(duration);
-                assert_eq!(nz_duration.get(), duration);
-            }
-        }
-
-        FuzzInput::NZDurationMacro { millis } => {
-            let duration = Duration::from_millis(millis);
-            if duration != Duration::ZERO {
-                let nz = NZDuration!(duration);
-                assert_eq!(nz.get(), duration);
+                assert_eq!(NZU64!(v).get(), v);
             }
         }
 
         FuzzInput::Hex { data } => {
             let hex_str = hex(&data);
-            if let Some(decoded) = from_hex(&hex_str) {
-                assert_eq!(decoded, data);
-            }
+            assert_eq!(from_hex(&hex_str), Some(data));
         }
 
         FuzzInput::FromHex { hex_str } => {
-            if !hex_str.is_empty() && !hex_str.chars().any(|c| c.is_ascii_hexdigit()) {
-                assert_eq!(from_hex(&hex_str), None)
-            } else if let Some(decoded) = from_hex(&hex_str) {
+            let result = from_hex(&hex_str);
+
+            if let Some(decoded) = result {
                 let re_encoded = hex(&decoded);
                 assert_eq!(from_hex(&re_encoded), Some(decoded));
             }
@@ -114,21 +95,41 @@ fn fuzz(input: FuzzInput) {
             if n == 0 {
                 return;
             }
-            let faults = N3f1::max_faults(n);
-            assert_eq!(faults, (n.saturating_sub(1)) / 3);
+            let n3f1_faults = N3f1::max_faults(n);
+            assert_eq!(n3f1_faults, (n - 1) / 3);
 
-            let q = N3f1::quorum(n);
-            assert_eq!(q + faults, n);
+            let n3f1_quorum = N3f1::quorum(n);
+            assert_eq!(n3f1_quorum + n3f1_faults, n);
+            assert!(2 * u64::from(n3f1_quorum) > u64::from(n) + u64::from(n3f1_faults));
+
+            let n5f1_faults = N5f1::max_faults(n);
+            assert_eq!(n5f1_faults, (n - 1) / 5);
+
+            let n5f1_quorum = N5f1::quorum(n);
+            assert_eq!(n5f1_quorum + n5f1_faults, n);
+            assert_eq!(N5f1::l_quorum(n), n5f1_quorum);
+            assert_eq!(N5f1::m_quorum(n), 2 * n5f1_faults + 1);
+            // BFT safety / quorum-intersection: 2q > n + f
+            assert!(2 * u64::from(n5f1_quorum) > u64::from(n) + u64::from(n5f1_faults));
         }
 
         FuzzInput::Quorum { n } => {
             if n == 0 {
                 return;
             }
-            let q = N3f1::quorum(n);
-            let faults = N3f1::max_faults(n);
+            let n3f1_quorum = N3f1::quorum(n);
+            let n3f1_faults = N3f1::max_faults(n);
+            assert_eq!(n3f1_quorum, n - n3f1_faults);
+            // BFT safety / quorum-intersection: 2q > n + f
+            assert!(2 * u64::from(n3f1_quorum) > u64::from(n) + u64::from(n3f1_faults));
 
-            assert_eq!(q, n - faults);
+            let n5f1_quorum = N5f1::quorum(n);
+            let n5f1_faults = N5f1::max_faults(n);
+            assert_eq!(n5f1_quorum, n - n5f1_faults);
+            assert_eq!(N5f1::l_quorum(n), n5f1_quorum);
+            assert_eq!(N5f1::m_quorum(n), 2 * n5f1_faults + 1);
+            // BFT safety / quorum-intersection: 2q > n + f
+            assert!(2 * u64::from(n5f1_quorum) > u64::from(n) + u64::from(n5f1_faults));
         }
 
         FuzzInput::Union { a, b } => {
@@ -184,6 +185,74 @@ fn fuzz(input: FuzzInput) {
 
             let zeros = vec![0u8; bytes.len()];
             assert_eq!(modulo(&zeros, n), 0);
+        }
+
+        FuzzInput::Participant { index } => {
+            let participant = Participant::new(index);
+            assert_eq!(participant.get(), index);
+            assert_eq!(usize::from(participant), index as usize);
+            assert_eq!(participant.to_string(), index.to_string());
+
+            let mut encoded = BytesMut::with_capacity(participant.encode_size());
+            participant.write(&mut encoded);
+            assert_eq!(encoded.len(), participant.encode_size());
+            let decoded = Participant::read(&mut encoded.freeze()).expect("participant decodes");
+            assert_eq!(decoded, participant);
+        }
+
+        FuzzInput::ParticipantFromUsize { index } => {
+            let Ok(expected) = u32::try_from(index) else {
+                return;
+            };
+            let participant = Participant::from_usize(index);
+            assert_eq!(participant.get(), expected);
+            assert_eq!(usize::from(participant), index);
+        }
+
+        FuzzInput::NonZeroDuration { secs, nanos } => {
+            let duration = Duration::new(secs, nanos % 1_000_000_000);
+            let result = NonZeroDuration::new(duration);
+            if duration.is_zero() {
+                assert!(result.is_none());
+            } else {
+                let non_zero = result.expect("non-zero duration accepted");
+                assert_eq!(non_zero.get(), duration);
+                assert_eq!(Duration::from(non_zero), duration);
+                assert_eq!(NonZeroDuration::new_panic(duration).get(), duration);
+            }
+        }
+
+        FuzzInput::NZDuration { secs, nanos } => {
+            let duration = Duration::new(secs, nanos % 1_000_000_000);
+            if duration.is_zero() {
+                return;
+            }
+            assert_eq!(NZDuration!(duration).get(), duration);
+        }
+
+        FuzzInput::SystemTimeEpoch { secs_since_epoch } => {
+            let Some(time) =
+                SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs_since_epoch))
+            else {
+                return;
+            };
+
+            let epoch = time.epoch();
+            assert_eq!(epoch, Duration::from_secs(secs_since_epoch));
+        }
+
+        FuzzInput::SystemTimeEpochMillis { secs_since_epoch } => {
+            let Some(time) =
+                SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs_since_epoch))
+            else {
+                return;
+            };
+
+            let millis = time.epoch_millis();
+            let Some(expected_millis) = secs_since_epoch.checked_mul(1000) else {
+                return;
+            };
+            assert_eq!(millis, expected_millis);
         }
     }
 }

@@ -23,7 +23,7 @@ use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use commonware_utils::channel::mpsc::Receiver;
+use commonware_utils::{channel::mpsc::Receiver, NZUsize};
 use futures::FutureExt;
 use rand::Rng;
 use std::{
@@ -1540,7 +1540,7 @@ pub(crate) fn run_recovery<P: simplex_protocol::Simplex>(
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();

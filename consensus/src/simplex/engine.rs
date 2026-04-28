@@ -4,7 +4,10 @@ use super::{
     elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
+use crate::{
+    simplex::{scheme::Scheme, Plan},
+    CertifiableAutomaton, Relay, Reporter,
+};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -23,7 +26,7 @@ pub struct Engine<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
 > {
@@ -32,7 +35,7 @@ pub struct Engine<
     voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, F, T>,
+    batcher: batcher::Actor<E, S, B, D, F, R, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
     resolver: resolver::Actor<E, S, B, D, T>,
@@ -46,7 +49,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
         T: Strategy,
     > Engine<E, S, L, B, D, A, R, F, T>
@@ -63,11 +66,13 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
+                relay: cfg.relay.clone(),
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                forwarding: cfg.forwarding,
             },
         );
 
@@ -178,7 +183,6 @@ impl<
         spawn_cell!(
             self.context,
             self.run(vote_network, certificate_network, resolver_network)
-                .await
         )
     }
 
@@ -221,20 +225,20 @@ impl<
             certificate_sender,
         );
 
-        // Wait for the resolver or voter to finish
+        // If any task completes, the engine should stop
         let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping engine");
             },
-            _ = &mut voter_task => {
-                panic!("voter should not finish");
+            voter = &mut voter_task => {
+                debug!(?voter, "voter stopped, shutting down engine");
             },
-            _ = &mut batcher_task => {
-                panic!("batcher should not finish");
+            batcher = &mut batcher_task => {
+                debug!(?batcher, "batcher stopped, shutting down engine");
             },
-            _ = &mut resolver_task => {
-                panic!("resolver should not finish");
+            resolver = &mut resolver_task => {
+                debug!(?resolver, "resolver stopped, shutting down engine");
             },
         }
     }

@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    mmr::{Location, Proof, StandardHasher as Standard},
+    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location, Proof},
     qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;
@@ -14,54 +14,69 @@ const MAX_OPERATION_BYTES: usize = 512;
 
 #[derive(Arbitrary, Debug)]
 struct OperationInput {
+    // Raw `u64` so we also exercise the per-op `is_valid()` rejection path.
     location: u64,
     payload: Vec<u8>,
 }
 
-#[derive(Arbitrary, Debug)]
-struct FuzzInput {
-    proof_leaves: Location,
+// `proof_leaves` is typed `Location<F>` so that `Arbitrary` bounds it to `F::MAX_LEAVES`;
+// otherwise `verify_multi_proof` would reject on overflow before exercising its inner logic.
+#[derive(Debug)]
+struct FuzzInput<F: MerkleFamily> {
+    proof_leaves: Location<F>,
     digests: Vec<[u8; 32]>,
     operations: Vec<OperationInput>,
     root: [u8; 32],
 }
 
-fn fuzz(input: FuzzInput) {
-    let mut hasher: Standard<Sha256> = Standard::new();
+impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            proof_leaves: u.arbitrary()?,
+            digests: u.arbitrary()?,
+            operations: u.arbitrary()?,
+            root: u.arbitrary()?,
+        })
+    }
+}
 
-    let digests = input
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
+    let hasher = Standard::<Sha256>::new();
+
+    let digests: Vec<Digest> = input
         .digests
-        .into_iter()
+        .iter()
+        .copied()
         .take(MAX_DIGESTS)
         .map(Digest::from)
-        .collect::<Vec<_>>();
+        .collect();
 
-    let proof = Proof {
+    let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
         digests,
     };
 
-    let mut operations = Vec::new();
-    for entry in input.operations.into_iter().take(MAX_OPERATIONS) {
-        let mut payload = entry.payload;
+    let mut operations: Vec<(Location<F>, Vec<u8>)> = Vec::new();
+    for entry in input.operations.iter().take(MAX_OPERATIONS) {
+        let mut payload = entry.payload.clone();
         if payload.len() > MAX_OPERATION_BYTES {
             payload.truncate(MAX_OPERATION_BYTES);
         }
-        // Only add operations with valid locations
-        let location = Location::new(entry.location);
+        let location = Location::<F>::new(entry.location);
         if location.is_valid() {
             operations.push((location, payload));
         }
     }
 
     let root = Digest::from(input.root);
-    let _ = verify_multi_proof(&mut hasher, &proof, operations.as_slice(), &root);
+    let _ = verify_multi_proof(&hasher, &proof, operations.as_slice(), &root);
 }
 
 fuzz_target!(|data: &[u8]| {
-    let mut unstructured = Unstructured::new(data);
-    let Ok(input) = FuzzInput::arbitrary(&mut unstructured) else {
-        return;
-    };
-    fuzz(input);
+    if let Ok(input) = FuzzInput::<mmr::Family>::arbitrary(&mut Unstructured::new(data)) {
+        fuzz_family::<mmr::Family>(&input);
+    }
+    if let Ok(input) = FuzzInput::<mmb::Family>::arbitrary(&mut Unstructured::new(data)) {
+        fuzz_family::<mmb::Family>(&input);
+    }
 });

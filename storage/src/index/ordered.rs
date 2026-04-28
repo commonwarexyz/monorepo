@@ -11,8 +11,10 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_runtime::Metrics;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use commonware_runtime::{
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
+    Metrics,
+};
 use std::{
     collections::{
         btree_map::{
@@ -107,21 +109,13 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
 
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
+        Self {
             translator,
             map: BTreeMap::new(),
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
+            keys: ctx.gauge("keys", "Number of translated keys in the index"),
+            items: ctx.gauge("items", "Number of items in the index"),
+            pruned: ctx.counter("pruned", "Number of items pruned"),
+        }
     }
 
     /// Like [Ordered::next_translated_key] but without cycling around to the first key if there is
@@ -197,6 +191,12 @@ impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
         self.map
             .last_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
+    }
+}
+
+impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+    fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
     }
 }
 

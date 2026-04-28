@@ -64,7 +64,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
-    use commonware_cryptography::Digest;
+    use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
@@ -99,6 +99,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// If it is possible to generate a payload, the Digest should be returned over the provided
         /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
         /// takes too long, the consensus engine may drop the provided proposal.
+        ///
+        /// Returning a payload from `propose` commits the local proposer to verifying
+        /// the same `(context, payload)`.
+        ///
+        /// For [`CertifiableAutomaton`] implementations, returning a payload from
+        /// `propose` also commits the local proposer to certifying that same
+        /// `(round, payload)` if it later becomes notarized.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -134,18 +141,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Determine whether a verified payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
-        /// applications to associate certification with the correct verification context.
+        /// applications to associate certification with the correct verification context. The
+        /// same payload may appear in multiple rounds, so implementations must key any state
+        /// on `(round, payload)` rather than `payload` alone.
         ///
-        /// Note: In applications where payloads incorporate the round number (recommended),
-        /// each round will have a unique payload digest. However, the same payload may appear
-        /// in multiple rounds when re-proposing notarized blocks at epoch boundaries or in
-        /// integrations where payloads are round-agnostic.
-        ///
-        /// This is particularly useful for applications that employ erasure coding, which
-        /// can override this method to delay or prevent finalization until they have
-        /// reconstructed and validated the full block (e.g., after receiving enough shards).
-        ///
-        /// Like [`Automaton::verify`], certification is single-shot for the given
+        /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
+        /// Also like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
         /// certification as concluded and will not retry the same request.
         ///
@@ -183,12 +184,22 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
-        /// it isn't dropped).
+        /// Identity key of a network participant.
+        type PublicKey: PublicKey;
+
+        /// Directive for how a payload should be broadcast.
         ///
-        /// Other participants may not begin voting on a proposal until they have the full contents,
-        /// so timely delivery often yields better performance.
-        fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+        /// Consensus mechanisms that need broadcast control (e.g. distinguishing
+        /// initial broadcast from rebroadcasts) define a custom enum here. Mechanisms that
+        /// treat every broadcast identically can set this to `()`.
+        type Plan: Send;
+
+        /// Broadcast a payload according to the given plan.
+        fn broadcast(
+            &mut self,
+            payload: Self::Digest,
+            plan: Self::Plan,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.

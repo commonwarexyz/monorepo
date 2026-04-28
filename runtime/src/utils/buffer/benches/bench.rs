@@ -1,14 +1,13 @@
 //! Benchmarks for the page cache via the Append blob wrapper.
 //!
-//! Uses memory-based storage (deterministic runtime) to isolate
-//! page cache performance from disk I/O.
+//! Includes both deterministic in-memory runs to isolate buffer/page-cache work
+//! and Tokio-backed runs to exercise real storage I/O paths.
 //!
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef},
-    deterministic::Context,
-    Storage as _,
+    Storage,
 };
 use commonware_utils::NZU16;
 use criterion::{criterion_group, criterion_main};
@@ -22,17 +21,15 @@ const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;
 
-type MemBlob = <Context as commonware_runtime::Storage>::Blob;
-
 /// Create a new Append wrapper for benchmarking.
-async fn create_append(ctx: &Context, name: &[u8], cache_ref: CacheRef) -> Append<MemBlob> {
+async fn create_append<C: Storage>(ctx: &C, name: &[u8], cache_ref: CacheRef) -> Append<C::Blob> {
     let (blob, size) = ctx.open("bench_partition", name).await.unwrap();
     Append::new(blob, size, WRITE_BUFFER_SIZE, cache_ref)
         .await
         .unwrap()
 }
 
-async fn destroy_append(ctx: &Context, append: Append<MemBlob>, name: &[u8]) {
+async fn destroy_append<C: Storage>(ctx: &C, append: Append<C::Blob>, name: &[u8]) {
     drop(append);
     ctx.remove("bench_partition", Some(name)).await.unwrap();
 }

@@ -13,13 +13,16 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell,
+    telemetry::metrics::{CounterFamily, MetricsExt as _},
+    BufferPooler, ContextCell, Handle, Metrics, Spawner,
+};
 use commonware_utils::{
     channel::{mpsc, ring},
     NZUsize,
 };
 use futures::SinkExt;
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -31,7 +34,7 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
-    messages_dropped: Family<metrics::Message, Counter>,
+    messages_dropped: CounterFamily<metrics::Message<P>>,
 }
 
 impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
@@ -43,12 +46,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
         let pool = context.network_buffer_pool().clone();
 
         // Create metrics
-        let messages_dropped = Family::<metrics::Message, Counter>::default();
-        context.register(
-            "messages_dropped",
-            "messages dropped",
-            messages_dropped.clone(),
-        );
+        let messages_dropped = context.family("messages_dropped", "messages dropped");
 
         // Create actor
         (
@@ -86,7 +84,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        spawn_cell!(self.context, self.run(routing).await)
+        spawn_cell!(self.context, self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages

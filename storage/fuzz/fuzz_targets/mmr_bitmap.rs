@@ -58,12 +58,12 @@ fn fuzz(input: FuzzInput) {
     const PARTITION: &str = "fuzz-mmr-bitmap-test-partition";
 
     runner.start(|context| async move {
-        let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
+        let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
             context.with_label("bitmap"),
             PARTITION,
             None,
-            &mut hasher,
+            &hasher,
         )
         .await
         .unwrap();
@@ -164,7 +164,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::PruneToBit { bit_offset } => {
                     let mut bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
-                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&mut hasher).unwrap(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % (bit_count + 1)).min(bit_count);
@@ -182,7 +182,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::Merkleize => {
                     let bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
-                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&mut hasher).unwrap(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
                     Bitmap::Merkleized(bitmap)
                 }
@@ -190,7 +190,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::GetNode { position } => {
                     let bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
-                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&mut hasher).unwrap(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
                     if bitmap.size() > 0 {
                         let safe_pos = position % bitmap.size().as_u64();
@@ -210,11 +210,11 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::Proof { bit_offset } => {
                     let bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
-                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&mut hasher).unwrap(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
                     if bit_count > pruned_bits {
                         let bit_offset = (bit_offset % (bit_count - pruned_bits)) + pruned_bits;
-                        if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
+                        if let Ok((proof, chunk)) = bitmap.proof(&hasher, bit_offset).await {
                             let root = bitmap.root();
                             assert!(
                                 MerkleizedBitMap::<
@@ -222,11 +222,7 @@ fn fuzz(input: FuzzInput) {
                                     sha256::Digest,
                                     CHUNK_SIZE,
                                 >::verify_bit_inclusion(
-                                    &mut hasher,
-                                    &proof,
-                                    &chunk,
-                                    bit_offset,
-                                    &root
+                                    &hasher, &proof, &chunk, bit_offset, &root
                                 ),
                                 "failed to verify bit {bit_offset}",
                             );
@@ -242,7 +238,7 @@ fn fuzz(input: FuzzInput) {
                             .with_attribute("instance", restarts),
                         PARTITION,
                         None,
-                        &mut hasher,
+                        &hasher,
                     )
                     .await
                     .unwrap();
@@ -256,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::WritePruned => {
                     let mut bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
-                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&mut hasher).unwrap(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
                     let _ = bitmap.write_pruned().await;
                     Bitmap::Merkleized(bitmap)

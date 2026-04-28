@@ -43,6 +43,17 @@ enum FuzzInput {
     BitXorOp(Vec<bool>, Vec<bool>),
     Codec(Vec<bool>),
     IteratorOps(Vec<bool>),
+    /// Extend the bitmap to a new length and check the result against a
+    /// `Vec<bool>` model plus the trailing-bits-zero invariant.
+    ExtendTo(Vec<bool>, u64),
+    /// Truncate the bitmap to a new length and check the model + trailing bits.
+    Truncate(Vec<bool>, u64),
+    /// Push a chunk to the end (only valid when `len % CHUNK_SIZE_BITS == 0`).
+    PushChunk(Vec<bool>, [u8; 8]),
+    /// Verify `ones_iter` enumerates exactly the indices set to true.
+    OnesIter(Vec<bool>),
+    /// Verify `is_unset(range)` matches the model.
+    IsUnset(Vec<bool>, u64, u64),
 }
 
 #[derive(Debug)]
@@ -488,6 +499,75 @@ fn fuzz(input: Vec<FuzzInput>) {
                     }
                 }
                 assert_eq!(iter2.next(), None);
+            }
+
+            FuzzInput::ExtendTo(bools, new_len) => {
+                let new_len = new_len.min(MAX_SIZE as u64);
+                if new_len < bools.len() as u64 {
+                    return;
+                }
+                let mut v = BitMap::from(&bools);
+                v.extend_to(new_len);
+                assert_eq!(v.len(), new_len);
+                // Newly added bits are zero.
+                for i in bools.len() as u64..new_len {
+                    assert!(!v.get(i));
+                }
+                let mut model = bools.clone();
+                model.resize(new_len as usize, false);
+                assert_eq!(v, BitMap::from(&model));
+            }
+
+            FuzzInput::Truncate(bools, new_len) => {
+                let mut v = BitMap::from(&bools);
+                if new_len > v.len() {
+                    return;
+                }
+                v.truncate(new_len);
+                assert_eq!(v.len(), new_len);
+                // Surviving bits unchanged.
+                for i in 0..new_len {
+                    assert_eq!(v.get(i), bools[i as usize]);
+                }
+                let model: Vec<bool> = bools.iter().take(new_len as usize).copied().collect();
+                assert_eq!(v, BitMap::from(&model));
+            }
+
+            FuzzInput::PushChunk(bools, chunk) => {
+                let mut v = BitMap::from(&bools);
+                if v.len() % BitMap::CHUNK_SIZE_BITS != 0 {
+                    return;
+                }
+                let old_len = v.len();
+                v.push_chunk(&chunk);
+                assert_eq!(v.len(), old_len + BitMap::CHUNK_SIZE_BITS);
+                for (byte_idx, byte) in chunk.iter().enumerate() {
+                    for bit_idx in 0..8 {
+                        let global = old_len + (byte_idx as u64) * 8 + (bit_idx as u64);
+                        let expected = (byte >> bit_idx) & 1 == 1;
+                        assert_eq!(v.get(global), expected);
+                    }
+                }
+            }
+
+            FuzzInput::OnesIter(bools) => {
+                let v = BitMap::from(&bools);
+                let from_iter: Vec<u64> = v.ones_iter().collect();
+                let oracle: Vec<u64> = bools
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &b)| if b { Some(i as u64) } else { None })
+                    .collect();
+                assert_eq!(from_iter, oracle);
+            }
+
+            FuzzInput::IsUnset(bools, lo, hi) => {
+                let v = BitMap::from(&bools);
+                if hi > v.len() || lo > hi {
+                    return;
+                }
+                let oracle = bools[lo as usize..hi as usize].iter().all(|&b| !b);
+                assert_eq!(v.is_unset(lo..hi), oracle);
             }
         }
     }

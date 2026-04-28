@@ -59,7 +59,8 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
     pub faults: Arc<Mutex<Faults<S, D>>>,
-    pub invalid: Arc<Mutex<usize>>,
+    pub invalid_votes: Arc<Mutex<usize>>,
+    pub invalid_certificates: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
@@ -91,7 +92,8 @@ where
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
-            invalid: Arc::new(Mutex::new(0)),
+            invalid_votes: Arc::new(Mutex::new(0)),
+            invalid_certificates: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
             strict: Arc::new(Mutex::new(true)),
@@ -115,6 +117,18 @@ where
             self.participants.key(leader).cloned().unwrap()
         });
     }
+
+    pub fn assert_no_faults(&self) {
+        let faults = self.faults.lock();
+        assert!(faults.is_empty(), "faults detected");
+    }
+
+    pub fn assert_no_invalid(&self) {
+        let invalid_votes = self.invalid_votes.lock();
+        let invalid_certificates = self.invalid_certificates.lock();
+        assert_eq!(*invalid_votes, 0, "invalid votes detected");
+        assert_eq!(*invalid_certificates, 0, "invalid certificates detected");
+    }
 }
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
@@ -137,7 +151,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = notarize.encode();
@@ -165,7 +179,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_certificates.lock() += 1;
                     return;
                 }
                 let encoded = notarization.encode();
@@ -179,7 +193,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = nullify.encode();
@@ -205,7 +219,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_certificates.lock() += 1;
                     return;
                 }
                 let encoded = nullification.encode();
@@ -221,7 +235,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = finalize.encode();
@@ -249,7 +263,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_certificates.lock() += 1;
                     return;
                 }
                 let encoded = finalization.encode();
@@ -271,7 +285,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
@@ -291,7 +305,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
@@ -311,7 +325,7 @@ where
                     if *self.strict.lock() {
                         assert!(!verified);
                     }
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > The Carnot Bound</title>
+    <meta name="description" content="Recently, we released a paper
+called The Carnot Bound, which investigates the fundamental limits and
+possibilities for bandwidth-efficient consensus. The paper establishes a
+tight lower bound on coding efficiency for protocols with fast finality,
+and shows that an additional round of voting breaks the barrier.">
+    <meta name="author" content="Andrew Lewis-Pye">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/carnot-bound" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/carnot.png" />
+    <meta property="og:title" content="The Carnot Bound" />
+    <meta property="og:description" content="Recently, we released a
+paper called The Carnot Bound, which investigates the fundamental limits
+and possibilities for bandwidth-efficient consensus. The paper
+establishes a tight lower bound on coding efficiency for protocols with
+fast finality, and shows that an additional round of voting breaks the
+barrier." />
+    <meta property="article:author" content="Andrew Lewis-Pye" />
+    <meta property="article:published_time" content="2026-03-20T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-03-20T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/carnot-bound" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/carnot-bound" />
+    <meta property="twitter:title" content="The Carnot Bound" />
+    <meta property="twitter:description" content="Recently, we released
+a paper called The Carnot Bound, which investigates the fundamental
+limits and possibilities for bandwidth-efficient consensus. The paper
+establishes a tight lower bound on coding efficiency for protocols with
+fast finality, and shows that an additional round of voting breaks the
+barrier." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/carnot.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/AndrewLewisPye" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>The Carnot Bound</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/AndrewLewisPye">Andrew
+Lewis-Pye</a></div>
+                        <div class="date">March 20th, 2026</div>
+        </div>
+        <p>Recently, we released a paper called <a
+        href="https://arxiv.org/abs/2603.11797">The Carnot Bound</a>,
+        which investigates the fundamental limits and possibilities for
+        bandwidth-efficient consensus. The paper establishes a tight
+        lower bound on coding efficiency for protocols with fast
+        finality, and shows that an additional round of voting breaks
+        the barrier. Here’s the idea.</p>
+        <p>In leader-based consensus, the leader is the throughput
+        bottleneck. Every block the leader proposes must be sent to
+        every other processor, and the time this takes is governed by a
+        key parameter: the <em>data expansion rate</em>. If a block
+        payload has size <span class="math inline">\(\beta\)</span>, and
+        the leader must send a total of <span class="math inline">\(d
+        \cdot \beta\)</span> bits across all processors, then <span
+        class="math inline">\(d\)</span> is the data expansion rate. The
+        closer <span class="math inline">\(d\)</span> is to <span
+        class="math inline">\(1\)</span>, the closer maximum throughput
+        gets to the raw network bandwidth.</p>
+        <p>Erasure coding is what makes <span class="math inline">\(d
+        &lt; n\)</span> possible. Rather than sending a full copy of the
+        block to each of the <span class="math inline">\(n\)</span>
+        processors, the leader encodes the payload into <span
+        class="math inline">\(n\)</span> fragments, each much smaller
+        than the original, from which the full payload can be
+        reconstructed once enough fragments are collected. The question
+        is: how small can <span class="math inline">\(d\)</span>
+        actually get?</p>
+        <h2 id="a-wall-at-2.5">A wall at 2.5</h2>
+        <p>The answer depends on how many rounds of communication your
+        protocol needs to finalise a block. Protocols with <em>2-round
+        finality</em>—one round for the leader’s proposal, one round of
+        voting—include <a
+        href="https://arxiv.org/abs/2508.10862">E-Minimmit</a> and <a
+        href="https://arxiv.org/abs/2505.08771">Kudzu</a>. These
+        protocols achieve data expansion rates of roughly <span
+        class="math inline">\(2.5\)</span>. In the paper, we prove this
+        is optimal: no protocol with 2-round finality can do better. The
+        bound is tight.</p>
+        <p>The impossibility is established via an indistinguishability
+        argument. In a protocol with 2-round finality, if the leader
+        crashes immediately after sending fragments to a subset of
+        processors, those processors must still be able to determine the
+        leader’s proposal. This forces enough redundancy in the leader’s
+        messages that the data expansion rate cannot drop below <span
+        class="math inline">\(2.5\)</span>.</p>
+        <h2 id="breaking-through-with-a-second-vote">Breaking through
+        with a second vote</h2>
+        <p>Protocols with <em>3-round finality</em>—one proposal round
+        and two rounds of voting—can circumvent this bound entirely,
+        pushing the data expansion rate arbitrarily close to <span
+        class="math inline">\(1\)</span>. The key insight is that the
+        second voting round provides a recovery mechanism. A leader can
+        <em>attempt</em> an aggressive erasure code, and if some
+        processors fail to reconstruct the payload, the second round
+        detects this and allows the protocol to nullify the view and
+        retry. With only one round of voting, a failed reconstruction
+        attempt can leave the protocol in an unrecoverable state. With
+        two rounds, it cannot.</p>
+        <p>We present two protocols realising this approach, both
+        building on <a
+        href="https://link.springer.com/chapter/10.1007/978-3-031-48624-1_17">Simplex</a>.
+        <strong>Carnot 1</strong> assumes <span class="math inline">\(n
+        \geq 4f+1\)</span> processors and achieves a particularly clean
+        design: processors echo their fragment once upon voting, and no
+        further fragment dissemination is ever required.</p>
+        <p><img src="/imgs/carnot-algo-1.png" /></p>
+        <p><strong>Carnot 2</strong> operates under the optimal
+        assumption <span class="math inline">\(n \geq 3f+1\)</span>, at
+        the cost of additional fragment dissemination when Byzantine
+        processors interfere.</p>
+        <p><img src="/imgs/carnot-algo-3.png" /></p>
+        <p><img src="/imgs/carnot-algo-4.png" /></p>
+        <p>Under favourable conditions—correct leaders and few actual
+        faults—both protocols allow data expansion rates approaching
+        <span class="math inline">\(1\)</span>. When conditions
+        deteriorate, they revert to safe rates of roughly <span
+        class="math inline">\(1.33\)</span> and <span
+        class="math inline">\(1.5\)</span>, respectively. Both rates are
+        well below the <span class="math inline">\(2.5\)</span> wall for
+        2-round protocols.</p>
+        <p>Both protocols can also incorporate stable leaders and
+        optimistic proposals, eliminating the gap between consecutive
+        block proposals and allowing throughput to approach the
+        underlying network bandwidth.</p>
+        <p><img src="/imgs/carnot-algo-2.png" /></p>
+        <p>The paper is available on <a
+        href="https://arxiv.org/abs/2603.11797">arXiv</a>. The name is
+        inspired by the Carnot heat engine, which achieves the
+        theoretical maximum efficiency for converting heat into work.
+        Similarly, our protocols aim to approach the theoretical maximum
+        efficiency for converting network bandwidth into throughput.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>

@@ -1,5 +1,15 @@
-use crate::{authenticated::discovery::types::Info, Ingress};
+use crate::{
+    authenticated::{
+        dialing::{DialStatus, ReserveResult},
+        discovery::types::Info,
+    },
+    Ingress,
+};
 use commonware_cryptography::PublicKey;
+use commonware_runtime::Clock;
+use commonware_utils::SystemTimeExt;
+use rand::Rng;
+use std::time::{Duration, SystemTime};
 use tracing::trace;
 
 /// Represents information known about a peer's address.
@@ -47,11 +57,20 @@ pub struct Record<C: PublicKey> {
     /// Connection status of the peer.
     status: Status,
 
-    /// Number of peer sets this peer is part of.
-    sets: usize,
+    /// Number of primary peer sets this peer is part of.
+    primary_sets: usize,
+
+    /// Number of secondary peer sets this peer is part of.
+    secondary_sets: usize,
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
+
+    /// The earliest time we are willing to reserve this peer again.
+    next_reservable_at: SystemTime,
+
+    /// The earliest time we are willing to dial this peer.
+    next_dial_at: SystemTime,
 }
 
 impl<C: PublicKey> Record<C> {
@@ -62,8 +81,11 @@ impl<C: PublicKey> Record<C> {
         Self {
             address: Address::Unknown,
             status: Status::Inert,
-            sets: 0,
+            primary_sets: 0,
+            secondary_sets: 0,
             persistent: false,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -72,8 +94,11 @@ impl<C: PublicKey> Record<C> {
         Self {
             address: Address::Myself(info),
             status: Status::Inert,
-            sets: 0,
+            primary_sets: 0,
+            secondary_sets: 0,
             persistent: true,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -82,8 +107,11 @@ impl<C: PublicKey> Record<C> {
         Self {
             address: Address::Bootstrapper(ingress.into()),
             status: Status::Inert,
-            sets: 0,
+            primary_sets: 0,
+            secondary_sets: 0,
             persistent: true,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -119,32 +147,52 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
-    /// Increase the count of peer sets this peer is part of.
-    pub const fn increment(&mut self) {
-        self.sets = self.sets.checked_add(1).unwrap();
+    /// Increase the count of primary peer sets this peer is part of.
+    pub const fn increment_primary(&mut self) {
+        self.primary_sets = self.primary_sets.checked_add(1).unwrap();
     }
 
-    /// Decrease the count of peer sets this peer is part of.
-    ///
-    /// Returns `true` if the record can be deleted. That is:
-    /// - The count reaches zero
-    /// - The peer is not a bootstrapper or the local node
-    pub const fn decrement(&mut self) {
-        self.sets = self.sets.checked_sub(1).unwrap();
+    /// Decrease the count of primary peer sets this peer is part of.
+    pub const fn decrement_primary(&mut self) {
+        self.primary_sets = self.primary_sets.checked_sub(1).unwrap();
+    }
+
+    /// Increase the count of secondary peer sets this peer is part of.
+    pub const fn increment_secondary(&mut self) {
+        self.secondary_sets = self.secondary_sets.checked_add(1).unwrap();
+    }
+
+    /// Decrease the count of secondary peer sets this peer is part of.
+    pub const fn decrement_secondary(&mut self) {
+        self.secondary_sets = self.secondary_sets.checked_sub(1).unwrap();
+    }
+
+    /// Whether this peer should be dialed outbound (primary or persistent peers).
+    pub const fn is_outbound_target(&self) -> bool {
+        self.primary_sets > 0 || self.persistent
     }
 
     /// Attempt to reserve the peer for connection.
     ///
-    /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub const fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Myself(_)) {
-            return false;
+    /// Checks that the peer is not ourselves, is currently inert, and that
+    /// `next_reservable_at` has passed. On success, computes a jittered
+    /// `next_dial_at` and sets `next_reservable_at` to `now + interval`.
+    pub fn reserve(
+        &mut self,
+        context: &mut (impl Rng + Clock),
+        interval: Duration,
+    ) -> ReserveResult {
+        if matches!(self.address, Address::Myself(_)) || !matches!(self.status, Status::Inert) {
+            return ReserveResult::Unavailable;
         }
-        if matches!(self.status, Status::Inert) {
-            self.status = Status::Reserved;
-            return true;
+        let now = context.current();
+        if now < self.next_reservable_at {
+            return ReserveResult::RateLimited;
         }
-        false
+        self.status = Status::Reserved;
+        self.next_reservable_at = now.saturating_add_ext(interval);
+        self.next_dial_at = self.next_reservable_at.add_jittered(context, interval / 2);
+        ReserveResult::Reserved
     }
 
     /// Marks the peer as connected.
@@ -192,30 +240,43 @@ impl<C: PublicKey> Record<C> {
         !matches!(self.address, Address::Myself(_))
     }
 
-    /// Returns the number of peer sets this peer is part of.
-    pub const fn sets(&self) -> usize {
-        self.sets
+    /// Returns the number of secondary peer sets this peer is part of.
+    pub const fn secondary_sets(&self) -> usize {
+        self.secondary_sets
     }
 
-    /// Returns `true` if the record is dialable.
+    /// Returns the number of primary peer sets this peer is part of.
+    pub const fn primary_sets(&self) -> usize {
+        self.primary_sets
+    }
+
+    /// Check whether this record is dialable at the given time.
     ///
-    /// A record is dialable if:
-    /// - We have the ingress address of the peer
-    /// - It is not ourselves
-    /// - We are not already connected or reserved
-    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
-    ///
-    /// Note: For DNS addresses, private IP checks are performed in the dialer after resolution.
-    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
-        if self.status != Status::Inert {
-            return false;
+    /// Returns [DialStatus::Now] if the peer can be dialed immediately,
+    /// [DialStatus::After] if it will become dialable at a future time,
+    /// or [DialStatus::Unavailable] if it is not dialable at all.
+    pub fn dialable(
+        &self,
+        now: SystemTime,
+        allow_private_ips: bool,
+        allow_dns: bool,
+    ) -> DialStatus {
+        if self.status != Status::Inert || !self.is_outbound_target() {
+            return DialStatus::Unavailable;
         }
         let ingress = match &self.address {
             Address::Bootstrapper(ingress) => ingress,
             Address::Discovered(info, _) => &info.ingress,
-            _ => return false,
+            _ => return DialStatus::Unavailable,
         };
-        ingress.is_valid(allow_private_ips, allow_dns)
+        if !ingress.is_valid(allow_private_ips, allow_dns) {
+            return DialStatus::Unavailable;
+        }
+        if self.next_dial_at > now {
+            DialStatus::After(self.next_dial_at)
+        } else {
+            DialStatus::Now
+        }
     }
 
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
@@ -249,12 +310,6 @@ impl<C: PublicKey> Record<C> {
         .cloned()
     }
 
-    /// Returns `true` if the peer is reserved (or active).
-    /// This is used to determine if we should attempt to reserve the peer again.
-    pub const fn reserved(&self) -> bool {
-        matches!(self.status, Status::Reserved | Status::Active)
-    }
-
     /// Returns `true` if we want to ask for updated peer information for this peer.
     ///
     /// - Returns `false` for `Myself` addresses.
@@ -271,19 +326,23 @@ impl<C: PublicKey> Record<C> {
 
     /// Returns `true` if the record can safely be deleted.
     pub const fn deletable(&self) -> bool {
-        self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
+        self.primary_sets == 0
+            && self.secondary_sets == 0
+            && !self.persistent
+            && matches!(self.status, Status::Inert)
     }
 
     /// Returns `true` if this peer is eligible for connection.
     ///
     /// A peer is eligible if:
     /// - It is not ourselves
-    /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
+    /// - It is part of at least one primary peer set, at least one secondary peer set, or is
+    ///   persistent
     pub const fn eligible(&self) -> bool {
         match self.address {
             Address::Myself(_) => false,
             Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
-                self.sets > 0 || self.persistent
+                self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
             }
         }
     }
@@ -293,6 +352,7 @@ mod tests {
     use super::*;
     use crate::authenticated::discovery::types;
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
+    use commonware_runtime::{deterministic, Runner};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -342,11 +402,11 @@ mod tests {
         let record = Record::<PublicKey>::unknown();
         assert!(matches!(record.address, Address::Unknown));
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
+        assert_eq!(record.primary_sets, 0);
         assert!(!record.persistent);
         assert!(record.ingress().is_none());
         assert!(record.sharable().is_none());
-        assert!(!record.reserved());
+        assert_eq!(record.status, Status::Inert);
         assert!(record.want(0), "Should want info for unknown peer");
         assert!(record.deletable());
         assert!(!record.eligible());
@@ -360,14 +420,14 @@ mod tests {
             matches!(&record.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info))
         );
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
+        assert_eq!(record.primary_sets, 0);
         assert!(record.persistent);
         assert_eq!(record.ingress(), Some(&my_info.ingress));
         assert!(compare_optional_peer_info(
             record.sharable().as_ref(),
             &my_info
         ));
-        assert!(!record.reserved());
+        assert_eq!(record.status, Status::Inert);
         assert!(!record.want(0), "Should not want info for myself");
         assert!(!record.deletable());
         assert!(!record.eligible());
@@ -380,11 +440,11 @@ mod tests {
         let record = Record::<PublicKey>::bootstrapper(socket);
         assert!(matches!(&record.address, Address::Bootstrapper(i) if *i == ingress));
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
+        assert_eq!(record.primary_sets, 0);
         assert!(record.persistent);
         assert_eq!(record.ingress(), Some(&ingress));
         assert!(record.sharable().is_none());
-        assert!(!record.reserved());
+        assert_eq!(record.status, Status::Inert);
         assert!(record.want(0), "Should want info for bootstrapper");
         assert!(!record.deletable());
         assert!(record.eligible());
@@ -509,9 +569,9 @@ mod tests {
         // Test Unknown (not persistent)
         let mut record_unknown = Record::<PublicKey>::unknown();
         assert!(record_unknown.deletable());
-        record_unknown.increment(); // sets = 1
+        record_unknown.increment_primary(); // primary_sets = 1
         assert!(!record_unknown.deletable());
-        record_unknown.decrement(); // sets = 0
+        record_unknown.decrement_primary(); // primary_sets = 0
         assert!(record_unknown.deletable());
 
         // Test Discovered (not persistent)
@@ -519,26 +579,26 @@ mod tests {
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
         assert!(record_disc.deletable());
-        record_disc.increment(); // sets = 1
+        record_disc.increment_primary(); // primary_sets = 1
         assert!(!record_disc.deletable());
-        record_disc.decrement(); // sets = 0
+        record_disc.decrement_primary(); // primary_sets = 0
         assert!(record_disc.deletable());
 
         // Test Bootstrapper (persistent)
         let mut record_boot = Record::<PublicKey>::bootstrapper(test_socket());
         assert!(!record_boot.deletable()); // Persistent
-        record_boot.increment(); // sets = 1
+        record_boot.increment_primary(); // primary_sets = 1
         assert!(!record_boot.deletable());
-        record_boot.decrement(); // sets = 0
+        record_boot.decrement_primary(); // primary_sets = 0
         assert!(!record_boot.deletable()); // Still persistent
 
         // Test Myself (persistent)
         let my_info = create_peer_info::<PrivateKey>(0, test_socket(), 100);
         let mut record_myself = Record::myself(my_info);
         assert!(!record_myself.deletable()); // Persistent
-        record_myself.increment(); // sets = 1
+        record_myself.increment_primary(); // primary_sets = 1
         assert!(!record_myself.deletable());
-        record_myself.decrement(); // sets = 0
+        record_myself.decrement_primary(); // primary_sets = 0
         assert!(!record_myself.deletable()); // Still persistent
     }
 
@@ -546,8 +606,8 @@ mod tests {
     #[should_panic]
     fn test_decrement_panics_at_zero() {
         let mut record = Record::<PublicKey>::unknown();
-        assert_eq!(record.sets, 0);
-        record.decrement(); // Panics
+        assert_eq!(record.primary_sets, 0);
+        record.decrement_primary(); // Panics
     }
 
     #[test]
@@ -575,31 +635,44 @@ mod tests {
 
     #[test]
     fn test_status_transitions_reserve_connect_release() {
-        let mut record = Record::<PublicKey>::unknown();
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
 
-        assert_eq!(record.status, Status::Inert);
-        assert!(record.reserve());
-        assert_eq!(record.status, Status::Reserved);
-        assert!(record.reserved());
+            assert_eq!(record.status, Status::Inert);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert_eq!(record.status, Status::Reserved);
 
-        assert!(!record.reserve(), "Cannot re-reserve when Reserved");
-        assert_eq!(record.status, Status::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Unavailable,
+                "Cannot re-reserve when Reserved"
+            );
+            assert_eq!(record.status, Status::Reserved);
 
-        record.connect();
-        assert_eq!(record.status, Status::Active);
-        assert!(record.reserved()); // reserved() is true for Active too
+            record.connect();
+            assert_eq!(record.status, Status::Active);
 
-        assert!(!record.reserve(), "Cannot reserve when Active");
-        assert_eq!(record.status, Status::Active);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Unavailable,
+                "Cannot reserve when Active"
+            );
+            assert_eq!(record.status, Status::Active);
 
-        record.release(); // Release from Active
-        assert_eq!(record.status, Status::Inert);
-        assert!(!record.reserved());
+            record.release();
+            assert_eq!(record.status, Status::Inert);
 
-        assert!(record.reserve()); // Reserve again
-        assert_eq!(record.status, Status::Reserved);
-        record.release(); // Release from Reserved
-        assert_eq!(record.status, Status::Inert);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert_eq!(record.status, Status::Reserved);
+            record.release();
+            assert_eq!(record.status, Status::Inert);
+        });
     }
 
     #[test]
@@ -612,10 +685,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_connect_when_active_panics() {
-        let mut record = Record::<PublicKey>::unknown();
-        assert!(record.reserve());
-        record.connect();
-        record.connect(); // Should panic
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
+            record.reserve(&mut context, Duration::ZERO);
+            record.connect();
+            record.connect(); // Should panic
+        });
     }
 
     #[test]
@@ -627,53 +702,60 @@ mod tests {
 
     #[test]
     fn test_sharable_logic() {
-        let socket = test_socket();
-        let peer_info_data = create_peer_info::<PrivateKey>(12, socket, 100);
+        deterministic::Runner::default().start(|mut context| async move {
+            let socket = test_socket();
+            let peer_info_data = create_peer_info::<PrivateKey>(12, socket, 100);
 
-        // Unknown: Not sharable
-        let record_unknown = Record::<PublicKey>::unknown();
-        assert!(record_unknown.sharable().is_none());
+            // Unknown: Not sharable
+            let record_unknown = Record::<PublicKey>::unknown();
+            assert!(record_unknown.sharable().is_none());
 
-        // Myself: Sharable
-        let record_myself = Record::myself(peer_info_data.clone());
-        assert!(compare_optional_peer_info(
-            record_myself.sharable().as_ref(),
-            &peer_info_data
-        ));
+            // Myself: Sharable
+            let record_myself = Record::myself(peer_info_data.clone());
+            assert!(compare_optional_peer_info(
+                record_myself.sharable().as_ref(),
+                &peer_info_data
+            ));
 
-        // Bootstrapper (no Info yet): Not sharable
-        let record_boot = Record::<PublicKey>::bootstrapper(socket);
-        assert!(record_boot.sharable().is_none());
+            // Bootstrapper (no Info yet): Not sharable
+            let record_boot = Record::<PublicKey>::bootstrapper(socket);
+            assert!(record_boot.sharable().is_none());
 
-        // Discovered but not Active: Not sharable
-        let mut record_disc = Record::<PublicKey>::unknown();
-        assert!(record_disc.update(peer_info_data.clone()));
-        assert!(record_disc.sharable().is_none()); // Status Inert
-        assert!(record_disc.reserve());
-        assert!(record_disc.sharable().is_none()); // Status Reserved
+            // Discovered but not Active: Not sharable
+            let mut record_disc = Record::<PublicKey>::unknown();
+            assert!(record_disc.update(peer_info_data.clone()));
+            assert!(record_disc.sharable().is_none()); // Status Inert
+            record_disc.reserve(&mut context, Duration::ZERO);
+            assert!(record_disc.sharable().is_none()); // Status Reserved
 
-        // Discovered and Active: Sharable
-        record_disc.connect();
-        assert!(compare_optional_peer_info(
-            record_disc.sharable().as_ref(),
-            &peer_info_data
-        ));
+            // Discovered and Active: Sharable
+            record_disc.connect();
+            assert!(compare_optional_peer_info(
+                record_disc.sharable().as_ref(),
+                &peer_info_data
+            ));
 
-        // Released after Active: Not sharable
-        record_disc.release();
-        assert!(record_disc.sharable().is_none());
+            // Released after Active: Not sharable
+            record_disc.release();
+            assert!(record_disc.sharable().is_none());
+        });
     }
 
     #[test]
     fn test_reserved_status_check() {
-        let mut record = Record::<PublicKey>::unknown();
-        assert!(!record.reserved()); // Inert
-        assert!(record.reserve());
-        assert!(record.reserved()); // Reserved
-        record.connect();
-        assert!(record.reserved()); // Active
-        record.release();
-        assert!(!record.reserved()); // Inert again
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
+            assert_eq!(record.status, Status::Inert);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert_eq!(record.status, Status::Reserved);
+            record.connect();
+            assert_eq!(record.status, Status::Active);
+            record.release();
+            assert_eq!(record.status, Status::Inert);
+        });
     }
 
     #[test]
@@ -721,95 +803,99 @@ mod tests {
 
     #[test]
     fn test_want_logic_with_min_fails() {
-        let socket = test_socket();
-        let ingress = Ingress::Socket(socket);
-        let peer_info = create_peer_info::<PrivateKey>(13, socket, 100);
-        let min_fails = 2;
+        deterministic::Runner::default().start(|mut context| async move {
+            let socket = test_socket();
+            let ingress = Ingress::Socket(socket);
+            let peer_info = create_peer_info::<PrivateKey>(13, socket, 100);
+            let min_fails = 2;
 
-        // Unknown and Bootstrapper always want info
-        assert!(Record::<PublicKey>::unknown().want(min_fails));
-        assert!(Record::<PublicKey>::bootstrapper(socket).want(min_fails));
+            // Unknown and Bootstrapper always want info
+            assert!(Record::<PublicKey>::unknown().want(min_fails));
+            assert!(Record::<PublicKey>::bootstrapper(socket).want(min_fails));
 
-        // Myself never wants info
-        assert!(!Record::myself(peer_info.clone()).want(min_fails));
+            // Myself never wants info
+            assert!(!Record::myself(peer_info.clone()).want(min_fails));
 
-        let mut record_disc = Record::<PublicKey>::unknown();
-        assert!(record_disc.update(peer_info));
+            let mut record_disc = Record::<PublicKey>::unknown();
+            assert!(record_disc.update(peer_info));
 
-        // Status Inert
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when fails=0 < min_fails"
-        );
-        record_disc.dial_failure(&ingress); // fails = 1
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when fails=1 < min_fails"
-        );
-        record_disc.dial_failure(&ingress); // fails = 2
-        assert!(
-            record_disc.want(min_fails),
-            "Should want when fails=2 >= min_fails"
-        );
+            // Status Inert
+            assert!(
+                !record_disc.want(min_fails),
+                "Should not want when fails=0 < min_fails"
+            );
+            record_disc.dial_failure(&ingress); // fails = 1
+            assert!(
+                !record_disc.want(min_fails),
+                "Should not want when fails=1 < min_fails"
+            );
+            record_disc.dial_failure(&ingress); // fails = 2
+            assert!(
+                record_disc.want(min_fails),
+                "Should want when fails=2 >= min_fails"
+            );
 
-        // Status Reserved
-        assert!(record_disc.reserve());
-        assert!(
-            record_disc.want(min_fails),
-            "Should still want when Reserved and fails >= min_fails"
-        );
+            // Status Reserved
+            record_disc.reserve(&mut context, Duration::ZERO);
+            assert!(
+                record_disc.want(min_fails),
+                "Should still want when Reserved and fails >= min_fails"
+            );
 
-        // Status Active
-        record_disc.connect();
-        assert!(!record_disc.want(min_fails), "Should not want when Active");
+            // Status Active
+            record_disc.connect();
+            assert!(!record_disc.want(min_fails), "Should not want when Active");
 
-        // Status Inert again (after release)
-        record_disc.release();
-        assert!(record_disc.want(min_fails));
+            // Status Inert again (after release)
+            record_disc.release();
+            assert!(record_disc.want(min_fails));
 
-        // Reset failures
-        record_disc.dial_success(); // Reset failures
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when Inert and fails=0"
-        );
-        record_disc.dial_failure(&ingress); // fails = 1
-        assert!(!record_disc.want(min_fails));
-        record_disc.dial_failure(&ingress); // fails = 2
-        assert!(record_disc.want(min_fails));
+            // Reset failures
+            record_disc.dial_success(); // Reset failures
+            assert!(
+                !record_disc.want(min_fails),
+                "Should not want when Inert and fails=0"
+            );
+            record_disc.dial_failure(&ingress); // fails = 1
+            assert!(!record_disc.want(min_fails));
+            record_disc.dial_failure(&ingress); // fails = 2
+            assert!(record_disc.want(min_fails));
+        });
     }
 
     #[test]
     fn test_deletable_logic_detailed() {
-        let peer_info = create_peer_info::<PrivateKey>(14, test_socket(), 100);
+        deterministic::Runner::default().start(|mut context| async move {
+            let peer_info = create_peer_info::<PrivateKey>(14, test_socket(), 100);
 
-        // Persistent records are never deletable regardless of sets count
-        assert!(!Record::myself(peer_info.clone()).deletable());
-        assert!(!Record::<PublicKey>::bootstrapper(test_socket()).deletable());
-        let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_pers.update(peer_info));
-        assert!(!record_pers.deletable());
+            // Persistent records are never deletable regardless of sets count
+            assert!(!Record::myself(peer_info.clone()).deletable());
+            assert!(!Record::<PublicKey>::bootstrapper(test_socket()).deletable());
+            let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
+            assert!(record_pers.update(peer_info));
+            assert!(!record_pers.deletable());
 
-        // Non-persistent records depend on sets count and status
-        let mut record = Record::<PublicKey>::unknown(); // Not persistent
-        assert_eq!(record.sets, 0);
-        assert_eq!(record.status, Status::Inert);
-        assert!(record.deletable()); // sets = 0, !persistent, Inert
+            // Non-persistent records depend on sets count and status
+            let mut record = Record::<PublicKey>::unknown(); // Not persistent
+            assert_eq!(record.primary_sets, 0);
+            assert_eq!(record.status, Status::Inert);
+            assert!(record.deletable()); // primary_sets = 0, !persistent, Inert
 
-        record.increment(); // sets = 1
-        assert!(!record.deletable()); // sets != 0
+            record.increment_primary(); // primary_sets = 1
+            assert!(!record.deletable()); // primary_sets != 0
 
-        assert!(record.reserve()); // status = Reserved
-        assert!(!record.deletable()); // status != Inert
+            record.reserve(&mut context, Duration::ZERO); // status = Reserved
+            assert!(!record.deletable()); // status != Inert
 
-        record.connect(); // status = Active
-        assert!(!record.deletable()); // status != Inert
+            record.connect(); // status = Active
+            assert!(!record.deletable()); // status != Inert
 
-        record.release(); // status = Inert
-        assert!(!record.deletable()); // sets != 0
+            record.release(); // status = Inert
+            assert!(!record.deletable()); // primary_sets != 0
 
-        record.decrement(); // sets = 0
-        assert!(record.deletable()); // sets = 0, !persistent, Inert
+            record.decrement_primary(); // primary_sets = 0
+            assert!(record.deletable()); // primary_sets = 0, !persistent, Inert
+        });
     }
 
     #[test]
@@ -827,16 +913,16 @@ mod tests {
 
         // Non-persistent records (Unknown, Discovered) require sets > 0
         let mut record_unknown = Record::<PublicKey>::unknown();
-        assert!(!record_unknown.eligible()); // sets = 0, !persistent
-        record_unknown.increment(); // sets = 1
-        assert!(record_unknown.eligible()); // sets > 0
-        record_unknown.decrement(); // sets = 0
+        assert!(!record_unknown.eligible()); // primary_sets = 0, !persistent
+        record_unknown.increment_primary(); // primary_sets = 1
+        assert!(record_unknown.eligible()); // primary_sets > 0
+        record_unknown.decrement_primary(); // primary_sets = 0
         assert!(!record_unknown.eligible());
 
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
-        assert!(!record_disc.eligible()); // sets = 0, !persistent
-        record_disc.increment(); // sets = 1
-        assert!(record_disc.eligible()); // sets > 0
+        assert!(!record_disc.eligible()); // primary_sets = 0, !persistent
+        record_disc.increment_primary(); // primary_sets = 1
+        assert!(record_disc.eligible()); // primary_sets > 0
     }
 }

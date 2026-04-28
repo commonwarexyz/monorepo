@@ -1,13 +1,19 @@
 use super::{Config, Error, Identifier};
-use crate::journal::segmented::oversized::{
-    Config as OversizedConfig, Oversized, Record as OversizedRecord,
+use crate::{
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    },
+    Context,
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, IoBuf, Metrics, Storage};
+use commonware_runtime::{
+    buffer,
+    telemetry::metrics::{Counter, MetricsExt as _},
+    Blob, Buf, BufMut, BufferPooler, IoBuf,
+};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
-use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
 
@@ -383,7 +389,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> {
+pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -420,7 +426,7 @@ pub struct Freezer<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: Cod
     resizes: Counter,
 }
 
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -749,28 +755,17 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         };
 
         // Create metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let unnecessary_writes = Counter::default();
-        let resizes = Counter::default();
-        context.register("puts", "number of put operations", puts.clone());
-        context.register("gets", "number of get operations", gets.clone());
-        context.register(
+        let puts = context.counter("puts", "number of put operations");
+        let gets = context.counter("gets", "number of get operations");
+        let unnecessary_reads = context.counter(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
         );
-        context.register(
+        let unnecessary_writes = context.counter(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            unnecessary_writes.clone(),
         );
-        context.register(
-            "resizes",
-            "number of table resizing operations",
-            resizes.clone(),
-        );
+        let resizes = context.counter("resizes", "number of table resizing operations");
 
         Ok(Self {
             context,
@@ -1165,7 +1160,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Metrics, Runner, Storage,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},

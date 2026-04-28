@@ -4,12 +4,10 @@ use super::{metrics, Error};
 use crate::{
     journal::contiguous::{variable, Reader as _},
     rmap::RMap,
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::CodecShared;
-use commonware_runtime::{
-    buffer::paged::CacheRef, telemetry::metrics::status::GaugeExt, Clock, Metrics, Storage,
-};
+use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -72,7 +70,7 @@ pub struct Config<C> {
 /// On restart, `ack_floor` is set to the journal's pruning boundary.
 /// Items that were pruned are gone; everything else is re-delivered.
 /// Applications must handle duplicates (idempotent processing).
-pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Queue<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
 
@@ -97,7 +95,7 @@ pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
     metrics: metrics::Metrics,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
+impl<E: Context, V: CodecShared> Queue<E, V> {
     /// Initialize a queue from storage.
     ///
     /// On first initialization, creates an empty queue. On restart, begins reading
@@ -344,7 +342,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     }
 }
 
-impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
+impl<E: Context + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
@@ -369,7 +367,9 @@ mod tests {
     use super::*;
     use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 

@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1014,7 +1014,6 @@ dependencies = [
  "commonware-storage",
  "commonware-stream",
  "commonware-utils",
- "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "tracing",
@@ -1023,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "commonware-codec",
  "commonware-cryptography",
@@ -1031,7 +1030,6 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
- "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
@@ -1039,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-broadcast",
@@ -1054,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1065,7 +1063,6 @@ dependencies = [
  "commonware-utils",
  "crossterm 0.29.0",
  "futures",
- "prometheus-client",
  "ratatui",
  "serde_json",
  "tracing",
@@ -1074,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1090,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1102,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1113,6 +1110,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
  "criterion",
@@ -1127,9 +1125,10 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-codec",
  "commonware-coding",
  "commonware-cryptography",
  "commonware-parallel",
@@ -1140,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "anyhow",
  "commonware-codec",
@@ -1150,7 +1149,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
- "prometheus-client",
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
@@ -1159,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1176,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "commonware-conformance-macros",
  "commonware-macros",
@@ -1188,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance-macros"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1197,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1218,7 +1216,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "pin-project",
- "prometheus-client",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1232,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1257,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -1278,8 +1275,8 @@ dependencies = [
  "crc-fast",
  "criterion",
  "ctutils",
+ "curve25519-dalek",
  "ecdsa 0.16.9",
- "ed25519-consensus",
  "getrandom 0.2.16",
  "num-rational",
  "num-traits",
@@ -1297,17 +1294,19 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "blake3",
  "blst",
+ "bytes",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-math",
  "commonware-parallel",
  "commonware-utils",
  "crc",
+ "ed25519-consensus",
  "ed25519-zebra",
  "libfuzzer-sys",
  "num-rational",
@@ -1319,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1342,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "colored",
@@ -1353,7 +1352,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -1364,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1375,7 +1373,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "serde",
  "serde_yaml",
@@ -1386,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-invariants"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-macros",
@@ -1398,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1411,7 +1408,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "crossterm 0.29.0",
- "prometheus-client",
  "rand 0.8.5",
  "ratatui",
  "serde_json",
@@ -1421,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "commonware-macros-impl",
  "futures",
@@ -1433,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros-impl"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1444,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-math"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1462,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-math-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-math",
@@ -1471,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1489,7 +1485,6 @@ dependencies = [
  "num-integer",
  "num-rational",
  "num-traits",
- "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rand_distr",
@@ -1500,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1516,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-parallel"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1526,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-reshare"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1543,7 +1538,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
@@ -1555,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1569,7 +1563,6 @@ dependencies = [
  "commonware-stream",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
@@ -1578,21 +1571,24 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "axum",
  "bytes",
  "cfg-if",
+ "clap",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-parallel",
+ "commonware-runtime-macros",
  "commonware-utils",
  "console-subscriber",
  "criterion",
  "crossbeam-queue",
+ "crossbeam-utils",
  "futures",
  "getrandom 0.2.16",
  "governor",
@@ -1606,6 +1602,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rayon",
+ "serde_json",
  "sha2 0.10.9",
  "sysinfo",
  "thiserror 2.0.17",
@@ -1617,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
@@ -1626,8 +1623,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-runtime-macros"
+version = "2026.4.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "prometheus-client",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "commonware-storage"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1646,7 +1654,6 @@ dependencies = [
  "criterion",
  "futures",
  "futures-util",
- "prometheus-client",
  "rand 0.8.5",
  "rayon",
  "rstest",
@@ -1658,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1673,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -1692,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1708,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1719,7 +1726,6 @@ dependencies = [
  "commonware-stream",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.17",
@@ -1730,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1758,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "2026.3.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1768,6 +1774,7 @@ dependencies = [
  "libfuzzer-sys",
  "num-bigint",
  "num-rational",
+ "num-traits",
  "rand 0.8.5",
 ]
 
@@ -2335,6 +2342,7 @@ dependencies = [
  "curve25519-dalek-ng",
  "hex",
  "rand_core 0.6.4",
+ "serde",
  "sha2 0.9.9",
  "thiserror 1.0.69",
  "zeroize",
@@ -3934,9 +3942,9 @@ dependencies = [
 
 [[package]]
 name = "prometheus-client"
-version = "0.24.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4500adecd7af8e0e9f4dbce15cfee07ce913fbf6ad605cc468b83f2d531ee94"
+checksum = "cca3d75b4566b9a29fe1ed623587fb058e826eb329a0be4b7c4da1ebb2d7a6ca"
 dependencies = [
  "dtoa",
  "itoa",
@@ -5170,9 +5178,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.48.0"
+version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
 dependencies = [
  "bytes",
  "libc",

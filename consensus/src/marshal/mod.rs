@@ -139,5 +139,9 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     ///
     /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
     /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
+    ///
+    /// Marshal only emits a block after it has durably persisted the said block. This ensures applications
+    /// that make stateful changes based on a block in other locations can access the same block on restart (often
+    /// some logic on startup attempts on infallible read on the last processed block).
     Block(B, A),
 }

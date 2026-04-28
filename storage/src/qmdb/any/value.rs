@@ -16,7 +16,7 @@ mod sealed {
     }
 }
 
-pub(crate) use sealed::ValueEncoding;
+pub use sealed::ValueEncoding;
 
 /// A fixed-size, clonable value.
 #[derive(Clone, Debug, PartialEq, Eq)]

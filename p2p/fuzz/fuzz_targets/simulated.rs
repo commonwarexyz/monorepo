@@ -7,6 +7,7 @@ use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, IoBuf, Metrics, Quota, Runner};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
@@ -111,7 +112,7 @@ fn fuzz(input: FuzzInput) {
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
         disconnect_on_block: false,
-        tracked_peer_sets: None,
+        tracked_peer_sets: NZUsize!(1),
     };
 
     let executor = deterministic::Runner::seeded(input.seed);
@@ -124,7 +125,12 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Create the simulated network and oracle for controlling it
-        let (network, oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
+        let (network, oracle) = simulated::Network::new_with_peers(
+            context.with_label("network"),
+            p2p_cfg,
+            peer_pks.iter().cloned(),
+        )
+        .await;
         let _network_handle = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
@@ -177,11 +183,6 @@ fn fuzz(input: FuzzInput) {
                     // Clamp message size to not exceed max (accounting for channel overhead)
                     let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
-                    // Skip if receiver hasn't registered this channel - they won't be able to receive
-                    if !channels.contains_key(&(to_idx, channel_id)) {
-                        continue;
-                    }
-
                     // Skip if sender channel not registered
                     let Some((sender, _)) = channels.get_mut(&(from_idx, channel_id)) else {
                         continue;
@@ -194,22 +195,22 @@ fn fuzz(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery
-                    let sent = sender
+                    let accepted = sender
                         .send(
                             Recipients::One(peer_pks[to_idx].clone()),
                             message.clone(),
                             true,
                         )
-                        .await
-                        .is_ok();
+                        .await;
 
-                    // Track message as expected only if send was accepted
-                    // Note: Message may still be dropped by unreliable link
-                    if sent {
-                        expected_msgs
-                            .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
-                            .or_default()
-                            .push_back(message);
+                    // Track the message only if the network accepted this recipient.
+                    if let Ok(accepted) = accepted {
+                        if accepted.iter().any(|pk| pk == &peer_pks[to_idx]) {
+                            expected_msgs
+                                .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
+                                .or_default()
+                                .push_back(message);
+                        }
                     }
                 }
 

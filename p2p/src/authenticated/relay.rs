@@ -1,3 +1,4 @@
+use commonware_macros::select;
 use commonware_utils::channel::mpsc::{self, error::TrySendError};
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,29 @@ impl<T> Relay<T> {
     pub fn send(&self, message: T, priority: bool) -> Result<(), TrySendError<T>> {
         let sender = if priority { &self.high } else { &self.low };
         sender.try_send(message)
+    }
+}
+
+/// Message received from one of the prioritized relay channels.
+pub enum Prioritized<C, D> {
+    /// Control message received from the control channel.
+    Control(C),
+    /// Data message received from either the high- or low-priority data channel.
+    Data(D),
+    /// One of the relay channels closed before yielding a message.
+    Closed,
+}
+
+/// Awaits a message from control, high, or low priority receivers.
+pub async fn recv_prioritized<C, D>(
+    control: &mut mpsc::Receiver<C>,
+    high: &mut mpsc::Receiver<D>,
+    low: &mut mpsc::Receiver<D>,
+) -> Prioritized<C, D> {
+    select! {
+        msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
+        msg = high.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
+        msg = low.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
     }
 }
 

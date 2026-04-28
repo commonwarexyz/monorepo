@@ -1,7 +1,10 @@
 //! A write-once key-value store for ordered data.
 //!
-//! [Archive] is a key-value store designed for workloads where all data is written only once and is
-//! uniquely associated with both an `index` and a `key`.
+//! [Archive] is a key-value store designed for workloads where data is written only once and each
+//! item is addressed by both an `index` and a `key`. Workloads with unique indices should use [Archive]
+//! and workloads with overlapping indices should use [MultiArchive] (allows all items with the same index
+//! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
+//! return any of the associated values.
 
 use commonware_codec::Codec;
 use commonware_utils::Array;
@@ -39,7 +42,7 @@ pub enum Error {
     RecordTooLarge,
 }
 
-/// A write-once key-value store where each key is associated with a unique index.
+/// A write-once key-value store addressed by both an index and a key.
 pub trait Archive: Send {
     /// The type of the key.
     type Key: Array;
@@ -47,10 +50,12 @@ pub trait Archive: Send {
     /// The type of the value.
     type Value: Codec + Send;
 
-    /// Store an item in [Archive]. Both indices and keys are assumed to both be globally unique.
+    /// Store an item in [Archive].
     ///
-    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
-    /// at different indices (not recommended), any value associated with the key may be returned.
+    /// Indices are unique: if the index already exists, put does nothing and returns. Duplicate
+    /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique: the same key
+    /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
+    /// with an [Identifier::Key] identifier may return any of the values associated with that key.
     fn put(
         &mut self,
         index: u64,
@@ -102,6 +107,9 @@ pub trait Archive: Send {
     /// Retrieve an iterator over all populated ranges (inclusive) within the [Archive].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)>;
 
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)>;
+
     /// Retrieve the first index in the [Archive].
     fn first_index(&self) -> Option<u64>;
 
@@ -119,8 +127,7 @@ pub trait Archive: Send {
 ///
 /// Unlike [Archive::put], which is a no-op when the index already exists,
 /// [MultiArchive::put_multi] allows storing additional `(key, value)` pairs
-/// at an existing index. As with [Archive::put], keys are assumed to be globally
-/// unique, but duplicate keys are not rejected.
+/// at an existing index.
 pub trait MultiArchive: Archive {
     /// Retrieve all values stored at the given index.
     ///
@@ -377,6 +384,74 @@ mod tests {
         executor.start(|context| async move {
             let archive = create_immutable(context, None).await;
             test_duplicate_key_impl(archive).await;
+        });
+    }
+
+    async fn test_duplicate_key_cross_index_impl(
+        mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>,
+    ) {
+        // Store the same key at two different indices; distinct values only so
+        // the test can observe which entry wins a key lookup.
+        let key = test_key("dupe-xindex");
+        archive.put(2, key.clone(), 20).await.expect("put(2)");
+        archive.put(5, key.clone(), 50).await.expect("put(5)");
+
+        // Both indices must resolve individually.
+        assert_eq!(
+            archive.get(Identifier::Index(2)).await.unwrap(),
+            Some(20),
+            "Index(2) must resolve to the value stored at 2"
+        );
+        assert_eq!(
+            archive.get(Identifier::Index(5)).await.unwrap(),
+            Some(50),
+            "Index(5) must resolve to the value stored at 5"
+        );
+
+        // Key lookup may return either value per the contract; just assert it
+        // returns one of them and that `has` reports presence.
+        let got = archive
+            .get(Identifier::Key(&key))
+            .await
+            .unwrap()
+            .expect("key lookup must find at least one entry");
+        assert!(got == 20 || got == 50, "unexpected value: {got}");
+        assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, Some(3)).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, None).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, Some(3)).await;
+            test_duplicate_key_cross_index_impl(archive).await;
         });
     }
 

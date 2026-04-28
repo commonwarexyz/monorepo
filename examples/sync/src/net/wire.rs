@@ -1,17 +1,20 @@
 use crate::net::{ErrorResponse, RequestId};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, IsUnit, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
-    mmr::{Location, Proof},
-    qmdb::sync::Target,
+    mmr::{self, Location, Proof},
+    qmdb::sync::{compact, compact::State, Target},
 };
 use std::num::NonZeroU64;
 
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
+
+/// Maximum number of pinned nodes (one per MMR peak, bounded by max tree height).
+pub const MAX_PINNED_NODES: usize = 64;
 
 /// Request for operations from the server.
 #[derive(Debug)]
@@ -20,6 +23,7 @@ pub struct GetOperationsRequest {
     pub op_count: Location,
     pub start_loc: Location,
     pub max_ops: NonZeroU64,
+    pub include_pinned_nodes: bool,
 }
 
 /// Response with operations and proof.
@@ -31,6 +35,7 @@ where
     pub request_id: RequestId,
     pub proof: Proof<D>,
     pub operations: Vec<Op>,
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 /// Request for sync target from server.
@@ -46,7 +51,43 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub target: Target<D>,
+    pub target: Target<mmr::Family, D>,
+}
+
+/// Request for compact authenticated state.
+#[derive(Debug)]
+pub struct GetCompactTargetRequest {
+    pub request_id: RequestId,
+}
+
+/// Response with compact-sync target.
+#[derive(Debug)]
+pub struct GetCompactTargetResponse<D>
+where
+    D: Digest,
+{
+    pub request_id: RequestId,
+    pub target: compact::Target<mmr::Family, D>,
+}
+
+/// Request for compact authenticated state.
+#[derive(Debug)]
+pub struct GetCompactStateRequest<D>
+where
+    D: Digest,
+{
+    pub request_id: RequestId,
+    pub target: compact::Target<mmr::Family, D>,
+}
+
+/// Response with compact authenticated state.
+#[derive(Debug)]
+pub struct GetCompactStateResponse<Op, D>
+where
+    D: Digest,
+{
+    pub request_id: RequestId,
+    pub state: State<mmr::Family, Op, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -59,6 +100,10 @@ where
     GetOperationsResponse(GetOperationsResponse<Op, D>),
     GetSyncTargetRequest(GetSyncTargetRequest),
     GetSyncTargetResponse(GetSyncTargetResponse<D>),
+    GetCompactTargetRequest(GetCompactTargetRequest),
+    GetCompactTargetResponse(GetCompactTargetResponse<D>),
+    GetCompactStateRequest(GetCompactStateRequest<D>),
+    GetCompactStateResponse(GetCompactStateResponse<Op, D>),
     Error(ErrorResponse),
 }
 
@@ -72,6 +117,10 @@ where
             Self::GetOperationsResponse(r) => r.request_id,
             Self::GetSyncTargetRequest(r) => r.request_id,
             Self::GetSyncTargetResponse(r) => r.request_id,
+            Self::GetCompactTargetRequest(r) => r.request_id,
+            Self::GetCompactTargetResponse(r) => r.request_id,
+            Self::GetCompactStateRequest(r) => r.request_id,
+            Self::GetCompactStateResponse(r) => r.request_id,
             Self::Error(e) => e.request_id,
         }
     }
@@ -79,7 +128,8 @@ where
 
 impl<Op, D> super::Message for Message<Op, D>
 where
-    Op: Encode + DecodeExt<()> + Send + Sync + 'static,
+    Op: Encode + Read + Send + Sync + 'static,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
@@ -110,8 +160,24 @@ where
                 3u8.write(buf);
                 resp.write(buf);
             }
-            Self::Error(err) => {
+            Self::GetCompactTargetRequest(req) => {
                 4u8.write(buf);
+                req.write(buf);
+            }
+            Self::GetCompactTargetResponse(resp) => {
+                5u8.write(buf);
+                resp.write(buf);
+            }
+            Self::GetCompactStateRequest(req) => {
+                6u8.write(buf);
+                req.write(buf);
+            }
+            Self::GetCompactStateResponse(resp) => {
+                7u8.write(buf);
+                resp.write(buf);
+            }
+            Self::Error(err) => {
+                8u8.write(buf);
                 err.write(buf);
             }
         }
@@ -129,6 +195,10 @@ where
             Self::GetOperationsResponse(resp) => resp.encode_size(),
             Self::GetSyncTargetRequest(req) => req.encode_size(),
             Self::GetSyncTargetResponse(resp) => resp.encode_size(),
+            Self::GetCompactTargetRequest(req) => req.encode_size(),
+            Self::GetCompactTargetResponse(resp) => resp.encode_size(),
+            Self::GetCompactStateRequest(req) => req.encode_size(),
+            Self::GetCompactStateResponse(resp) => resp.encode_size(),
             Self::Error(err) => err.encode_size(),
         }
     }
@@ -136,7 +206,8 @@ where
 
 impl<Op, D> Read for Message<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -151,7 +222,19 @@ where
             3 => Ok(Self::GetSyncTargetResponse(GetSyncTargetResponse::read(
                 buf,
             )?)),
-            4 => Ok(Self::Error(ErrorResponse::read(buf)?)),
+            4 => Ok(Self::GetCompactTargetRequest(
+                GetCompactTargetRequest::read(buf)?,
+            )),
+            5 => Ok(Self::GetCompactTargetResponse(
+                GetCompactTargetResponse::read(buf)?,
+            )),
+            6 => Ok(Self::GetCompactStateRequest(GetCompactStateRequest::read(
+                buf,
+            )?)),
+            7 => Ok(Self::GetCompactStateResponse(
+                GetCompactStateResponse::read(buf)?,
+            )),
+            8 => Ok(Self::Error(ErrorResponse::read(buf)?)),
             d => Err(CodecError::InvalidEnum(d)),
         }
     }
@@ -163,6 +246,7 @@ impl Write for GetOperationsRequest {
         self.op_count.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
+        (self.include_pinned_nodes as u8).write(buf);
     }
 }
 
@@ -172,6 +256,7 @@ impl EncodeSize for GetOperationsRequest {
             + self.op_count.encode_size()
             + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
+            + 1u8.encode_size()
     }
 }
 
@@ -188,11 +273,13 @@ impl Read for GetOperationsRequest {
                 "max_ops cannot be zero",
             ));
         };
+        let include_pinned_nodes = u8::read(buf)? != 0;
         Ok(Self {
             request_id,
             op_count,
             start_loc,
             max_ops,
+            include_pinned_nodes,
         })
     }
 }
@@ -218,6 +305,15 @@ where
         self.request_id.write(buf);
         self.proof.write(buf);
         self.operations.write(buf);
+        match &self.pinned_nodes {
+            Some(nodes) => {
+                1u8.write(buf);
+                nodes.write(buf);
+            }
+            None => {
+                0u8.write(buf);
+            }
+        }
     }
 }
 
@@ -227,13 +323,21 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
+        self.request_id.encode_size()
+            + self.proof.encode_size()
+            + self.operations.encode_size()
+            + 1u8.encode_size()
+            + self
+                .pinned_nodes
+                .as_ref()
+                .map_or(0, |nodes| nodes.encode_size())
     }
 }
 
 impl<Op, D> Read for GetOperationsResponse<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -242,12 +346,20 @@ where
         let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
         let operations = {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
+            Vec::<Op>::read_cfg(buf, &(range_cfg, Op::Cfg::default()))?
+        };
+        let has_pinned_nodes = u8::read(buf)? != 0;
+        let pinned_nodes = if has_pinned_nodes {
+            let range_cfg = RangeCfg::from(0..=MAX_PINNED_NODES);
+            Some(Vec::<D>::read_cfg(buf, &(range_cfg, ()))?)
+        } else {
+            None
         };
         Ok(Self {
             request_id,
             proof,
             operations,
+            pinned_nodes,
         })
     }
 }
@@ -298,7 +410,131 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = Target::<D>::read_cfg(buf, &())?;
+        let target = Target::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
+    }
+}
+
+impl<D> Write for GetCompactStateRequest<D>
+where
+    D: Digest,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+        self.target.write(buf);
+    }
+}
+
+impl<D> EncodeSize for GetCompactStateRequest<D>
+where
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size() + self.target.encode_size()
+    }
+}
+
+impl<D> Read for GetCompactStateRequest<D>
+where
+    D: Digest,
+{
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        let target = compact::Target::<mmr::Family, D>::read_cfg(buf, &())?;
+        Ok(Self { request_id, target })
+    }
+}
+
+impl Write for GetCompactTargetRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+    }
+}
+
+impl EncodeSize for GetCompactTargetRequest {
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size()
+    }
+}
+
+impl Read for GetCompactTargetRequest {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        Ok(Self { request_id })
+    }
+}
+
+impl<D> Write for GetCompactTargetResponse<D>
+where
+    D: Digest,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+        self.target.write(buf);
+    }
+}
+
+impl<D> EncodeSize for GetCompactTargetResponse<D>
+where
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size() + self.target.encode_size()
+    }
+}
+
+impl<D> Read for GetCompactTargetResponse<D>
+where
+    D: Digest,
+{
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        let target = compact::Target::<mmr::Family, D>::read_cfg(buf, &())?;
+        Ok(Self { request_id, target })
+    }
+}
+
+impl<Op, D> Write for GetCompactStateResponse<Op, D>
+where
+    Op: Write,
+    D: Digest,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+        self.state.write(buf);
+    }
+}
+
+impl<Op, D> EncodeSize for GetCompactStateResponse<Op, D>
+where
+    Op: EncodeSize,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size() + self.state.encode_size()
+    }
+}
+
+impl<Op, D> Read for GetCompactStateResponse<Op, D>
+where
+    Op: Read,
+    Op::Cfg: IsUnit,
+    D: Digest,
+{
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        let state = State::<mmr::Family, Op, D>::read_cfg(
+            buf,
+            &(
+                RangeCfg::from(0..=MAX_PINNED_NODES),
+                Op::Cfg::default(),
+                MAX_DIGESTS,
+            ),
+        )?;
+        Ok(Self { request_id, state })
     }
 }

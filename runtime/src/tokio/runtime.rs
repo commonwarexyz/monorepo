@@ -6,43 +6,42 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "external")]
 use crate::Pacer;
+use crate::{
+    child_label,
+    network::metered::Network as MeteredNetwork,
+    prefixed_name,
+    process::metered::Metrics as MeteredProcess,
+    signal::Signal,
+    storage::metered::Storage as MeteredStorage,
+    telemetry::metrics::{
+        add_attribute, raw, task::Label, CounterFamily, GaugeFamily, Metric, Register, Registered,
+        Registry,
+    },
+    utils::{self, signal::Stopper, supervision::Tree, Panicker},
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
+    Spawner as _, StreamOf, METRICS_PREFIX,
+};
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
-use crate::{
-    network::metered::Network as MeteredNetwork,
-    process::metered::Metrics as MeteredProcess,
-    signal::Signal,
-    storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
-};
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::sync::Mutex;
-use futures::{future::BoxFuture, FutureExt};
+use commonware_utils::{sync::Mutex, NZUsize};
+use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry as PrometheusRegistry},
-};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
-    borrow::Cow,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
-    thread,
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -62,27 +61,24 @@ cfg_if::cfg_if! {
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Family<Label, Counter>,
-    tasks_running: Family<Label, Gauge>,
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
 }
 
 impl Metrics {
-    pub fn init(registry: &mut PrometheusRegistry) -> Self {
-        let metrics = Self {
-            tasks_spawned: Family::default(),
-            tasks_running: Family::default(),
-        };
-        registry.register(
-            "tasks_spawned",
-            "Total number of tasks spawned",
-            metrics.tasks_spawned.clone(),
-        );
-        registry.register(
-            "tasks_running",
-            "Number of tasks currently running",
-            metrics.tasks_running.clone(),
-        );
-        metrics
+    pub fn init(registry: &mut impl Register) -> Self {
+        Self {
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+        }
     }
 }
 
@@ -94,19 +90,21 @@ pub struct NetworkConfig {
     /// Defaults to `Some(true)`.
     tcp_nodelay: Option<bool>,
 
-    /// Whether or not to set the `SO_LINGER` socket option.
+    /// Whether to set `SO_LINGER` to zero on the socket.
     ///
-    /// When `None`, the system default is used. When
-    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
-    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     ///
-    /// Defaults to `Some(Duration::ZERO)`.
-    so_linger: Option<Duration>,
+    /// Defaults to `true`.
+    zero_linger: bool,
 
     /// Read/write timeout for network operations.
+    ///
+    /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
+    /// individual socket syscall. Larger
+    /// batched writes may therefore require a larger timeout.
     read_write_timeout: Duration,
 }
 
@@ -114,7 +112,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             tcp_nodelay: Some(true),
-            so_linger: Some(Duration::ZERO),
+            zero_linger: true,
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -130,6 +128,14 @@ pub struct Config {
     /// Tokio sets the default value to the number of logical CPUs.
     worker_threads: usize,
 
+    /// Number of scheduler ticks between global queue polls.
+    ///
+    /// When unset, Tokio uses its default behavior for the multi-thread
+    /// scheduler. Smaller values reduce the delay before tasks woken from
+    /// outside a worker, such as io_uring completion notifications, are polled
+    /// from the global queue again.
+    global_queue_interval: Option<u32>,
+
     /// Maximum number of threads to use for blocking tasks.
     ///
     /// Unlike worker threads, blocking threads are created as needed and
@@ -138,6 +144,14 @@ pub struct Config {
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     max_blocking_threads: usize,
+
+    /// Stack size to use for runtime-owned threads.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// See [utils::thread::system_thread_stack_size].
+    thread_stack_size: usize,
 
     /// Whether or not to catch panics.
     catch_panics: bool,
@@ -153,11 +167,11 @@ pub struct Config {
     /// Network configuration.
     network_cfg: NetworkConfig,
 
-    /// Buffer pool configuration for network I/O.
-    network_buffer_pool_cfg: BufferPoolConfig,
+    /// Explicit buffer pool configuration for network I/O, if provided.
+    network_buffer_pool_cfg: Option<BufferPoolConfig>,
 
-    /// Buffer pool configuration for storage I/O.
-    storage_buffer_pool_cfg: BufferPoolConfig,
+    /// Explicit buffer pool configuration for storage I/O, if provided.
+    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
 }
 
 impl Config {
@@ -167,13 +181,15 @@ impl Config {
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
+            global_queue_interval: None,
             max_blocking_threads: 512,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
-            network_buffer_pool_cfg: BufferPoolConfig::for_network(),
-            storage_buffer_pool_cfg: BufferPoolConfig::for_storage(),
+            network_buffer_pool_cfg: None,
+            storage_buffer_pool_cfg: None,
         }
     }
 
@@ -184,8 +200,18 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_global_queue_interval(mut self, n: u32) -> Self {
+        self.global_queue_interval = Some(n);
+        self
+    }
+    /// See [Config]
     pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
         self
     }
     /// See [Config]
@@ -204,8 +230,8 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_so_linger(mut self, l: Option<Duration>) -> Self {
-        self.network_cfg.so_linger = l;
+    pub const fn with_zero_linger(mut self, l: bool) -> Self {
+        self.network_cfg.zero_linger = l;
         self
     }
     /// See [Config]
@@ -220,12 +246,12 @@ impl Config {
     }
     /// See [Config]
     pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = cfg;
+        self.network_buffer_pool_cfg = Some(cfg);
         self
     }
     /// See [Config]
     pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = cfg;
+        self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
 
@@ -235,8 +261,16 @@ impl Config {
         self.worker_threads
     }
     /// See [Config]
+    pub const fn global_queue_interval(&self) -> Option<u32> {
+        self.global_queue_interval
+    }
+    /// See [Config]
     pub const fn max_blocking_threads(&self) -> usize {
         self.max_blocking_threads
+    }
+    /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
     }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
@@ -251,8 +285,8 @@ impl Config {
         self.network_cfg.tcp_nodelay
     }
     /// See [Config]
-    pub const fn so_linger(&self) -> Option<Duration> {
-        self.network_cfg.so_linger
+    pub const fn zero_linger(&self) -> bool {
+        self.network_cfg.zero_linger
     }
     /// See [Config]
     pub const fn storage_directory(&self) -> &PathBuf {
@@ -262,13 +296,21 @@ impl Config {
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
-    /// See [Config]
-    pub const fn network_buffer_pool_config(&self) -> &BufferPoolConfig {
-        &self.network_buffer_pool_cfg
+
+    /// Returns the network buffer pool config, deriving pool parallelism from
+    /// `worker_threads` if not explicitly configured.
+    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
+        self.network_buffer_pool_cfg.clone().unwrap_or_else(|| {
+            BufferPoolConfig::for_network().with_parallelism(NZUsize!(self.worker_threads))
+        })
     }
-    /// See [Config]
-    pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
-        &self.storage_buffer_pool_cfg
+
+    /// Returns the storage buffer pool config, deriving pool parallelism from
+    /// `worker_threads` if not explicitly configured.
+    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
+        self.storage_buffer_pool_cfg.clone().unwrap_or_else(|| {
+            BufferPoolConfig::for_storage().with_parallelism(NZUsize!(self.worker_threads))
+        })
     }
 }
 
@@ -280,11 +322,12 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    registry: Mutex<Registry>,
+    registry: Registry,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    thread_stack_size: usize,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -315,16 +358,20 @@ impl crate::Runner for Runner {
     {
         // Create a new registry
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
-        let runtime = Builder::new_multi_thread()
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        let mut builder = Builder::new_multi_thread();
+        builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
+            .thread_stack_size(self.cfg.thread_stack_size)
+            .enable_all();
+        if let Some(global_queue_interval) = self.cfg.global_queue_interval {
+            builder.global_queue_interval(global_queue_interval);
+        }
+        let runtime = builder.build().expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
@@ -333,34 +380,35 @@ impl crate::Runner for Runner {
         //
         // We prefer to collect process metrics outside of `Context` because
         // we are using `runtime_registry` rather than the one provided by `Context`.
-        let process = MeteredProcess::init(runtime_registry);
+        let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
-            self.cfg.network_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            self.cfg.resolved_network_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
-            self.cfg.storage_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            self.cfg.resolved_storage_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let iouring_registry =
-                    runtime_registry.sub_registry_with_prefix("iouring_storage");
+                let mut iouring_registry =
+                    runtime_registry.sub_registry("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: Default::default(),
+                            thread_stack_size: self.cfg.thread_stack_size,
                         },
-                        iouring_registry,
+                        &mut iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             } else {
                 let storage = MeteredStorage::new(
@@ -371,7 +419,7 @@ impl crate::Runner for Runner {
                         ),
                         storage_buffer_pool.clone(),
                     ),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             }
         }
@@ -379,49 +427,52 @@ impl crate::Runner for Runner {
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let iouring_registry =
-                    runtime_registry.sub_registry_with_prefix("iouring_network");
+                let mut iouring_registry =
+                    runtime_registry.sub_registry("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                    so_linger: self.cfg.network_cfg.so_linger,
+                    zero_linger: self.cfg.network_cfg.zero_linger,
+                    read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
-                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        max_request_timeout: self.cfg.network_cfg.read_write_timeout,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
+                    thread_stack_size: self.cfg.thread_stack_size,
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(
                         config,
-                        iouring_registry,
+                        &mut iouring_registry,
                         network_buffer_pool.clone(),
                     )
                     .unwrap(),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             } else {
                 let config = TokioNetworkConfig::default()
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                    .with_so_linger(self.cfg.network_cfg.so_linger);
+                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             }
         }
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            registry,
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            thread_stack_size: self.cfg.thread_stack_size,
         });
 
         // Get metrics
@@ -434,14 +485,13 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
-            scope: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
             storage_buffer_pool,
             tree: Tree::root(),
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -472,7 +522,6 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -480,7 +529,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -489,7 +538,6 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -497,7 +545,7 @@ impl Clone for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -520,11 +568,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -537,9 +580,9 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -548,14 +591,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future: BoxFuture<'_, T> = if is_instrumented {
+        let future = if traced {
             let span = info_span!("task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
-            f(self).instrument(span).boxed()
+            Either::Left(f(self).instrument(span))
         } else {
-            f(self).boxed()
+            Either::Right(f(self))
         };
         let (f, handle) = Handle::init(
             future,
@@ -565,7 +608,7 @@ impl crate::Spawner for Context {
         );
 
         if matches!(past, Execution::Dedicated) {
-            thread::spawn({
+            utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
@@ -639,51 +682,15 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
-    fn with_label(&self, label: &str) -> Self {
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
-        Self {
-            name,
-            ..self.clone()
-        }
-    }
-
     fn label(&self) -> String {
         self.name.clone()
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
-    }
-
-    fn encode(&self) -> String {
-        self.executor.registry.lock().encode()
+    fn with_label(&self, label: &str) -> Self {
+        Self {
+            name: child_label(&self.name, label),
+            ..self.clone()
+        }
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
@@ -695,23 +702,32 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn with_scope(&self) -> Self {
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        // Closure is infallible to avoid panicking in Drop.
-        let executor = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            executor.registry.lock().remove_scope(id);
-        }));
+    fn with_span(&self) -> Self {
         Self {
-            scope: Some(guard),
+            traced: true,
             ..self.clone()
         }
+    }
+
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        let name = name.into();
+        let help = help.into();
+        let metric = Arc::new(metric);
+        self.executor.registry.register(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
+    }
+
+    fn encode(&self) -> String {
+        self.executor.registry.encode()
     }
 }
 
@@ -725,13 +741,8 @@ impl Clock for Context {
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        let now = SystemTime::now();
-        let duration_until_deadline = deadline.duration_since(now).unwrap_or_else(|_| {
-            // Deadline is in the past
-            Duration::from_secs(0)
-        });
-        let target_instant = tokio::time::Instant::now() + duration_until_deadline;
-        tokio::time::sleep_until(target_instant)
+        let duration_until_deadline = deadline.duration_since(self.current()).unwrap_or_default();
+        tokio::time::sleep(duration_until_deadline)
     }
 }
 
@@ -835,5 +846,74 @@ impl crate::BufferPooler for Context {
 
     fn storage_buffer_pool(&self) -> &BufferPool {
         &self.storage_buffer_pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_threads_updates_default_buffer_pool_parallelism() {
+        let cfg = Config::new().with_worker_threads(8);
+
+        assert_eq!(cfg.worker_threads, 8);
+        let network = cfg.resolved_network_buffer_pool_config();
+        assert_eq!(network.parallelism, NZUsize!(8));
+        assert_eq!(
+            network.thread_cache_config,
+            BufferPoolConfig::for_network().thread_cache_config
+        );
+
+        let storage = cfg.resolved_storage_buffer_pool_config();
+        assert_eq!(storage.parallelism, NZUsize!(8));
+        assert_eq!(
+            storage.thread_cache_config,
+            BufferPoolConfig::for_storage().thread_cache_config
+        );
+    }
+
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        let cfg = Config::new();
+        assert_eq!(
+            cfg.thread_stack_size(),
+            utils::thread::system_thread_stack_size()
+        );
+    }
+
+    #[test]
+    fn test_thread_stack_size_override() {
+        let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
+        assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_explicit_buffer_pool_configs_override_worker_threads() {
+        // Order does not matter -- explicit configs always win.
+        let cfg = Config::new()
+            .with_network_buffer_pool_config(
+                BufferPoolConfig::for_network().with_parallelism(NZUsize!(2)),
+            )
+            .with_worker_threads(8)
+            .with_storage_buffer_pool_config(
+                BufferPoolConfig::for_storage().with_thread_cache_disabled(),
+            );
+
+        let network = cfg.resolved_network_buffer_pool_config();
+        assert_eq!(network.parallelism, NZUsize!(2));
+        assert_eq!(
+            network.thread_cache_config,
+            BufferPoolConfig::for_network().thread_cache_config
+        );
+
+        let storage = cfg.resolved_storage_buffer_pool_config();
+        assert_eq!(storage.parallelism, NZUsize!(1));
+        assert_eq!(
+            storage.thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_disabled()
+                .thread_cache_config
+        );
     }
 }

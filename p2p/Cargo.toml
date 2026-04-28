@@ -28,7 +28,6 @@ num-bigint.workspace = true
 num-integer.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true
-prometheus-client.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 rand_distr.workspace = true
@@ -42,7 +41,7 @@ commonware-runtime = { workspace = true, features = ["test-utils"] }
 tracing-subscriber.workspace = true
 
 [features]
-mocks = []
+mocks = [ "commonware-cryptography/mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
