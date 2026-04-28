@@ -7,7 +7,12 @@ license.workspace = true
 
 [features]
 default = [ "mocks" ]
-mocks = []
+mocks = [
+    "commonware-consensus/mocks",
+    "commonware-cryptography/mocks",
+    "commonware-p2p/mocks",
+    "commonware-resolver/mocks",
+]
 
 [package.metadata]
 cargo-fuzz = true
