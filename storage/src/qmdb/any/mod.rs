@@ -2201,6 +2201,97 @@ pub(crate) mod test {
         });
     }
 
+    /// `prune()` must advance the bitmap only as far as the authenticated journal actually
+    /// pruned. Journal pruning is section-granular while bitmap pruning rounds to chunk
+    /// boundaries, so a coarse `items_per_section` can leave the journal retaining from the
+    /// start while the bitmap has already crossed the next chunk boundary. A subsequent
+    /// `rewind()` to a still-retained early commit must still succeed.
+    #[test_traced("INFO")]
+    fn test_any_prune_keeps_bitmap_aligned_with_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Bitmap chunk size in bits. The bug requires the bitmap to round across at least
+            // one chunk boundary while the journal cannot prune any section.
+            const BITMAP_CHUNK_BITS: u64 =
+                commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+            // Items-per-section is chosen so that no full section fits in the test's op count,
+            // forcing the journal to retain from 0 even when prune is requested past the first
+            // bitmap chunk boundary.
+            const ITEMS_PER_SECTION: u64 = 2048;
+            assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS);
+
+            let ctx = context.with_label("db");
+            let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
+            cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
+
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), cfg).await.unwrap();
+
+            commit_writes(&mut db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
+            let rewind_target = db.size().await;
+            // Rewind target must lie below the chunk boundary the buggy prune would advance
+            // to; otherwise the unfixed code would not panic on truncate.
+            assert!(
+                *rewind_target < BITMAP_CHUNK_BITS,
+                "rewind_target {rewind_target:?} must be < {BITMAP_CHUNK_BITS} for the bug to manifest"
+            );
+            let root_at_target = db.root();
+
+            commit_writes(
+                &mut db,
+                (0..700).map(|i| (key(i), Some(val(1_000 + i)))),
+                None,
+            )
+            .await;
+            commit_writes(
+                &mut db,
+                (0..700).map(|i| (key(i), Some(val(10_000 + i)))),
+                None,
+            )
+            .await;
+
+            // Pre-rewind size must actually exceed the rewind target so the rewind is not a
+            // no-op.
+            let pre_prune_size = db.size().await;
+            assert!(pre_prune_size > rewind_target);
+
+            let prune_loc = Location::new(600);
+            // prune_loc must cross at least one bitmap chunk boundary; otherwise the buggy
+            // bitmap prune would correctly stay at 0 and the test would pass even unfixed.
+            assert!(
+                *prune_loc > BITMAP_CHUNK_BITS,
+                "prune_loc {prune_loc:?} must exceed one bitmap chunk ({BITMAP_CHUNK_BITS} bits)"
+            );
+            // prune_loc must lie within the first journal section so the journal cannot
+            // prune any section, leaving bounds.start at 0 to expose the bitmap drift.
+            assert!(
+                *prune_loc < ITEMS_PER_SECTION,
+                "prune_loc {prune_loc:?} must be < {ITEMS_PER_SECTION} so the journal retains section 0"
+            );
+            assert!(db.inactivity_floor_loc() >= prune_loc);
+
+            db.prune(prune_loc).await.unwrap();
+
+            // Journal could not prune any section, so it still retains from 0. The bitmap
+            // must therefore also remain at 0.
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, Location::new(0));
+            assert_eq!(
+                db.bitmap.pruned_bits(),
+                0,
+                "bitmap pruned past journal retained start"
+            );
+
+            // Rewind to the still-retained early commit must succeed and restore visible
+            // state (root match implies the snapshot was rebuilt correctly).
+            db.rewind(rewind_target).await.unwrap();
+            assert_eq!(db.size().await, rewind_target);
+            assert_eq!(db.root(), root_at_target);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // --- MMB family tests ---
     //
     // The tests above use MMR-backed databases (via the concrete Db type aliases). The tests

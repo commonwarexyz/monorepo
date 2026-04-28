@@ -444,7 +444,8 @@ where
         // a pruned log with stale metadata would lose peak digests permanently.
         self.sync_metadata().await?;
 
-        self.any.prune_log(prune_loc).await
+        self.any.prune_log(prune_loc).await?;
+        Ok(())
     }
 
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
