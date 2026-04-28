@@ -11,8 +11,12 @@ use commonware_cryptography::{
     certificate::{Scheme as CertificateScheme, Signers},
     sha256::Digest as Sha256Digest,
 };
+use commonware_utils::ordered::Quorum;
 use rand_core::CryptoRngCore;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
 pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
@@ -186,35 +190,31 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 }
 
 /// Checks invariants that require per-vote signer information.
-/// `faults` is the number of Byzantine nodes (n0..n{faults-1}); only correct
-/// nodes (n{faults}..n{n-1}) are checked for equivocation.
+/// `faults` is the number of Byzantine nodes by participant index
+/// (`0..faults`); only correct nodes (`faults..n`) are checked for equivocation.
 pub fn check_vote_invariants<E, S, L>(faults: usize, reporters: &[Reporter<E, S, L, Sha256Digest>])
 where
     E: CryptoRngCore,
     S: Scheme<Sha256Digest>,
+    S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
 {
     // Invariant: no_vote_equivocation
     // A correct node cannot both nullify and finalize in the same view.
     // Aggregate across all reporters to get a global view of who sent what.
-    // Public keys in the deterministic fixture print as "n0", "n1", ...; the
-    // numeric suffix beyond `faults` distinguishes correct nodes.
-    let correct = |s: &str| -> bool {
-        s.strip_prefix('n')
-            .and_then(|idx| idx.parse::<usize>().ok())
-            .is_some_and(|idx| idx >= faults)
-    };
-
-    let mut seen_nullify: HashMap<u64, HashSet<String>> = HashMap::new();
-    let mut seen_finalize: HashMap<u64, HashSet<String>> = HashMap::new();
+    let mut seen_nullify: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
+    let mut seen_finalize: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
     for reporter in reporters {
         let nullifies = reporter.nullifies.lock();
         for (view, signers) in nullifies.iter() {
             let entry = seen_nullify.entry(view.get()).or_default();
             for pk in signers {
-                let s = pk.to_string();
-                if correct(&s) {
-                    entry.insert(s);
+                if reporter
+                    .participants
+                    .index(pk)
+                    .is_some_and(|idx| usize::from(idx) >= faults)
+                {
+                    entry.insert(pk.clone());
                 }
             }
         }
@@ -228,9 +228,12 @@ where
             let entry = seen_finalize.entry(view.get()).or_default();
             for signers in by_digest.values() {
                 for pk in signers {
-                    let s = pk.to_string();
-                    if correct(&s) {
-                        entry.insert(s);
+                    if reporter
+                        .participants
+                        .index(pk)
+                        .is_some_and(|idx| usize::from(idx) >= faults)
+                    {
+                        entry.insert(pk.clone());
                     }
                 }
             }
@@ -239,7 +242,10 @@ where
     }
     for (v, nullifiers) in &seen_nullify {
         if let Some(finalizers) = seen_finalize.get(v) {
-            let equivocators: Vec<_> = nullifiers.intersection(finalizers).collect();
+            let equivocators: Vec<_> = nullifiers
+                .intersection(finalizers)
+                .map(|pk| pk.as_ref().to_vec())
+                .collect();
             assert!(
                 equivocators.is_empty(),
                 "Invariant violation: vote equivocation in view {v}: {equivocators:?} both nullified and finalized",
