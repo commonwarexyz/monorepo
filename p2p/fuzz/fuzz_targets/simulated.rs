@@ -239,14 +239,12 @@ fn fuzz(input: FuzzInput) {
                                 let expected_msgs_key = (to_idx, sender_pk.clone(), channel_id);
                                 let queue = expected_msgs.get_mut(&expected_msgs_key).expect("Expected queue not found");
 
-                                // Find message in expected queue
-                                // Messages can be dropped, but if received they must be in order
+                                // Find message in expected queue.
+                                // Accepted messages may be dropped, delayed, or delivered after a
+                                // link is removed, so receipt of a later message does not prove
+                                // earlier pending messages were dropped.
                                 if let Some(pos) = queue.iter().position(|m| *m == message) {
-                                    // Remove all messages up to and including this one
-                                    // Messages before it were implicitly dropped, this one is received
-                                    for _ in 0..=pos {
-                                        queue.pop_front();
-                                    }
+                                    queue.remove(pos);
 
                                     // Clean up empty queue
                                     if queue.is_empty() {
