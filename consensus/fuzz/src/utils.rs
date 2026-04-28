@@ -4,6 +4,22 @@ use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::{Clock, Quota};
 use std::{collections::HashMap, num::NonZeroU32};
 
+/// FNV-1a hash for deterministic hashing.
+///
+/// Uses FNV-1a instead of `DefaultHasher` because `DefaultHasher` is not
+/// guaranteed to be stable across Rust versions.
+pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
