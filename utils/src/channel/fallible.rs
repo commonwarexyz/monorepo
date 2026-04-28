@@ -16,7 +16,10 @@
 //! let result = sender.request(|tx| Message::Query { responder: tx }).await;
 //! ```
 
-use super::{mpsc, oneshot};
+use super::{
+    mpsc, oneshot,
+    reservation::{Reservation, ReservationExt},
+};
 
 /// Extension trait for channel operations that may fail due to disconnection.
 ///
@@ -125,6 +128,14 @@ pub trait AsyncFallibleExt<T> {
     /// disconnected.
     fn try_send_lossy(&self, msg: T) -> bool;
 
+    /// Attempts to send immediately, reserving the message when the channel is full.
+    ///
+    /// Returns `None` if the value was sent immediately or the receiver has been dropped.
+    #[must_use = "send any reservation"]
+    fn send_or_reserve_lossy<'a>(&self, msg: T) -> Option<Reservation<'a, T>>
+    where
+        T: 'a;
+
     /// Send a request message containing a oneshot responder and await the response.
     ///
     /// Returns `None` if:
@@ -159,6 +170,16 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
 
     fn try_send_lossy(&self, msg: T) -> bool {
         self.try_send(msg).is_ok()
+    }
+
+    fn send_or_reserve_lossy<'a>(&self, msg: T) -> Option<Reservation<'a, T>>
+    where
+        T: 'a,
+    {
+        match self.send_or_reserve(msg) {
+            Ok(None) | Err(_) => None,
+            Ok(Some(reservation)) => Some(reservation),
+        }
     }
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>
@@ -363,6 +384,72 @@ mod tests {
 
         // Should not panic, returns false
         assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)));
+    }
+
+    // send_or_reserve_lossy tests
+
+    #[test]
+    fn test_send_or_reserve_lossy_success() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(42))
+            .is_none());
+        assert!(matches!(rx.try_recv(), Ok(TestMessage::FireAndForget(42))));
+    }
+
+    #[test]
+    fn test_send_or_reserve_lossy_disconnected() {
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        assert!(tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(42))
+            .is_none());
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_lossy_reserves_when_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(TestMessage::FireAndForget(1)).unwrap();
+
+        let reservation = tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(2))
+            .expect("receiver should be open");
+
+        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(1))));
+        reservation.await.unwrap().send();
+        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(2))));
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_lossy_reserved_send() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(TestMessage::FireAndForget(1)).unwrap();
+
+        let reservation = tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(2))
+            .expect("receiver should be open");
+
+        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(1))));
+        assert!(reservation.await.is_ok_and(|reserved| {
+            reserved.send();
+            true
+        }));
+        assert!(matches!(rx.recv().await, Some(TestMessage::FireAndForget(2))));
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_lossy_reserved_disconnected() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(TestMessage::FireAndForget(1)).unwrap();
+
+        let reservation = tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(2))
+            .expect("receiver should be open");
+        drop(rx);
+
+        assert!(reservation.await.is_err());
     }
 
     // OneshotExt tests
