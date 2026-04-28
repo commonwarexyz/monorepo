@@ -28,8 +28,8 @@
 //! let fork_a = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(&db, None).await?;
 //! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3)).merkleize(&db, None).await?;
 //!
-//! db.apply_batch(fork_a).await?;           // OK -- includes parent
-//! assert!(db.apply_batch(fork_b).is_err()) // StaleBatch
+//! db.apply_batch(fork_a).await?;                 // OK -- includes parent
+//! assert!(db.apply_batch(fork_b).await.is_err()); // StaleBatch
 //! ```
 //!
 //! ```ignore
@@ -47,8 +47,8 @@
 //! let parent = db.new_batch().write(k1, Some(v1)).merkleize(&db, None).await?;
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(&db, None).await?;
 //!
-//! db.apply_batch(child).await?;            // OK -- includes parent
-//! assert!(db.apply_batch(parent).is_err()) // StaleBatch
+//! db.apply_batch(child).await?;                  // OK -- includes parent
+//! assert!(db.apply_batch(parent).await.is_err()); // StaleBatch
 //! ```
 //!
 //! ```ignore
@@ -59,8 +59,8 @@
 //! let b1 = db.new_batch().write(k3, Some(v3)).merkleize(&db, None).await?;
 //! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4)).merkleize(&db, None).await?;
 //!
-//! db.apply_batch(a2).await?;               // OK -- includes a1
-//! assert!(db.apply_batch(b2).is_err())     // StaleBatch
+//! db.apply_batch(a2).await?;                 // OK -- includes a1
+//! assert!(db.apply_batch(b2).await.is_err()); // StaleBatch
 //! ```
 
 use crate::{
@@ -2399,17 +2399,9 @@ pub(crate) mod test {
 
 #[cfg(test)]
 mod bitmap_tests {
-    //! Regression tests for activity-bitmap maintenance in `any::Db`.
-    //!
-    //! The bitmap is mutated by `apply_batch`, `prune_bitmap`, and `rewind`. These tests target
-    //! maintenance logic shared across all `any::Db` variants — the mutation code is parametric
-    //! on bitmap geometry alone, not on key/value/journal types — so one variant
-    //! (`unordered::variable`) suffices as the test bed.
-    //!
-    //! Each test ends with an *oracle round-trip*: commit the in-memory state, drop the handle,
-    //! reopen via `init_from_log`, and assert the rebuilt bitmap is byte-identical to what apply
-    //! produced. That catches divergence between the apply-time and init-time paths — divergence
-    //! that's otherwise silent because proofs verify roots, not bitmap byte-equality.
+    //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
+    //! `apply_batch`, `prune_bitmap`, and `rewind` is parametric on bitmap geometry alone, so one
+    //! variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
         qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
@@ -2505,8 +2497,7 @@ mod bitmap_tests {
 
     /// `any::Db::rewind` restores bitmap state correctly.
     ///
-    /// Pre-PR, `current::Db::rewind` patched the bitmap using the `restored_locs` Vec returned
-    /// by `any::Db::rewind`. This PR moved the fixup into `any::rewind` itself; it must:
+    /// `any::rewind` is the sole writer of the bitmap during rewind; it must:
     ///   1. truncate the bitmap to the rewind size,
     ///   2. flip restored locs (committed snapshot entries the rewound tail had superseded) back
     ///      to active,

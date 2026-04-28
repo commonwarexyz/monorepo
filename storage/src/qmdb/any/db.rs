@@ -15,7 +15,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::{BitMap, BitmapReadable, Shared},
+        bitmap::{BitmapReadable, Shared},
         build_snapshot_from_log, delete_known_loc,
         operation::Operation as OperationTrait,
         update_known_loc, Error,
@@ -24,6 +24,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
+use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 

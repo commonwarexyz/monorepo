@@ -51,6 +51,7 @@ use crate::{
             },
             FixedValue, VariableValue,
         },
+        bitmap::Shared,
         current::{
             db, grafting,
             ordered::{
@@ -144,7 +145,7 @@ where
     let pruned_chunks = (*range.start() / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(crate::qmdb::bitmap::Shared::<N>::new(bitmap));
+    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.

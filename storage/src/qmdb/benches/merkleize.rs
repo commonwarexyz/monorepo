@@ -1,11 +1,13 @@
 //! Benchmarks for speculative batch merkleization.
 //!
 //! Each iteration creates a speculative batch (10% random updates, sampled with replacement),
-//! merkleizes it, and reads the root. The DB is seeded with N unique keys; setup is not timed.
+//! merkleizes it, and reads the root. The per-iteration `write_random_updates` + `merkleize` +
+//! `root()` is timed; one-time setup (seed, churn batches, sync) is not.
 //!
-//! - [`bench_merkleize`]: steady-state timing on a freshly seeded DB.
-//! - [`bench_merkleize_churned`]: timing after overwrite batches accumulate inactive update
-//!   operations above the inactivity floor for the floor-raise scan to skip.
+//! - [`bench_merkleize`]: timing on a freshly seeded DB (no prior overwrites).
+//! - [`bench_merkleize_churned`]: timing after overwrite batches have accumulated inactive
+//!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
+//!   optimizes for.
 
 use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::Sha256;

@@ -258,6 +258,7 @@ use crate::{
             operation::{Operation, Update},
             Config as AnyConfig,
         },
+        bitmap::Shared,
         operation::Committable,
     },
     translator::Translator,
@@ -350,7 +351,7 @@ where
     // populates it during snapshot rebuild.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(crate::qmdb::bitmap::Shared::<N>::new(bitmap));
+    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
@@ -3037,8 +3038,9 @@ pub mod tests {
             // Sanity: c's pending write is still readable via the any-layer diff chain.
             assert_eq!(c.get(&key(250), &db).await.unwrap(), Some(val(99_999)));
 
-            // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
-            // chunks below the current pruned boundary.
+            // The actual prune-interaction test: apply c after prune. `any.apply_batch` writes
+            // diff entries directly into the (now more-pruned) bitmap; bits for locations below
+            // the pruning boundary cannot exist and are filtered by snapshot precedence.
             db.apply_batch(c).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
@@ -3345,15 +3347,17 @@ pub mod tests {
         });
     }
 
-    /// Regression: C's precomputed bitmap clears can target a chunk that
-    /// was pruned after parent P was committed.
+    /// Regression: C's diff entry has a stale `base_old_loc` (255) pointing into a chunk that
+    /// was pruned after parent P was committed. `committed_locs` precedence in
+    /// `any::Db::apply_batch` must override the stale value with P's rewrite location, so the
+    /// `set_bit(false)` call targets P's (post-floor-raise) loc, not the pruned chunk.
     ///
-    /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255
-    /// (end of chunk 0). P overwrites keys 1..254, whose floor raise
-    /// moves key(0) from 255 to tip, pushing the floor past chunk 0.
-    /// C is built from P and writes key(0); its base_old_loc is 255.
-    /// After committing P and pruning chunk 0, C's clear at 255 targets
-    /// the pruned chunk.
+    /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255 (end of chunk 0). P
+    /// overwrites keys 1..254; P's floor-raise moves key(0) from 255 to a fresh loc above 255.
+    /// C is built from P and writes key(0) again. After committing P and pruning chunk 0, C's
+    /// pre-merkleize `base_old_loc=255` is no longer the right clear target — `committed_locs`
+    /// substitutes P's rewrite loc instead. If that precedence path broke, apply would panic
+    /// (`set_bit` on a pruned bit).
     #[test_traced("WARN")]
     fn test_current_stale_bitmap_clears_after_prune() {
         let executor = deterministic::Runner::default();
@@ -3540,9 +3544,19 @@ pub mod tests {
     /// merkleize must equal the bytes that `any::Db::apply_batch` writes via diff-driven
     /// updates. `current::Db::apply_batch` relies on this equivalence to install the precomputed
     /// `batch.grafted` against the now-current bitmap.
+    ///
+    /// The workload spans multiple bitmap chunks and exercises:
+    /// - parent/child same-key overwrite (`committed_locs` precedence path),
+    /// - parent-create then child-delete (uncommitted-ancestor precedence),
+    /// - mixed deletes and overwrites in different chunks (clear-bit + set-bit paths).
     #[test_traced("INFO")]
     fn test_current_apply_chunks_match_speculative_chunks() {
-        const CHUNK_SIZE_BITS: u64 = commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS;
+        const N: usize = 32;
+        const CHUNK_SIZE_BITS: u64 = commonware_utils::bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+        // Seed enough keys to cross at least one chunk boundary. Each batch also produces a
+        // CommitFloor op, so the bitmap grows past the user-visible key count.
+        const SEED_KEYS: u64 = CHUNK_SIZE_BITS + 50;
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
@@ -3551,56 +3565,70 @@ pub mod tests {
                     .await
                     .unwrap();
 
-            // Seed two committed batches so the chain has multiple ancestor diffs to merge.
-            for i in 0..4u64 {
-                let b = db
-                    .new_batch()
-                    .write(key(i), Some(val(i)))
-                    .merkleize(&db, None)
-                    .await
-                    .unwrap();
-                db.apply_batch(b).await.unwrap();
-            }
+            // Seed all keys in one committed batch.
+            let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
             db.commit().await.unwrap();
 
-            // Build a chain: parent overwrites two keys, child overwrites two more.
+            // Setup sanity: the committed bitmap spans at least two chunks.
+            assert!(
+                BitmapReadable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
+                "setup must cross a chunk boundary",
+            );
+
+            // Parent (uncommitted): overwrites + delete + creates spread across the bitmap.
             let parent = db
                 .new_batch()
-                .write(key(0), Some(val(10)))
-                .write(key(1), Some(val(11)))
+                .write(key(10), Some(val(110))) // overwrite (low chunk)
+                .write(key(50), None) // delete (low chunk)
+                .write(key(CHUNK_SIZE_BITS + 5), Some(val(120))) // overwrite (high chunk)
+                .write(key(SEED_KEYS), Some(val(130))) // create new key
+                .write(key(SEED_KEYS + 1), Some(val(131))) // create new key
                 .merkleize(&db, None)
                 .await
                 .unwrap();
+
+            // Child (uncommitted, descendant of parent):
+            //   - same-key overwrite of parent's key(10)        -> committed_locs precedence
+            //   - delete of parent's just-created key(SEED_KEYS) -> uncommitted-create-child-delete
+            //   - additional delete + overwrite in mixed chunks -> set-bit + clear-bit coverage
             let child = parent
                 .new_batch::<Sha256>()
-                .write(key(2), Some(val(12)))
-                .write(key(3), Some(val(13)))
+                .write(key(10), Some(val(210)))
+                .write(key(SEED_KEYS), None)
+                .write(key(75), None)
+                .write(key(CHUNK_SIZE_BITS + 30), Some(val(220)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
 
-            // Snapshot every chunk in the speculative `BitmapBatch` chain.
-            let speculative_chunks: Vec<[u8; 32]> = {
-                let len = BitmapReadable::<32>::len(&child.bitmap);
+            // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
+            let speculative_chunks: Vec<[u8; N]> = {
+                let len = BitmapReadable::<N>::len(&child.bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| BitmapReadable::<32>::get_chunk(&child.bitmap, idx))
+                    .map(|idx| BitmapReadable::<N>::get_chunk(&child.bitmap, idx))
                     .collect()
             };
+            // Setup sanity: speculative state spans at least two chunks.
+            assert!(speculative_chunks.len() >= 2);
 
-            // Apply and re-read the same chunks from the committed bitmap.
+            // Apply child (commits parent + child) and re-read every chunk from the committed
+            // bitmap. The two views must be byte-identical; otherwise the precomputed
+            // `batch.canonical_root` is no longer valid against the post-apply state.
             db.apply_batch(child).await.unwrap();
-            let committed_chunks: Vec<[u8; 32]> = {
-                let len = BitmapReadable::<32>::len(db.any.bitmap.as_ref());
+            let committed_chunks: Vec<[u8; N]> = {
+                let len = BitmapReadable::<N>::len(db.any.bitmap.as_ref());
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| BitmapReadable::<32>::get_chunk(db.any.bitmap.as_ref(), idx))
+                    .map(|idx| BitmapReadable::<N>::get_chunk(db.any.bitmap.as_ref(), idx))
                     .collect()
             };
 
             assert_eq!(
                 speculative_chunks, committed_chunks,
-                "speculative chunks must equal post-apply committed chunks"
+                "speculative chunks must equal post-apply committed chunks across all chunks",
             );
 
             db.destroy().await.unwrap();

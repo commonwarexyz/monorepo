@@ -14,16 +14,12 @@ use commonware_utils::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-/// A [`Prunable`] bitmap.
-pub(crate) type BitMap<const N: usize> = Prunable<N>;
-
-/// The committed bitmap shared between `any::Db` and `current::Db`.
 pub(crate) struct Shared<const N: usize> {
-    inner: RwLock<BitMap<N>>,
+    inner: RwLock<Prunable<N>>,
 }
 
 impl<const N: usize> Shared<N> {
-    pub(crate) const fn new(bitmap: BitMap<N>) -> Self {
+    pub(crate) const fn new(bitmap: Prunable<N>) -> Self {
         Self {
             inner: RwLock::new(bitmap),
         }
@@ -31,13 +27,13 @@ impl<const N: usize> Shared<N> {
 
     /// Acquire a shared read guard over the committed bitmap. Kept private so external callers
     /// go through [`BitmapReadable`] (which doesn't expose a guard across `.await`).
-    fn read(&self) -> RwLockReadGuard<'_, BitMap<N>> {
+    fn read(&self) -> RwLockReadGuard<'_, Prunable<N>> {
         self.inner.read()
     }
 
     /// Acquire an exclusive write guard. By convention only the inner-`any` mutators
     /// (`apply_batch`, `prune_bitmap`, `rewind`) hold the write lock.
-    pub(crate) fn write(&self) -> RwLockWriteGuard<'_, BitMap<N>> {
+    pub(crate) fn write(&self) -> RwLockWriteGuard<'_, Prunable<N>> {
         self.inner.write()
     }
 

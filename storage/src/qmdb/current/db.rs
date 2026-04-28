@@ -386,7 +386,8 @@ where
             return Ok(());
         }
 
-        let prune_pos = Position::try_from(prune_loc).expect("valid leaf count");
+        let prune_pos = Position::try_from(prune_loc)
+            .map_err(|_| Error::<F>::DataCorrupted("prune location overflow"))?;
         let root = *self.grafted_tree.root();
         let size = self.grafted_tree.size();
 
@@ -424,6 +425,8 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > [`Self::sync_boundary`].
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` >
     ///   [crate::merkle::Family::MAX_LEAVES].
+    /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
+    ///   or retained node is missing, or the prune location overflows a [Position]).
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
         let sync_boundary = self.sync_boundary();
         if prune_loc > sync_boundary {
