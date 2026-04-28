@@ -158,8 +158,9 @@ where
     where
         V: 'a,
     {
-        let start_iter = self.snapshot.get(&start);
-        let mut init_pending = self.fetch_all_updates(start_iter).await?;
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let start_locs: Vec<Location<F>> = self.snapshot.get(&start).copied().collect();
+        let mut init_pending = self.fetch_all_updates(start_locs.iter()).await?;
         init_pending.retain(|x| x.key >= start);
 
         Ok(stream::unfold(
@@ -170,16 +171,21 @@ where
                     return Some((Ok((item.key, item.value)), (driver_key, pending)));
                 }
 
-                let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key) else {
-                    return None; // DB is empty
+                // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+                let locs: Vec<Location<F>> = {
+                    let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key)
+                    else {
+                        return None; // DB is empty
+                    };
+                    if wrapped {
+                        return None; // End of DB
+                    }
+                    iter.copied().collect()
                 };
-                if wrapped {
-                    return None; // End of DB
-                }
 
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
                 // fetch a much larger batch of "pending" keys.
-                match self.fetch_all_updates(iter).await {
+                match self.fetch_all_updates(locs.iter()).await {
                     Ok(mut pending) => {
                         let item = pending.pop().expect("pending is not empty");
                         let key = item.key.clone();

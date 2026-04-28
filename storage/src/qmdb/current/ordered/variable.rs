@@ -124,6 +124,16 @@ mod test {
     type CurrentTest =
         super::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
+    #[allow(dead_code)]
+    fn _assert_stream_range_is_send(db: &CurrentTest, start: Digest) {
+        fn require_send<F: core::future::Future + Send>(_: F) {}
+        require_send(async move {
+            let stream = db.stream_range(start).await.unwrap();
+            futures::pin_mut!(stream);
+            let _ = futures::StreamExt::next(&mut stream).await;
+        });
+    }
+
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = variable_config::<OneCap>(&partition_prefix, &context);

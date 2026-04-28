@@ -114,6 +114,7 @@ crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
 crossbeam-queue = "0.3.12"
+crossbeam-utils = "0.8.21"
 crossterm = "0.29.0"
 ctutils = "0.3.1"
 curve25519-dalek = "4.1.3"
