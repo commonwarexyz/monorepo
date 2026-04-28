@@ -12,7 +12,7 @@ use commonware_storage::{
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashSet, num::NonZeroU64};
+use std::{collections::HashSet, num::NonZeroUsize};
 
 const MAX_MUTATIONS: usize = 50;
 
@@ -41,7 +41,7 @@ struct FuzzInput {
     elements: Vec<u8>,
     /// Non-zero XOR mask applied to `inactive_peaks` to drive its mutation. The mask is non-zero
     /// so the mutated value is guaranteed to differ from the original.
-    inactive_peaks_mask: NonZeroU64,
+    inactive_peaks_mask: NonZeroUsize,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -59,7 +59,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let elements = (0..num_elements)
             .map(|_| u.arbitrary::<u8>())
             .collect::<Result<Vec<_>, _>>()?;
-        let inactive_peaks_mask = NonZeroU64::new(u.int_in_range(1..=u64::MAX)?).unwrap();
+        let inactive_peaks_mask = NonZeroUsize::new(u.int_in_range(1..=usize::MAX)?).unwrap();
         Ok(FuzzInput {
             proof,
             mutations,
@@ -167,7 +167,7 @@ fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
             assert!(original_proof.verify_element_inclusion(&hasher, element, loc, &root, spec));
 
             let mut mutated_proof = original_proof.clone();
-            mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get() as usize;
+            mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
             assert_ne!(mutated_proof, original_proof);
             assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, &root, spec));
 
@@ -225,7 +225,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
     ));
 
     let mut mutated_proof = original_proof.clone();
-    mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get() as usize;
+    mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
     assert_ne!(mutated_proof, original_proof);
     assert!(!mutated_proof.verify_range_inclusion(
         &hasher,
@@ -269,7 +269,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         ));
 
         let mut mutated_proof = original_proof.clone();
-        mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get() as usize;
+        mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
         assert_ne!(mutated_proof, original_proof);
         assert!(!mutated_proof.verify_range_inclusion(
             &hasher,
