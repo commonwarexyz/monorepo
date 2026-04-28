@@ -199,7 +199,7 @@ stability_scope!(BETA {
         /// [`Spawner::dedicated`] instead.
         ///
         /// The shared executor with `blocking == false` is the default spawn mode.
-        #[must_use]
+        #[must_use = "the spawn builder must be used to spawn a task"]
         fn shared(self, blocking: bool) -> SpawnBuilder<Self>
         where
             Self: Sized,
@@ -213,7 +213,7 @@ stability_scope!(BETA {
         /// shared executor.
         ///
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
-        #[must_use]
+        #[must_use = "the spawn builder must be used to spawn a task"]
         fn dedicated(self) -> SpawnBuilder<Self>
         where
             Self: Sized,
