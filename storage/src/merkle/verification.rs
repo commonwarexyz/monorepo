@@ -716,6 +716,84 @@ mod tests {
         });
     }
 
+    /// Pyramid-MMB deployments commit the canonical sync root with `split_backward(k)` for
+    /// `k > 0`: the oldest `k` peaks are forward-folded into the inactive prefix accumulator and
+    /// the active suffix is backward-folded. Exercises sub-range proof construction across
+    /// every sub-range of the active region and asserts that sub-ranges into the inactive
+    /// prefix are correctly rejected as unrecoverable.
+    #[test_traced]
+    fn test_verification_proof_store_with_backward_fold_inactive_prefix_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmb = Mmb::new();
+            let elements: Vec<_> = (0..123).map(test_digest).collect();
+            let batch = {
+                let mut batch = mmb.new_batch();
+                for element in &elements {
+                    batch = batch.add(&hasher, element);
+                }
+                batch.merkleize(&mmb, &hasher)
+            };
+            mmb.apply_batch(&batch).unwrap();
+
+            // Choose a non-zero inactive prefix and locate the first active leaf as the sum of
+            // the leading peaks' leaf capacities. The proven range covers the entire active
+            // region so the inactive prefix is forward-folded into the prefix accumulator and
+            // any subsequent backward-fold suffix is empty (no peaks past the proven range).
+            let inactive_peaks = 2;
+            let active_start: u64 = crate::mmb::Family::peaks(mmb.size())
+                .take(inactive_peaks)
+                .map(|(_, h)| 1u64 << h)
+                .sum();
+            let total_leaves = *mmb.leaves();
+            assert!(active_start > 0 && active_start < total_leaves);
+
+            let spec = RootSpec::split_backward(inactive_peaks);
+            let root = mmb.root(&hasher, spec).unwrap();
+
+            let range = MmbLocation::new(active_start)..MmbLocation::new(total_leaves);
+            let range_proof =
+                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), spec)
+                    .await
+                    .unwrap();
+            let proof_store = ProofStore::new(
+                &hasher,
+                &range_proof,
+                &elements[range.to_usize_range()],
+                range.start,
+                &root,
+                spec,
+            )
+            .unwrap();
+
+            // Every sub-range of the active region round-trips through the store.
+            for start in active_start..total_leaves {
+                for end in (start + 1)..=total_leaves {
+                    let sub_range = MmbLocation::new(start)..MmbLocation::new(end);
+                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    assert!(
+                        sub_proof.verify_range_inclusion(
+                            &hasher,
+                            &elements[sub_range.to_usize_range()],
+                            sub_range.start,
+                            &root,
+                            spec,
+                        ),
+                        "sub-proof should verify for MMB range {start}..{end} with split_backward({inactive_peaks})"
+                    );
+                }
+            }
+
+            // Sub-ranges into the inactive prefix are unrecoverable: those peaks were folded
+            // into the prefix accumulator and individual digests are not retained.
+            assert!(matches!(
+                proof_store.range_proof(&hasher, MmbLocation::new(0)..MmbLocation::new(1)),
+                Err(Error::ElementPruned(_))
+            ));
+        });
+    }
+
     /// Backward-folded `BackwardFold` proofs collapse the active suffix peaks into a synthetic
     /// accumulator. `multi_proof()` over a covered location must distinguish "needed digest is
     /// hidden behind that accumulator" from "needed digest is genuinely pruned" so callers know
