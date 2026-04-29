@@ -1014,9 +1014,10 @@ pub mod tests {
         });
     }
 
-    use crate::{qmdb::bitmap::BitmapReadable, translator::OneCap};
+    use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{test_group, test_traced};
+    use commonware_utils::bitmap::Readable;
 
     type OrderedFixedDb =
         ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
@@ -3573,7 +3574,7 @@ pub mod tests {
 
             // Setup sanity: the committed bitmap spans at least two chunks.
             assert!(
-                BitmapReadable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
+                Readable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
                 "setup must cross a chunk boundary",
             );
 
@@ -3605,10 +3606,10 @@ pub mod tests {
 
             // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
             let speculative_chunks: Vec<[u8; N]> = {
-                let len = BitmapReadable::<N>::len(&child.bitmap);
+                let len = Readable::<N>::len(&child.bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| BitmapReadable::<N>::get_chunk(&child.bitmap, idx))
+                    .map(|idx| Readable::<N>::get_chunk(&child.bitmap, idx))
                     .collect()
             };
             // Setup sanity: speculative state spans at least two chunks.
@@ -3619,10 +3620,10 @@ pub mod tests {
             // `batch.canonical_root` is no longer valid against the post-apply state.
             db.apply_batch(child).await.unwrap();
             let committed_chunks: Vec<[u8; N]> = {
-                let len = BitmapReadable::<N>::len(db.any.bitmap.as_ref());
+                let len = Readable::<N>::len(db.any.bitmap.as_ref());
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| BitmapReadable::<N>::get_chunk(db.any.bitmap.as_ref(), idx))
+                    .map(|idx| Readable::<N>::get_chunk(db.any.bitmap.as_ref(), idx))
                     .collect()
             };
 

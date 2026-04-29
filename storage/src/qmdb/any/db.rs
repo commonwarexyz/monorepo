@@ -15,16 +15,14 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::{BitmapReadable, Shared},
-        build_snapshot_from_log, delete_known_loc,
-        operation::Operation as OperationTrait,
-        update_known_loc, Error,
+        bitmap::Shared, build_snapshot_from_log, delete_known_loc,
+        operation::Operation as OperationTrait, update_known_loc, Error,
     },
     Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
@@ -526,8 +524,9 @@ where
             // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
             // appends bits from the inactivity floor onward.
             let bitmap = shared_bitmap.unwrap_or_else(|| {
-                let pruned_chunks = (bounds.start / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-                let bm = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+                let pruned_chunks =
+                    (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
+                let bm = bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
                     .expect("pruned chunk count fits in u64 bits");
                 Arc::new(Shared::new(bm))
             });
@@ -580,7 +579,7 @@ where
         };
 
         // The bitmap must have exactly one bit per retained log location.
-        if BitmapReadable::<N>::len(bitmap.as_ref()) != log.size().await {
+        if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size().await {
             return Err(crate::qmdb::Error::DataCorrupted(
                 "bitmap length diverged from log size during init",
             ));

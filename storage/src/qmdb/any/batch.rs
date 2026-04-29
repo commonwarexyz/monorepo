@@ -14,7 +14,7 @@ use crate::{
             ordered::{find_next_key, find_prev_key},
             ValueEncoding,
         },
-        bitmap::{BitmapReadable, Shared},
+        bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -23,7 +23,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::Prunable;
+use commonware_utils::bitmap;
 use core::{iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
@@ -285,9 +285,11 @@ where
     None
 }
 
-/// Apply a single diff entry to the snapshot index.
-fn apply_snapshot_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>>(
+/// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
+/// install the winning `Active` location and clear the prior committed location.
+fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
     snapshot: &mut I,
+    bitmap: &mut bitmap::Prunable<N>,
     key: &impl Key,
     entry: &DiffEntry<F, V>,
     base_old_loc: Option<Location<F>>,
@@ -303,24 +305,7 @@ fn apply_snapshot_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>>(
             }
         }
     }
-}
-
-/// Mirror a single diff transition into the activity bitmap: set the
-/// winning Active location to 1 (if present), clear the prior committed
-/// location to 0 (if present).
-fn apply_bitmap_diff<F: Family, V, const N: usize>(
-    bitmap: &mut Prunable<N>,
-    entry: &DiffEntry<F, V>,
-    base_old_loc: Option<Location<F>>,
-) {
-    let new_loc = entry.loc();
-    if let (Some(new), Some(old)) = (new_loc, base_old_loc) {
-        debug_assert_ne!(
-            new, old,
-            "same location cannot be both active and superseded",
-        );
-    }
-    if let Some(loc) = new_loc {
+    if let Some(loc) = entry.loc() {
         bitmap.set_bit(*loc, true);
     }
     if let Some(loc) = base_old_loc {
@@ -342,7 +327,7 @@ fn next_candidate<F: Family, const N: usize>(
     tip: u64,
 ) -> Option<Location<F>> {
     let floor = *floor;
-    let bitmap_len = BitmapReadable::<N>::len(bitmap);
+    let bitmap_len = bitmap::Readable::<N>::len(bitmap);
     let committed_end = bitmap_len.min(tip);
     if floor < committed_end {
         if let Some(idx) = bitmap.next_one_from(floor) {
@@ -655,6 +640,10 @@ where
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
                     };
+                    // `is_active_at` is required even for set bits in the committed bitmap
+                    // range: this batch's own diff or an uncommitted ancestor diff may
+                    // supersede the committed location, and neither source is reflected in
+                    // the bitmap.
                     if !self.is_active_at(&key, candidate, &diff, db) {
                         continue;
                     }
@@ -1612,8 +1601,7 @@ where
                     .get(key)
                     .copied()
                     .unwrap_or_else(|| entry.base_old_loc());
-                apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
-                apply_bitmap_diff(&mut bitmap, entry, base_old_loc);
+                apply_diff(&mut self.snapshot, &mut bitmap, key, entry, base_old_loc);
             }
 
             // Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
@@ -1627,8 +1615,7 @@ where
                             .get(key)
                             .copied()
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
-                        apply_bitmap_diff(&mut bitmap, entry, base_old_loc);
+                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, base_old_loc);
                     } else if let Some(loc) = entry.loc() {
                         debug_assert!(
                             !bitmap.get_bit(*loc),
@@ -1856,7 +1843,7 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
-    const BITMAP_CHUNK_BITS: u64 = Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+    const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
     fn loc(n: u64) -> Location<mmr::Family> {
         Location::new(n)
@@ -1864,9 +1851,9 @@ mod tests {
 
     fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
     where
-        F: FnOnce(&mut Prunable<BITMAP_CHUNK_BYTES>),
+        F: FnOnce(&mut bitmap::Prunable<BITMAP_CHUNK_BYTES>),
     {
-        let mut bm = Prunable::<BITMAP_CHUNK_BYTES>::new();
+        let mut bm = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::new();
         build(&mut bm);
         Shared::new(bm)
     }

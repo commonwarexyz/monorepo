@@ -2218,7 +2218,7 @@ pub(crate) mod test {
             // forcing the journal to retain from 0 even when prune is requested past the first
             // bitmap chunk boundary.
             const ITEMS_PER_SECTION: u64 = 2048;
-            assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS);
+            const { assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS) };
 
             let ctx = context.with_label("db");
             let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
@@ -2491,8 +2491,8 @@ pub(crate) mod test {
 #[cfg(test)]
 mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
-    //! `apply_batch`, `prune_bitmap`, and `rewind` is parametric on bitmap geometry alone, so one
-    //! variant (`unordered::variable`) suffices as the test bed.
+    //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
+    //! so one variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
         qmdb::any::unordered::variable::test::{create_test_config, AnyTest},

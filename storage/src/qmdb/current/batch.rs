@@ -29,7 +29,7 @@ use crate::{
 use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+use commonware_utils::bitmap::{self, Readable as _};
 use std::{
     collections::{BTreeSet, HashMap},
     hash::BuildHasherDefault,
@@ -53,7 +53,7 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 }
 
 impl<const N: usize> ChunkOverlay<N> {
-    const CHUNK_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
+    const CHUNK_BITS: u64 = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
 
     fn new(len: u64) -> Self {
         Self {
@@ -64,7 +64,7 @@ impl<const N: usize> ChunkOverlay<N> {
 
     /// Load-or-create a chunk: returns a mutable reference to the materialized chunk bytes. On
     /// first access for an existing chunk, reads from `base`.
-    fn chunk_mut<B: BitmapReadable<N>>(&mut self, base: &B, idx: usize) -> &mut [u8; N] {
+    fn chunk_mut<B: bitmap::Readable<N>>(&mut self, base: &B, idx: usize) -> &mut [u8; N] {
         self.chunks.entry(idx).or_insert_with(|| {
             let base_len = base.len();
             let base_complete = base.complete_chunks();
@@ -80,8 +80,8 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 
     /// Set a single bit (used for pushes and active operations).
-    fn set_bit<B: BitmapReadable<N>>(&mut self, base: &B, loc: u64) {
-        let idx = BitMap::<N>::to_chunk_index(loc);
+    fn set_bit<B: bitmap::Readable<N>>(&mut self, base: &B, loc: u64) {
+        let idx = bitmap::Prunable::<N>::to_chunk_index(loc);
         let rel = (loc % Self::CHUNK_BITS) as usize;
         let chunk = self.chunk_mut(base, idx);
         chunk[rel / 8] |= 1 << (rel % 8);
@@ -90,8 +90,8 @@ impl<const N: usize> ChunkOverlay<N> {
     /// Clear a single bit (used for superseded locations). `pruned_chunks` is passed in by the
     /// caller so the hot loop in `build_chunk_overlay` reads it once rather than per call.
     /// Skips locations in pruned chunks since those bits are already inactive.
-    fn clear_bit<B: BitmapReadable<N>>(&mut self, base: &B, pruned_chunks: usize, loc: u64) {
-        let idx = BitMap::<N>::to_chunk_index(loc);
+    fn clear_bit<B: bitmap::Readable<N>>(&mut self, base: &B, pruned_chunks: usize, loc: u64) {
+        let idx = bitmap::Prunable::<N>::to_chunk_index(loc);
         if idx < pruned_chunks {
             return;
         }
@@ -118,7 +118,13 @@ impl<const N: usize> ChunkOverlay<N> {
 /// *possibly* active in `[floor, tip)`, may skip locations only when known inactive.
 /// `is_active_at` revalidates each candidate, so false positives are tolerated; false negatives
 /// are forbidden.
-pub(crate) fn next_candidate<F: Graftable, B: BitmapReadable<N>, const N: usize>(
+///
+/// False positives can arise two ways:
+/// - In the committed prefix, an uncommitted ancestor batch in the chain may have superseded
+///   the location — the committed bitmap doesn't reflect uncommitted shadows.
+/// - Beyond the committed bitmap, locations are returned as sequential candidates (one per
+///   index) without per-location filtering, so any inactive uncommitted op shows up here.
+pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
     floor: Location<F>,
     tip: u64,
@@ -486,7 +492,7 @@ where
 /// search back through ancestors to find the most recent active location; if none exists, we clear
 /// the committed DB location (`base_old_loc`).
 #[allow(clippy::type_complexity)]
-fn build_chunk_overlay<F: Graftable, U, B: BitmapReadable<N>, const N: usize>(
+fn build_chunk_overlay<F: Graftable, U, B: bitmap::Readable<N>, const N: usize>(
     base: &B,
     batch_len: usize,
     batch_base: u64,
@@ -715,7 +721,7 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
 }
 
 impl<const N: usize> BitmapBatch<N> {
-    const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
+    const CHUNK_SIZE_BITS: u64 = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
 
     /// Return the terminal [`Shared`] at the bottom of the chain.
     fn shared(&self) -> &Arc<Shared<N>> {
@@ -730,7 +736,7 @@ impl<const N: usize> BitmapBatch<N> {
     /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
     fn trim_committed(&self) -> Self {
         let shared = self.shared();
-        let committed = BitmapReadable::<N>::len(shared.as_ref());
+        let committed = bitmap::Readable::<N>::len(shared.as_ref());
         let mut kept = Vec::new();
         let mut current = self;
         while let Self::Layer(layer) = current {
@@ -752,7 +758,7 @@ impl<const N: usize> BitmapBatch<N> {
     }
 }
 
-impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
+impl<const N: usize> bitmap::Readable<N> for BitmapBatch<N> {
     fn complete_chunks(&self) -> usize {
         (self.len() / Self::CHUNK_SIZE_BITS) as usize
     }
@@ -795,7 +801,7 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
 
     fn len(&self) -> u64 {
         match self {
-            Self::Base(shared) => BitmapReadable::<N>::len(shared.as_ref()),
+            Self::Base(shared) => bitmap::Readable::<N>::len(shared.as_ref()),
             Self::Layer(layer) => layer.overlay.len,
         }
     }

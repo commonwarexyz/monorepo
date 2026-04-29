@@ -32,7 +32,7 @@ use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_utils::{
-    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+    bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
     sync::AsyncMutex,
 };
@@ -307,7 +307,7 @@ where
     /// the chunk's last leaf, so condition (1) always holds and the function returns the
     /// inactivity floor rounded down to the nearest chunk boundary.
     pub fn sync_boundary(&self) -> Location<F> {
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
         let mut pruned_chunks = *self.any.inactivity_floor_loc / chunk_bits;
 
         let ops_leaves = *self.any.last_commit_loc + 1;
@@ -485,7 +485,7 @@ where
 
         let pruned_chunks = self.any.bitmap.pruned_chunks();
         let pruned_bits = (pruned_chunks as u64)
-            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
+            .checked_mul(bitmap::Prunable::<N>::CHUNK_SIZE_BITS)
             .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
         if rewind_size < pruned_bits {
             return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
@@ -684,11 +684,11 @@ where
 
 /// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
 /// `None` if all bits fall on complete chunk boundaries.
-pub(super) fn partial_chunk<B: BitmapReadable<N>, const N: usize>(
+pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
 ) -> Option<([u8; N], u64)> {
     let (last_chunk, next_bit) = bitmap.last_chunk();
-    if next_bit == BitMap::<N>::CHUNK_SIZE_BITS {
+    if next_bit == bitmap::Prunable::<N>::CHUNK_SIZE_BITS {
         None
     } else {
         Some((last_chunk, next_bit))
@@ -724,7 +724,7 @@ pub(super) fn combine_roots<H: Hasher>(
 pub(super) async fn compute_db_root<
     F: merkle::Graftable,
     H: Hasher,
-    B: BitmapReadable<N>,
+    B: bitmap::Readable<N>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
@@ -759,7 +759,7 @@ pub(super) async fn compute_db_root<
 pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
-    B: BitmapReadable<N>,
+    B: bitmap::Readable<N>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
@@ -888,7 +888,7 @@ pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, cons
 /// (i.e., not pruned from the journal).
 pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N: usize>(
     hasher: &StandardHasher<H>,
-    bitmap: &impl BitmapReadable<N>,
+    bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     pool: Option<&ThreadPool>,
