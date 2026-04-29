@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
@@ -77,7 +77,7 @@ async fn commit_pending<F: MerkleFamily + Bagging>(
 }
 
 fn fuzz_family<F: MerkleFamily + Bagging>(data: &FuzzInput, suffix: &str) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = F::default_hasher::<Sha256>();
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {

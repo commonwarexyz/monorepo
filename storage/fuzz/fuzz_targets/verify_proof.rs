@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location, Proof},
+    merkle::{mmb, mmr, Family as MerkleFamily, Location, Proof},
     qmdb::{verify::verify_multi_proof, Bagging},
 };
 use libfuzzer_sys::fuzz_target;
@@ -43,7 +43,7 @@ impl<'a, F: MerkleFamily + Bagging> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput<F>) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = F::default_hasher::<Sha256>();
 
     let digests: Vec<Digest> = input
         .digests

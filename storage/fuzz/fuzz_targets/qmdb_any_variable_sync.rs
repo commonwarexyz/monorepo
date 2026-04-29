@@ -5,9 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{
-        full::Config as MerkleConfig, hasher::Standard, mmb, mmr, Family as MerkleFamily, Location,
-    },
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily, Location},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
         verify_proof, Bagging,
@@ -167,7 +165,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, test_name: &str) {
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let hasher = Standard::<Sha256>::new();
+        let hasher = F::default_hasher::<Sha256>();
         let cfg = test_config::<F>(&test_name, &context);
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await

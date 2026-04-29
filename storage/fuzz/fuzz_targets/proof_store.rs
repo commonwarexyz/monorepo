@@ -5,8 +5,7 @@ use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
     merkle::{
-        hasher::Standard, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location,
-        Position, Proof,
+        mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location, Position, Proof,
     },
     qmdb::Bagging as QmdbBagging,
 };
@@ -61,7 +60,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily + QmdbBagging>(input: &FuzzInput<F>) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = F::default_hasher::<Sha256>();
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
         inactive_peaks: input.inactive_peaks,

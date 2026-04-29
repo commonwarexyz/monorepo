@@ -6,7 +6,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
@@ -150,7 +150,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, suffix: &str) {
                 .await
                 .unwrap();
 
-            let hasher = Standard::<Sha256>::new();
+            let hasher = F::default_hasher::<Sha256>();
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
             let mut last_commit_loc: Option<Location<F>> = None;
