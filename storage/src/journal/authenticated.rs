@@ -185,6 +185,26 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
         self.inner.root(base, hasher, spec)
     }
 
+    /// Inclusion proof for the element at `loc` using an explicit root spec.
+    pub fn proof(
+        &self,
+        hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
+        loc: Location<F>,
+        spec: RootSpec,
+    ) -> Result<Proof<F, D>, merkle::Error<F>> {
+        self.inner.proof(hasher, loc, spec)
+    }
+
+    /// Inclusion proof for all elements in `range` using an explicit root spec.
+    pub fn range_proof(
+        &self,
+        hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
+        range: core::ops::Range<Location<F>>,
+        spec: RootSpec,
+    ) -> Result<Proof<F, D>, merkle::Error<F>> {
+        self.inner.range_proof(hasher, range, spec)
+    }
+
     /// The items added in this batch.
     pub(crate) const fn items(&self) -> &Arc<Vec<Item>> {
         &self.items
@@ -224,22 +244,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
 
     fn pruning_boundary(&self) -> Location<F> {
         self.inner.pruning_boundary()
-    }
-
-    fn proof(
-        &self,
-        hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
-        loc: Location<F>,
-    ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.proof(hasher, loc)
-    }
-
-    fn range_proof(
-        &self,
-        hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
-        range: core::ops::Range<Location<F>>,
-    ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.range_proof(hasher, range)
     }
 }
 

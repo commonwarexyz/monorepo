@@ -504,6 +504,40 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         hasher.root(leaves, spec, peaks.iter())
     }
 
+    /// Inclusion proof for the element at `loc` using an explicit root spec.
+    pub fn proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        loc: Location<F>,
+        spec: RootSpec,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        if !loc.is_valid_index() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        self.range_proof(hasher, loc..loc + 1, spec)
+            .map_err(|e| match e {
+                Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
+                _ => e,
+            })
+    }
+
+    /// Inclusion proof for all elements in `range` using an explicit root spec.
+    pub fn range_proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        range: Range<Location<F>>,
+        spec: RootSpec,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        crate::merkle::proof::build_range_proof(
+            hasher,
+            self.leaves(),
+            spec,
+            range,
+            |pos| Self::get_node(self, pos),
+            Error::ElementPruned,
+        )
+    }
+
     /// Items before this location have been pruned.
     pub const fn pruning_boundary(&self) -> Location<F> {
         self.pruning_boundary
@@ -548,35 +582,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 
     fn pruning_boundary(&self) -> Location<F> {
         Self::pruning_boundary(self)
-    }
-
-    fn proof(
-        &self,
-        hasher: &impl Hasher<F, Digest = D>,
-        loc: Location<F>,
-    ) -> Result<Proof<F, D>, Error<F>> {
-        if !loc.is_valid_index() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
-            _ => e,
-        })
-    }
-
-    fn range_proof(
-        &self,
-        hasher: &impl Hasher<F, Digest = D>,
-        range: Range<Location<F>>,
-    ) -> Result<Proof<F, D>, Error<F>> {
-        crate::merkle::proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            RootSpec::FULL_FORWARD,
-            range,
-            |pos| Self::get_node(self, pos),
-            Error::ElementPruned,
-        )
     }
 }
 
