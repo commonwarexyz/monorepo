@@ -75,6 +75,6 @@ pub trait Database: Sized + Send {
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
 
-    /// Return the root spec used to verify an ops proof for this database's sync root.
-    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> RootSpec;
+    /// Return the root spec for verifying an ops proof against this database's configured policy.
+    fn proof_spec(config: &Self::Config, proof: &Proof<Self::Family, Self::Digest>) -> RootSpec;
 }

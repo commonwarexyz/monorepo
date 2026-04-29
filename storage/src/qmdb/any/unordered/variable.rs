@@ -159,6 +159,8 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
+            split_root: true,
+            root_bagging: <mmr::Family as crate::qmdb::RootSpec>::root_spec(0).bagging(),
         }
     }
 

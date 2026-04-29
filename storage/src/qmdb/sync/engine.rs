@@ -702,7 +702,7 @@ where
             && self.pinned_nodes.is_none()
             && !self.local_target_state_available
             && start_loc == self.target.range.start();
-        let proof_spec = DB::proof_spec(&proof);
+        let proof_spec = DB::proof_spec(&self.config, &proof);
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
