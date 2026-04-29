@@ -190,7 +190,7 @@ impl<
             },
             on_stopped => {
                 debug!("shutdown");
-                let _ = self.inflight.drain();
+                self.inflight.drain();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
