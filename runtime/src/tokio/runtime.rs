@@ -577,7 +577,7 @@ impl Context {
     fn spawn_rayon_buffer_pool_thread_cache_flush(&self, pool: &ThreadPool) {
         let pool = Arc::downgrade(pool);
         let pending = Arc::new(AtomicBool::new(false));
-        self.with_label("rayon-buffer-pool-thread-cache-flush")
+        self.with_label("rayon_buffer_pool_thread_cache_flush")
             .spawn(move |context| async move {
                 loop {
                     context.sleep(RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL).await;

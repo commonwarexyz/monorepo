@@ -3968,7 +3968,7 @@ mod tests {
             tokio::Config::default()
                 .with_network_buffer_pool_config(
                     BufferPoolConfig::for_network()
-                        .with_max_per_class(NZUsize!(2))
+                        .with_max_per_class(NZU32!(2))
                         .with_thread_cache_capacity(NZUsize!(1)),
                 )
                 .with_storage_buffer_pool_config(
