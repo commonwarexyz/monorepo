@@ -211,6 +211,9 @@ where
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
+            if inactivity_floor_loc > last_commit_loc {
+                return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
+            }
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
