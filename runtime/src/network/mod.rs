@@ -19,7 +19,7 @@ mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use commonware_macros::select;
     use commonware_utils::sync::Barrier;
-    use futures::join;
+    use futures::{join, FutureExt};
     use std::{net::SocketAddr, sync::Arc, time::Duration};
     use tokio::{sync::oneshot, task::JoinSet};
 
@@ -429,25 +429,34 @@ mod tests {
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
+        let (canceled_sender, canceled_receiver) = oneshot::channel();
 
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-            // Cancel a large send mid-write. The payload must exceed all
-            // backend buffer sizes (TCP kernel buffer, mock backpressure
-            // threshold) so that send blocks and can be interrupted.
-            select! {
-                _ = sink.send(vec![0u8; 256 * 1024 * 1024]) => {
-                    panic!("send should have blocked on backpressure");
-                },
-                _ = tokio::time::sleep(Duration::from_millis(5)) => {},
-            };
+            // Poll multiple sends until backpressure makes one pending, then
+            // drop that pending future to simulate cancellation.
+            let mut blocked = false;
+            for _ in 0..1024 {
+                match sink.send(vec![0u8; 128 * 1024]).now_or_never() {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => panic!("send failed before blocking: {err:?}"),
+                    None => {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+            assert!(blocked, "send should have blocked on backpressure");
 
             // Sink should be poisoned after cancellation.
             assert!(matches!(
                 sink.send(b"after".as_slice()).await,
                 Err(crate::Error::Closed)
             ));
+            canceled_sender
+                .send(())
+                .expect("client should wait for send cancellation");
 
             // Stream should remain usable.
             let received = stream.recv(2).await.expect("stream should remain usable");
@@ -462,8 +471,9 @@ mod tests {
                 .await
                 .expect("Failed to dial server");
 
-            // Give the server time to attempt its large send and cancel.
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceled_receiver
+                .await
+                .expect("server should cancel the send first");
 
             sink.send(IoBuf::from(b"ok")).await.expect("Failed to send");
 
