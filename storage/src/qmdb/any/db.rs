@@ -140,19 +140,8 @@ where
 
     /// Return the operations-root spec for the given leaf count and inactivity floor.
     pub(crate) fn root_spec(&self, leaves: Location<F>, inactivity_floor: Location<F>) -> RootSpec {
-        if self.split_root {
-            RootSpec::Split {
-                inactive_peaks: F::inactive_peaks(
-                    F::location_to_position(leaves),
-                    inactivity_floor,
-                ),
-                bagging: self.root_bagging,
-            }
-        } else {
-            RootSpec::Full {
-                bagging: self.root_bagging,
-            }
-        }
+        let inactive_peaks = F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
+        RootSpec::from_split_policy(self.split_root, self.root_bagging, inactive_peaks)
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -549,20 +538,15 @@ where
                 active_keys,
             )
         };
-        let root_spec = if split_root {
-            RootSpec::Split {
-                inactive_peaks: F::inactive_peaks(
-                    F::location_to_position(log.merkle.leaves()),
-                    inactivity_floor_loc,
-                ),
-                bagging: root_bagging,
-            }
-        } else {
-            RootSpec::Full {
-                bagging: root_bagging,
-            }
-        };
-        let root = log.root(root_spec)?;
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(log.merkle.leaves()),
+            inactivity_floor_loc,
+        );
+        let root = log.root(RootSpec::from_split_policy(
+            split_root,
+            root_bagging,
+            inactive_peaks,
+        ))?;
 
         Ok(Self {
             log,

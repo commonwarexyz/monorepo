@@ -117,6 +117,10 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
+        split_root: true,
+        root_bagging:
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
+                .bagging(),
     }
 }
 
@@ -138,6 +142,10 @@ pub fn any_var_digest_cfg(
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
+        split_root: true,
+        root_bagging:
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
+                .bagging(),
     }
 }
 
@@ -161,6 +169,10 @@ pub fn any_var_vec_cfg(
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
+        split_root: true,
+        root_bagging:
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
+                .bagging(),
     }
 }
 

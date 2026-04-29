@@ -119,7 +119,7 @@ where
         self.root()
     }
 
-    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> RootSpec {
+    fn proof_spec(_config: &Self::Config, proof: &Proof<Self::Family, Self::Digest>) -> RootSpec {
         F::root_spec(proof.inactive_peaks)
     }
 }

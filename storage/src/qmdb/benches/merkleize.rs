@@ -300,6 +300,10 @@ fn any_fix_cfg(
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
+        split_root: true,
+        root_bagging:
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
+                .bagging(),
     }
 }
 
@@ -311,6 +315,10 @@ fn any_var_cfg(
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         translator: EightCap,
+        split_root: true,
+        root_bagging:
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
+                .bagging(),
     }
 }
 

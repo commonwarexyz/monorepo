@@ -94,6 +94,23 @@ impl RootSpec {
         }
     }
 
+    /// Build a spec from a `(split_root, bagging)` policy plus the runtime `inactive_peaks` count.
+    /// `inactive_peaks` is ignored when `split_root` is false.
+    pub const fn from_split_policy(
+        split_root: bool,
+        bagging: Bagging,
+        inactive_peaks: usize,
+    ) -> Self {
+        if split_root {
+            Self::Split {
+                inactive_peaks,
+                bagging,
+            }
+        } else {
+            Self::Full { bagging }
+        }
+    }
+
     /// True if this spec splits an inactive prefix off from the remaining peaks.
     pub const fn has_inactive_prefix(self) -> bool {
         matches!(self, Self::Split { .. })

@@ -104,6 +104,8 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
+                split_root: true,
+                root_bagging: F::root_spec(0).bagging(),
             };
 
             let mut db: GenericDb<F> =

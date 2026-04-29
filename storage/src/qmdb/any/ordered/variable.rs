@@ -204,6 +204,8 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
+            split_root: true,
+            root_bagging: <mmr::Family as crate::qmdb::RootSpec>::root_spec(0).bagging(),
         }
     }
 
@@ -286,7 +288,7 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
+        let cfg = variable_db_config::<mmr::Family, _>("fixed-bytes-var-partition", &context);
         VariableDb::init(context, cfg).await.unwrap()
     }
 

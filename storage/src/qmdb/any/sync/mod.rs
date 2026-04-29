@@ -84,6 +84,7 @@ where
 }
 
 /// Shared helper to build a [Db] from sync components.
+#[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, T>(
     context: E,
     merkle_config: full::Config,
@@ -92,9 +93,11 @@ async fn build_db<F, E, U, I, H, C, T>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    split_root: bool,
+    root_bagging: merkle::Bagging,
 ) -> Result<Db<F, E, C, I, H, U>, qmdb::Error<F>>
 where
-    F: merkle::Family + qmdb::RootSpec,
+    F: merkle::Family,
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
@@ -128,8 +131,8 @@ where
         index,
         log,
         Some(range.start()),
-        true,
-        F::root_spec(0).bagging(),
+        split_root,
+        root_bagging,
         |_, _| {},
     )
     .await?;
@@ -144,7 +147,7 @@ macro_rules! impl_sync_database {
      $(; $($where_extra:tt)+)?) => {
         impl<F, E, K, V, H, T> qmdb::sync::Database for $db<F, E, K, V, H, T>
         where
-            F: merkle::Family + qmdb::RootSpec,
+            F: merkle::Family,
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
@@ -170,6 +173,8 @@ macro_rules! impl_sync_database {
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
+                let split_root = config.split_root;
+                let root_bagging = config.root_bagging;
                 build_db::<F, _, $update<K, V>, _, H, _, T>(
                     context,
                     merkle_config,
@@ -178,6 +183,8 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    split_root,
+                    root_bagging,
                 )
                 .await
             }
@@ -195,7 +202,11 @@ macro_rules! impl_sync_database {
                     context,
                     config.merkle_config.clone(),
                     target,
-                    F::root_spec(inactive_peaks),
+                    RootSpec::from_split_policy(
+                        config.split_root,
+                        config.root_bagging,
+                        inactive_peaks,
+                    ),
                 )
                 .await
             }
@@ -204,8 +215,15 @@ macro_rules! impl_sync_database {
                 crate::qmdb::any::db::Db::root(self)
             }
 
-            fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> RootSpec {
-                F::root_spec(proof.inactive_peaks)
+            fn proof_spec(
+                config: &Self::Config,
+                proof: &Proof<Self::Family, Self::Digest>,
+            ) -> RootSpec {
+                RootSpec::from_split_policy(
+                    config.split_root,
+                    config.root_bagging,
+                    proof.inactive_peaks,
+                )
             }
         }
     };

@@ -329,7 +329,10 @@ macro_rules! impl_current_sync_database {
                 self.any.root()
             }
 
-            fn proof_spec(_proof: &Proof<Self::Family, Self::Digest>) -> RootSpec {
+            fn proof_spec(
+                _config: &Self::Config,
+                _proof: &Proof<Self::Family, Self::Digest>,
+            ) -> RootSpec {
                 RootSpec::FULL_FORWARD
             }
         }

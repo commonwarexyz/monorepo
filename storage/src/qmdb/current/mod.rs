@@ -243,7 +243,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, full::Config as MerkleConfig, Bagging, Location},
     mmr::StandardHasher,
     qmdb::{
         any::{
@@ -293,6 +293,8 @@ impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
+            split_root: false,
+            root_bagging: Bagging::ForwardFold,
         }
     }
 }
@@ -345,7 +347,7 @@ where
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_full_forward(
+    let any = any::init(
         context.with_label("any"),
         config.into(),
         Some(last_known_inactivity_floor),
