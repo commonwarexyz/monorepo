@@ -524,6 +524,11 @@ where
                 .expect("commit should exist");
             let last_commit = reader.read(last_commit_loc).await?;
             let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
+            if *inactivity_floor_loc > last_commit_loc {
+                return Err(crate::qmdb::Error::DataCorrupted(
+                    "inactivity floor exceeds last commit",
+                ));
+            }
             if let Some(known_inactivity_floor) = known_inactivity_floor {
                 (*known_inactivity_floor..*inactivity_floor_loc)
                     .for_each(|_| callback(false, None));
