@@ -25,8 +25,9 @@ use crate::Hasher;
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{hex, Array, Span};
+use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
@@ -140,13 +141,13 @@ impl Deref for Digest {
 
 impl Debug for Digest {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.0))
+        write!(f, "{}", Hex(&self.0))
     }
 }
 
 impl Display for Digest {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.0))
+        write!(f, "{}", Hex(&self.0))
     }
 }
 
@@ -172,10 +173,10 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_utils::hex;
 
-    const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
-        hex!("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+    const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    );
 
     #[test]
     fn test_sha256() {

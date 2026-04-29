@@ -1,6 +1,7 @@
-use crate::{hex, Array, Span};
+use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_formatting::Hex;
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -67,7 +68,7 @@ impl<const N: usize> Deref for FixedBytes<N> {
 
 impl<const N: usize> Display for FixedBytes<N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.0))
+        write!(f, "{}", Hex(&self.0))
     }
 }
 

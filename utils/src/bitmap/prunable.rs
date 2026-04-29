@@ -466,9 +466,9 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for Prunable<N> {
 #[cfg(test)]
 mod tests {
     use super::{super::Readable, *};
-    use crate::hex;
     use bytes::BytesMut;
     use commonware_codec::Encode;
+    use commonware_formatting::hex;
 
     #[test]
     fn test_new() {

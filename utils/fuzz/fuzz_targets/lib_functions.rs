@@ -1,9 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_formatting::{from_hex, from_hex_formatted, hex};
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Faults, N3f1, NZDuration,
-    NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
+    modulo, union, union_unique, Faults, N3f1, NZDuration, NZUsize, NonZeroDuration, NZU16, NZU32,
+    NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;

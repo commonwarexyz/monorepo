@@ -51,7 +51,7 @@
 //! it.
 
 use arbitrary::Unstructured;
-use commonware_utils::from_hex_formatted;
+use commonware_formatting::from_hex_formatted;
 use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore as _, SeedableRng};
 use std::{

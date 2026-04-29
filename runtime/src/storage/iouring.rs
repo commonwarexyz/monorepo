@@ -27,7 +27,7 @@ use crate::{
     utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{from_hex, hex};
+use commonware_formatting::{from_hex, hex};
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},

@@ -134,9 +134,10 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
+    use commonware_formatting::from_hex_formatted;
     use commonware_math::algebra::CryptoGroup;
     use commonware_parallel::Sequential;
-    use commonware_utils::{from_hex_formatted, test_rng, union_unique};
+    use commonware_utils::{test_rng, union_unique};
     use rstest::rstest;
 
     fn codec<V: Variant>() {
@@ -373,23 +374,23 @@ mod tests {
     ) -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         (
             parse_private_key(private_key).unwrap(),
-            commonware_utils::from_hex_formatted(msg).unwrap(),
+            commonware_formatting::from_hex_formatted(msg).unwrap(),
             parse_signature(signature).unwrap(),
         )
     }
 
     fn parse_private_key(private_key: &str) -> Result<Private, CodecError> {
-        let bytes = commonware_utils::from_hex_formatted(private_key).unwrap();
+        let bytes = commonware_formatting::from_hex_formatted(private_key).unwrap();
         Private::decode(bytes.as_ref())
     }
 
     fn parse_public_key(public_key: &str) -> Result<<MinPk as Variant>::Public, CodecError> {
-        let bytes = commonware_utils::from_hex_formatted(public_key).unwrap();
+        let bytes = commonware_formatting::from_hex_formatted(public_key).unwrap();
         <MinPk as Variant>::Public::decode(bytes.as_ref())
     }
 
     fn parse_signature(signature: &str) -> Result<<MinPk as Variant>::Signature, CodecError> {
-        let bytes = commonware_utils::from_hex_formatted(signature).unwrap();
+        let bytes = commonware_formatting::from_hex_formatted(signature).unwrap();
         <MinPk as Variant>::Signature::decode(bytes.as_ref())
     }
 
@@ -404,7 +405,7 @@ mod tests {
     ) {
         (
             parse_public_key(public_key),
-            commonware_utils::from_hex_formatted(msg).unwrap(),
+            commonware_formatting::from_hex_formatted(msg).unwrap(),
             parse_signature(signature),
         )
     }

@@ -16,7 +16,7 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
 stability_scope!(BETA {
     use crate::{Buf, BufMut};
     use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-    use commonware_utils::hex;
+    use commonware_formatting::hex;
     use std::ops::RangeInclusive;
 
     pub mod metered;

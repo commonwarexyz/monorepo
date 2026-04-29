@@ -37,9 +37,10 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{hex, Array, Span};
+use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
@@ -231,13 +232,13 @@ impl From<<MinPk as Variant>::Public> for PublicKey {
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", Hex(&self.raw))
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", Hex(&self.raw))
     }
 }
 
@@ -333,13 +334,13 @@ impl From<<MinPk as Variant>::Signature> for Signature {
 
 impl Debug for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", Hex(&self.raw))
     }
 }
 
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", Hex(&self.raw))
     }
 }
 
@@ -441,7 +442,7 @@ mod tests {
 
     fn parse_private_key(private_key: &str) -> Result<PrivateKey, CodecError> {
         PrivateKey::decode(
-            commonware_utils::from_hex_formatted(private_key)
+            commonware_formatting::from_hex_formatted(private_key)
                 .unwrap()
                 .as_ref(),
         )
@@ -449,7 +450,7 @@ mod tests {
 
     fn parse_public_key(public_key: &str) -> Result<PublicKey, CodecError> {
         PublicKey::decode(
-            commonware_utils::from_hex_formatted(public_key)
+            commonware_formatting::from_hex_formatted(public_key)
                 .unwrap()
                 .as_ref(),
         )
@@ -457,7 +458,7 @@ mod tests {
 
     fn parse_signature(signature: &str) -> Result<Signature, CodecError> {
         Signature::decode(
-            commonware_utils::from_hex_formatted(signature)
+            commonware_formatting::from_hex_formatted(signature)
                 .unwrap()
                 .as_ref(),
         )

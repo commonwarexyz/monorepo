@@ -1,7 +1,7 @@
 use super::Header;
 use crate::{BufferPool, Error};
 use commonware_codec::Encode;
-use commonware_utils::{from_hex, hex};
+use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};

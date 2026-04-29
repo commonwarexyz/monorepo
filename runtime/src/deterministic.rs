@@ -69,10 +69,10 @@ use crate::{
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
+use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
 use commonware_utils::{
-    hex,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
     SystemTimeExt,

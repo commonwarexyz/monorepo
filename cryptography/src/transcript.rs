@@ -378,7 +378,7 @@ impl Ord for Summary {
 
 impl Display for Summary {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", commonware_utils::hex(self.as_ref()))
+        write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
     }
 }
 

@@ -18,9 +18,9 @@ commonware_macros::stability_scope!(BETA {
     extern crate alloc;
 
     #[cfg(not(feature = "std"))]
-    use alloc::{boxed::Box, string::String, vec::Vec};
+    use alloc::{boxed::Box, vec::Vec};
     use bytes::{BufMut, BytesMut};
-    use core::{fmt::Write as FmtWrite, time::Duration};
+    use core::time::Duration;
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
 
@@ -128,40 +128,6 @@ commonware_macros::stability_scope!(BETA {
     /// Alias for boxed errors that are `Send` and `Sync`.
     pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
-    /// Converts bytes to a hexadecimal string.
-    pub fn hex(bytes: &[u8]) -> String {
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for byte in bytes.iter() {
-            write!(hex, "{byte:02x}").expect("writing to string should never fail");
-        }
-        hex
-    }
-
-    /// Converts a hexadecimal string to bytes.
-    pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-        let bytes = hex.as_bytes();
-        if !bytes.len().is_multiple_of(2) {
-            return None;
-        }
-
-        bytes
-            .chunks_exact(2)
-            .map(|chunk| {
-                let hi = decode_hex_digit(chunk[0])?;
-                let lo = decode_hex_digit(chunk[1])?;
-                Some((hi << 4) | lo)
-            })
-            .collect()
-    }
-
-    /// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
-    /// in testing to encode external test vectors without modification.
-    pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
-        let hex = hex.replace(['\t', '\n', '\r', ' '], "");
-        let res = hex.strip_prefix("0x").unwrap_or(&hex);
-        from_hex(res)
-    }
-
     /// Computes the union of two byte slices.
     pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
         let mut union = Vec::with_capacity(a.len() + b.len());
@@ -263,25 +229,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
 )))] // BETA
-pub mod hex_literal;
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // BETA
 pub mod vec;
-
-#[commonware_macros::stability(BETA)]
-#[inline]
-const fn decode_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
 
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
 /// For literal values, validation occurs at compile time. For expressions, validation
@@ -353,6 +301,26 @@ macro_rules! NZU64 {
     };
 }
 
+/// Re-export of `commonware_formatting` so that the `fixed_bytes!` macro's
+/// expansion can resolve `hex!` in any caller's namespace.
+#[doc(hidden)]
+pub use ::commonware_formatting as __formatting;
+
+/// Macro for converting sequence of string literals containing hex-encoded data
+/// into a [`crate::sequence::FixedBytes`] type.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! fixed_bytes {
+    ($s:tt) => {
+        const { $crate::sequence::FixedBytes::new($crate::__formatting::hex!($s)) }
+    };
+}
+
 /// A macro to create a `NonZeroDuration` from a duration, panicking if the duration is zero.
 #[macro_export]
 macro_rules! NZDuration {
@@ -365,95 +333,9 @@ macro_rules! NZDuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_formatting::hex;
     use num_bigint::BigUint;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-
-    #[test]
-    fn test_hex() {
-        // Test case 0: empty bytes
-        let b = &[];
-        let h = hex(b);
-        assert_eq!(h, "");
-        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
-
-        // Test case 1: single byte
-        let b = &hex!("0x01");
-        let h = hex(b);
-        assert_eq!(h, "01");
-        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
-
-        // Test case 2: multiple bytes
-        let b = &hex!("0x010203");
-        let h = hex(b);
-        assert_eq!(h, "010203");
-        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
-
-        // Test case 3: odd number of bytes
-        let h = "0102030";
-        assert!(from_hex(h).is_none());
-
-        // Test case 4: invalid hexadecimal character
-        let h = "01g3";
-        assert!(from_hex(h).is_none());
-
-        // Test case 5: invalid `+` in string
-        let h = "+123";
-        assert!(from_hex(h).is_none());
-
-        // Test case 6: empty string
-        assert_eq!(from_hex(""), Some(vec![]));
-    }
-
-    #[test]
-    fn test_from_hex_formatted() {
-        // Test case 0: empty bytes
-        let b = &[];
-        let h = hex(b);
-        assert_eq!(h, "");
-        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
-
-        // Test case 1: single byte
-        let b = &hex!("0x01");
-        let h = hex(b);
-        assert_eq!(h, "01");
-        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
-
-        // Test case 2: multiple bytes
-        let b = &hex!("0x010203");
-        let h = hex(b);
-        assert_eq!(h, "010203");
-        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
-
-        // Test case 3: odd number of bytes
-        let h = "0102030";
-        assert!(from_hex_formatted(h).is_none());
-
-        // Test case 4: invalid hexadecimal character
-        let h = "01g3";
-        assert!(from_hex_formatted(h).is_none());
-
-        // Test case 5: whitespace
-        let h = "01 02 03";
-        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
-
-        // Test case 6: 0x prefix
-        let h = "0x010203";
-        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
-
-        // Test case 7: 0x prefix + different whitespace chars
-        let h = "    \n\n0x\r\n01
-                            02\t03\n";
-        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
-    }
-
-    #[test]
-    fn test_from_hex_utf8_char_boundaries() {
-        const MISALIGNMENT_CASE: &str = "쀘\n";
-
-        // Ensure that `from_hex` can handle misaligned UTF-8 character boundaries.
-        let b = from_hex(MISALIGNMENT_CASE);
-        assert!(b.is_none());
-    }
 
     #[test]
     fn test_union() {
