@@ -12,7 +12,7 @@ cargo-fuzz = true
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
-commonware-utils = { path = ".." }
+commonware-utils = { path = "..", features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true
 num-bigint.workspace = true
@@ -93,6 +93,13 @@ bench = false
 [[bin]]
 name = "set"
 path = "fuzz_targets/set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ordered"
+path = "fuzz_targets/ordered.rs"
 test = false
 doc = false
 bench = false

@@ -2,7 +2,10 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Encode, Error as CodecError, RangeCfg, Read, Write};
-use commonware_utils::{vec::NonEmptyVec, NZUsize, TryFromIterator};
+use commonware_utils::{
+    vec::{Error as NonEmptyVecError, NonEmptyVec},
+    TryFromIterator,
+};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroUsize;
 
@@ -17,103 +20,214 @@ enum Op {
     Pop,
     Remove { index: usize },
     Resize { new_len: u8, value: u8 },
+    ResizeWith { new_len: u8, seed: u8 },
     Mutate { swap_a: usize, swap_b: usize },
 }
 
-#[derive(Arbitrary, Debug)]
-struct FuzzInput {
-    init: Vec<u8>,
-    ops: Vec<Op>,
+#[derive(Debug)]
+enum FuzzInput {
+    Construct { items: Vec<u8>, array: [u8; 3] },
+    Mutate { init: Vec<u8>, ops: Vec<Op> },
+    Codec { items: Vec<u8> },
+    Arbitrary { bytes: Vec<u8> },
 }
 
-fn check_invariants(nev: &NonEmptyVec<u8>, model: &[u8]) {
-    assert!(!model.is_empty(), "model must remain non-empty");
-    assert_eq!(nev.len().get(), model.len());
-    assert!(nev.len().get() >= 1);
-    assert_eq!(nev.first(), &model[0]);
-    assert_eq!(nev.last(), model.last().unwrap());
-    assert_eq!(nev.is_singleton(), model.len() == 1);
-    assert_eq!(&**nev, model);
-}
-
-fn apply(op: Op, nev: &mut NonEmptyVec<u8>, model: &mut Vec<u8>) {
-    match op {
-        Op::Push(v) => {
-            if model.len() >= MAX_LEN {
-                return;
-            }
-            nev.push(v);
-            model.push(v);
-        }
-        Op::Insert { index, value } => {
-            let idx = if model.is_empty() {
-                0
-            } else {
-                index % (model.len() + 1)
-            };
-            if model.len() >= MAX_LEN {
-                return;
-            }
-            nev.insert(idx, value);
-            model.insert(idx, value);
-        }
-        Op::Extend(items) => {
-            let take = items.len().min(MAX_LEN.saturating_sub(model.len()));
-            let slice = &items[..take];
-            nev.extend(slice.iter().copied());
-            model.extend_from_slice(slice);
-        }
-        Op::Pop => {
-            // NonEmptyVec::pop returns None iff len == 1, leaving the vector unchanged.
-            let popped = nev.pop();
-            if model.len() > 1 {
-                let expected = model.pop();
-                assert_eq!(popped, expected);
-            } else {
-                assert_eq!(popped, None);
-                assert_eq!(model.len(), 1);
-            }
-        }
-        Op::Remove { index } => {
-            let idx = index % model.len();
-            let removed = nev.remove(idx);
-            if model.len() > 1 {
-                let expected = model.remove(idx);
-                assert_eq!(removed, Some(expected));
-            } else {
-                assert_eq!(removed, None);
-                assert_eq!(model.len(), 1);
-            }
-        }
-        Op::Resize { new_len, value } => {
-            // Clamp to [1, MAX_LEN] to preserve the non-empty invariant.
-            let target = (new_len as usize).clamp(1, MAX_LEN);
-            let nz = NonZeroUsize::new(target).unwrap();
-            nev.resize(nz, value);
-            model.resize(target, value);
-        }
-        Op::Mutate { swap_a, swap_b } => {
-            let a = swap_a % model.len();
-            let b = swap_b % model.len();
-            nev.mutate(|v| v.swap(a, b));
-            model.swap(a, b);
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        match u.int_in_range(0..=3)? {
+            0 => Ok(Self::Construct {
+                items: arbitrary_vec_low_empty(u)?,
+                array: u.arbitrary()?,
+            }),
+            1 => Ok(Self::Mutate {
+                init: arbitrary_vec_low_empty(u)?,
+                ops: u.arbitrary()?,
+            }),
+            2 => Ok(Self::Codec {
+                items: arbitrary_vec_low_empty(u)?,
+            }),
+            _ => Ok(Self::Arbitrary {
+                bytes: arbitrary_vec_low_empty(u)?,
+            }),
         }
     }
 }
 
-fn fuzz(input: FuzzInput) {
-    if input.init.is_empty() {
-        let err = NonEmptyVec::<u8>::try_from(Vec::<u8>::new()).unwrap_err();
-        assert_eq!(err, commonware_utils::vec::Error::Empty);
+fn arbitrary_vec_low_empty<'a, T: Arbitrary<'a>>(
+    u: &mut arbitrary::Unstructured<'a>,
+) -> arbitrary::Result<Vec<T>> {
+    if u.ratio(1, 16)? {
+        return Ok(Vec::new());
+    }
 
-        let err: commonware_utils::vec::Error =
-            <NonEmptyVec<u8> as TryFromIterator<u8>>::try_from_iter(core::iter::empty())
-                .unwrap_err();
-        assert_eq!(err, commonware_utils::vec::Error::Empty);
+    let first = T::arbitrary(u)?;
+    let mut rest = Vec::<T>::arbitrary(u)?;
+    let mut items = Vec::with_capacity(1 + rest.len());
+    items.push(first);
+    items.append(&mut rest);
+    Ok(items)
+}
 
-        let empty: Vec<u8> = Vec::new();
+fn check_invariants(nev: &NonEmptyVec<u8>, model: &[u8]) {
+    assert!(!model.is_empty());
+    assert_eq!(nev.len().get(), model.len());
+    assert_eq!(nev.is_singleton(), model.len() == 1);
+    assert_eq!(nev.first(), &model[0]);
+    assert_eq!(nev.last(), model.last().unwrap());
+    assert_eq!(&**nev, model);
+}
+
+fn exercise_construct(mut items: Vec<u8>, array: [u8; 3]) {
+    items.truncate(MAX_LEN);
+
+    if items.is_empty() {
+        assert_eq!(
+            NonEmptyVec::<u8>::try_from(Vec::<u8>::new()),
+            Err(NonEmptyVecError::Empty)
+        );
+        assert_eq!(
+            NonEmptyVec::<u8>::try_from(&[][..]),
+            Err(NonEmptyVecError::Empty)
+        );
+        assert_eq!(
+            NonEmptyVec::<u8>::try_from([]),
+            Err(NonEmptyVecError::Empty)
+        );
+        assert_eq!(
+            NonEmptyVec::<u8>::try_from(&[]),
+            Err(NonEmptyVecError::Empty)
+        );
+        assert_eq!(
+            <NonEmptyVec<u8> as TryFromIterator<u8>>::try_from_iter(core::iter::empty()),
+            Err(NonEmptyVecError::Empty)
+        );
+        return;
+    }
+
+    let mut nev = NonEmptyVec::<u8>::try_from(items.clone()).unwrap();
+    assert_eq!(NonEmptyVec::from_unchecked(items.clone()), nev);
+    assert_eq!(
+        <NonEmptyVec<u8> as TryFromIterator<u8>>::try_from_iter(items.iter().copied()).unwrap(),
+        nev
+    );
+    assert_eq!(NonEmptyVec::<u8>::try_from(items.as_slice()).unwrap(), nev);
+    let from_array = NonEmptyVec::<u8>::try_from(array).unwrap();
+    assert_eq!(NonEmptyVec::<u8>::try_from(&array).unwrap(), from_array);
+
+    *nev.first_mut() = nev.first().wrapping_add(1);
+    *nev.last_mut() = nev.last().wrapping_add(1);
+
+    let as_slice: &[u8] = nev.as_ref();
+    let as_vec: &Vec<u8> = nev.as_ref();
+    assert_eq!(as_slice, as_vec.as_slice());
+
+    let mapped = nev.map(|item| item.wrapping_add(1));
+    assert_eq!(mapped.len(), nev.len());
+    let mapped = nev.clone().map_into(|item| item.wrapping_add(1));
+    assert_eq!(mapped.len(), nev.len());
+
+    let owned: Vec<u8> = nev.clone().into();
+    assert_eq!(owned, nev.clone().into_vec());
+    let owned_sum: u16 = nev.clone().into_iter().map(u16::from).sum();
+    let ref_sum: u16 = (&nev).into_iter().copied().map(u16::from).sum();
+    assert_eq!(owned_sum, ref_sum);
+    for item in &mut nev {
+        *item = item.wrapping_add(1);
+    }
+    assert_eq!(nev.len().get(), owned.len());
+}
+
+fn apply(op: Op, nev: &mut NonEmptyVec<u8>, model: &mut Vec<u8>) {
+    match op {
+        Op::Push(value) => {
+            if model.len() >= MAX_LEN {
+                return;
+            }
+            nev.push(value);
+            model.push(value);
+        }
+        Op::Insert { index, value } => {
+            if model.len() >= MAX_LEN {
+                return;
+            }
+            let index = index % (model.len() + 1);
+            nev.insert(index, value);
+            model.insert(index, value);
+        }
+        Op::Extend(items) => {
+            let take = items.len().min(MAX_LEN.saturating_sub(model.len()));
+            nev.extend(items.iter().take(take).copied());
+            model.extend_from_slice(&items[..take]);
+        }
+        Op::Pop => {
+            let actual = nev.pop();
+            let expected = if model.len() > 1 { model.pop() } else { None };
+            assert_eq!(actual, expected);
+        }
+        Op::Remove { index } => {
+            let index = index % model.len();
+            let actual = nev.remove(index);
+            let expected = if model.len() > 1 {
+                Some(model.remove(index))
+            } else {
+                None
+            };
+            assert_eq!(actual, expected);
+        }
+        Op::Resize { new_len, value } => {
+            let target = (new_len as usize).clamp(1, MAX_LEN);
+            let target = NonZeroUsize::new(target).unwrap();
+            nev.resize(target, value);
+            model.resize(target.get(), value);
+        }
+        Op::ResizeWith { new_len, seed } => {
+            let target = (new_len as usize).clamp(1, MAX_LEN);
+            let target = NonZeroUsize::new(target).unwrap();
+            let mut actual_next = seed;
+            nev.resize_with(target, || {
+                actual_next = actual_next.wrapping_add(1);
+                actual_next
+            });
+            let mut expected_next = seed;
+            while model.len() < target.get() {
+                expected_next = expected_next.wrapping_add(1);
+                model.push(expected_next);
+            }
+            model.truncate(target.get());
+        }
+        Op::Mutate { swap_a, swap_b } => {
+            let a = swap_a % model.len();
+            let b = swap_b % model.len();
+            let len = nev.mutate(|items| {
+                items.swap(a, b);
+                items.len()
+            });
+            model.swap(a, b);
+            assert_eq!(len, model.len());
+        }
+    }
+}
+
+fn exercise_mutate(mut init: Vec<u8>, ops: Vec<Op>) {
+    init.truncate(MAX_LEN);
+    let Ok(mut nev) = NonEmptyVec::<u8>::try_from(init.clone()) else {
+        return;
+    };
+
+    let mut model = init;
+    check_invariants(&nev, &model);
+    for op in ops.into_iter().take(MAX_OPS) {
+        apply(op, &mut nev, &mut model);
+        check_invariants(&nev, &model);
+    }
+}
+
+fn exercise_codec(mut items: Vec<u8>) {
+    items.truncate(MAX_LEN);
+
+    if items.is_empty() {
         let mut buf = Vec::new();
-        empty.write(&mut buf);
+        Vec::<u8>::new().write(&mut buf);
         let result = NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(..), ()));
         assert!(matches!(
             result,
@@ -125,30 +239,36 @@ fn fuzz(input: FuzzInput) {
         return;
     }
 
-    let mut init = input.init;
-    init.truncate(MAX_LEN);
-
-    let mut nev = NonEmptyVec::<u8>::try_from(init.clone()).expect("non-empty input");
-    let from_unchecked = NonEmptyVec::from_unchecked(init.clone());
-    assert_eq!(nev, from_unchecked);
-
-    let mut model = init;
-    check_invariants(&nev, &model);
-
-    for op in input.ops.into_iter().take(MAX_OPS) {
-        apply(op, &mut nev, &mut model);
-        check_invariants(&nev, &model);
-    }
-
+    let nev = NonEmptyVec::<u8>::try_from(items.clone()).unwrap();
     let encoded = nev.encode();
     let decoded = NonEmptyVec::<u8>::read_cfg(
         &mut encoded.as_ref(),
-        &(RangeCfg::from(NZUsize!(1)..=NZUsize!(MAX_LEN)), ()),
+        &(
+            RangeCfg::from(NonZeroUsize::new(1).unwrap()..=NonZeroUsize::new(MAX_LEN).unwrap()),
+            (),
+        ),
     )
     .expect("valid encoding decodes");
     assert_eq!(decoded, nev);
+    assert_eq!(decoded.into_vec(), items);
+}
 
-    assert_eq!(nev.clone().into_vec(), model);
+fn exercise_arbitrary(bytes: &[u8]) {
+    let mut unstructured = arbitrary::Unstructured::new(bytes);
+    match NonEmptyVec::<u8>::arbitrary(&mut unstructured) {
+        Ok(nev) => assert!(!nev.is_empty()),
+        Err(arbitrary::Error::NotEnoughData) => {}
+        Err(e) => panic!("unexpected arbitrary error: {e:?}"),
+    }
+}
+
+fn fuzz(input: FuzzInput) {
+    match input {
+        FuzzInput::Construct { items, array } => exercise_construct(items, array),
+        FuzzInput::Mutate { init, ops } => exercise_mutate(init, ops),
+        FuzzInput::Codec { items } => exercise_codec(items),
+        FuzzInput::Arbitrary { bytes } => exercise_arbitrary(&bytes),
+    }
 }
 
 fuzz_target!(|input: FuzzInput| {

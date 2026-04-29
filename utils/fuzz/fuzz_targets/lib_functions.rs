@@ -4,33 +4,92 @@ use arbitrary::Arbitrary;
 use bytes::BytesMut;
 use commonware_codec::{EncodeSize, ReadExt, Write};
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Faults, N3f1, N5f1, NZDuration,
-    NZUsize, NonZeroDuration, Participant, SystemTimeExt, NZU16, NZU32, NZU64, NZU8,
+    from_hex, from_hex_formatted, hex, hex_literal, modulo, union, union_unique, Faults, N3f1,
+    N5f1, NZDuration, NZUsize, NonZeroDuration, Participant, SystemTimeExt, NZU16, NZU32, NZU64,
+    NZU8,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::{Duration, SystemTime};
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
-    Hex { data: Vec<u8> },
-    FromHex { hex_str: String },
-    FromHexFormatted { hex_str: String },
-    MaxFaults { n: u32 },
-    Quorum { n: u32 },
-    Union { a: Vec<u8>, b: Vec<u8> },
-    UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
-    Modulo { bytes: Vec<u8>, n: u64 },
-    Participant { index: u32 },
-    ParticipantFromUsize { index: usize },
-    NonZeroDuration { secs: u64, nanos: u32 },
-    NZDuration { secs: u64, nanos: u32 },
-    NZUsize { v: usize },
-    NZU8 { v: u8 },
-    NZU16 { v: u16 },
-    NZU32 { v: u32 },
-    NZU64 { v: u64 },
-    SystemTimeEpoch { secs_since_epoch: u64 },
-    SystemTimeEpochMillis { secs_since_epoch: u64 },
+    Hex {
+        data: Vec<u8>,
+    },
+    FromHex {
+        hex_str: String,
+    },
+    FromHexFormatted {
+        hex_str: String,
+    },
+    HexLiteralStripPrefix {
+        string: Vec<u8>,
+    },
+    HexLiteralRoundtrip {
+        data: Vec<u8>,
+    },
+    HexLiteralDecode {
+        data: [u8; 32],
+    },
+    HexLiteralMixed {
+        data: [u8; 32],
+        case_bits: u64,
+        ws_bits: u32,
+        split_bits: u32,
+    },
+    MaxFaults {
+        n: u32,
+    },
+    Quorum {
+        n: u32,
+    },
+    Union {
+        a: Vec<u8>,
+        b: Vec<u8>,
+    },
+    UnionUnique {
+        namespace: Vec<u8>,
+        msg: Vec<u8>,
+    },
+    Modulo {
+        bytes: Vec<u8>,
+        n: u64,
+    },
+    Participant {
+        index: u32,
+    },
+    ParticipantFromUsize {
+        index: usize,
+    },
+    NonZeroDuration {
+        secs: u64,
+        nanos: u32,
+    },
+    NZDuration {
+        secs: u64,
+        nanos: u32,
+    },
+    NZUsize {
+        v: usize,
+    },
+    NZU8 {
+        v: u8,
+    },
+    NZU16 {
+        v: u16,
+    },
+    NZU32 {
+        v: u32,
+    },
+    NZU64 {
+        v: u64,
+    },
+    SystemTimeEpoch {
+        secs_since_epoch: u64,
+    },
+    SystemTimeEpochMillis {
+        secs_since_epoch: u64,
+    },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -89,6 +148,67 @@ fn fuzz(input: FuzzInput) {
 
             let with_prefix = format!("0x{hex_str}");
             from_hex_formatted(&with_prefix);
+        }
+
+        FuzzInput::HexLiteralStripPrefix { string } => {
+            let stripped = hex_literal::strip_hex_prefix(&string);
+            if string.len() >= 2 && string[0] == b'0' && (string[1] == b'x' || string[1] == b'X') {
+                assert_eq!(stripped, &string[2..]);
+            } else {
+                assert_eq!(stripped, string.as_slice());
+            }
+        }
+
+        FuzzInput::HexLiteralRoundtrip { data } => {
+            let formatted = hex(&data);
+            let strings: &[&[u8]] = &[formatted.as_bytes()];
+            assert_eq!(hex_literal::len(strings), data.len());
+
+            let with_prefix = format!("0x{formatted}");
+            assert_eq!(
+                hex_literal::strip_hex_prefix(with_prefix.as_bytes()),
+                formatted.as_bytes()
+            );
+        }
+
+        FuzzInput::HexLiteralDecode { data } => {
+            let formatted = hex(&data);
+            let strings: &[&[u8]] = &[formatted.as_bytes()];
+            let decoded: [u8; 32] = hex_literal::decode(strings);
+            assert_eq!(decoded, data);
+        }
+
+        FuzzInput::HexLiteralMixed {
+            data,
+            case_bits,
+            ws_bits,
+            split_bits,
+        } => {
+            let mut chars: Vec<u8> = hex(&data).into_bytes();
+            for (i, byte) in chars.iter_mut().enumerate() {
+                if (case_bits >> (i % 64)) & 1 == 1 {
+                    byte.make_ascii_uppercase();
+                }
+            }
+
+            let mut fragments: Vec<Vec<u8>> = Vec::new();
+            let mut current: Vec<u8> = Vec::new();
+            for byte_idx in 0..32 {
+                current.push(chars[byte_idx * 2]);
+                current.push(chars[byte_idx * 2 + 1]);
+                if byte_idx < 31 && (ws_bits >> byte_idx) & 1 == 1 {
+                    current.push(b' ');
+                }
+                if byte_idx < 31 && (split_bits >> byte_idx) & 1 == 1 {
+                    fragments.push(std::mem::take(&mut current));
+                }
+            }
+            fragments.push(current);
+
+            let strings: Vec<&[u8]> = fragments.iter().map(Vec::as_slice).collect();
+            assert_eq!(hex_literal::len(&strings), 32);
+            let decoded: [u8; 32] = hex_literal::decode(&strings);
+            assert_eq!(decoded, data);
         }
 
         FuzzInput::MaxFaults { n } => {

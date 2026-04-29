@@ -50,10 +50,38 @@ fn classify(s: &str) -> Result<(), Error> {
     Ok(())
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     raw: String,
     bytes: Vec<u8>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_disc: u8 = u.arbitrary()?;
+        let raw = if raw_disc == 0 {
+            String::new()
+        } else {
+            let first: char = u.arbitrary()?;
+            let rest: String = u.arbitrary()?;
+            let mut s = String::with_capacity(first.len_utf8() + rest.len());
+            s.push(first);
+            s.push_str(&rest);
+            s
+        };
+        let bytes_disc: u8 = u.arbitrary()?;
+        let bytes = if bytes_disc == 0 {
+            Vec::new()
+        } else {
+            let first: u8 = u.arbitrary()?;
+            let rest: Vec<u8> = u.arbitrary()?;
+            let mut v = Vec::with_capacity(1 + rest.len());
+            v.push(first);
+            v.extend(rest);
+            v
+        };
+        Ok(Self { raw, bytes })
+    }
 }
 
 fn fuzz(input: FuzzInput) {
