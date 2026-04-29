@@ -117,11 +117,6 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
         assert!(entry.delivery.replace(aborter).is_none());
     }
 
-    /// Number of in-flight deliveries.
-    pub(super) fn active(&self) -> usize {
-        self.deliveries.len()
-    }
-
     /// Returns a future that resolves to the next completed delivery, or [Aborted] if
     /// the delivery was canceled.
     pub(super) fn next_delivery(

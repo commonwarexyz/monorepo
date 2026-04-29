@@ -169,10 +169,7 @@ impl<
                     .metrics
                     .fetch_pending
                     .try_set(self.fetcher.len_pending());
-                let _ = self
-                    .metrics
-                    .fetch_active
-                    .try_set(self.fetcher.len_active() + self.inflight.active());
+                let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
                 let _ = self
                     .metrics
                     .peers_blocked
