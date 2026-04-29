@@ -7,9 +7,6 @@ use std::collections::HashMap;
 pub enum Event<K, V> {
     /// The consumer received a value for a key and considered it valid
     Success(K, V),
-
-    /// The consumer failed to fetch a value for a key
-    Failed(K),
 }
 
 /// A consumer that can be used for testing
@@ -62,7 +59,6 @@ impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
 impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consumer<K, V> {
     type Key = K;
     type Value = V;
-    type Failure = ();
 
     /// Deliver data to the consumer.
     ///
@@ -73,10 +69,5 @@ impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consume
             self.sender.send_lossy(Event::Success(key, value));
         }
         valid
-    }
-
-    /// Let the consumer know that the data is not being fetched anymore.
-    async fn failed(&mut self, key: Self::Key, _failure: ()) {
-        self.sender.send_lossy(Event::Failed(key));
     }
 }

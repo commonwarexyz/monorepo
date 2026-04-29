@@ -20,9 +20,6 @@ commonware_macros::stability_scope!(BETA {
         /// Type of data to retrieve.
         type Value;
 
-        /// Type used to indicate why data is not available.
-        type Failure;
-
         /// Deliver data to the consumer.
         ///
         /// Returns `true` if the data is valid.
@@ -30,8 +27,7 @@ commonware_macros::stability_scope!(BETA {
         /// The returned future may be dropped before completion if the
         /// application cancels the fetch via [`Resolver::cancel`],
         /// [`Resolver::clear`], or [`Resolver::retain`]. Implementations must
-        /// make partial delivery progress cancel-safe and tolerate a later
-        /// [`Consumer::failed`] notification for the same key.
+        /// make partial delivery progress cancel-safe.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
@@ -40,17 +36,6 @@ commonware_macros::stability_scope!(BETA {
             key: Self::Key,
             value: Self::Value,
         ) -> impl Future<Output = bool> + Send;
-
-        /// Let the consumer know that the data is not being fetched anymore.
-        ///
-        /// The failure is used to indicate why. Implementations must tolerate
-        /// this notification running out-of-band from the resolver event loop
-        /// and potentially after later resolver operations for other keys.
-        fn failed(
-            &mut self,
-            key: Self::Key,
-            failure: Self::Failure,
-        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.

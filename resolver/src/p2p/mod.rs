@@ -210,7 +210,7 @@ mod tests {
             Sender<PublicKey, deterministic::Context>,
             Receiver<PublicKey>,
         ),
-        consumer: impl crate::Consumer<Key = Key, Value = Bytes, Failure = ()>,
+        consumer: impl crate::Consumer<Key = Key, Value = Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
@@ -267,7 +267,6 @@ mod tests {
     impl crate::Consumer for BlockingConsumer {
         type Key = Key;
         type Value = Bytes;
-        type Failure = ();
 
         async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
             self.started.send_lossy(key.clone());
@@ -277,10 +276,6 @@ mod tests {
             }
             self.sender.send_lossy(Event::Success(key, value));
             true
-        }
-
-        async fn failed(&mut self, key: Self::Key, _failure: ()) {
-            self.sender.send_lossy(Event::Failed(key));
         }
     }
 
@@ -332,7 +327,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 2"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -406,7 +400,6 @@ mod tests {
                             assert_eq!(key_actual, key2);
                             assert_eq!(value, data2);
                         }
-                        Event::Failed(key) => panic!("Fetch failed unexpectedly for {key:?}"),
                     }
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
@@ -421,7 +414,6 @@ mod tests {
                     assert_eq!(key_actual, key1);
                     assert_eq!(value, data1);
                 }
-                Event::Failed(key) => panic!("Fetch failed unexpectedly for {key:?}"),
             }
         });
     }
@@ -580,7 +572,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 3"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -707,7 +698,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 2"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -795,7 +785,6 @@ mod tests {
                                 panic!("Unexpected key received");
                             }
                         }
-                        Event::Failed(_) => panic!("Fetch failed unexpectedly"),
                     }
                 }
                 assert!(found_key2 && found_key3,);
@@ -859,7 +848,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 6"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Attempt to cancel after data has been delivered, expecting no effect
@@ -962,7 +950,6 @@ mod tests {
                         assert_eq!(key_actual, key_a);
                         assert_eq!(value, valid_data_a);
                     }
-                    Event::Failed(_) => panic!("Fetch failed unexpectedly"),
                 }
             }
 
@@ -1040,7 +1027,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 5"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Make sure we don't receive a second event for the duplicate fetch
@@ -1111,7 +1097,6 @@ mod tests {
                     assert_eq!(key_actual, key1);
                     assert_eq!(value, Bytes::from("data from peer 2"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Change peer set to include peer 3
@@ -1139,7 +1124,6 @@ mod tests {
                     assert_eq!(key_actual, key2);
                     assert_eq!(value, Bytes::from("data from peer 3"));
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -1222,7 +1206,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, valid_data);
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Verify peer 2 was blocked (sent invalid data)
@@ -1425,7 +1408,6 @@ mod tests {
                     Event::Success(key, value) => {
                         results.insert(key, value);
                     }
-                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
                 }
             }
 
@@ -1516,7 +1498,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, valid_data);
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -1596,7 +1577,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, valid_data);
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -1667,7 +1647,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 5"));
                 }
-                Event::Failed(_) => unreachable!(),
             }
         });
     }
@@ -1737,7 +1716,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 6"));
                 }
-                Event::Failed(_) => unreachable!(),
             }
         });
     }
@@ -1826,7 +1804,6 @@ mod tests {
                     Event::Success(key, value) => {
                         results.insert(key.clone(), value);
                     }
-                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
                 }
             }
 
@@ -1917,7 +1894,6 @@ mod tests {
                     Event::Success(key, value) => {
                         results.insert(key.clone(), value);
                     }
-                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
                 }
             }
 
@@ -2000,7 +1976,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, data);
                 }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -2357,7 +2332,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, valid_history);
                 }
-                Event::Failed(_) => panic!("fetch failed unexpectedly"),
             }
 
             assert!(
@@ -2434,7 +2408,6 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, data);
                 }
-                Event::Failed(_) => panic!("secondary peer request should have been served"),
             }
         });
     }
@@ -2518,7 +2491,6 @@ mod tests {
             let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Abort all actors
@@ -2590,7 +2562,6 @@ mod tests {
             let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Abort all actors
