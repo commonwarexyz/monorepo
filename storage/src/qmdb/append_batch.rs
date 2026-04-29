@@ -1,4 +1,4 @@
-//! Shared append-batch machinery for QMDB variants.
+//! Shared append-batch algebra for QMDB variants.
 
 use crate::{
     merkle::{self, batch, hasher::Hasher as MerkleHasher, Family, Location, Position},
@@ -8,8 +8,8 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use std::sync::Arc;
 
-/// Root state for an unmerkleized batch.
-pub(crate) enum BatchBase<F: Family, D: Digest, W> {
+/// Lineage for an unmerkleized batch.
+pub(crate) enum BatchLineage<F: Family, D: Digest, W> {
     /// The batch is rooted directly in the committed database.
     Db {
         /// Committed leaf count when the batch was created. Used to detect stale batches at apply.
@@ -21,8 +21,8 @@ pub(crate) enum BatchBase<F: Family, D: Digest, W> {
     Child(Arc<W>),
 }
 
-/// Resolved root state for a batch before new leaves are appended.
-pub(crate) struct ResolvedBase<F: Family, D: Digest, W> {
+/// Resolved lineage for a batch before new leaves are appended.
+pub(crate) struct ResolvedLineage<F: Family, D: Digest, W> {
     /// Leaf count this batch starts appending at (committed tip + ancestors' ops).
     ///
     /// Differs from `db_size` only when the batch has uncommitted ancestors: `base_size` advances
@@ -37,8 +37,9 @@ pub(crate) struct ResolvedBase<F: Family, D: Digest, W> {
     pub(crate) ancestors: Vec<Arc<W>>,
 }
 
-/// Span covered by a merkleized batch and the floor declared by its commit.
-pub(crate) struct BatchSpan<F: Family> {
+/// Log extent covered by a merkleized batch and the floor declared by its commit.
+#[derive(Clone, Copy)]
+pub(crate) struct BatchExtent<F: Family> {
     /// Leaf count this batch starts at; equals `db_size` when the batch has no ancestors.
     base_size: u64,
     /// Committed leaf count when the batch chain was forked. Used for stale-batch detection.
@@ -46,114 +47,63 @@ pub(crate) struct BatchSpan<F: Family> {
     /// Leaf count after this batch (data ops + the commit leaf) is applied.
     total_size: u64,
     /// Inactivity floor declared by this batch's commit operation.
-    new_floor: Location<F>,
+    commit_floor: Location<F>,
 }
 
-/// View of a merkleized append batch used by shared chain validation and child-batch creation.
+/// View of a merkleized append batch used by shared validation and child-batch creation.
 pub(crate) trait AppendBatchView<F: Family, D: Digest> {
     /// Speculative Merkle batch built from this chain's leaves.
     fn merkle(&self) -> &Arc<batch::MerkleizedBatch<F, D>>;
 
-    /// Position bookkeeping plus the floor declared by this batch's commit.
-    fn span(&self) -> &BatchSpan<F>;
-
-    /// Return the location of the commit operation ending this batch.
-    fn commit_loc(&self) -> Location<F> {
-        self.span().commit_loc()
-    }
-
-    /// Return the inactivity floor declared by this batch's commit operation.
-    fn commit_floor(&self) -> Location<F> {
-        self.span().commit_floor()
-    }
+    /// Log extent plus the floor declared by this batch's commit.
+    fn extent(&self) -> &BatchExtent<F>;
 
     /// Return the speculative root.
     fn root(&self) -> D {
         self.merkle().root()
     }
-
-    /// Validate whether this batch can be applied on top of the current database state.
-    fn validate_apply<W>(
-        &self,
-        starting_floor: Location<F>,
-        current_db_size: u64,
-        ancestors: &[Arc<W>],
-    ) -> Result<(), Error<F>>
-    where
-        W: AppendBatchView<F, D>,
-    {
-        self.span().validate_stale(
-            current_db_size,
-            ancestors
-                .iter()
-                .map(|ancestor| ancestor.span().total_size()),
-        )?;
-        self.span().validate_floors(
-            starting_floor,
-            current_db_size,
-            ancestors
-                .iter()
-                .map(|ancestor| (ancestor.span().total_size(), ancestor.commit_floor())),
-        )
-    }
 }
 
-/// A merkleized append batch plus its speculative ancestor chain.
-///
-/// Used by [`BatchBase::resolve`] so child batches can recover their parent Merkle state and the
-/// chain of uncommitted ancestors through wrapper-specific storage.
-pub(crate) trait AppendBatchChain<F: Family, D: Digest>:
-    AppendBatchView<F, D> + Sized
-{
-    /// Uncommitted ancestors, newest-to-oldest. Excludes `self`.
-    fn ancestors(&self) -> &[Arc<Self>];
-
-    /// Build a newest-to-oldest ancestor chain rooted at `parent`, including `parent` itself.
-    fn ancestor_chain(parent: &Arc<Self>) -> Vec<Arc<Self>> {
-        let mut ancestors = Vec::with_capacity(parent.ancestors().len() + 1);
-        ancestors.push(Arc::clone(parent));
-        ancestors.extend(parent.ancestors().iter().cloned());
-        ancestors
-    }
-}
-
-impl<F, D, W> BatchBase<F, D, W>
+impl<F, D, W> BatchLineage<F, D, W>
 where
     F: Family,
     D: Digest,
-    W: AppendBatchChain<F, D>,
+    W: AppendBatchView<F, D>,
 {
     /// Resolve this base into merkle parent state and newest-to-oldest ancestors.
-    pub(crate) fn resolve(self) -> ResolvedBase<F, D, W> {
+    pub(crate) fn resolve(
+        self,
+        ancestor_chain: impl FnOnce(&Arc<W>) -> Vec<Arc<W>>,
+    ) -> ResolvedLineage<F, D, W> {
         match self {
             Self::Db {
                 db_size,
                 merkle_parent,
-            } => ResolvedBase {
+            } => ResolvedLineage {
                 base_size: db_size,
                 db_size,
                 merkle_parent,
                 ancestors: Vec::new(),
             },
-            Self::Child(parent) => ResolvedBase {
-                base_size: parent.span().total_size(),
-                db_size: parent.span().db_size(),
+            Self::Child(parent) => ResolvedLineage {
+                base_size: parent.extent().total_size(),
+                db_size: parent.extent().db_size(),
                 merkle_parent: Arc::clone(parent.merkle()),
-                ancestors: W::ancestor_chain(&parent),
+                ancestors: ancestor_chain(&parent),
             },
         }
     }
 }
 
-impl<F: Family> BatchSpan<F> {
+impl<F: Family> BatchExtent<F> {
     /// Build metadata for a committed state with no speculative appends. Used by `to_batch` to
     /// represent the database tip as an empty batch; all three positions collapse to `size`.
-    pub(crate) const fn quiescent(size: u64, new_floor: Location<F>) -> Self {
+    pub(crate) const fn quiescent(size: u64, commit_floor: Location<F>) -> Self {
         Self {
             base_size: size,
             db_size: size,
             total_size: size,
-            new_floor,
+            commit_floor,
         }
     }
 
@@ -163,13 +113,13 @@ impl<F: Family> BatchSpan<F> {
         base_size: u64,
         db_size: u64,
         item_count: usize,
-        new_floor: Location<F>,
+        commit_floor: Location<F>,
     ) -> Self {
         Self {
             base_size,
             db_size,
             total_size: base_size + item_count as u64 + 1,
-            new_floor,
+            commit_floor,
         }
     }
 
@@ -185,10 +135,10 @@ impl<F: Family> BatchSpan<F> {
 
     /// Return the inactivity floor declared by this batch's commit operation.
     pub(crate) const fn commit_floor(&self) -> Location<F> {
-        self.new_floor
+        self.commit_floor
     }
 
-    /// Return whether this span has not yet been reflected in a database of `current_db_size`.
+    /// Return whether this extent has not yet been reflected in a database of `current_db_size`.
     pub(crate) const fn is_unapplied(&self, current_db_size: u64) -> bool {
         self.total_size > current_db_size
     }
@@ -248,11 +198,11 @@ impl<F: Family> BatchSpan<F> {
         }
 
         let commit_loc = self.commit_loc();
-        if self.new_floor < prev_floor {
-            return Err(Error::FloorRegressed(self.new_floor, prev_floor));
+        if self.commit_floor < prev_floor {
+            return Err(Error::FloorRegressed(self.commit_floor, prev_floor));
         }
-        if self.new_floor > commit_loc {
-            return Err(Error::FloorBeyondSize(self.new_floor, commit_loc));
+        if self.commit_floor > commit_loc {
+            return Err(Error::FloorBeyondSize(self.commit_floor, commit_loc));
         }
         Ok(())
     }
@@ -261,32 +211,32 @@ impl<F: Family> BatchSpan<F> {
 /// Concrete append-batch view for compact variants.
 ///
 /// Full variants derive their Merkle view from the authenticated journal batch. Compact variants
-/// do not carry a journal batch, so they store this Merkle state and span directly.
-pub(crate) struct AppendBatchCore<F: Family, D: Digest> {
+/// do not carry a journal batch, so they store this Merkle state and extent directly.
+pub(crate) struct CompactBatch<F: Family, D: Digest> {
     /// Speculative Merkle batch built from this chain's leaves.
     pub(crate) merkle: Arc<batch::MerkleizedBatch<F, D>>,
-    /// Position bookkeeping plus the floor declared by this batch's commit.
-    pub(crate) span: BatchSpan<F>,
+    /// Log extent plus the floor declared by this batch's commit.
+    pub(crate) extent: BatchExtent<F>,
 }
 
-impl<F: Family, D: Digest> AppendBatchView<F, D> for AppendBatchCore<F, D> {
+impl<F: Family, D: Digest> AppendBatchView<F, D> for CompactBatch<F, D> {
     fn merkle(&self) -> &Arc<batch::MerkleizedBatch<F, D>> {
         &self.merkle
     }
 
-    fn span(&self) -> &BatchSpan<F> {
-        &self.span
+    fn extent(&self) -> &BatchExtent<F> {
+        &self.extent
     }
 }
 
-impl<F: Family, D: Digest> AppendBatchCore<F, D> {
-    /// Build a core by merkleizing pre-computed leaf digests.
+impl<F: Family, D: Digest> CompactBatch<F, D> {
+    /// Build a compact batch by merkleizing pre-computed leaf digests.
     fn from_leaf_digests(
         parent: Arc<batch::MerkleizedBatch<F, D>>,
         mem: &merkle::mem::Mem<F, D>,
         hasher: &impl MerkleHasher<F, Digest = D>,
         leaves: &[D],
-        span: BatchSpan<F>,
+        extent: BatchExtent<F>,
     ) -> Self {
         let mut batch = parent.new_batch();
         for digest in leaves {
@@ -294,11 +244,11 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         }
         Self {
             merkle: batch.merkleize(mem, hasher),
-            span,
+            extent,
         }
     }
 
-    /// Build a core by hashing encoded operations at consecutive locations.
+    /// Build a compact batch by hashing encoded operations at consecutive locations.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_encoded_ops<H, Op>(
         parent: Arc<batch::MerkleizedBatch<F, D>>,
@@ -306,7 +256,7 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         hasher: &H,
         base_size: u64,
         db_size: u64,
-        new_floor: Location<F>,
+        commit_floor: Location<F>,
         data_ops: impl ExactSizeIterator<Item = Op>,
         commit_op: Op,
     ) -> Self
@@ -324,8 +274,9 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         let pos = Position::try_from(commit_loc).expect("valid leaf location");
         leaves.push(hasher.leaf_digest(pos, &commit_op.encode()));
 
-        let span = BatchSpan::from_item_count(base_size, db_size, leaves.len() - 1, new_floor);
-        Self::from_leaf_digests(parent, mem, hasher, &leaves, span)
+        let extent =
+            BatchExtent::from_item_count(base_size, db_size, leaves.len() - 1, commit_floor);
+        Self::from_leaf_digests(parent, mem, hasher, &leaves, extent)
     }
 
     /// Return the speculative root.
@@ -342,13 +293,13 @@ mod tests {
     type F = mmr::Family;
 
     #[test]
-    fn batch_span_validates_stale_sizes() {
-        let span = BatchSpan::<F>::from_item_count(10, 10, 2, Location::new(12));
+    fn batch_extent_validates_stale_sizes() {
+        let extent = BatchExtent::<F>::from_item_count(10, 10, 2, Location::new(12));
 
-        assert!(span.validate_stale(10, []).is_ok());
-        assert!(span.validate_stale(12, [12]).is_ok());
+        assert!(extent.validate_stale(10, []).is_ok());
+        assert!(extent.validate_stale(12, [12]).is_ok());
 
-        let err = span.validate_stale(11, []).unwrap_err();
+        let err = extent.validate_stale(11, []).unwrap_err();
         assert!(matches!(
             err,
             Error::StaleBatch {
@@ -360,14 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn batch_span_validates_floor_monotonicity() {
-        let span = BatchSpan::<F>::from_item_count(10, 10, 2, Location::new(8));
+    fn batch_extent_validates_floor_monotonicity() {
+        let extent = BatchExtent::<F>::from_item_count(10, 10, 2, Location::new(8));
 
-        assert!(span
+        assert!(extent
             .validate_floors(Location::new(5), 10, [(12, Location::new(7))])
             .is_ok());
 
-        let err = span
+        let err = extent
             .validate_floors(Location::new(5), 10, [(12, Location::new(4))])
             .unwrap_err();
         assert!(matches!(
@@ -378,10 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn batch_span_rejects_floor_beyond_commit() {
-        let span = BatchSpan::<F>::from_item_count(10, 10, 2, Location::new(13));
+    fn batch_extent_rejects_floor_beyond_commit() {
+        let extent = BatchExtent::<F>::from_item_count(10, 10, 2, Location::new(13));
 
-        let err = span.validate_floors(Location::new(5), 10, []).unwrap_err();
+        let err = extent
+            .validate_floors(Location::new(5), 10, [])
+            .unwrap_err();
         assert!(matches!(
             err,
             Error::FloorBeyondSize(floor, commit)

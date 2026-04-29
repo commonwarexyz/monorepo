@@ -73,12 +73,11 @@ pub struct Db<
     /// - There is always at least one commit operation in the log.
     pub(crate) log: AuthenticatedLog<F, E, C, H>,
 
-    /// A location before which all operations are "inactive" (that is, operations before this point
-    /// are over keys that have been updated by some operation at or after this point).
-    pub(crate) inactivity_floor_loc: Location<F>,
-
-    /// The location of the last commit operation.
+    /// Location of the last committed operation.
     pub(crate) last_commit_loc: Location<F>,
+
+    /// Inactivity floor declared by the last committed batch.
+    pub(crate) inactivity_floor_loc: Location<F>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -587,9 +586,9 @@ where
 
         Ok(Self {
             log,
+            last_commit_loc,
             inactivity_floor_loc,
             snapshot: index,
-            last_commit_loc,
             active_keys,
             bitmap,
             _update: core::marker::PhantomData,

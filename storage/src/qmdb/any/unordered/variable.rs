@@ -489,7 +489,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // B has more ops than A.
-            assert!(batch_b.total_size > batch_a.total_size);
+            assert!(batch_b.extent.total_size() > batch_a.extent.total_size());
 
             // Apply A, then B must be stale.
             db.apply_batch(batch_a).await.unwrap();

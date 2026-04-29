@@ -124,10 +124,8 @@ where
         let db = Self {
             journal,
             snapshot,
-            commit_bounds: crate::qmdb::commit_bounds::CommitBounds::new(
-                last_commit_loc,
-                inactivity_floor_loc,
-            ),
+            last_commit_loc,
+            inactivity_floor_loc,
         };
 
         db.sync().await?;

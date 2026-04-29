@@ -2493,10 +2493,7 @@ mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
     //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
     //! so one variant (`unordered::variable`) suffices as the test bed.
-    use crate::{
-        merkle::Location,
-        qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
-    };
+    use crate::qmdb::any::unordered::variable::test::{create_test_config, AnyTest};
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -2564,7 +2561,7 @@ mod bitmap_tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                commit_locs.push(batch.new_last_commit_loc);
+                commit_locs.push(batch.extent.commit_loc());
                 db.apply_batch(batch).await.unwrap();
             }
             db.commit().await.unwrap();
@@ -2612,7 +2609,7 @@ mod bitmap_tests {
                 .unwrap();
             db.apply_batch(b1).await.unwrap();
             db.commit().await.unwrap();
-            let size_after_first = Location::new(*db.last_commit_loc + 1);
+            let size_after_first = db.last_commit_loc + 1;
 
             let b2 = db
                 .new_batch()
@@ -2685,7 +2682,7 @@ mod bitmap_tests {
                 .await
                 .unwrap();
             assert!(
-                parent.total_size > committed_bitmap_len,
+                parent.extent.total_size() > committed_bitmap_len,
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
@@ -2700,7 +2697,7 @@ mod bitmap_tests {
             }
             let child = child_batch.merkleize(&db, None).await.unwrap();
             assert!(
-                child.total_size > committed_bitmap_len,
+                child.extent.total_size() > committed_bitmap_len,
                 "child must include an uncommitted tail beyond committed bitmap",
             );
             let expected_root = child.root();

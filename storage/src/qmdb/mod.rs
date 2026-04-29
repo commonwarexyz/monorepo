@@ -56,7 +56,6 @@ use thiserror::Error;
 pub mod any;
 pub(crate) mod append_batch;
 pub(crate) mod bitmap;
-pub(crate) mod commit_bounds;
 pub(crate) mod compact_db;
 pub(crate) mod compact_witness;
 #[cfg(test)]
@@ -65,6 +64,7 @@ pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod operation;
+pub(crate) mod plan;
 pub mod store;
 pub mod sync;
 pub mod verify;

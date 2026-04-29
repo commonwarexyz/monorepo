@@ -50,9 +50,7 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{
-        any::value::ValueEncoding, append_batch::BatchSpan, commit_bounds::CommitBounds, Error,
-    },
+    qmdb::{any::value::ValueEncoding, append_batch::BatchExtent, plan::apply, Error},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -95,8 +93,11 @@ where
     /// Authenticated journal of operations.
     journal: authenticated::Journal<F, E, C, H>,
 
-    /// Committed tip and inactivity-floor pointers.
-    commit_bounds: CommitBounds<F>,
+    /// Location of the last committed operation.
+    last_commit_loc: Location<F>,
+
+    /// Inactivity floor declared by the last committed batch.
+    inactivity_floor_loc: Location<F>,
 }
 
 impl<F, E, V, C, H> Keyless<F, E, V, C, H>
@@ -134,7 +135,8 @@ where
 
         Ok(Self {
             journal,
-            commit_bounds: CommitBounds::new(last_commit_loc, inactivity_floor_loc),
+            last_commit_loc,
+            inactivity_floor_loc,
         })
     }
 
@@ -185,12 +187,12 @@ where
 
     /// Returns the location of the last commit.
     pub const fn last_commit_loc(&self) -> Location<F> {
-        self.commit_bounds.last_commit_loc()
+        self.last_commit_loc
     }
 
     /// Returns the inactivity floor declared by the last committed batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.commit_bounds.inactivity_floor_loc()
+        self.inactivity_floor_loc
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
@@ -204,7 +206,7 @@ where
     /// upper bound on [`Self::prune`]'s `loc`. For keyless databases, this equals the
     /// inactivity floor declared by the last committed batch.
     pub const fn sync_boundary(&self) -> Location<F> {
-        self.commit_bounds.inactivity_floor_loc()
+        self.inactivity_floor_loc
     }
 
     /// Get the metadata associated with the last commit.
@@ -213,7 +215,7 @@ where
             .journal
             .reader()
             .await
-            .read(*self.commit_bounds.last_commit_loc())
+            .read(*self.last_commit_loc)
             .await?;
         let Operation::Commit(metadata, _floor) = op else {
             return Ok(None);
@@ -294,10 +296,10 @@ where
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
     ///   the last committed batch.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        if loc > self.commit_bounds.inactivity_floor_loc() {
+        if loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
-                self.commit_bounds.inactivity_floor_loc(),
+                self.inactivity_floor_loc,
             ));
         }
         self.journal.prune(loc).await?;
@@ -327,7 +329,7 @@ where
     /// [`Self::sync`].
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.commit_bounds.size();
+        let current_size = *self.last_commit_loc + 1;
         if rewind_size == current_size {
             return Ok(());
         }
@@ -356,7 +358,8 @@ where
         // Journal rewind happens before in-memory commit-location updates. If a later step fails,
         // this handle may be internally diverged and must be dropped by the caller.
         self.journal.rewind(rewind_size).await?;
-        self.commit_bounds = CommitBounds::new(rewind_last_loc, rewind_floor);
+        self.last_commit_loc = rewind_last_loc;
+        self.inactivity_floor_loc = rewind_floor;
         Ok(())
     }
 
@@ -379,18 +382,18 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V> {
-        let journal_size = *self.commit_bounds.size();
+        let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
 
     /// Create an initial [`batch::MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V>> {
-        let journal_size = *self.commit_bounds.size();
+        let journal_size = *self.last_commit_loc + 1;
         let journal_batch = self.journal.to_merkleized_batch();
-        let span = BatchSpan::quiescent(journal_size, self.commit_bounds.inactivity_floor_loc());
+        let extent = BatchExtent::quiescent(journal_size, self.inactivity_floor_loc);
         Arc::new(batch::MerkleizedBatch {
             journal_batch,
-            span,
+            extent,
             ancestors: Vec::new(),
         })
     }
@@ -425,12 +428,19 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let validated = self
-            .commit_bounds
-            .validate(batch.as_ref(), &batch.ancestors)?;
+        let validated = apply(
+            self.last_commit_loc,
+            self.inactivity_floor_loc,
+            batch.as_ref(),
+            &batch.ancestors,
+        )?;
         self.journal.apply_batch(&batch.journal_batch).await?;
 
-        let range = validated.commit(&mut self.commit_bounds);
+        let range = {
+            self.last_commit_loc = validated.next_last_commit_loc();
+            self.inactivity_floor_loc = validated.next_inactivity_floor_loc();
+            validated.range()
+        };
         debug!(size = ?range.end, "applied batch");
         Ok(range)
     }

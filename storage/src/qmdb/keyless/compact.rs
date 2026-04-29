@@ -25,11 +25,10 @@ use crate::{
     },
     qmdb::{
         any::value::ValueEncoding,
-        append_batch::{
-            AppendBatchChain, AppendBatchCore, AppendBatchView, BatchBase, BatchSpan, ResolvedBase,
-        },
+        append_batch::{AppendBatchView, BatchExtent, BatchLineage, CompactBatch, ResolvedLineage},
         compact_db::CompactDbInner,
         compact_witness::CompactCommit,
+        plan::apply,
         sync::compact as compact_sync,
         Error,
     },
@@ -98,7 +97,7 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
-    base: BatchBase<F, H::Digest, MerkleizedBatch<F, H::Digest, V>>,
+    base: BatchLineage<F, H::Digest, MerkleizedBatch<F, H::Digest, V>>,
     appends: Vec<V::Value>,
 }
 
@@ -107,7 +106,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding>
 where
     Operation<F, V>: EncodeShared,
 {
-    pub(super) core: AppendBatchCore<F, D>,
+    pub(super) compact: CompactBatch<F, D>,
     pub(super) commit_metadata: Option<V::Value>,
     /// Strong refs to uncommitted ancestors, newest-to-oldest.
     ///
@@ -120,20 +119,11 @@ where
     Operation<F, V>: EncodeShared,
 {
     fn merkle(&self) -> &Arc<crate::merkle::batch::MerkleizedBatch<F, D>> {
-        &self.core.merkle
+        &self.compact.merkle
     }
 
-    fn span(&self) -> &BatchSpan<F> {
-        &self.core.span
-    }
-}
-
-impl<F: Family, D: Digest, V: ValueEncoding> AppendBatchChain<F, D> for MerkleizedBatch<F, D, V>
-where
-    Operation<F, V>: EncodeShared,
-{
-    fn ancestors(&self) -> &[Arc<Self>] {
-        &self.ancestors
+    fn extent(&self) -> &BatchExtent<F> {
+        &self.compact.extent
     }
 }
 
@@ -141,9 +131,17 @@ impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
 {
+    /// Build a newest-to-oldest ancestor chain rooted at `parent`, including `parent` itself.
+    fn ancestor_chain(parent: &Arc<Self>) -> Vec<Arc<Self>> {
+        let mut ancestors = Vec::with_capacity(parent.ancestors.len() + 1);
+        ancestors.push(Arc::clone(parent));
+        ancestors.extend(parent.ancestors.iter().cloned());
+        ancestors
+    }
+
     /// Return the root digest after this batch is applied.
     pub fn root(&self) -> D {
-        self.core.root()
+        self.compact.root()
     }
 
     /// Create a new speculative batch with this one as its parent.
@@ -152,7 +150,7 @@ where
         H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            base: BatchBase::Child(Arc::clone(self)),
+            base: BatchLineage::Child(Arc::clone(self)),
             appends: Vec::new(),
         }
     }
@@ -172,7 +170,7 @@ where
         Operation<F, V>: Read<Cfg = C>,
     {
         Self {
-            base: BatchBase::Db {
+            base: BatchLineage::Db {
                 db_size: committed_size,
                 merkle_parent: db.inner.merkle.to_batch(),
             },
@@ -204,15 +202,15 @@ where
         Operation<F, V>: Read<Cfg = C>,
     {
         let hasher = StandardHasher::<H>::new();
-        let ResolvedBase {
+        let ResolvedLineage {
             base_size,
             db_size,
             merkle_parent,
             ancestors,
-        } = self.base.resolve();
+        } = self.base.resolve(MerkleizedBatch::ancestor_chain);
         let commit_op = Operation::Commit(metadata.clone(), inactivity_floor);
-        let core = db.inner.merkle.with_mem(|mem| {
-            AppendBatchCore::from_encoded_ops(
+        let compact = db.inner.merkle.with_mem(|mem| {
+            CompactBatch::from_encoded_ops(
                 merkle_parent,
                 mem,
                 &hasher,
@@ -225,7 +223,7 @@ where
         });
 
         Arc::new(MerkleizedBatch {
-            core,
+            compact,
             commit_metadata: metadata,
             ancestors,
         })
@@ -314,7 +312,7 @@ where
 
     /// Return the latest compact-sync target this compact db can currently serve.
     ///
-    /// This reflects the last state for which both commit_bounds and witness were durably captured,
+    /// This reflects the last state for which both commit pointers and witness were durably captured,
     /// which may lag behind live in-memory mutations until [`Self::sync`] is called.
     pub fn current_target(&self) -> compact_sync::Target<F, H::Digest> {
         self.inner.current_target()
@@ -345,11 +343,11 @@ where
     /// Create an owned merkleized batch representing the current committed state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V>> {
         let committed_size = *self.inner.size();
-        let span = BatchSpan::quiescent(committed_size, self.inner.inactivity_floor_loc());
+        let extent = BatchExtent::quiescent(committed_size, self.inner.inactivity_floor_loc());
         Arc::new(MerkleizedBatch {
-            core: AppendBatchCore {
+            compact: CompactBatch {
                 merkle: self.inner.merkle.to_batch(),
-                span,
+                extent,
             },
             commit_metadata: self.inner.get_metadata(),
             ancestors: Vec::new(),
@@ -372,13 +370,19 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let validated = self
-            .inner
-            .commit_bounds
-            .validate(&batch.core, &batch.ancestors)?;
-        self.inner.merkle.apply_batch(&batch.core.merkle)?;
+        let validated = apply(
+            self.inner.last_commit_loc,
+            self.inner.inactivity_floor_loc,
+            &batch.compact,
+            &batch.ancestors,
+        )?;
+        self.inner.merkle.apply_batch(&batch.compact.merkle)?;
         self.inner.last_commit_metadata = batch.commit_metadata.clone();
-        Ok(validated.commit(&mut self.inner.commit_bounds))
+        Ok({
+            self.inner.last_commit_loc = validated.next_last_commit_loc();
+            self.inner.inactivity_floor_loc = validated.next_inactivity_floor_loc();
+            validated.range()
+        })
     }
 
     /// Durably persist the current db state to disk.
