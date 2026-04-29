@@ -138,7 +138,7 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::mocks::{Consumer as MockConsumer, Event, Key as MockKey};
+    use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -291,7 +291,7 @@ mod tests {
             assert!(delivery.valid);
 
             // The consumer was actually invoked.
-            let Event::Success(k, v) = events.recv().await.unwrap();
+            let (k, v) = events.recv().await.unwrap();
             assert_eq!(k, key);
             assert_eq!(v, value);
         });
