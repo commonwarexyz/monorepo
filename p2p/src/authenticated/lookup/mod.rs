@@ -876,35 +876,27 @@ mod tests {
 
             // Verify that network actors started for all peers
             let metrics_before = context.encode();
-            let is_running = |name: &str| -> bool {
-                metrics_before.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
+            let tasks_running = |metrics: &str, name: &str| -> Option<u64> {
+                metrics.lines().find_map(|line| {
+                    (line.starts_with("runtime_tasks_running{")
                         && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 1")
+                        && line.contains("kind=\"Task\""))
+                    .then(|| {
+                        line.split_whitespace()
+                            .next_back()
+                            .expect("metric line must have a value")
+                            .parse::<u64>()
+                            .expect("running task count must be an integer")
+                    })
                 })
             };
-            for i in 0..n {
-                let prefix = format!("peer_{i}_network");
-                assert!(
-                    is_running(&format!("{prefix}_tracker")),
-                    "peer_{i} tracker should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_router")),
-                    "peer_{i} router should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_spawner")),
-                    "peer_{i} spawner should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_listener")),
-                    "peer_{i} listener should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_dialer")),
-                    "peer_{i} dialer should be running"
+
+            for actor in ["tracker", "router", "spawner", "listener", "dialer"] {
+                let name = format!("peer_network_{actor}");
+                assert_eq!(
+                    tasks_running(&metrics_before, &name),
+                    Some(n as u64),
+                    "{name} should have {n} running tasks before shutdown"
                 );
             }
 
@@ -928,35 +920,12 @@ mod tests {
 
             // Verify that all network actors stopped
             let metrics_after = context.encode();
-            let is_stopped = |name: &str| -> bool {
-                metrics_after.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 0")
-                })
-            };
-            for i in 0..n {
-                let prefix = format!("peer_{i}_network");
-                assert!(
-                    is_stopped(&format!("{prefix}_tracker")),
-                    "peer_{i} tracker should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_router")),
-                    "peer_{i} router should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_spawner")),
-                    "peer_{i} spawner should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_listener")),
-                    "peer_{i} listener should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_dialer")),
-                    "peer_{i} dialer should be stopped"
+            for actor in ["tracker", "router", "spawner", "listener", "dialer"] {
+                let name = format!("peer_network_{actor}");
+                assert_eq!(
+                    tasks_running(&metrics_after, &name),
+                    Some(0),
+                    "{name} should be stopped"
                 );
             }
         });

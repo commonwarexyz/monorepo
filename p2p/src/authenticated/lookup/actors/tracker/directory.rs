@@ -737,7 +737,11 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
             assert_eq!(
-                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                metric_value(
+                    &context.encode(),
+                    "directory_updates_total",
+                    &pk_1.to_string()
+                ),
                 None
             );
 
@@ -756,7 +760,11 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
             assert_eq!(
-                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                metric_value(
+                    &context.encode(),
+                    "directory_updates_total",
+                    &pk_1.to_string()
+                ),
                 Some(1)
             );
 
@@ -838,7 +846,11 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                metric_value(
+                    &context.encode(),
+                    "directory_updates_total",
+                    &pk_1.to_string()
+                ),
                 None
             );
 
@@ -852,7 +864,11 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                metric_value(&context.encode(), "updates_total", &pk_1.to_string()),
+                metric_value(
+                    &context.encode(),
+                    "directory_updates_total",
+                    &pk_1.to_string()
+                ),
                 Some(1)
             );
         });
@@ -1172,14 +1188,17 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                metric_value(&metrics, "connected", &pk_1.to_string()),
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
                 Some(connected_at)
             );
 
             directory.release(super::Metadata::Listener(pk_1.clone()));
 
             let metrics = context.encode();
-            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
+            assert_eq!(
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
+                None
+            );
         });
     }
 

@@ -994,14 +994,17 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                metric_value(&metrics, "connected", &pk_1.to_string()),
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
                 Some(connected_at)
             );
 
             directory.release(Metadata::Listener(pk_1.clone()));
 
             let metrics = context.encode();
-            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
+            assert_eq!(
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
+                None
+            );
         });
     }
 

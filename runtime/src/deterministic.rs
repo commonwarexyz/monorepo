@@ -2105,14 +2105,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate attribute key: epoch")]
-    fn test_metrics_duplicate_attribute_panics() {
+    fn test_metrics_duplicate_attribute_overwrites() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let _ = context
+            let context = context
                 .child("test")
                 .with_attribute("epoch", "old")
                 .with_attribute("epoch", "new");
+            assert_eq!(
+                context.name().attributes,
+                vec![("epoch".to_string(), "new".to_string())]
+            );
         });
     }
 

@@ -116,6 +116,22 @@ mod tests {
         success_rate: 0.5,
     };
 
+    fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {
+        let prefix = format!("{name}{{");
+        let status_label = format!("status=\"{status}\"");
+        metrics
+            .lines()
+            .filter(|line| line.starts_with(&prefix) && line.contains(&status_label))
+            .map(|line| {
+                line.split_whitespace()
+                    .next_back()
+                    .expect("metric line must have a value")
+                    .parse::<u64>()
+                    .expect("status metric value must be an integer")
+            })
+            .sum()
+    }
+
     async fn setup_network_and_peers(
         context: &deterministic::Context,
         peer_seeds: &[u64],
@@ -1045,7 +1061,10 @@ mod tests {
 
             // Verify metrics: 1 successful fetch (from peer 3 after peer 2 was blocked)
             let metrics = context.encode();
-            assert!(metrics.contains("_fetch_total{status=\"Success\"} 1"));
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                1
+            );
         });
     }
 
@@ -1249,7 +1268,10 @@ mod tests {
 
             // Verify metrics: 3 successful fetches
             let metrics = context.encode();
-            assert!(metrics.contains("_fetch_total{status=\"Success\"} 3"));
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                3
+            );
         });
     }
 
