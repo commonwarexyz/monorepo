@@ -305,8 +305,8 @@ impl BufferPoolConfig {
     }
 
     /// Returns true if thread-local caching is enabled.
-    pub const fn thread_cache_enabled(&self) -> bool {
-        matches!(self.thread_cache_config, BufferPoolThreadCacheConfig::Enabled(_))
+    pub fn thread_cache_enabled(&self) -> bool {
+        self.resolve_thread_cache_capacity() > 0
     }
 
     /// Validates the configuration, panicking on invalid values.
@@ -1239,6 +1239,26 @@ mod tests {
         let page = page_size();
         let config = test_config(page, page * 4, 10).with_thread_cache_capacity(NZUsize!(11));
         config.validate();
+    }
+
+    #[test]
+    fn test_thread_cache_enabled_uses_resolved_capacity() {
+        let page = page_size();
+
+        // Automatic sizing can resolve to zero for small class budgets.
+        let auto_zero = test_config(page, page, 1);
+        assert_eq!(auto_zero.resolve_thread_cache_capacity(), 0);
+        assert!(!auto_zero.thread_cache_enabled());
+
+        let auto_nonzero = test_config(page, page, 4);
+        assert!(auto_nonzero.resolve_thread_cache_capacity() > 0);
+        assert!(auto_nonzero.thread_cache_enabled());
+
+        let explicit = test_config(page, page, 1).with_thread_cache_capacity(NZUsize!(1));
+        assert!(explicit.thread_cache_enabled());
+
+        let disabled = test_config(page, page, 4).with_thread_cache_disabled();
+        assert!(!disabled.thread_cache_enabled());
     }
 
     #[test]
