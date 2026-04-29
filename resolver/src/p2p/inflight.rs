@@ -77,11 +77,6 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
         self.entries.remove(key).expect("inflight entry");
     }
 
-    /// Drop all in-flight entries without recording duration metrics.
-    pub(super) fn clear(&mut self) {
-        self.entries.clear();
-    }
-
     /// Drop entries for which the predicate returns false. Cancels the timer
     /// for each dropped entry. Returns the count of dropped entries.
     pub(super) fn retain<F: FnMut(&Key) -> bool>(&mut self, mut predicate: F) -> usize {
@@ -137,5 +132,209 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
         &mut self,
     ) -> impl Future<Output = Result<Delivery<P, Key>, Aborted>> + '_ {
         self.deliveries.next_completed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p2p::mocks::{Consumer as MockConsumer, Event, Key as MockKey};
+    use bytes::Bytes;
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Signer,
+    };
+    use commonware_runtime::{
+        deterministic::{Context, Runner},
+        telemetry::metrics::{histogram::Buckets, MetricsExt},
+        Metrics, Runner as _,
+    };
+    use std::sync::Arc;
+
+    type TestInflight = Inflight<Context, PublicKey, MockKey>;
+
+    fn make_timed(context: &Context) -> histogram::Timed<Context> {
+        let registered = context.histogram("test_duration", "Test histogram", Buckets::LOCAL);
+        histogram::Timed::new(registered, Arc::new(context.clone()))
+    }
+
+    fn pubkey() -> PublicKey {
+        PrivateKey::from_seed(0).public_key()
+    }
+
+    #[test]
+    fn test_insert_contains_cancel_remove_round_trip() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+
+            assert!(!inflight.contains(&MockKey(1)));
+            inflight.insert(MockKey(1), timed.timer());
+            assert!(inflight.contains(&MockKey(1)));
+
+            assert!(inflight.cancel(&MockKey(1)));
+            assert!(!inflight.contains(&MockKey(1)));
+            // Subsequent cancel of an absent key returns false.
+            assert!(!inflight.cancel(&MockKey(1)));
+        });
+    }
+
+    #[test]
+    fn test_cancel_suppresses_duration_metric() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+
+            inflight.insert(MockKey(1), timed.timer());
+            inflight.cancel(&MockKey(1));
+
+            let metrics = context.encode();
+            assert!(metrics.contains("test_duration_count 0"));
+        });
+    }
+
+    #[test]
+    fn test_complete_records_duration_metric() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+
+            inflight.insert(MockKey(1), timed.timer());
+            inflight.complete(&MockKey(1));
+
+            let metrics = context.encode();
+            assert!(metrics.contains("test_duration_count 1"));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "inflight entry")]
+    fn test_complete_panics_on_missing_key() {
+        let runner = Runner::default();
+        runner.start(|_context| async move {
+            let mut inflight: TestInflight = Inflight::default();
+            inflight.complete(&MockKey(1));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "inflight entry")]
+    fn test_clear_delivery_panics_on_missing_key() {
+        let runner = Runner::default();
+        runner.start(|_context| async move {
+            let mut inflight: TestInflight = Inflight::default();
+            inflight.clear_delivery(&MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_retain_drops_non_matching_and_suppresses_metric() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+
+            inflight.insert(MockKey(1), timed.timer());
+            inflight.insert(MockKey(2), timed.timer());
+            inflight.insert(MockKey(3), timed.timer());
+
+            let dropped = inflight.retain(|k| k.0 % 2 == 1);
+            assert_eq!(dropped, 1);
+            assert!(inflight.contains(&MockKey(1)));
+            assert!(!inflight.contains(&MockKey(2)));
+            assert!(inflight.contains(&MockKey(3)));
+
+            let metrics = context.encode();
+            assert!(metrics.contains("test_duration_count 0"));
+        });
+    }
+
+    #[test]
+    fn test_drain_removes_all_and_suppresses_metric() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+
+            inflight.insert(MockKey(1), timed.timer());
+            inflight.insert(MockKey(2), timed.timer());
+
+            assert_eq!(inflight.drain(), 2);
+            assert!(!inflight.contains(&MockKey(1)));
+            assert!(!inflight.contains(&MockKey(2)));
+
+            let metrics = context.encode();
+            assert!(metrics.contains("test_duration_count 0"));
+        });
+    }
+
+    #[test]
+    fn test_start_delivery_completes_with_consumer_result() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+            let (consumer, mut events) = MockConsumer::<MockKey, Bytes>::new();
+            let peer = pubkey();
+            let key = MockKey(7);
+            let value = Bytes::from("data");
+
+            inflight.insert(key.clone(), timed.timer());
+            inflight.start_delivery(key.clone(), peer.clone(), value.clone(), consumer);
+
+            let delivery = inflight.next_delivery().await.expect("delivery aborted");
+            assert_eq!(delivery.key, key);
+            assert_eq!(delivery.peer, peer);
+            assert!(delivery.valid);
+
+            // The consumer was actually invoked.
+            let Event::Success(k, v) = events.recv().await.unwrap();
+            assert_eq!(k, key);
+            assert_eq!(v, value);
+        });
+    }
+
+    #[test]
+    fn test_start_delivery_aborts_when_entry_dropped_before_poll() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let peer = pubkey();
+            let key = MockKey(1);
+
+            inflight.insert(key.clone(), timed.timer());
+            inflight.start_delivery(key.clone(), peer, Bytes::from("v"), consumer);
+
+            // Drop the entry (and its aborter) before the delivery future is ever polled.
+            assert!(inflight.cancel(&key));
+
+            let result = inflight.next_delivery().await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_drain_aborts_in_flight_deliveries() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let mut inflight: TestInflight = Inflight::default();
+            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let peer = pubkey();
+            let key = MockKey(1);
+
+            inflight.insert(key.clone(), timed.timer());
+            inflight.start_delivery(key, peer, Bytes::from("v"), consumer);
+
+            assert_eq!(inflight.drain(), 1);
+
+            let result = inflight.next_delivery().await;
+            assert!(result.is_err());
+        });
     }
 }
