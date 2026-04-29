@@ -102,6 +102,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     pub(super) merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
+    pub(super) root: D,
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
     pub(super) base_size: u64,
@@ -483,11 +484,18 @@ where
     }
 
     /// Create an owned merkleized batch representing the current committed state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>> {
+    ///
+    /// The returned batch's cached root reflects the live in-memory state and matches
+    /// [`Self::root`]; the durable serve-state cache (which can lag unsynced mutations) is
+    /// intentionally not consulted here.
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
+    where
+        F: RootSpec,
+    {
         let committed_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
-            root: self.serve_state.read().root,
+            root: self.root(),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
             base_size: committed_size,
@@ -736,6 +744,52 @@ mod tests {
                 db.apply_batch(batch_b),
                 Err(Error::StaleBatch { .. })
             ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: `to_batch()` must reflect the live in-memory state, not the lagging durable
+    /// serve-state cache. Compact dbs intentionally keep the serve-state cache behind unsynced
+    /// mutations, so a snapshot built without `sync()` / `commit()` between
+    /// `apply_batch()` and `to_batch()` previously bound its cached root to the stale serve
+    /// state.
+    #[test_traced("INFO")]
+    fn test_compact_to_batch_reflects_live_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.with_label("db"), "keyless-to-batch-live").await;
+            let floor = db.inactivity_floor_loc();
+
+            let pre_apply_root = db.root();
+            let pre_snapshot = db.to_batch();
+            assert_eq!(
+                pre_snapshot.root(),
+                pre_apply_root,
+                "snapshot before any mutation should match the live root"
+            );
+
+            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
+                &db,
+                Some(U64::new(11)),
+                floor,
+            ))
+            .unwrap();
+
+            // Deliberately skip `sync()` / `commit()` so the durable serve-state cache lags the
+            // live merkle state.
+            let live_root = db.root();
+            assert_ne!(
+                live_root, pre_apply_root,
+                "applying a non-empty batch must change the live root"
+            );
+
+            let snapshot = db.to_batch();
+            assert_eq!(
+                snapshot.root(),
+                live_root,
+                "to_batch().root() must match the live db.root() even before sync/commit"
+            );
 
             db.destroy().await.unwrap();
         });
