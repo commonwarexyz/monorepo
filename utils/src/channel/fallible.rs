@@ -16,7 +16,11 @@
 //! let result = sender.request(|tx| Message::Query { responder: tx }).await;
 //! ```
 
-use super::{mpsc, oneshot};
+use super::{
+    mpsc, oneshot,
+    reservation::{Reservation, ReservationExt},
+};
+use std::future::Future;
 
 /// Extension trait for channel operations that may fail due to disconnection.
 ///
@@ -44,7 +48,7 @@ pub trait FallibleExt<T> {
     ///     .request(|tx| Message::Dialable { responder: tx })
     ///     .await;
     /// ```
-    fn request<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = Option<R>> + Send
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -53,11 +57,7 @@ pub trait FallibleExt<T> {
     ///
     /// This is a convenience wrapper around [`request`](Self::request) for cases
     /// where you have a sensible default value.
-    fn request_or<R, F>(
-        &self,
-        make_msg: F,
-        default: R,
-    ) -> impl std::future::Future<Output = R> + Send
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -66,7 +66,7 @@ pub trait FallibleExt<T> {
     ///
     /// This is a convenience wrapper around [`request`](Self::request) for types
     /// that implement [`Default`].
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = R> + Send
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
     where
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -116,7 +116,7 @@ pub trait AsyncFallibleExt<T> {
     /// may have been dropped during shutdown. The return value can
     /// be ignored if the caller doesn't need to know whether the
     /// send succeeded.
-    fn send_lossy(&self, msg: T) -> impl std::future::Future<Output = bool> + Send;
+    fn send_lossy(&self, msg: T) -> impl Future<Output = bool> + Send;
 
     /// Try to send a message without blocking, returning `true` if successful.
     ///
@@ -125,28 +125,32 @@ pub trait AsyncFallibleExt<T> {
     /// disconnected.
     fn try_send_lossy(&self, msg: T) -> bool;
 
+    /// Attempts to send immediately, reserving the message when the channel is full.
+    ///
+    /// Returns `None` if the value was sent immediately or the receiver has been dropped.
+    #[must_use = "await and send any reservation"]
+    fn send_or_reserve_lossy(&self, msg: T) -> Option<Reservation<T>>
+    where
+        T: 'static;
+
     /// Send a request message containing a oneshot responder and await the response.
     ///
     /// Returns `None` if:
     /// - The receiver has been dropped (send fails)
     /// - The responder is dropped without sending (receive fails)
-    fn request<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = Option<R>> + Send
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
 
     /// Send a request and return the provided default on failure.
-    fn request_or<R, F>(
-        &self,
-        make_msg: F,
-        default: R,
-    ) -> impl std::future::Future<Output = R> + Send
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
 
     /// Send a request and return `R::default()` on failure.
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = R> + Send
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
     where
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -159,6 +163,13 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
 
     fn try_send_lossy(&self, msg: T) -> bool {
         self.try_send(msg).is_ok()
+    }
+
+    fn send_or_reserve_lossy(&self, msg: T) -> Option<Reservation<T>>
+    where
+        T: 'static,
+    {
+        self.send_or_reserve(msg).ok().flatten()
     }
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>
@@ -363,6 +374,61 @@ mod tests {
 
         // Should not panic, returns false
         assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)));
+    }
+
+    // send_or_reserve_lossy tests
+
+    #[test]
+    fn test_send_or_reserve_lossy_success() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(42))
+            .is_none());
+        assert!(matches!(rx.try_recv(), Ok(TestMessage::FireAndForget(42))));
+    }
+
+    #[test]
+    fn test_send_or_reserve_lossy_disconnected() {
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        assert!(tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(42))
+            .is_none());
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_lossy_reserves_when_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(TestMessage::FireAndForget(1)).unwrap();
+
+        let reservation = tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(2))
+            .expect("receiver should be open");
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TestMessage::FireAndForget(1))
+        ));
+        reservation.await.unwrap().send();
+        assert!(matches!(
+            rx.recv().await,
+            Some(TestMessage::FireAndForget(2))
+        ));
+    }
+
+    #[test_async]
+    async fn test_send_or_reserve_lossy_reserved_disconnected() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(TestMessage::FireAndForget(1)).unwrap();
+
+        let reservation = tx
+            .send_or_reserve_lossy(TestMessage::FireAndForget(2))
+            .expect("receiver should be open");
+        drop(rx);
+
+        assert!(reservation.await.is_err());
     }
 
     // OneshotExt tests
