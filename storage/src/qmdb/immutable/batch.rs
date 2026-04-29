@@ -255,7 +255,11 @@ where
         journal_batch = journal_batch.add(Operation::Commit(metadata, inactivity_floor));
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let ancestors = MerkleizedBatch::ancestor_chain(self.parent.as_ref());
+        let ancestors = self
+            .parent
+            .as_ref()
+            .map(MerkleizedBatch::ancestor_chain)
+            .unwrap_or_default();
         let chain =
             ChainMeta::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
         let core = AppendBatchCore {

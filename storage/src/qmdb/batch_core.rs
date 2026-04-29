@@ -13,7 +13,9 @@ use std::sync::Arc;
 pub(crate) enum BatchBase<F: Family, D: Digest, W> {
     /// The batch is rooted directly in the committed database.
     Db {
+        /// Committed leaf count when the batch was created. Used to detect stale batches at apply.
         db_size: u64,
+        /// Committed Merkle state to merkleize this batch against.
         merkle_parent: Arc<batch::MerkleizedBatch<F, D>>,
     },
     /// The batch is rooted in a speculative parent batch.
@@ -22,35 +24,46 @@ pub(crate) enum BatchBase<F: Family, D: Digest, W> {
 
 /// Resolved root state for a batch before new leaves are appended.
 pub(crate) struct ResolvedBase<F: Family, D: Digest, W> {
+    /// Leaf count this batch starts appending at (committed tip + ancestors' ops).
+    ///
+    /// Differs from `db_size` only when the batch has uncommitted ancestors: `base_size` advances
+    /// past each ancestor's appended ops, while `db_size` stays at the committed tip for
+    /// stale-batch checks at apply time.
     pub(crate) base_size: u64,
+    /// Committed leaf count when the batch chain was forked. Used for stale-batch detection.
     pub(crate) db_size: u64,
+    /// Merkle state to root new leaves in (the parent's merkleized batch, or the committed mem).
     pub(crate) merkle_parent: Arc<batch::MerkleizedBatch<F, D>>,
+    /// Uncommitted ancestor chain, newest-to-oldest. Empty when rooted directly in the DB.
     pub(crate) ancestors: Vec<Arc<W>>,
 }
 
-/// Shared chain metadata and validation state.
+/// Per-batch chain state: positions and the floor declared by this batch's commit.
 pub(crate) struct ChainMeta<F: Family> {
+    /// Leaf count this batch starts at; equals `db_size` when the batch has no ancestors.
     pub(crate) base_size: u64,
+    /// Committed leaf count when the batch chain was forked. Used for stale-batch detection.
     pub(crate) db_size: u64,
+    /// Leaf count after this batch (data ops + the commit leaf) is applied.
     pub(crate) total_size: u64,
+    /// Inactivity floor declared by this batch's commit operation.
     pub(crate) new_floor: Location<F>,
 }
 
-/// Wrapper access to a shared append core.
+/// Lets per-variant `MerkleizedBatch` wrappers expose their shared [`AppendBatchCore`] for
+/// shared validation and chain advance.
 pub(crate) trait HasCore<F: Family, D: Digest> {
     fn core(&self) -> &AppendBatchCore<F, D>;
 }
 
-/// Wrapper access to a speculative ancestor chain.
+/// Adds access to the wrapper's uncommitted ancestor chain. Required by [`BatchBase::resolve`]
+/// so child batches can collect their parent chain through wrapper-specific storage.
 pub(crate) trait HasAncestors<F: Family, D: Digest>: HasCore<F, D> + Sized {
+    /// Uncommitted ancestors, newest-to-oldest. Excludes `self`.
     fn ancestors(&self) -> &[Arc<Self>];
 
     /// Build a newest-to-oldest ancestor chain rooted at `parent`, including `parent` itself.
-    /// Returns an empty `Vec` when `parent` is `None`.
-    fn ancestor_chain(parent: Option<&Arc<Self>>) -> Vec<Arc<Self>> {
-        let Some(parent) = parent else {
-            return Vec::new();
-        };
+    fn ancestor_chain(parent: &Arc<Self>) -> Vec<Arc<Self>> {
         let mut ancestors = Vec::with_capacity(parent.ancestors().len() + 1);
         ancestors.push(Arc::clone(parent));
         ancestors.extend(parent.ancestors().iter().cloned());
@@ -80,14 +93,15 @@ where
                 base_size: parent.core().chain.total_size,
                 db_size: parent.core().chain.db_size,
                 merkle_parent: Arc::clone(&parent.core().merkle),
-                ancestors: W::ancestor_chain(Some(&parent)),
+                ancestors: W::ancestor_chain(&parent),
             },
         }
     }
 }
 
 impl<F: Family> ChainMeta<F> {
-    /// Build metadata for a quiescent committed state with no speculative appends.
+    /// Build metadata for a committed state with no speculative appends. Used by `to_batch` to
+    /// represent the database tip as an empty batch; all three positions collapse to `size`.
     pub(crate) const fn quiescent(size: u64, new_floor: Location<F>) -> Self {
         Self {
             base_size: size,
@@ -97,7 +111,8 @@ impl<F: Family> ChainMeta<F> {
         }
     }
 
-    /// Build metadata for a batch with `item_count` data leaves followed by one commit leaf.
+    /// Build metadata for a batch of `item_count` data ops plus one trailing commit leaf.
+    /// `total_size` becomes `base_size + item_count + 1`.
     pub(crate) const fn from_item_count(
         base_size: u64,
         db_size: u64,
@@ -177,9 +192,12 @@ impl<F: Family> ChainMeta<F> {
     }
 }
 
-/// Sidecar-free merkleized append value shared by compact and full variants.
+/// Merkleized batch state shared by compact and full variants. Per-variant wrappers carry this
+/// alongside their own per-variant payload (journal items, key diffs, etc.).
 pub(crate) struct AppendBatchCore<F: Family, D: Digest> {
+    /// Speculative Merkle batch built from this chain's leaves.
     pub(crate) merkle: Arc<batch::MerkleizedBatch<F, D>>,
+    /// Position bookkeeping plus the floor declared by this batch's commit.
     pub(crate) chain: ChainMeta<F>,
 }
 
@@ -275,7 +293,9 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         )
     }
 
-    /// Advance committed chain state after the backing Merkle or journal applies this batch.
+    /// Advance the database's committed-chain pointers and return the location range this
+    /// batch wrote. Intended to run after the backing Merkle or journal has accepted the batch,
+    /// so the wrapper does not duplicate the bookkeeping in its `apply_batch` tail.
     pub(crate) fn commit_to(
         &self,
         last_commit_loc: &mut Location<F>,

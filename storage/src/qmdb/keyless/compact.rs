@@ -260,7 +260,7 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let (last_commit_loc, serve_state) = compact_witness::init_from_verified_state(
+        let (last_commit_loc, serve_state) = compact_witness::assemble_serve_state(
             merkle.root(),
             merkle.leaves(),
             inactivity_floor_loc,
@@ -296,16 +296,15 @@ where
                 &commit_codec_config,
             )
             .await?;
-
-        Self::init_from_verified_state(
+        let last_commit_loc = Location::new(*serve_state.leaf_count - 1);
+        Ok(Self {
+            last_commit_loc,
             merkle,
-            commit_codec_config,
             last_commit_metadata,
             inactivity_floor_loc,
-            serve_state.commit_op_bytes,
-            serve_state.commit_proof,
-            serve_state.pinned_nodes,
-        )
+            commit_codec_config,
+            serve_state: RwLock::new(serve_state),
+        })
     }
 
     /// Return the root of the db.

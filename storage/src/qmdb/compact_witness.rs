@@ -234,8 +234,13 @@ where
     Ok((serve_state, last_commit_metadata, inactivity_floor_loc))
 }
 
+/// Validate caller-supplied compact-sync state and assemble it into a serve cache.
+///
+/// Used on the compact-sync init path where the caller has already authenticated the supplied
+/// commit proof against the requested target root, but the leaf count and floor still need to be
+/// checked locally. Returns `(last_commit_loc, cache)`.
 #[allow(clippy::type_complexity)]
-pub(crate) fn init_from_verified_state<F, D>(
+pub(crate) fn assemble_serve_state<F, D>(
     root: D,
     leaf_count: Location<F>,
     inactivity_floor_loc: Location<F>,
