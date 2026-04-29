@@ -25,7 +25,7 @@ struct Entry<E: Clock> {
 }
 
 /// Tracks all in-flight fetch state.
-pub(super) struct Inflight<E: Clock, P: PublicKey, Key: Span, Con: Consumer<Key = Key>> {
+pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> {
     /// Per-key entries tracking fetch duration timers and (when validating a response)
     /// the [Aborter] that cancels the in-flight consumer delivery.
     entries: HashMap<Key, Entry<E>>,
@@ -37,7 +37,7 @@ pub(super) struct Inflight<E: Clock, P: PublicKey, Key: Span, Con: Consumer<Key 
     consumer: Con,
 }
 
-impl<E: Clock, P: PublicKey, Key: Span, Con: Consumer<Key = Key>> Inflight<E, P, Key, Con>
+impl<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> Inflight<E, Con, P, Key>
 where
     Con::Value: Send + 'static,
 {
@@ -149,7 +149,7 @@ mod tests {
     };
     use std::sync::Arc;
 
-    type TestInflight = Inflight<Context, PublicKey, MockKey, MockConsumer<MockKey, Bytes>>;
+    type TestInflight = Inflight<Context, MockConsumer<MockKey, Bytes>, PublicKey, MockKey>;
 
     fn dummy_inflight() -> TestInflight {
         Inflight::new(MockConsumer::dummy())

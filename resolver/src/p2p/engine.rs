@@ -70,7 +70,7 @@ pub struct Engine<
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Tracks all in-flight fetch state
-    inflight: Inflight<E, P, Key, Con>,
+    inflight: Inflight<E, Con, P, Key>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
