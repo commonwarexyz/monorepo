@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner, Supervisor};
 //! use commonware_utils::{NZU32, NZUsize};
 //! use std::time::Duration;
 //!

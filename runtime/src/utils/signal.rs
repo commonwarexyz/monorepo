@@ -50,7 +50,7 @@ use std::{
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};
+/// use commonware_runtime::{Clock, Spawner, Runner, Supervisor, deterministic, Metrics, signal::Signaler};
 /// use commonware_utils::channel::oneshot;
 /// use std::time::Duration;
 ///

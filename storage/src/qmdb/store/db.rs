@@ -11,7 +11,9 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
-//! use commonware_runtime::{buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{
+//!     buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _, Supervisor as _,
+//! };
 //!
 //! use std::num::NonZeroU16;
 //! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);

@@ -185,6 +185,7 @@ pub fn add_attribute(
 /// ```rust
 /// use commonware_runtime::{
 ///     deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Runner, Spawner,
+///     Supervisor,
 /// };
 /// use std::time::Duration;
 ///
