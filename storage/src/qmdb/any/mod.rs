@@ -221,7 +221,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             split_root: true,
-            root_bagging: F::root_spec(0).bagging(),
+            root_bagging: F::root_spec(0).bagging,
         }
     }
 
@@ -249,7 +249,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             split_root: true,
-            root_bagging: F::root_spec(0).bagging(),
+            root_bagging: F::root_spec(0).bagging,
         }
     }
 

@@ -150,7 +150,7 @@ fn any_fixed_config<F: qmdb::RootSpec>(
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: F::root_spec(0).bagging,
     }
 }
 
@@ -164,7 +164,7 @@ fn any_variable_config<F: qmdb::RootSpec>(
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: F::root_spec(0).bagging,
     }
 }
 

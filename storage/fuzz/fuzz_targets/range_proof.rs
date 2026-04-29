@@ -31,9 +31,7 @@ fn supported_root_specs<F: MerkleFamily>(merkle: &Mem<F, Digest>) -> Vec<RootSpe
         }
     };
     push_unique(RootSpec::FULL_FORWARD);
-    push_unique(RootSpec::Full {
-        bagging: Bagging::BackwardFold,
-    });
+    push_unique(RootSpec::full(Bagging::BackwardFold));
     for inactive_peaks in 0..=peak_count {
         push_unique(RootSpec::split_forward(inactive_peaks));
         push_unique(RootSpec::split_backward(inactive_peaks));

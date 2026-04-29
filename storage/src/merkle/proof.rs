@@ -164,10 +164,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if self.inactive_peaks != spec.inactive_peaks() {
+        if self.inactive_peaks != spec.inactive_peaks {
             return false;
         }
-        self.verify_range_inclusion_using_policy(hasher, elements, start_loc, root, spec.bagging())
+        self.verify_range_inclusion_using_policy(hasher, elements, start_loc, root, spec.bagging)
     }
 
     /// Verify a range proof using a decomposed bagging policy supplied by the caller.
@@ -340,10 +340,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if self.inactive_peaks != spec.inactive_peaks() {
+        if self.inactive_peaks != spec.inactive_peaks {
             return false;
         }
-        self.verify_multi_inclusion_using_policy(hasher, elements, root, spec.bagging())
+        self.verify_multi_inclusion_using_policy(hasher, elements, root, spec.bagging)
     }
 
     /// Reconstruct the root digest from this proof and the given consecutive elements using `spec`,
@@ -359,10 +359,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if self.inactive_peaks != spec.inactive_peaks() {
+        if self.inactive_peaks != spec.inactive_peaks {
             return Err(ReconstructionError::InvalidProof);
         }
-        self.reconstruct_root_using_policy(hasher, elements, start_loc, spec.bagging())
+        self.reconstruct_root_using_policy(hasher, elements, start_loc, spec.bagging)
     }
 
     /// Reconstruct a root from a range proof using a decomposed bagging policy.
@@ -435,7 +435,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if self.inactive_peaks != spec.inactive_peaks() {
+        if self.inactive_peaks != spec.inactive_peaks {
             return Err(Error::InvalidProof);
         }
         self.verify_range_inclusion_and_extract_digests_using_policy(
@@ -443,7 +443,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             elements,
             start_loc,
             root,
-            spec.bagging(),
+            spec.bagging,
         )
     }
 
@@ -492,7 +492,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if self.inactive_peaks != spec.inactive_peaks() {
+        if self.inactive_peaks != spec.inactive_peaks {
             return false;
         }
         self.verify_proof_and_pinned_nodes_using_policy(
@@ -501,7 +501,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             start_loc,
             pinned_nodes,
             root,
-            spec.bagging(),
+            spec.bagging,
         )
     }
 
@@ -1214,9 +1214,9 @@ where
     H: Hasher<F, Digest = D>,
     E: From<super::Error<F>>,
 {
-    Blueprint::new_using_policy(leaves, spec.inactive_peaks(), spec.bagging(), range)?.build_proof(
+    Blueprint::new_using_policy(leaves, spec.inactive_peaks, spec.bagging, range)?.build_proof(
         hasher,
-        spec.inactive_peaks(),
+        spec.inactive_peaks,
         get_node,
         element_pruned,
     )
@@ -1335,12 +1335,7 @@ mod tests {
         let mut specs = Vec::new();
 
         push_unique_spec(&mut specs, RootSpec::FULL_FORWARD);
-        push_unique_spec(
-            &mut specs,
-            RootSpec::Full {
-                bagging: Bagging::BackwardFold,
-            },
-        );
+        push_unique_spec(&mut specs, RootSpec::full(Bagging::BackwardFold));
         for inactive_peaks in 0..=peak_count {
             push_unique_spec(&mut specs, RootSpec::split_forward(inactive_peaks));
             push_unique_spec(&mut specs, RootSpec::split_backward(inactive_peaks));
@@ -1361,7 +1356,7 @@ mod tests {
         spec: RootSpec,
         width: u64,
     ) -> Location<F> {
-        let start = inactive_leaf_floor::<F>(leaves, spec.inactive_peaks());
+        let start = inactive_leaf_floor::<F>(leaves, spec.inactive_peaks);
         if start + width <= *leaves {
             return Location::new(start);
         }
@@ -1390,14 +1385,14 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(proof.inactive_peaks, spec.inactive_peaks());
+            assert_eq!(proof.inactive_peaks, spec.inactive_peaks);
             assert!(
                 proof.verify_range_inclusion(&hasher, &elements, range.start, &root, spec,),
                 "range proof should verify for {spec:?}",
             );
 
             let mut tampered_boundary = proof.clone();
-            tampered_boundary.inactive_peaks = if spec.inactive_peaks() == 0 { 1 } else { 0 };
+            tampered_boundary.inactive_peaks = if spec.inactive_peaks == 0 { 1 } else { 0 };
             assert!(
                 !tampered_boundary.verify_range_inclusion(
                     &hasher,
@@ -1436,14 +1431,14 @@ mod tests {
             let locations = [first, first + 5, first + 11];
             let nodes = nodes_required_for_multi_proof(
                 leaves,
-                spec.inactive_peaks(),
-                spec.bagging(),
+                spec.inactive_peaks,
+                spec.bagging,
                 &locations,
             )
             .expect("test locations valid");
             let proof = Proof {
                 leaves,
-                inactive_peaks: spec.inactive_peaks(),
+                inactive_peaks: spec.inactive_peaks,
                 digests: nodes
                     .into_iter()
                     .map(|pos| mem.get_node(pos).unwrap())
@@ -1461,7 +1456,7 @@ mod tests {
             );
 
             let mut tampered_boundary = proof.clone();
-            tampered_boundary.inactive_peaks = if spec.inactive_peaks() == 0 { 1 } else { 0 };
+            tampered_boundary.inactive_peaks = if spec.inactive_peaks == 0 { 1 } else { 0 };
             assert!(
                 !tampered_boundary.verify_multi_inclusion(&hasher, &elements, &root, spec,),
                 "inactive_peaks mutation should fail for {spec:?}",
@@ -1541,9 +1536,7 @@ mod tests {
     fn full_backward_root_spec_proves_like_split_zero() {
         let hasher = H::new();
         let mem = build_raw::<mmb::Family>(&hasher, 123);
-        let full_backward = RootSpec::Full {
-            bagging: Bagging::BackwardFold,
-        };
+        let full_backward = RootSpec::full(Bagging::BackwardFold);
         let range = Location::new(2)..Location::new(3);
 
         let generated: Result<Proof<mmb::Family, D>, Error<mmb::Family>> = build_range_proof(

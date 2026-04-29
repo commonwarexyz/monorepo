@@ -59,7 +59,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         I: IntoIterator<Item = &'a Self::Digest>,
         I::IntoIter: ExactSizeIterator,
     {
-        self.root_with_inactive_prefix(leaves, spec.inactive_peaks(), spec.bagging(), peak_digests)
+        self.root_with_inactive_prefix(leaves, spec.inactive_peaks, spec.bagging, peak_digests)
     }
 
     /// Computes a root where the oldest `inactive_peaks` are forward-bagged into a single

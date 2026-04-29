@@ -205,7 +205,7 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             split_root: true,
-            root_bagging: <mmr::Family as crate::qmdb::RootSpec>::root_spec(0).bagging(),
+            root_bagging: <mmr::Family as crate::qmdb::RootSpec>::root_spec(0).bagging,
         }
     }
 

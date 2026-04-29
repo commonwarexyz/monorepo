@@ -303,7 +303,7 @@ fn any_fix_cfg(
         split_root: true,
         root_bagging:
             <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+                .bagging,
     }
 }
 
@@ -318,7 +318,7 @@ fn any_var_cfg(
         split_root: true,
         root_bagging:
             <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+                .bagging,
     }
 }
 

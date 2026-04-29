@@ -47,48 +47,48 @@ pub enum Bagging {
 
 /// Fully specifies how to compute a Merkle root from the current peak set.
 ///
+/// The inactive prefix (the leading `inactive_peaks` peaks) is always forward-folded into a
+/// single accumulator, regardless of `bagging`; `bagging` applies only to the remaining peaks.
+/// When `inactive_peaks == 0`, no boundary is committed and the root is byte-equivalent to
+/// bagging the full peak list with `bagging`.
+///
 /// Generic Merkle storage does not cache roots or remember this value. Callers choose a
 /// concrete spec whenever they compute a root or construct a proof.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum RootSpec {
-    /// Bag every peak with `bagging`. No inactive prefix.
-    Full {
-        /// Bagging applied to the full peak list.
-        bagging: Bagging,
-    },
-    /// Forward-fold the inactive prefix, then bag the remaining peaks with `bagging`.
-    ///
-    /// The inactive prefix bagging is not configurable: it always uses forward bagging
-    /// (left-folded) into a single accumulator. Only the remaining peak bagging is selectable.
-    /// The inactive boundary is committed into the root.
-    ///
-    /// When `inactive_peaks == 0`, no boundary is committed. For an empty inactive prefix, a
-    /// split root is byte-equivalent to the corresponding full root with the same bagging.
-    Split {
-        /// Number of oldest peaks included in the inactive prefix.
-        inactive_peaks: usize,
-        /// Bagging applied to the remaining peaks after the inactive prefix has been folded.
-        bagging: Bagging,
-    },
+pub struct RootSpec {
+    /// Number of oldest peaks committed as a forward-folded inactive prefix.
+    /// `0` means there is no inactive prefix; the boundary is not committed into the root.
+    pub inactive_peaks: usize,
+    /// Bagging applied to the active suffix (or the full peak list when `inactive_peaks == 0`).
+    pub bagging: Bagging,
 }
 
 impl RootSpec {
-    /// `Full { bagging: ForwardFold }`: the default for plain Merkle structures.
-    pub const FULL_FORWARD: Self = Self::Full {
+    /// No inactive prefix, forward-bagged: the default for plain Merkle structures.
+    pub const FULL_FORWARD: Self = Self {
+        inactive_peaks: 0,
         bagging: Bagging::ForwardFold,
     };
 
-    /// `Split { inactive_peaks, bagging: ForwardFold }`.
+    /// No inactive prefix, with the given bagging.
+    pub const fn full(bagging: Bagging) -> Self {
+        Self {
+            inactive_peaks: 0,
+            bagging,
+        }
+    }
+
+    /// Inactive prefix of `inactive_peaks`, forward-bagged active suffix.
     pub const fn split_forward(inactive_peaks: usize) -> Self {
-        Self::Split {
+        Self {
             inactive_peaks,
             bagging: Bagging::ForwardFold,
         }
     }
 
-    /// `Split { inactive_peaks, bagging: BackwardFold }`.
+    /// Inactive prefix of `inactive_peaks`, backward-bagged active suffix.
     pub const fn split_backward(inactive_peaks: usize) -> Self {
-        Self::Split {
+        Self {
             inactive_peaks,
             bagging: Bagging::BackwardFold,
         }
@@ -101,35 +101,9 @@ impl RootSpec {
         bagging: Bagging,
         inactive_peaks: usize,
     ) -> Self {
-        if split_root {
-            Self::Split {
-                inactive_peaks,
-                bagging,
-            }
-        } else {
-            Self::Full { bagging }
-        }
-    }
-
-    /// True if this spec splits an inactive prefix off from the remaining peaks.
-    pub const fn has_inactive_prefix(self) -> bool {
-        matches!(self, Self::Split { .. })
-    }
-
-    /// Number of inactive peaks committed into the root.
-    pub const fn inactive_peaks(self) -> usize {
-        match self {
-            Self::Full { .. } => 0,
-            Self::Split { inactive_peaks, .. } => inactive_peaks,
-        }
-    }
-
-    /// The bagging policy applied to the bag step. For `Full`, this bags every peak; for
-    /// `Split`, this bags only the remaining peaks (the inactive prefix uses forward bagging
-    /// separately and unconditionally).
-    pub const fn bagging(self) -> Bagging {
-        match self {
-            Self::Full { bagging } | Self::Split { bagging, .. } => bagging,
+        Self {
+            inactive_peaks: if split_root { inactive_peaks } else { 0 },
+            bagging,
         }
     }
 }

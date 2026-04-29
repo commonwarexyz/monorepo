@@ -130,7 +130,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(data: &FuzzInput, suffix: &str) {
                 },
                 translator: EightCap,
                 split_root: true,
-                root_bagging: F::root_spec(0).bagging(),
+                root_bagging: F::root_spec(0).bagging,
             };
 
             let mut db: GenericDb<F> =

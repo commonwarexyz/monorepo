@@ -62,10 +62,10 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if proof.inactive_peaks != spec.inactive_peaks() {
+        if proof.inactive_peaks != spec.inactive_peaks {
             return Err(Error::InvalidProof);
         }
-        Self::new_using_policy(hasher, proof, elements, start_loc, root, spec.bagging())
+        Self::new_using_policy(hasher, proof, elements, start_loc, root, spec.bagging)
     }
 
     pub(crate) fn new_using_policy<H, E>(
@@ -341,8 +341,8 @@ pub async fn historical_range_proof<
         hasher,
         merkle,
         leaves,
-        spec.inactive_peaks(),
-        spec.bagging(),
+        spec.inactive_peaks,
+        spec.bagging,
         range,
     )
     .await
@@ -406,7 +406,7 @@ pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     spec: RootSpec,
     locations: &[Location<F>],
 ) -> Result<Proof<F, D>, Error<F>> {
-    multi_proof_using_policy(merkle, spec.inactive_peaks(), spec.bagging(), locations).await
+    multi_proof_using_policy(merkle, spec.inactive_peaks, spec.bagging, locations).await
 }
 
 /// Return a multi proof for the elements at the specified locations using decomposed root bagging

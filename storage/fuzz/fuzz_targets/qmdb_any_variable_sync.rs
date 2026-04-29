@@ -158,7 +158,7 @@ fn test_config<F: RootSpec>(
         },
         translator: TwoCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: F::root_spec(0).bagging,
     }
 }
 

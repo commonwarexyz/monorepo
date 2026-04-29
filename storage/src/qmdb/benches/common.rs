@@ -120,7 +120,7 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
         split_root: true,
         root_bagging:
             <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+                .bagging,
     }
 }
 
@@ -145,7 +145,7 @@ pub fn any_var_digest_cfg(
         split_root: true,
         root_bagging:
             <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+                .bagging,
     }
 }
 
@@ -172,7 +172,7 @@ pub fn any_var_vec_cfg(
         split_root: true,
         root_bagging:
             <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+                .bagging,
     }
 }
 
