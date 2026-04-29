@@ -1,11 +1,17 @@
 //! Shared read-only trait for merkleized data structures.
 
-use crate::merkle::{hasher::Hasher, proof::Proof, Family, Location, Position};
+use crate::merkle::{Family, Location, Position};
 use alloc::sync::Arc;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
 /// Read-only interface for a merkleized data structure.
+///
+/// This trait covers structural reads (size, leaves, retained nodes, pruning boundary). Proof
+/// construction is intentionally *not* part of the trait: every concrete implementation exposes
+/// inherent `proof` / `range_proof` methods that take an explicit [`crate::merkle::RootSpec`], so
+/// callers cannot accidentally pair a split-spec root with a forward-fold proof from the same
+/// state.
 pub trait Readable: Send + Sync {
     /// The Merkle family implemented by this structure.
     type Family: Family;
@@ -13,7 +19,7 @@ pub trait Readable: Send + Sync {
     /// The digest type used by this structure.
     type Digest: Digest;
 
-    /// The error type returned by proof construction.
+    /// The error type returned by structural reads.
     type Error;
 
     /// Total number of nodes (retained + pruned).
@@ -24,20 +30,6 @@ pub trait Readable: Send + Sync {
 
     /// Leaf location up to which pruning has been performed, or 0 if never pruned.
     fn pruning_boundary(&self) -> Location<Self::Family>;
-
-    /// Inclusion proof for the element at `loc`.
-    fn proof(
-        &self,
-        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
-        loc: Location<Self::Family>,
-    ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error>;
-
-    /// Inclusion proof for all elements in `range`.
-    fn range_proof(
-        &self,
-        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
-        range: Range<Location<Self::Family>>,
-    ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error>;
 
     /// Total number of leaves.
     fn leaves(&self) -> Location<Self::Family> {
@@ -65,21 +57,5 @@ impl<T: Readable> Readable for Arc<T> {
 
     fn pruning_boundary(&self) -> Location<Self::Family> {
         (**self).pruning_boundary()
-    }
-
-    fn proof(
-        &self,
-        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
-        loc: Location<Self::Family>,
-    ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error> {
-        (**self).proof(hasher, loc)
-    }
-
-    fn range_proof(
-        &self,
-        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
-        range: Range<Location<Self::Family>>,
-    ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error> {
-        (**self).range_proof(hasher, range)
     }
 }
