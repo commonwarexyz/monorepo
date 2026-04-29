@@ -981,43 +981,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Merkle<F,
     fn pruning_boundary(&self) -> Location<F> {
         self.inner.read().mem.pruning_boundary()
     }
-
-    fn proof(
-        &self,
-        hasher: &impl Hasher<F, Digest = D>,
-        loc: Location<F>,
-    ) -> Result<Proof<F, D>, Error<F>> {
-        if !loc.is_valid_index() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        crate::merkle::proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            RootSpec::FULL_FORWARD,
-            loc..loc + 1,
-            |pos| <Self as Readable>::get_node(self, pos),
-            Error::ElementPruned,
-        )
-        .map_err(|e| match e {
-            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
-            _ => e,
-        })
-    }
-
-    fn range_proof(
-        &self,
-        hasher: &impl Hasher<F, Digest = D>,
-        range: core::ops::Range<Location<F>>,
-    ) -> Result<Proof<F, D>, Error<F>> {
-        crate::merkle::proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            RootSpec::FULL_FORWARD,
-            range,
-            |pos| <Self as Readable>::get_node(self, pos),
-            Error::ElementPruned,
-        )
-    }
 }
 
 impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::storage::Storage<F>
@@ -1087,8 +1050,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     /// Return an inclusion proof for the element at the location `loc` that can be verified against
     /// the current root, using `spec` to determine peak bagging.
     ///
-    /// This async inherent method shadows [`Readable::proof`] and can read from the backing
-    /// journal for nodes that have been synced out of memory.
+    /// Unlike the in-memory `Mem::proof`, this async method can read from the backing journal for
+    /// nodes that have been synced out of memory.
     ///
     /// # Errors
     ///
@@ -1112,7 +1075,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     /// Return an inclusion proof for the elements within the specified location range, using
     /// `spec` to determine peak bagging.
     ///
-    /// This async inherent method shadows [`Readable::range_proof`] and can read from the backing
+    /// Unlike the in-memory `Mem::range_proof`, this async method can read from the backing
     /// journal for nodes that have been synced out of memory.
     ///
     /// # Errors

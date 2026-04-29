@@ -436,22 +436,6 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
     fn pruning_boundary(&self) -> Location<F> {
         Location::try_from(self.pruning_boundary).expect("valid pruning_boundary")
     }
-
-    fn proof(
-        &self,
-        hasher: &impl Hasher<F, Digest = D>,
-        loc: Location<F>,
-    ) -> Result<Proof<F, D>, Error<F>> {
-        self.proof(hasher, loc, RootSpec::FULL_FORWARD)
-    }
-
-    fn range_proof(
-        &self,
-        hasher: &impl Hasher<F, Digest = D>,
-        range: Range<Location<F>>,
-    ) -> Result<Proof<F, D>, Error<F>> {
-        self.range_proof(hasher, range, RootSpec::FULL_FORWARD)
-    }
 }
 
 #[cfg(test)]

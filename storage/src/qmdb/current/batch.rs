@@ -225,22 +225,6 @@ impl<F: Graftable, D: Digest> Readable for BatchOverMem<'_, F, D> {
     fn pruning_boundary(&self) -> Location<F> {
         self.batch.pruning_boundary()
     }
-
-    fn proof(
-        &self,
-        _hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
-        _loc: Location<F>,
-    ) -> Result<crate::merkle::Proof<F, D>, merkle::Error<F>> {
-        unreachable!("proof not used in compute_current_layer")
-    }
-
-    fn range_proof(
-        &self,
-        _hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
-        _range: core::ops::Range<Location<F>>,
-    ) -> Result<crate::merkle::Proof<F, D>, merkle::Error<F>> {
-        unreachable!("range_proof not used in compute_current_layer")
-    }
 }
 
 /// A speculative batch of mutations whose root digest has not yet been computed,
