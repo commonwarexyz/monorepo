@@ -106,7 +106,12 @@ mod tests {
         sync::Mutex,
         NZUsize, NZU32,
     };
-    use std::{collections::HashMap, num::NonZeroU32, sync::Arc, time::Duration};
+    use std::{
+        collections::{HashMap, VecDeque},
+        num::NonZeroU32,
+        sync::Arc,
+        time::Duration,
+    };
 
     const MAILBOX_SIZE: usize = 1024;
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
@@ -237,16 +242,19 @@ mod tests {
         mailbox
     }
 
+    type DeliveryGate = (oneshot::Receiver<()>, bool);
+    type DeliveryGates = Arc<Mutex<VecDeque<DeliveryGate>>>;
+
     #[derive(Clone)]
     struct BlockingConsumer {
         sender: mpsc::UnboundedSender<(Key, Bytes)>,
         started: mpsc::UnboundedSender<Key>,
-        gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        gates: DeliveryGates,
     }
 
     impl BlockingConsumer {
         fn new(
-            gate: oneshot::Receiver<()>,
+            gates: Vec<DeliveryGate>,
         ) -> (
             Self,
             mpsc::UnboundedReceiver<(Key, Bytes)>,
@@ -258,7 +266,7 @@ mod tests {
                 Self {
                     sender,
                     started,
-                    gate: Arc::new(Mutex::new(Some(gate))),
+                    gates: Arc::new(Mutex::new(gates.into())),
                 },
                 receiver,
                 started_receiver,
@@ -272,12 +280,51 @@ mod tests {
 
         async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
             self.started.send_lossy(key.clone());
-            let gate = self.gate.lock().take();
+            let (gate, valid) = self
+                .gates
+                .lock()
+                .pop_front()
+                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
             if let Some(gate) = gate {
-                let _ = gate.await;
+                if gate.await.is_err() {
+                    return false;
+                }
             }
-            self.sender.send_lossy((key, value));
-            true
+            if valid {
+                self.sender.send_lossy((key, value));
+            }
+            valid
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum CancelAll {
+        Clear,
+        Retain,
+    }
+
+    async fn cancel_all(mailbox: &mut Mailbox<Key, PublicKey>, operation: CancelAll) {
+        match operation {
+            CancelAll::Clear => mailbox.clear().await,
+            CancelAll::Retain => mailbox.retain(|_| false).await,
+        }
+    }
+
+    async fn wait_for_blocked(
+        context: &deterministic::Context,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        blocker: &PublicKey,
+        blocked: &PublicKey,
+    ) {
+        loop {
+            let blocked_peers = oracle.blocked().await.unwrap();
+            if blocked_peers
+                .iter()
+                .any(|(a, b)| a == blocker && b == blocked)
+            {
+                return;
+            }
+            context.sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -350,8 +397,10 @@ mod tests {
             let mut prod3 = Producer::default();
             prod3.insert(key2.clone(), data2.clone());
 
-            let (gate_sender, gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(gate_receiver);
+            let (gate_sender1, gate_receiver1) = oneshot::channel();
+            let (gate_sender2, gate_receiver2) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) =
+                BlockingConsumer::new(vec![(gate_receiver1, true), (gate_receiver2, true)]);
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -392,17 +441,20 @@ mod tests {
 
             mailbox1.fetch(key2.clone()).await;
             select! {
-                event = cons_out1.recv() => {
-                    let (key_actual, value) = event.expect("consumer channel closed");
-                    assert_eq!(key_actual, key2);
-                    assert_eq!(value, data2);
+                started_key = started.recv() => {
+                    assert_eq!(started_key.expect("delivery did not start"), key2);
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("resolver engine blocked on pending delivery");
                 },
             };
 
-            gate_sender.send(()).unwrap();
+            gate_sender2.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key2);
+            assert_eq!(value, data2);
+
+            gate_sender1.send(()).unwrap();
             let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
             assert_eq!(key_actual, key1);
             assert_eq!(value, data1);
@@ -419,11 +471,16 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let key = Key(1);
+            let data = Bytes::from("data for key 1");
             let mut prod2 = Producer::default();
-            prod2.insert(key.clone(), Bytes::from("data for key 1"));
+            prod2.insert(key.clone(), data.clone());
 
-            let (mut gate_sender, gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(gate_receiver);
+            let (mut first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(vec![
+                (first_gate_receiver, true),
+                (second_gate_receiver, true),
+            ]);
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -452,12 +509,185 @@ mod tests {
             assert_eq!(started_key, key);
 
             mailbox1.cancel(key.clone()).await;
+            mailbox1.fetch(key.clone()).await;
 
-            gate_sender.closed().await;
+            first_gate_sender.closed().await;
+            let started_key = started.recv().await.expect("second delivery did not start");
+            assert_eq!(started_key, key);
+
+            second_gate_sender.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
+
             select! {
-                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = cons_out1.recv() => panic!("unexpected extra event"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
+        });
+    }
+
+    #[test_traced]
+    fn test_invalid_delivery_retries_and_rearms_slot() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(vec![
+                (first_gate_receiver, false),
+                (second_gate_receiver, true),
+            ]);
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            mailbox1
+                .fetch_targeted(
+                    key.clone(),
+                    non_empty_vec![peers[1].clone(), peers[2].clone()],
+                )
+                .await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key);
+
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            oracle
+                .manager()
+                .track(
+                    1,
+                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+                )
+                .await;
+
+            let started_key = started.recv().await.expect("retry delivery did not start");
+            assert_eq!(started_key, key);
+
+            second_gate_sender.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
+        });
+    }
+
+    async fn run_pending_invalid_delivery_race(
+        context: &deterministic::Context,
+        operation: CancelAll,
+        validation_first: bool,
+    ) {
+        let (mut oracle, mut schemes, peers, mut connections) =
+            setup_network_and_peers(context, &[1, 2]).await;
+
+        add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+        let key = Key(1);
+        let mut prod2 = Producer::default();
+        prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+        let (mut gate_sender, gate_receiver) = oneshot::channel();
+        let (cons1, mut cons_out1, mut started) =
+            BlockingConsumer::new(vec![(gate_receiver, false)]);
+
+        let scheme = schemes.remove(0);
+        let mut mailbox1 = setup_and_spawn_actor(
+            context,
+            oracle.manager(),
+            oracle.control(scheme.public_key()),
+            scheme,
+            connections.remove(0),
+            cons1,
+            Producer::default(),
+        );
+
+        let scheme = schemes.remove(0);
+        let _mailbox2 = setup_and_spawn_actor(
+            context,
+            oracle.manager(),
+            oracle.control(scheme.public_key()),
+            scheme,
+            connections.remove(0),
+            Consumer::dummy(),
+            prod2,
+        );
+
+        mailbox1.fetch(key.clone()).await;
+        let started_key = started.recv().await.expect("delivery did not start");
+        assert_eq!(started_key, key);
+
+        if validation_first {
+            gate_sender.send(()).unwrap();
+            wait_for_blocked(context, &oracle, &peers[0], &peers[1]).await;
+            cancel_all(&mut mailbox1, operation).await;
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
+        } else {
+            cancel_all(&mut mailbox1, operation).await;
+            gate_sender.closed().await;
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        }
+
+        select! {
+            _ = cons_out1.recv() => panic!("unexpected event"),
+            _ = context.sleep(Duration::from_millis(100)) => {},
+        };
+    }
+
+    #[test_traced]
+    fn test_clear_or_retain_pending_invalid_delivery_race() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            run_pending_invalid_delivery_race(&context, CancelAll::Clear, false).await;
+            run_pending_invalid_delivery_race(&context, CancelAll::Retain, false).await;
+            run_pending_invalid_delivery_race(&context, CancelAll::Clear, true).await;
+            run_pending_invalid_delivery_race(&context, CancelAll::Retain, true).await;
         });
     }
 
@@ -2317,6 +2547,97 @@ mod tests {
             let (key_actual, value) = cons_out2.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, data);
+        });
+    }
+
+    #[test_traced]
+    fn test_shutdown_aborts_pending_delivery_without_leaked_tasks() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data);
+
+            let (mut gate_sender, gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) =
+                BlockingConsumer::new(vec![(gate_receiver, true)]);
+
+            let actor_context = context.with_label("actor");
+
+            let scheme = schemes.remove(0);
+            let public_key = scheme.public_key();
+            let (engine, mut mailbox1) = Engine::new(
+                actor_context.with_label("peer_0"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer: cons1,
+                    producer: Producer::<Key, Bytes>::default(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            let handle1 = engine.start(connections.remove(0));
+
+            let scheme = schemes.remove(0);
+            let public_key = scheme.public_key();
+            let (engine, _mailbox2) = Engine::new(
+                actor_context.with_label("peer_1"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer: Consumer::dummy(),
+                    producer: prod2,
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            let handle2 = engine.start(connections.remove(0));
+
+            mailbox1.fetch(key.clone()).await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key);
+
+            assert!(count_running_tasks(&context, "actor") > 0);
+
+            handle1.abort();
+            handle2.abort();
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            select! {
+                _ = gate_sender.closed() => {},
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("pending delivery was not aborted");
+                },
+            };
+
+            select! {
+                event = cons_out1.recv() => assert!(event.is_none(), "unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            let running_after = count_running_tasks(&context, "actor");
+            assert_eq!(
+                running_after, 0,
+                "all actor tasks should be stopped, but {running_after} still running"
+            );
         });
     }
 
