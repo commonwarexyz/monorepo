@@ -8,6 +8,7 @@ use commonware_codec::{
     BufsMut, Decode, DecodeExt, DecodeRangeExt, Encode, EncodeFixed, EncodeSize, Error, IsUnit,
     RangeCfg, Read, ReadRangeExt, Write,
 };
+use commonware_utils::sync::Once;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -17,7 +18,6 @@ use std::{
     ops::{
         Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive,
     },
-    sync::Once,
 };
 
 static BASELINE: Once = Once::new();

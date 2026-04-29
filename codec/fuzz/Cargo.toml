@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
 libfuzzer-sys.workspace = true
 paste.workspace = true
 thiserror.workspace = true
