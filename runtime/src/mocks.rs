@@ -157,7 +157,8 @@ impl crate::Sink for Sink {
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
-                self.state = SinkState::Sending;
+                channel.close_sink();
+                self.state = SinkState::Closed;
                 return Err(Error::SendFailed);
             }
 
@@ -180,7 +181,8 @@ impl crate::Sink for Sink {
                 if let Err(data) = os_send.send(data) {
                     channel.restore_front(data);
                     if !channel.stream_alive {
-                        self.state = SinkState::Sending;
+                        channel.close_sink();
+                        self.state = SinkState::Closed;
                         return Err(Error::SendFailed);
                     }
                 }
@@ -208,7 +210,10 @@ impl crate::Sink for Sink {
                 self.state = SinkState::Open;
                 Ok(())
             }
-            Err(_) => Err(Error::SendFailed),
+            Err(_) => {
+                self.close();
+                Err(Error::SendFailed)
+            }
         }
     }
 }
