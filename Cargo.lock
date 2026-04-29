@@ -1092,6 +1092,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-utils",
  "libfuzzer-sys",
  "paste",
  "thiserror 2.0.17",
