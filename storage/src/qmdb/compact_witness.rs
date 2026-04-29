@@ -156,6 +156,10 @@ pub(crate) trait CompactCommit: Sized {
     /// Build a commit op with the given metadata and inactivity floor.
     fn build_commit(metadata: Option<Self::Metadata>, floor: Location<Self::Family>) -> Self;
 
+    /// Whether this op is a commit. Used by the compact-serving path to validate the shape of
+    /// a decoded op without consuming it (so the typed op can still be returned to callers).
+    fn is_commit(&self) -> bool;
+
     /// Extract `(metadata, inactivity_floor)` if this op is a commit; otherwise return `None`.
     fn into_commit_fields(self) -> Option<CommitFields<Self>>;
 }

@@ -26,15 +26,15 @@ use crate::{
     qmdb::{
         any::value::ValueEncoding,
         batch_core::{AppendBatchCore, BatchBase, ChainMeta, HasAncestors, HasCore, ResolvedBase},
-        compact_witness::{self, CompactCommit, Witness, WitnessSource},
+        compact_db::CompactDbInner,
+        compact_witness::CompactCommit,
         sync::compact as compact_sync,
         Error,
     },
     Context,
 };
-use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
+use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::sync::RwLock;
 use std::sync::Arc;
 
 /// Configuration for a compact keyless authenticated db.
@@ -58,21 +58,8 @@ where
     Operation<F, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    merkle: compact_merkle::Merkle<F, E, H::Digest>,
-    last_commit_loc: Location<F>,
-    last_commit_metadata: Option<V::Value>,
-    inactivity_floor_loc: Location<F>,
-    commit_codec_config: C,
-    /// Cache of the last durably servable compact state.
-    ///
-    /// This cache is rebuilt from persisted witness bytes on reopen/rewind and refreshed on
-    /// [`Self::sync`]. It intentionally does not track unsynced in-memory mutations, so compact
-    /// serving never advertises state that has not been durably persisted.
-    witness: RwLock<Witness<F, H::Digest>>,
+    inner: CompactDbInner<F, E, H, Operation<F, V>, C>,
 }
-
-type ServeStateResult<F, V, D> =
-    Result<compact_sync::State<F, Operation<F, V>, D>, compact_sync::ServeError<F, D>>;
 
 impl<F, V> CompactCommit for Operation<F, V>
 where
@@ -87,6 +74,10 @@ where
 
     fn build_commit(metadata: Option<Self::Metadata>, floor: Location<Self::Family>) -> Self {
         Self::Commit(metadata, floor)
+    }
+
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::Commit(_, _))
     }
 
     fn into_commit_fields(self) -> Option<(Option<Self::Metadata>, Location<Self::Family>)> {
@@ -177,7 +168,7 @@ where
         Self {
             base: BatchBase::Db {
                 db_size: committed_size,
-                merkle_parent: db.merkle.to_batch(),
+                merkle_parent: db.inner.merkle.to_batch(),
             },
             appends: Vec::new(),
         }
@@ -214,7 +205,7 @@ where
             ancestors,
         } = self.base.resolve();
         let commit_op = Operation::Commit(metadata.clone(), inactivity_floor);
-        let core = db.merkle.with_mem(|mem| {
+        let core = db.inner.merkle.with_mem(|mem| {
             AppendBatchCore::from_encoded_ops(
                 merkle_parent,
                 mem,
@@ -245,6 +236,12 @@ where
     Operation<F, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
+    /// Borrow the shared compact-db inner state. Used by sync-engine plumbing that needs to
+    /// reach the witness machinery directly.
+    pub(crate) const fn inner(&self) -> &CompactDbInner<F, E, H, Operation<F, V>, C> {
+        &self.inner
+    }
+
     /// Build a compact db handle from already-verified compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
@@ -260,23 +257,16 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let (last_commit_loc, witness) = compact_witness::validate_witness(
-            merkle.root(),
-            merkle.leaves(),
+        let inner = CompactDbInner::init_from_verified_state(
+            merkle,
+            commit_codec_config,
+            last_commit_metadata,
             inactivity_floor_loc,
             commit_op_bytes,
             commit_proof,
             pinned_nodes,
         )?;
-
-        Ok(Self {
-            last_commit_loc,
-            merkle,
-            last_commit_metadata,
-            inactivity_floor_loc,
-            commit_codec_config,
-            witness: RwLock::new(witness),
-        })
+        Ok(Self { inner })
     }
 
     /// Open a compact db from persisted compact state and rebuild its serve cache.
@@ -284,52 +274,36 @@ where
     /// On first open, this bootstraps the initial commit and its witness so every later reopen and
     /// rewind can assume "the active slot has a complete servable compact state".
     pub(crate) async fn init_from_merkle(
-        mut merkle: compact_merkle::Merkle<F, E, H::Digest>,
+        merkle: compact_merkle::Merkle<F, E, H::Digest>,
         commit_codec_config: C,
-    ) -> Result<Self, Error<F>>
-    where
-        Operation<F, V>: Read<Cfg = C>,
-    {
-        let (witness, last_commit_metadata, inactivity_floor_loc) =
-            compact_witness::init_compact_state::<F, E, H, Operation<F, V>>(
-                &mut merkle,
-                &commit_codec_config,
-            )
-            .await?;
-        let last_commit_loc = Location::new(*witness.leaf_count - 1);
-        Ok(Self {
-            last_commit_loc,
-            merkle,
-            last_commit_metadata,
-            inactivity_floor_loc,
-            commit_codec_config,
-            witness: RwLock::new(witness),
-        })
+    ) -> Result<Self, Error<F>> {
+        let inner = CompactDbInner::init_from_merkle(merkle, commit_codec_config).await?;
+        Ok(Self { inner })
     }
 
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest {
-        self.merkle.root()
+        self.inner.root()
     }
 
     /// Return the location of the last commit.
     pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+        self.inner.last_commit_loc()
     }
 
     /// Return the inactivity floor declared by the last committed batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.inactivity_floor_loc
+        self.inner.inactivity_floor_loc()
     }
 
     /// Return the location of the next operation appended to this db.
     pub fn size(&self) -> Location<F> {
-        Location::new(*self.last_commit_loc + 1)
+        self.inner.size()
     }
 
     /// Get the metadata associated with the last commit.
     pub fn get_metadata(&self) -> Option<V::Value> {
-        self.last_commit_metadata.clone()
+        self.inner.get_metadata()
     }
 
     /// Return the latest compact-sync target this compact db can currently serve.
@@ -337,7 +311,7 @@ where
     /// This reflects the last state for which both frontier and witness were durably captured,
     /// which may lag behind live in-memory mutations until [`Self::sync`] is called.
     pub fn current_target(&self) -> compact_sync::Target<F, H::Digest> {
-        self.cloned_witness().target()
+        self.inner.current_target()
     }
 
     /// Return the authenticated state this compact db can serve for `target`.
@@ -345,59 +319,31 @@ where
     /// Compact sync only authenticates the requested `root` and `leaf_count`. If the target does
     /// not match the current servable tip, or if the cached witness is corrupted, this returns a
     /// serve error instead of panicking.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
-    ) -> ServeStateResult<F, V, H::Digest>
-    where
-        Operation<F, V>: Read<Cfg = C>,
+    ) -> Result<compact_sync::State<F, Operation<F, V>, H::Digest>, compact_sync::ServeError<F, H::Digest>>
     {
-        let witness = self.cloned_witness();
-        let current = witness.target();
-        if target.root != current.root || target.leaf_count != current.leaf_count {
-            return Err(compact_sync::ServeError::StaleTarget {
-                requested: target,
-                current,
-            });
-        }
-        let op = Operation::<F, V>::decode_cfg(
-            witness.commit_op_bytes.as_ref(),
-            &self.commit_codec_config,
-        )
-        .map_err(|_| {
-            compact_sync::ServeError::Database(Error::DataCorrupted(
-                "invalid cached commit operation",
-            ))
-        })?;
-        if !matches!(&op, Operation::Commit(_, _)) {
-            return Err(compact_sync::ServeError::Database(Error::DataCorrupted(
-                "cached last operation was not a commit",
-            )));
-        }
-        Ok(compact_sync::State {
-            leaf_count: witness.leaf_count,
-            pinned_nodes: witness.pinned_nodes,
-            last_commit_op: op,
-            last_commit_proof: witness.commit_proof,
-        })
+        self.inner.compact_state(target)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V> {
-        let committed_size = *self.last_commit_loc + 1;
+        let committed_size = *self.inner.last_commit_loc + 1;
         UnmerkleizedBatch::new(self, committed_size)
     }
 
     /// Create an owned merkleized batch representing the current committed state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V>> {
-        let committed_size = *self.last_commit_loc + 1;
-        let chain = ChainMeta::quiescent(committed_size, self.inactivity_floor_loc);
+        let committed_size = *self.inner.last_commit_loc + 1;
+        let chain = ChainMeta::quiescent(committed_size, self.inner.inactivity_floor_loc);
         Arc::new(MerkleizedBatch {
             core: AppendBatchCore {
-                merkle: self.merkle.to_batch(),
+                merkle: self.inner.merkle.to_batch(),
                 chain,
             },
-            commit_metadata: self.last_commit_metadata.clone(),
+            commit_metadata: self.inner.last_commit_metadata.clone(),
             ancestors: Vec::new(),
         })
     }
@@ -418,16 +364,17 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let db_size = *self.last_commit_loc + 1;
+        let db_size = *self.inner.last_commit_loc + 1;
         batch
             .core
-            .validate_apply(self.inactivity_floor_loc, db_size, &batch.ancestors)?;
+            .validate_apply(self.inner.inactivity_floor_loc, db_size, &batch.ancestors)?;
 
-        self.merkle.apply_batch(&batch.core.merkle)?;
-        self.last_commit_metadata = batch.commit_metadata.clone();
-        Ok(batch
-            .core
-            .commit_to(&mut self.last_commit_loc, &mut self.inactivity_floor_loc))
+        self.inner.merkle.apply_batch(&batch.core.merkle)?;
+        self.inner.last_commit_metadata = batch.commit_metadata.clone();
+        Ok(batch.core.commit_to(
+            &mut self.inner.last_commit_loc,
+            &mut self.inner.inactivity_floor_loc,
+        ))
     }
 
     /// Durably persist the current db state to disk.
@@ -436,7 +383,7 @@ where
     /// Merkle frontier and last-commit witness are written into the same slot, reusing the cached
     /// witness when the current state has already been persisted.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_witness(self).await
+        self.inner.sync().await
     }
 
     /// Durably persist the current db state to disk (alias for [`Self::sync`]).
@@ -469,55 +416,12 @@ where
     /// in-memory fields out of sync with the persisted slot. Callers must drop this handle
     /// after any `Err` from `rewind` and reopen from storage.
     pub async fn rewind(&mut self) -> Result<(), Error<F>> {
-        let hasher = StandardHasher::<H>::new();
-        self.merkle.rewind(&hasher).await?;
-        // Reload the witness from the reverted slot as well, so compact serving stays aligned with
-        // the same frontier/root that `rewind` restored.
-        let (witness, last_commit_metadata, inactivity_floor_loc) =
-            compact_witness::load_active_witness::<F, E, H, Operation<F, V>>(
-                &self.merkle,
-                &self.commit_codec_config,
-            )
-            .await?;
-        self.last_commit_metadata = last_commit_metadata;
-        self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = Location::new(*witness.leaf_count - 1);
-        self.store_witness(witness);
-        Ok(())
+        self.inner.rewind().await
     }
 
     /// Destroy all persisted state associated with this database.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.merkle.destroy().await.map_err(Into::into)
-    }
-}
-
-impl<F, E, V, H, C> WitnessSource<F, E, H> for Db<F, E, V, H, C>
-where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-{
-    fn merkle(&self) -> &compact_merkle::Merkle<F, E, H::Digest> {
-        &self.merkle
-    }
-
-    fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
-    }
-
-    fn encode_current_commit_op(&self) -> Vec<u8> {
-        Operation::<F, V>::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
-            .encode()
-            .to_vec()
-    }
-
-    fn witness_cache(&self) -> &RwLock<Witness<F, H::Digest>> {
-        &self.witness
+        self.inner.destroy().await
     }
 }
 
@@ -529,6 +433,7 @@ mod tests {
         metadata::{Config as MConfig, Metadata},
         qmdb::any::value::FixedEncoding,
     };
+    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _};
@@ -830,7 +735,7 @@ mod tests {
             ))
             .unwrap();
             db.commit().await.unwrap();
-            let slot = db.merkle.active_slot();
+            let slot = db.inner().merkle.active_slot();
             drop(db);
 
             tamper_metadata_key(
@@ -868,7 +773,7 @@ mod tests {
             ))
             .unwrap();
             db.commit().await.unwrap();
-            let slot = db.merkle.active_slot();
+            let slot = db.inner().merkle.active_slot();
             drop(db);
             let oversized_floor = Location::new(10);
 
@@ -1102,7 +1007,7 @@ mod tests {
             let db =
                 open_db::<mmr::Family>(context.with_label("db"), "keyless-serve-corruption").await;
             let target = db.current_target();
-            db.witness.write().commit_op_bytes.clear();
+            db.inner().witness.write().commit_op_bytes.clear();
 
             assert!(matches!(
                 db.compact_state(target),

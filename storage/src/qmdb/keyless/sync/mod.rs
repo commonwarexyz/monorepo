@@ -176,7 +176,7 @@ where
     }
 
     async fn persist_compact_state(&self) -> Result<(), qmdb::Error<F>> {
-        compact_witness::persist_cached_witness(self).await
+        compact_witness::persist_cached_witness(self.inner()).await
     }
 }
 
