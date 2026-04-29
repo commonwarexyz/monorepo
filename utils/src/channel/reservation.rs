@@ -186,5 +186,4 @@ mod tests {
             .send();
         assert_eq!(receiver.recv().await, Some(2));
     }
-
 }

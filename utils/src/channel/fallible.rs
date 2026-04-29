@@ -17,8 +17,7 @@
 //! ```
 
 use super::{
-    mpsc,
-    oneshot,
+    mpsc, oneshot,
     reservation::{Reservation, ReservationExt},
 };
 use std::future::Future;
@@ -58,11 +57,7 @@ pub trait FallibleExt<T> {
     ///
     /// This is a convenience wrapper around [`request`](Self::request) for cases
     /// where you have a sensible default value.
-    fn request_or<R, F>(
-        &self,
-        make_msg: F,
-        default: R,
-    ) -> impl Future<Output = R> + Send
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -149,11 +144,7 @@ pub trait AsyncFallibleExt<T> {
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
 
     /// Send a request and return the provided default on failure.
-    fn request_or<R, F>(
-        &self,
-        make_msg: F,
-        default: R,
-    ) -> impl Future<Output = R> + Send
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
