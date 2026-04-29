@@ -90,9 +90,8 @@ where
 
     /// Drop all entries, canceling each timer. Returns the count of dropped entries.
     pub(super) fn drain(&mut self) -> usize {
-        let removed: Vec<_> = self.entries.drain().collect();
-        let count = removed.len();
-        for (_, entry) in removed {
+        let count = self.entries.len();
+        for (_, entry) in self.entries.drain() {
             entry.timer.cancel();
         }
         count
@@ -118,9 +117,8 @@ where
     /// for a retry.
     pub(super) async fn next_delivery(&mut self) -> Result<(P, Key, bool), Aborted> {
         let (peer, key, valid) = self.deliveries.next_completed().await?;
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.delivery = None;
-        }
+        let entry = self.entries.get_mut(&key).expect("inflight entry");
+        entry.delivery = None;
         Ok((peer, key, valid))
     }
 }

@@ -258,26 +258,16 @@ impl<
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        // Remove from fetcher and inflight
                         self.fetcher.retain(&predicate);
-                        let count = self.inflight.retain(&predicate) as u64;
-                        if count == 0 {
-                            self.metrics.cancel.inc(Status::Dropped);
-                        } else {
-                            self.metrics.cancel.inc_by(Status::Success, count);
-                        }
+                        let count = self.inflight.retain(predicate) as u64;
+                        self.record_cancellations(count);
                     }
                     Message::Clear => {
                         trace!("mailbox: clear");
 
-                        // Clear fetcher and drain inflight
                         self.fetcher.clear();
                         let count = self.inflight.drain() as u64;
-                        if count == 0 {
-                            self.metrics.cancel.inc(Status::Dropped);
-                        } else {
-                            self.metrics.cancel.inc_by(Status::Success, count);
-                        }
+                        self.record_cancellations(count);
                     }
                 }
             },
@@ -342,6 +332,15 @@ impl<
                     wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
+        }
+    }
+
+    /// Record cancellation metrics for a retain-style operation.
+    fn record_cancellations(&mut self, count: u64) {
+        if count == 0 {
+            self.metrics.cancel.inc(Status::Dropped);
+        } else {
+            self.metrics.cancel.inc_by(Status::Success, count);
         }
     }
 

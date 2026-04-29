@@ -1561,18 +1561,18 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone()).await;
 
             // Retain with predicate that excludes the key
-            // This must clean up fetch timers entry for the key
+            // This must clean up the in-flight entry for the key
             let key_clone = key.clone();
             mailbox1.retain(move |k| k != &key_clone).await;
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            // Fetch same key again, if fetch timers wasn't cleaned up, this would
+            // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
             mailbox1.fetch(key.clone()).await;
 
@@ -1628,7 +1628,7 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone()).await;
 
             // Clear all fetches
@@ -1637,7 +1637,7 @@ mod tests {
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            // Fetch same key again, if fetch_timers wasn't cleaned up, this would
+            // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
             mailbox1.fetch(key.clone()).await;
 
