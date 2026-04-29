@@ -28,7 +28,7 @@ use crate::{
     qmdb::{sync::compact::Target, Error},
     Context,
 };
-use commonware_codec::{Decode as _, Encode as _, FixedSize};
+use commonware_codec::{Decode as _, Encode, FixedSize, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{sequence::prefixed_u64::U64, sync::RwLock};
 
@@ -138,47 +138,26 @@ pub(crate) fn validate_inactivity_floor<F: Family>(
     Ok(())
 }
 
-/// Validate every unapplied ancestor floor, then the tip floor, against the current db floor.
-///
-/// Compact immutable and keyless batches store ancestor metadata newest-first so batch construction
-/// can append in lockstep with the parent chain. Validation must therefore walk the slices in
-/// reverse to recover the original oldest-to-newest commit order, matching the per-commit floor
-/// checks performed by the full database variants.
-pub(crate) fn validate_ancestor_floors<F: Family>(
-    starting_floor: Location<F>,
-    db_size: u64,
-    ancestor_batch_ends: &[u64],
-    ancestor_floors: &[Location<F>],
-    tip_floor: Location<F>,
-    tip_commit_loc: Location<F>,
-) -> Result<(), Error<F>> {
-    debug_assert_eq!(ancestor_batch_ends.len(), ancestor_floors.len());
+/// `(metadata, inactivity_floor)` extracted from a commit operation.
+type CommitFields<Op> = (
+    Option<<Op as CompactCommit>::Metadata>,
+    Location<<Op as CompactCommit>::Family>,
+);
 
-    let mut prev_floor = starting_floor;
-    // Ancestors are stored newest-first, so walk in reverse to validate them oldest-first.
-    for i in (0..ancestor_batch_ends.len()).rev() {
-        let ancestor_end = ancestor_batch_ends[i];
-        // Ancestors at or below the current db size are already committed locally.
-        if ancestor_end <= db_size {
-            continue;
-        }
-        let ancestor_floor = ancestor_floors[i];
-        let ancestor_commit_loc = Location::new(ancestor_end - 1);
-        if ancestor_floor < prev_floor {
-            return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
-        }
-        if ancestor_floor > ancestor_commit_loc {
-            return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
-        }
-        prev_floor = ancestor_floor;
-    }
-    if tip_floor < prev_floor {
-        return Err(Error::FloorRegressed(tip_floor, prev_floor));
-    }
-    if tip_floor > tip_commit_loc {
-        return Err(Error::FloorBeyondSize(tip_floor, tip_commit_loc));
-    }
-    Ok(())
+/// `(serve cache, last commit metadata, inactivity floor)` rebuilt from a persisted witness.
+type LoadedServeState<F, D, M> = (CachedServeState<F, D>, Option<M>, Location<F>);
+
+/// Commit operation behavior needed by compact witnesses.
+pub(crate) trait CompactCommit: Sized {
+    type Family: Family;
+    type Metadata: Clone;
+    type CommitCfg: Clone + Send + Sync + 'static;
+
+    /// Build a commit op with the given metadata and inactivity floor.
+    fn build_commit(metadata: Option<Self::Metadata>, floor: Location<Self::Family>) -> Self;
+
+    /// Extract `(metadata, inactivity_floor)` if this op is a commit; otherwise return `None`.
+    fn into_commit_fields(self) -> Option<CommitFields<Self>>;
 }
 
 /// Rebuild the in-memory serve cache from the active slot's persisted witness.
@@ -194,16 +173,15 @@ pub(crate) fn validate_ancestor_floors<F: Family>(
 /// Any missing metadata, decode failure, or proof/root mismatch is treated as
 /// [`Error::DataCorrupted`], because the persisted frontier and witness no longer describe the same
 /// committed state.
-pub(crate) async fn load_serve_state<F, E, H, C, M, DecodeCommitOp>(
+pub(crate) async fn load_active_serve_state<F, E, H, Op>(
     merkle: &compact::Merkle<F, E, H::Digest>,
-    commit_codec_config: &C,
-    decode_commit_op: DecodeCommitOp,
-) -> Result<(CachedServeState<F, H::Digest>, M, Location<F>), Error<F>>
+    commit_codec_config: &Op::CommitCfg,
+) -> Result<LoadedServeState<F, H::Digest, Op::Metadata>, Error<F>>
 where
     F: Family,
     E: Context,
     H: Hasher,
-    DecodeCommitOp: FnOnce(&[u8], &C) -> Result<(M, Location<F>), Error<F>>,
+    Op: CompactCommit<Family = F> + Read<Cfg = Op::CommitCfg>,
 {
     let slot = merkle.active_slot();
     let commit_op_bytes = merkle
@@ -240,8 +218,11 @@ where
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>()
     });
-    let (last_commit_metadata, inactivity_floor_loc) =
-        decode_commit_op(commit_op_bytes.as_ref(), commit_codec_config)?;
+    let op = Op::decode_cfg(commit_op_bytes.as_ref(), commit_codec_config)
+        .map_err(|_| Error::DataCorrupted("invalid persisted commit operation"))?;
+    let (last_commit_metadata, inactivity_floor_loc) = op.into_commit_fields().ok_or(
+        Error::DataCorrupted("persisted last operation was not a commit"),
+    )?;
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     let serve_state = CachedServeState {
         root,
@@ -253,13 +234,41 @@ where
     Ok((serve_state, last_commit_metadata, inactivity_floor_loc))
 }
 
+#[allow(clippy::type_complexity)]
+pub(crate) fn init_from_verified_state<F, D>(
+    root: D,
+    leaf_count: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    commit_op_bytes: Vec<u8>,
+    commit_proof: Proof<F, D>,
+    pinned_nodes: Vec<D>,
+) -> Result<(Location<F>, CachedServeState<F, D>), Error<F>>
+where
+    F: Family,
+    D: Digest,
+{
+    if leaf_count == 0 {
+        return Err(Error::DataCorrupted("missing final commit"));
+    }
+    let last_commit_loc = Location::<F>::new(*leaf_count - 1);
+    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+    let serve_state = CachedServeState {
+        root,
+        leaf_count,
+        pinned_nodes,
+        commit_op_bytes,
+        commit_proof,
+    };
+    Ok((last_commit_loc, serve_state))
+}
+
 /// Bootstrap the first persisted witness for a brand-new compact db.
 ///
 /// Fresh compact databases begin with exactly one committed operation: the initial commit. This
 /// helper inserts that commit into the compact Merkle, builds its one-leaf proof, and persists the
 /// resulting witness/cache pair into the active slot so later reopen and rewind paths can use the
 /// same recovery logic as every subsequent commit.
-pub(crate) async fn bootstrap_initial_commit<F, E, H>(
+async fn bootstrap_initial_commit<F, E, H>(
     merkle: &mut compact::Merkle<F, E, H::Digest>,
     commit_op_bytes: Vec<u8>,
 ) -> Result<(), Error<F>>
@@ -293,6 +302,29 @@ where
         )
         .await?;
     Ok(())
+}
+
+/// Open a compact db's persisted witness, bootstrapping an initial commit on first open.
+///
+/// Returns the cached serve state plus the typed last-commit fields the caller needs to populate
+/// its own in-memory state. After this returns, the active slot is guaranteed to have a servable
+/// frontier/witness pair, so later reopen and rewind paths can assume that invariant.
+pub(crate) async fn init_compact_state<F, E, H, Op>(
+    merkle: &mut compact::Merkle<F, E, H::Digest>,
+    commit_codec_config: &Op::CommitCfg,
+) -> Result<LoadedServeState<F, H::Digest, Op::Metadata>, Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    Op: CompactCommit<Family = F> + Encode + Read<Cfg = Op::CommitCfg>,
+{
+    if merkle.leaves() == 0 {
+        let initial_floor = Location::new(0);
+        let commit_op_bytes = Op::build_commit(None, initial_floor).encode().to_vec();
+        bootstrap_initial_commit::<F, E, H>(merkle, commit_op_bytes).await?;
+    }
+    load_active_serve_state::<F, E, H, Op>(merkle, commit_codec_config).await
 }
 
 // Shared hook for persisting and reloading the current servable witness for compact immutable and

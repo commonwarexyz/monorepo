@@ -4,13 +4,16 @@ use super::{operation::Operation, Keyless};
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, Error},
+    qmdb::{
+        any::value::ValueEncoding,
+        batch_core::{AppendBatchCore, ChainMeta, HasAncestors, HasCore},
+        Error,
+    },
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
-use core::iter;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -42,51 +45,29 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
-#[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding>
 where
     Operation<F, V>: EncodeShared,
 {
+    /// Shared append core (Merkle state + chain metadata).
+    ///
+    /// Invariant: `core.merkle` is `Arc::clone(&journal_batch.inner)`.
+    pub(super) core: AppendBatchCore<F, D>,
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>>>,
-
-    /// The parent batch in the chain, if any.
-    pub(super) parent: Option<Weak<Self>>,
-
-    /// Total operations before this batch's own ops (DB + ancestor batches).
-    pub(super) base_size: u64,
-
-    /// Total operation count after this batch.
-    pub(super) total_size: u64,
-
-    /// The database size when the initial batch was created.
-    pub(super) db_size: u64,
-
-    /// Each ancestor's `total_size` (operation count after that ancestor).
-    /// Used by `apply_batch` to validate partial ancestor commits.
-    pub(super) ancestor_batch_ends: Vec<u64>,
-
-    /// Each ancestor's `new_inactivity_floor_loc`, stored in parallel with
-    /// `ancestor_batch_ends` (same order, newest-first: parent, grandparent, ...).
-    /// Used by `apply_batch` to enforce per-commit floor monotonicity across the chain.
-    pub(super) ancestor_new_inactivity_floor_locs: Vec<Location<F>>,
-
-    /// The inactivity floor declared by this batch's commit operation.
-    pub(super) new_inactivity_floor_loc: Location<F>,
+    /// Strong refs to uncommitted ancestors, newest-to-oldest.
+    ///
+    /// This is a wrapper-level chain for validation/read-through and may include itemless
+    /// `to_batch` markers that the journal layer intentionally filters out.
+    pub(super) ancestors: Vec<Arc<Self>>,
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
+impl<F: Family, D: Digest, V: ValueEncoding> HasCore<F, D> for MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
 {
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
-        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        iter::from_fn(move || {
-            let batch = next.take()?;
-            next = batch.parent.as_ref().and_then(Weak::upgrade);
-            Some(batch)
-        })
+    fn core(&self) -> &AppendBatchCore<F, D> {
+        &self.core
     }
 }
 
@@ -103,14 +84,13 @@ where
     Operation<F, V>: EncodeShared,
 {
     // Each batch's items span [size - items.len(), size). We compute the range from the
-    // journal (strong Arcs, always intact) rather than from the QMDB-layer Weak parent
-    // (which may be dead).
+    // journal (strong Arcs, always intact).
     let self_end = batch.journal_batch.size();
     let self_base = self_end - batch.journal_batch.items().len() as u64;
     if loc >= self_base && loc < self_end {
         return Some(batch.journal_batch.items()[(loc - self_base) as usize].clone());
     }
-    for ancestor in batch.ancestors() {
+    for ancestor in &batch.ancestors {
         let end = ancestor.journal_batch.size();
         let base = end - ancestor.journal_batch.items().len() as u64;
         if loc >= base && loc < end {
@@ -271,45 +251,38 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
     {
-        let base = self.base_size;
-
-        // Build operations: one Append per value, then Commit.
-        let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
-        for value in self.appends {
-            ops.push(Operation::Append(value));
-        }
-        ops.push(Operation::Commit(metadata, inactivity_floor));
-
-        let total_size = base + ops.len() as u64;
+        let item_count = self.appends.len();
 
         // Add operations to the journal batch and merkleize.
         let mut journal_batch = self.journal_batch;
-        for op in &ops {
-            journal_batch = journal_batch.add(op.clone());
+        for value in self.appends {
+            journal_batch = journal_batch.add(Operation::Append(value));
         }
+        journal_batch = journal_batch.add(Operation::Commit(metadata, inactivity_floor));
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let mut ancestor_batch_ends = Vec::new();
-        let mut ancestor_new_inactivity_floor_locs = Vec::new();
-        if let Some(parent) = &self.parent {
-            ancestor_batch_ends.push(parent.total_size);
-            ancestor_new_inactivity_floor_locs.push(parent.new_inactivity_floor_loc);
-            for batch in parent.ancestors() {
-                ancestor_batch_ends.push(batch.total_size);
-                ancestor_new_inactivity_floor_locs.push(batch.new_inactivity_floor_loc);
-            }
-        }
+        let ancestors = MerkleizedBatch::ancestor_chain(self.parent.as_ref());
+        let chain =
+            ChainMeta::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
+        let core = AppendBatchCore {
+            merkle: Arc::clone(&journal.inner),
+            chain,
+        };
 
         Arc::new(MerkleizedBatch {
+            core,
             journal_batch: journal,
-            parent: self.parent.as_ref().map(Arc::downgrade),
-            base_size: self.base_size,
-            total_size,
-            db_size: self.db_size,
-            ancestor_batch_ends,
-            ancestor_new_inactivity_floor_locs,
-            new_inactivity_floor_loc: inactivity_floor,
+            ancestors,
         })
+    }
+}
+
+impl<F: Family, D: Digest, V: ValueEncoding> HasAncestors<F, D> for MerkleizedBatch<F, D, V>
+where
+    Operation<F, V>: EncodeShared,
+{
+    fn ancestors(&self) -> &[Arc<Self>] {
+        &self.ancestors
     }
 }
 
@@ -319,7 +292,7 @@ where
 {
     /// Return the speculative root.
     pub fn root(&self) -> D {
-        self.journal_batch.root()
+        self.core.root()
     }
 
     /// Read a value at `loc`.
@@ -337,7 +310,7 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.db_size {
+        if loc_val >= self.core.chain.db_size {
             if let Some(op) = read_chain_op(self, loc_val) {
                 return Ok(op.into_value());
             }
@@ -375,7 +348,7 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.db_size {
+            if loc_val >= self.core.chain.db_size {
                 if let Some(op) = read_chain_op(self, loc_val) {
                     results.push(op.into_value());
                     continue;
@@ -410,8 +383,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.total_size,
-            db_size: self.db_size,
+            base_size: self.core.chain.total_size,
+            db_size: self.core.chain.db_size,
         }
     }
 }

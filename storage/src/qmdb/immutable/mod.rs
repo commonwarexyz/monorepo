@@ -87,7 +87,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding,
-        build_snapshot_from_log, compact_witness,
+        build_snapshot_from_log,
         operation::{Key, Operation as _},
         Error,
     },
@@ -569,7 +569,8 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`].
+    /// different-size fork returns [`Error::StaleBatch`]. Equal-size orphaned branches cannot be
+    /// distinguished by the size-based staleness check and must not be applied.
     ///
     /// Returns the range of locations written.
     ///
@@ -596,28 +597,9 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_diff_ends.contains(&db_size);
-        if !valid {
-            return Err(Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
-        let tip_commit_loc = Location::new(batch.total_size - 1);
-        // Per-commit floor validation; see `compact_witness::validate_ancestor_floors`.
-        compact_witness::validate_ancestor_floors(
-            self.inactivity_floor_loc,
-            db_size,
-            &batch.ancestor_diff_ends,
-            &batch.ancestor_new_inactivity_floor_locs,
-            batch.new_inactivity_floor_loc,
-            tip_commit_loc,
-        )?;
-        let start_loc = Location::new(db_size);
-
+        batch
+            .core
+            .validate_apply(self.inactivity_floor_loc, db_size, &batch.ancestors)?;
         // Apply journal.
         self.journal.apply_batch(&batch.journal_batch).await?;
 
@@ -630,11 +612,11 @@ where
             self.snapshot
                 .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
         }
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
+        for ancestor in &batch.ancestors {
+            if ancestor.core.chain.total_size <= db_size {
                 continue;
             }
-            for (key, entry) in ancestor_diff.iter() {
+            for (key, entry) in ancestor.diff.iter() {
                 if seen.insert(key.clone()) {
                     self.snapshot
                         .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
@@ -642,10 +624,9 @@ where
             }
         }
 
-        // Update state.
-        self.last_commit_loc = Location::new(batch.total_size - 1);
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
-        Ok(start_loc..Location::new(batch.total_size))
+        Ok(batch
+            .core
+            .commit_to(&mut self.last_commit_loc, &mut self.inactivity_floor_loc))
     }
 }
 
@@ -2305,7 +2286,7 @@ pub(super) mod test {
             .set(key3, v3)
             .merkleize(&db, None, Location::new(0));
 
-        // Drop A and B without committing. Their Weak refs in C are now dead.
+        // Drop A and B without committing. C's strong ancestor refs preserve their diffs.
         drop(a);
         drop(b);
 

@@ -14,21 +14,19 @@
 //!
 //! # Inactivity floor
 //!
-//! Commits still carry an inactivity floor, but only for wire-format compatibility with
-//! [`crate::qmdb::immutable::Immutable`]: the root is computed over the encoded operation
-//! sequence, and that sequence must include the same floor to produce the same root as the
-//! full variant. Here the floor has no effect on pruning or snapshot rebuilding. All
+//! Commits still carry an inactivity floor so compact and full variants derive the same encoded
+//! leaf for each commit. Here the floor has no effect on pruning or snapshot rebuilding. All
 //! historical in-memory state is discarded on every `sync`.
 
 use super::operation::Operation;
 use crate::{
     merkle::{
-        batch, compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location,
-        Proof,
+        compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location, Proof,
     },
     qmdb::{
         any::value::ValueEncoding,
-        compact_witness::{self, CachedServeState, WitnessSource},
+        batch_core::{AppendBatchCore, BatchBase, ChainMeta, HasAncestors, HasCore, ResolvedBase},
+        compact_witness::{self, CachedServeState, CompactCommit, WitnessSource},
         operation::Key,
         sync::compact as compact_sync,
         Error,
@@ -38,11 +36,8 @@ use crate::{
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::sync::RwLock;
-use core::{iter, marker::PhantomData};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-};
+use core::marker::PhantomData;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// Configuration for a compact immutable authenticated db.
 #[derive(Clone)]
@@ -80,9 +75,32 @@ where
     _key: PhantomData<K>,
 }
 
-type CommitFields<F, V> = (Option<<V as ValueEncoding>::Value>, Location<F>);
 type ServeStateResult<F, K, V, D> =
     Result<compact_sync::State<F, Operation<F, K, V>, D>, compact_sync::ServeError<F, D>>;
+
+impl<F, K, V> CompactCommit for Operation<F, K, V>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    Self: Read,
+    <Self as Read>::Cfg: Clone + Send + Sync + 'static,
+{
+    type Family = F;
+    type Metadata = V::Value;
+    type CommitCfg = <Self as Read>::Cfg;
+
+    fn build_commit(metadata: Option<Self::Metadata>, floor: Location<Self::Family>) -> Self {
+        Self::Commit(metadata, floor)
+    }
+
+    fn into_commit_fields(self) -> Option<(Option<Self::Metadata>, Location<Self::Family>)> {
+        let Self::Commit(metadata, floor) = self else {
+            return None;
+        };
+        Some((metadata, floor))
+    }
+}
 
 /// A speculative batch for a compact immutable db.
 #[allow(clippy::type_complexity)]
@@ -94,49 +112,50 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest>,
+    base: BatchBase<F, H::Digest, MerkleizedBatch<F, H::Digest, K, V>>,
     mutations: BTreeMap<K, V::Value>,
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, K, V>>>,
-    base_size: u64,
-    db_size: u64,
 }
 
 /// A merkleized batch for a compact immutable db.
-#[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding>
 where
     Operation<F, K, V>: EncodeShared,
 {
-    pub(super) merkle_batch: Arc<batch::MerkleizedBatch<F, D>>,
+    pub(super) core: AppendBatchCore<F, D>,
     pub(super) commit_metadata: Option<V::Value>,
-    pub(super) parent: Option<Weak<Self>>,
-    pub(super) base_size: u64,
-    pub(super) total_size: u64,
-    pub(super) db_size: u64,
-    /// Ancestor totals in newest-first order. Pair with `ancestor_floors[i]`.
-    pub(super) ancestor_batch_ends: Vec<u64>,
-    /// Floor each ancestor committed to; `[i]` matches `ancestor_batch_ends[i]`.
-    pub(super) ancestor_floors: Vec<Location<F>>,
-    pub(super) new_inactivity_floor_loc: Location<F>,
+    /// Strong refs to uncommitted ancestors, newest-to-oldest.
+    ///
+    /// This is a wrapper-level chain for validation and may include itemless `to_batch` markers.
+    pub(super) ancestors: Vec<Arc<Self>>,
     pub(super) _key: PhantomData<K>,
+}
+
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding> HasCore<F, D> for MerkleizedBatch<F, D, K, V>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    fn core(&self) -> &AppendBatchCore<F, D> {
+        &self.core
+    }
+}
+
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding> HasAncestors<F, D>
+    for MerkleizedBatch<F, D, K, V>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    fn ancestors(&self) -> &[Arc<Self>] {
+        &self.ancestors
+    }
 }
 
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
 {
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
-        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        iter::from_fn(move || {
-            let batch = next.take()?;
-            next = batch.parent.as_ref().and_then(Weak::upgrade);
-            Some(batch)
-        })
-    }
-
     /// Return the root digest after this batch is applied.
     pub fn root(&self) -> D {
-        self.merkle_batch.root()
+        self.core.root()
     }
 
     /// Create a new speculative batch with this one as its parent.
@@ -145,11 +164,8 @@ where
         H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            merkle_batch: compact_merkle::UnmerkleizedBatch::wrap(self.merkle_batch.new_batch()),
+            base: BatchBase::Child(Arc::clone(self)),
             mutations: BTreeMap::new(),
-            parent: Some(Arc::clone(self)),
-            base_size: self.total_size,
-            db_size: self.db_size,
         }
     }
 }
@@ -169,11 +185,11 @@ where
         Operation<F, K, V>: Read<Cfg = C>,
     {
         Self {
-            merkle_batch: db.merkle.new_batch(),
+            base: BatchBase::Db {
+                db_size: committed_size,
+                merkle_parent: db.merkle.to_batch(),
+            },
             mutations: BTreeMap::new(),
-            parent: None,
-            base_size: committed_size,
-            db_size: committed_size,
         }
     }
 
@@ -201,42 +217,32 @@ where
         Operation<F, K, V>: Read<Cfg = C>,
     {
         let hasher = StandardHasher::<H>::new();
-        let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
-        for (key, value) in self.mutations {
-            ops.push(Operation::Set(key, value));
-        }
-        ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
-
-        let total_size = self.base_size + ops.len() as u64;
-        let mut merkle_batch = self.merkle_batch;
-        for op in &ops {
-            merkle_batch = merkle_batch.add(&hasher, &op.encode());
-        }
-        let merkle = db
-            .merkle
-            .with_mem(|mem| merkle_batch.merkleize(mem, &hasher));
-
-        let mut ancestor_batch_ends = Vec::new();
-        let mut ancestor_floors = Vec::new();
-        if let Some(parent) = &self.parent {
-            ancestor_batch_ends.push(parent.total_size);
-            ancestor_floors.push(parent.new_inactivity_floor_loc);
-            for batch in parent.ancestors() {
-                ancestor_batch_ends.push(batch.total_size);
-                ancestor_floors.push(batch.new_inactivity_floor_loc);
-            }
-        }
+        let ResolvedBase {
+            base_size,
+            db_size,
+            merkle_parent,
+            ancestors,
+        } = self.base.resolve();
+        let commit_op = Operation::Commit(metadata.clone(), inactivity_floor);
+        let core = db.merkle.with_mem(|mem| {
+            AppendBatchCore::from_encoded_ops(
+                merkle_parent,
+                mem,
+                &hasher,
+                base_size,
+                db_size,
+                inactivity_floor,
+                self.mutations
+                    .into_iter()
+                    .map(|(key, value)| Operation::Set(key, value)),
+                commit_op,
+            )
+        });
 
         Arc::new(MerkleizedBatch {
-            merkle_batch: merkle,
+            core,
             commit_metadata: metadata,
-            parent: self.parent.as_ref().map(Arc::downgrade),
-            base_size: self.base_size,
-            total_size,
-            db_size: self.db_size,
-            ancestor_batch_ends,
-            ancestor_floors,
-            new_inactivity_floor_loc: inactivity_floor,
+            ancestors,
             _key: PhantomData,
         })
     }
@@ -253,48 +259,6 @@ where
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    fn encode_commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Vec<u8> {
-        Operation::<F, K, V>::Commit(metadata, inactivity_floor_loc)
-            .encode()
-            .to_vec()
-    }
-
-    fn decode_commit_op(
-        bytes: &[u8],
-        commit_codec_config: &C,
-    ) -> Result<CommitFields<F, V>, Error<F>>
-    where
-        Operation<F, K, V>: Read<Cfg = C>,
-    {
-        let op = Operation::<F, K, V>::decode_cfg(bytes, commit_codec_config)
-            .map_err(|_| Error::DataCorrupted("invalid persisted commit operation"))?;
-        let Operation::Commit(metadata, inactivity_floor_loc) = op else {
-            return Err(Error::DataCorrupted(
-                "persisted last operation was not a commit",
-            ));
-        };
-        Ok((metadata, inactivity_floor_loc))
-    }
-
-    async fn load_active_serve_state(
-        merkle: &compact_merkle::Merkle<F, E, H::Digest>,
-        commit_codec_config: &C,
-    ) -> Result<
-        (
-            CachedServeState<F, H::Digest>,
-            Option<V::Value>,
-            Location<F>,
-        ),
-        Error<F>,
-    > {
-        compact_witness::load_serve_state::<F, E, H, _, _, _>(
-            merkle,
-            commit_codec_config,
-            Self::decode_commit_op,
-        )
-        .await
-    }
-
     /// Build a compact db handle from already-verified compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
@@ -310,19 +274,14 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        if merkle.leaves() == 0 {
-            return Err(Error::DataCorrupted("missing final commit"));
-        }
-        let leaf_count = merkle.leaves();
-        let last_commit_loc = Location::<F>::new(*leaf_count - 1);
-        compact_witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-        let serve_state = CachedServeState {
-            root: merkle.root(),
-            leaf_count,
-            pinned_nodes,
+        let (last_commit_loc, serve_state) = compact_witness::init_from_verified_state(
+            merkle.root(),
+            merkle.leaves(),
+            inactivity_floor_loc,
             commit_op_bytes,
             commit_proof,
-        };
+            pinned_nodes,
+        )?;
 
         Ok(Self {
             merkle,
@@ -346,25 +305,12 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        // Bootstrap: append an initial Commit(None, 0) on first open. This establishes the
-        // invariant that every merkleized batch ends with a Commit op, so `last_commit_loc =
-        // leaves - 1` is always correct without replaying the log (which we can't, since we
-        // don't retain it).
-        //
-        // We also persist that initial commit's witness immediately so every later reopen or
-        // rewind can uniformly assume "the active slot has a servable tip witness".
-        if merkle.leaves() == 0 {
-            compact_witness::bootstrap_initial_commit::<F, E, H>(
+        let (serve_state, last_commit_metadata, inactivity_floor_loc) =
+            compact_witness::init_compact_state::<F, E, H, Operation<F, K, V>>(
                 &mut merkle,
-                Operation::<F, K, V>::Commit(None, Location::new(0))
-                    .encode()
-                    .to_vec(),
+                &commit_codec_config,
             )
             .await?;
-        }
-
-        let (serve_state, last_commit_metadata, inactivity_floor_loc) =
-            Self::load_active_serve_state(&merkle, &commit_codec_config).await?;
 
         Self::init_from_verified_state(
             merkle,
@@ -461,16 +407,14 @@ where
     /// Create an owned merkleized batch representing the current committed state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let committed_size = *self.last_commit_loc + 1;
+        let chain = ChainMeta::quiescent(committed_size, self.inactivity_floor_loc);
         Arc::new(MerkleizedBatch {
-            merkle_batch: self.merkle.to_batch(),
+            core: AppendBatchCore {
+                merkle: self.merkle.to_batch(),
+                chain,
+            },
             commit_metadata: self.last_commit_metadata.clone(),
-            parent: None,
-            base_size: committed_size,
-            total_size: committed_size,
-            db_size: committed_size,
-            ancestor_batch_ends: Vec::new(),
-            ancestor_floors: Vec::new(),
-            new_inactivity_floor_loc: self.inactivity_floor_loc,
+            ancestors: Vec::new(),
             _key: PhantomData,
         })
     }
@@ -492,34 +436,15 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_batch_ends.contains(&db_size);
-        if !valid {
-            return Err(Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
+        batch
+            .core
+            .validate_apply(self.inactivity_floor_loc, db_size, &batch.ancestors)?;
 
-        let tip_commit_loc = Location::new(batch.total_size - 1);
-        // Per-commit floor validation; see `compact_witness::validate_ancestor_floors`.
-        compact_witness::validate_ancestor_floors(
-            self.inactivity_floor_loc,
-            db_size,
-            &batch.ancestor_batch_ends,
-            &batch.ancestor_floors,
-            batch.new_inactivity_floor_loc,
-            tip_commit_loc,
-        )?;
-
-        let start_loc = self.last_commit_loc + 1;
-        self.merkle.apply_batch(&batch.merkle_batch)?;
-        self.last_commit_loc = Location::new(batch.total_size - 1);
+        self.merkle.apply_batch(&batch.core.merkle)?;
         self.last_commit_metadata = batch.commit_metadata.clone();
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
-        Ok(start_loc..Location::new(batch.total_size))
+        Ok(batch
+            .core
+            .commit_to(&mut self.last_commit_loc, &mut self.inactivity_floor_loc))
     }
 
     /// Durably persist the current db state to disk.
@@ -566,7 +491,11 @@ where
         // Reload the witness from the reverted slot as well, so compact serving stays aligned with
         // the same frontier/root that `rewind` restored.
         let (serve_state, last_commit_metadata, inactivity_floor_loc) =
-            Self::load_active_serve_state(&self.merkle, &self.commit_codec_config).await?;
+            compact_witness::load_active_serve_state::<F, E, H, Operation<F, K, V>>(
+                &self.merkle,
+                &self.commit_codec_config,
+            )
+            .await?;
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
         self.last_commit_loc = Location::new(*serve_state.leaf_count - 1);
@@ -600,7 +529,9 @@ where
     }
 
     fn encode_current_commit_op(&self) -> Vec<u8> {
-        Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
+        Operation::<F, K, V>::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
+            .encode()
+            .to_vec()
     }
 
     fn serve_state_cache(&self) -> &RwLock<CachedServeState<F, H::Digest>> {

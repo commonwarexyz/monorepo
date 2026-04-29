@@ -50,7 +50,11 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, Error},
+    qmdb::{
+        any::value::ValueEncoding,
+        batch_core::{AppendBatchCore, ChainMeta},
+        Error,
+    },
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -390,15 +394,15 @@ where
     /// Create an initial [`batch::MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V>> {
         let journal_size = *self.last_commit_loc + 1;
+        let journal_batch = self.journal.to_merkleized_batch();
+        let chain = ChainMeta::quiescent(journal_size, self.inactivity_floor_loc);
         Arc::new(batch::MerkleizedBatch {
-            journal_batch: self.journal.to_merkleized_batch(),
-            parent: None,
-            base_size: journal_size,
-            total_size: journal_size,
-            db_size: journal_size,
-            ancestor_batch_ends: Vec::new(),
-            ancestor_new_inactivity_floor_locs: Vec::new(),
-            new_inactivity_floor_loc: self.inactivity_floor_loc,
+            core: AppendBatchCore {
+                merkle: Arc::clone(&journal_batch.inner),
+                chain,
+            },
+            journal_batch,
+            ancestors: Vec::new(),
         })
     }
 
@@ -406,7 +410,8 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`].
+    /// different-size fork returns [`Error::StaleBatch`]. Equal-size orphaned branches cannot be
+    /// distinguished by the size-based staleness check and must not be applied.
     ///
     /// Every commit operation in the batch chain (each unapplied ancestor's commit plus the
     /// tip's) must satisfy two per-commit invariants:
@@ -432,61 +437,16 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_batch_ends.contains(&db_size);
-        if !valid {
-            return Err(Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
-        // Validate every unapplied commit's floor (each ancestor in the chain, then the tip)
-        // before mutating the journal. The invariant is per-commit:
-        //   - floors are monotonically non-decreasing across the chain, and
-        //   - each floor is at most its own commit location (= total_size - 1 at that point).
-        // Ancestors are stored newest-first, so walk in reverse to get oldest-first.
-        let mut prev_floor = self.inactivity_floor_loc;
-        for i in (0..batch.ancestor_batch_ends.len()).rev() {
-            let ancestor_end = batch.ancestor_batch_ends[i];
-            if ancestor_end <= db_size {
-                // Already on disk — its floor was validated when it was first applied.
-                continue;
-            }
-            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
-            let ancestor_commit_loc = Location::new(ancestor_end - 1);
-            if ancestor_floor < prev_floor {
-                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
-            }
-            if ancestor_floor > ancestor_commit_loc {
-                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
-            }
-            prev_floor = ancestor_floor;
-        }
-        // Tip checks chain off the last validated ancestor floor.
-        if batch.new_inactivity_floor_loc < prev_floor {
-            return Err(Error::FloorRegressed(
-                batch.new_inactivity_floor_loc,
-                prev_floor,
-            ));
-        }
-        let tip_commit_loc = Location::new(batch.total_size - 1);
-        if batch.new_inactivity_floor_loc > tip_commit_loc {
-            return Err(Error::FloorBeyondSize(
-                batch.new_inactivity_floor_loc,
-                tip_commit_loc,
-            ));
-        }
-        let start_loc = self.last_commit_loc + 1;
-
+        batch
+            .core
+            .validate_apply(self.inactivity_floor_loc, db_size, &batch.ancestors)?;
         self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = Location::new(batch.total_size - 1);
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
-        let end_loc = Location::new(batch.total_size);
-        debug!(size = ?end_loc, "applied batch");
-        Ok(start_loc..end_loc)
+        let range = batch
+            .core
+            .commit_to(&mut self.last_commit_loc, &mut self.inactivity_floor_loc);
+        debug!(size = ?range.end, "applied batch");
+        Ok(range)
     }
 }
 
