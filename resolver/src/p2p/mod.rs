@@ -453,9 +453,7 @@ mod tests {
 
             mailbox1.cancel(key.clone()).await;
 
-            // Engine cancel must drop the in-flight delivery future, which closes the gate.
             gate_sender.closed().await;
-
             select! {
                 _ = cons_out1.recv() => panic!("unexpected event"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
