@@ -20,8 +20,16 @@ pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S = Sequential> =
-    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
+pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
+    F,
+    E,
+    Journal<E, Operation<F, K, V>>,
+    Index<T, Location<F>>,
+    H,
+    Update<K, V>,
+    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+    S,
+>;
 
 impl<
         F: merkle::Family,
@@ -36,22 +44,7 @@ impl<
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        Self::init_with_callback(context, cfg, None, |_, _| {}).await
-    }
-
-    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
-    ///
-    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
-    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the snapshot
-    /// is built from the log, `callback` is invoked for each operation with its activity status and
-    /// previous location (if any).
-    pub(crate) async fn init_with_callback(
-        context: E,
-        cfg: Config<T, S>,
-        known_inactivity_floor: Option<Location<F>>,
-        callback: impl FnMut(bool, Option<Location<F>>),
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
+        crate::qmdb::any::init(context, cfg).await
     }
 }
 
@@ -93,6 +86,7 @@ pub mod partitioned {
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
 
@@ -110,22 +104,7 @@ pub mod partitioned {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-            Self::init_with_callback(context, cfg, None, |_, _| {}).await
-        }
-
-        /// Initialize the DB, invoking `callback` for each operation processed during recovery.
-        ///
-        /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
-        /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the snapshot
-        /// is built from the log, `callback` is invoked for each operation with its activity status and
-        /// previous location (if any).
-        pub(crate) async fn init_with_callback(
-            context: E,
-            cfg: Config<T, S>,
-            known_inactivity_floor: Option<Location<F>>,
-            callback: impl FnMut(bool, Option<Location<F>>),
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
+            crate::qmdb::any::init(context, cfg).await
         }
     }
 
@@ -195,9 +174,7 @@ pub(crate) mod test {
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        crate::qmdb::any::init(context, cfg, None, |_, _| {})
-            .await
-            .unwrap()
+        crate::qmdb::any::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names

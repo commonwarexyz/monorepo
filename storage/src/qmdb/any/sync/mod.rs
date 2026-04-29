@@ -92,7 +92,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
-) -> Result<Db<F, E, C, I, H, U, S>, qmdb::Error<F>>
+) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
     E: Context,
@@ -126,7 +126,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, Some(range.start()), |_, _| {}).await?;
+    let db = Db::init_from_log(index, log, None).await?;
 
     Ok(db)
 }

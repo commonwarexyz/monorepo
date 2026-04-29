@@ -28,8 +28,8 @@
 //! let fork_a = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(&db, None).await?;
 //! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3)).merkleize(&db, None).await?;
 //!
-//! db.apply_batch(fork_a).await?;           // OK -- includes parent
-//! assert!(db.apply_batch(fork_b).is_err()) // StaleBatch
+//! db.apply_batch(fork_a).await?;                 // OK -- includes parent
+//! assert!(db.apply_batch(fork_b).await.is_err()); // StaleBatch
 //! ```
 //!
 //! ```ignore
@@ -47,8 +47,8 @@
 //! let parent = db.new_batch().write(k1, Some(v1)).merkleize(&db, None).await?;
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(&db, None).await?;
 //!
-//! db.apply_batch(child).await?;            // OK -- includes parent
-//! assert!(db.apply_batch(parent).is_err()) // StaleBatch
+//! db.apply_batch(child).await?;                  // OK -- includes parent
+//! assert!(db.apply_batch(parent).await.is_err()); // StaleBatch
 //! ```
 //!
 //! ```ignore
@@ -59,8 +59,8 @@
 //! let b1 = db.new_batch().write(k3, Some(v3)).merkleize(&db, None).await?;
 //! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4)).merkleize(&db, None).await?;
 //!
-//! db.apply_batch(a2).await?;               // OK -- includes a1
-//! assert!(db.apply_batch(b2).is_err())     // StaleBatch
+//! db.apply_batch(a2).await?;                 // OK -- includes a1
+//! assert!(db.apply_batch(b2).await.is_err()); // StaleBatch
 //! ```
 
 use crate::{
@@ -72,6 +72,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
+        bitmap::Shared,
         operation::Committable,
     },
     translator::Translator,
@@ -80,6 +81,7 @@ use crate::{
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::{Sequential, Strategy};
+use std::sync::Arc;
 use tracing::warn;
 
 pub mod batch;
@@ -92,6 +94,8 @@ pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
+
+pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -113,12 +117,10 @@ pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, Cb, S>(
+pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
     cfg: Config<T, J::Config, S>,
-    known_inactivity_floor: Option<Location<F>>,
-    callback: Cb,
-) -> Result<db::Db<F, E, J, I, H, U, S>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
@@ -129,7 +131,27 @@ where
     J: Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
-    Cb: FnMut(bool, Option<Location<F>>),
+{
+    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+}
+
+/// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
+/// chunks from grafted metadata). `bitmap = None` allocates internally.
+pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
+    context: E,
+    cfg: Config<T, J::Config, S>,
+    bitmap: Option<Arc<Shared<N>>>,
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
+where
+    F: Family,
+    E: Context,
+    U: Update + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: IndexFactory<T, Value = Location<F>>,
+    J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
+    Operation<F, U>: Committable + CodecShared,
 {
     let mut log = J::init::<F, H, S>(
         context.with_label("log"),
@@ -147,7 +169,7 @@ where
     }
 
     let index = I::new(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
+    db::Db::init_from_log(index, log, bitmap).await
 }
 
 #[cfg(test)]
@@ -2081,11 +2103,7 @@ pub(crate) mod test {
 
             let root_before = db.root();
             let size_before = db.size().await;
-            let no_op_locs = db.rewind(size_before).await.unwrap();
-            assert!(
-                no_op_locs.is_empty(),
-                "expected no-op rewind to return no restored locations"
-            );
+            db.rewind(size_before).await.unwrap();
             assert_eq!(db.root(), root_before);
             assert_eq!(db.size().await, size_before);
 
@@ -2186,6 +2204,97 @@ pub(crate) mod test {
         });
     }
 
+    /// `prune()` must advance the bitmap only as far as the authenticated journal actually
+    /// pruned. Journal pruning is section-granular while bitmap pruning rounds to chunk
+    /// boundaries, so a coarse `items_per_section` can leave the journal retaining from the
+    /// start while the bitmap has already crossed the next chunk boundary. A subsequent
+    /// `rewind()` to a still-retained early commit must still succeed.
+    #[test_traced("INFO")]
+    fn test_any_prune_keeps_bitmap_aligned_with_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Bitmap chunk size in bits. The bug requires the bitmap to round across at least
+            // one chunk boundary while the journal cannot prune any section.
+            const BITMAP_CHUNK_BITS: u64 =
+                commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+            // Items-per-section is chosen so that no full section fits in the test's op count,
+            // forcing the journal to retain from 0 even when prune is requested past the first
+            // bitmap chunk boundary.
+            const ITEMS_PER_SECTION: u64 = 2048;
+            const { assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS) };
+
+            let ctx = context.with_label("db");
+            let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
+            cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
+
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), cfg).await.unwrap();
+
+            commit_writes(&mut db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
+            let rewind_target = db.size().await;
+            // Rewind target must lie below the chunk boundary the buggy prune would advance
+            // to; otherwise the unfixed code would not panic on truncate.
+            assert!(
+                *rewind_target < BITMAP_CHUNK_BITS,
+                "rewind_target {rewind_target:?} must be < {BITMAP_CHUNK_BITS} for the bug to manifest"
+            );
+            let root_at_target = db.root();
+
+            commit_writes(
+                &mut db,
+                (0..700).map(|i| (key(i), Some(val(1_000 + i)))),
+                None,
+            )
+            .await;
+            commit_writes(
+                &mut db,
+                (0..700).map(|i| (key(i), Some(val(10_000 + i)))),
+                None,
+            )
+            .await;
+
+            // Pre-rewind size must actually exceed the rewind target so the rewind is not a
+            // no-op.
+            let pre_prune_size = db.size().await;
+            assert!(pre_prune_size > rewind_target);
+
+            let prune_loc = Location::new(600);
+            // prune_loc must cross at least one bitmap chunk boundary; otherwise the buggy
+            // bitmap prune would correctly stay at 0 and the test would pass even unfixed.
+            assert!(
+                *prune_loc > BITMAP_CHUNK_BITS,
+                "prune_loc {prune_loc:?} must exceed one bitmap chunk ({BITMAP_CHUNK_BITS} bits)"
+            );
+            // prune_loc must lie within the first journal section so the journal cannot
+            // prune any section, leaving bounds.start at 0 to expose the bitmap drift.
+            assert!(
+                *prune_loc < ITEMS_PER_SECTION,
+                "prune_loc {prune_loc:?} must be < {ITEMS_PER_SECTION} so the journal retains section 0"
+            );
+            assert!(db.inactivity_floor_loc() >= prune_loc);
+
+            db.prune(prune_loc).await.unwrap();
+
+            // Journal could not prune any section, so it still retains from 0. The bitmap
+            // must therefore also remain at 0.
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, Location::new(0));
+            assert_eq!(
+                db.bitmap.pruned_bits(),
+                0,
+                "bitmap pruned past journal retained start"
+            );
+
+            // Rewind to the still-retained early commit must succeed and restore visible
+            // state (root match implies the snapshot was rebuilt correctly).
+            db.rewind(rewind_target).await.unwrap();
+            assert_eq!(db.size().await, rewind_target);
+            assert_eq!(db.root(), root_at_target);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // --- MMB family tests ---
     //
     // The tests above use MMR-backed databases (via the concrete Db type aliases). The tests
@@ -2209,7 +2318,7 @@ pub(crate) mod test {
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
         let cfg = variable_db_config::<OneCap>(suffix, &context);
-        super::init(context, cfg, None, |_, _| {}).await.unwrap()
+        super::init(context, cfg).await.unwrap()
     }
 
     async fn commit_writes_mmb(
@@ -2377,6 +2486,235 @@ pub(crate) mod test {
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
 
+            db.destroy().await.unwrap();
+        });
+    }
+}
+
+#[cfg(test)]
+mod bitmap_tests {
+    //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
+    //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
+    //! so one variant (`unordered::variable`) suffices as the test bed.
+    use crate::{
+        merkle::Location,
+        qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
+    };
+    use commonware_cryptography::{Hasher, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        deterministic::{self, Context},
+        Metrics, Runner as _,
+    };
+    use commonware_utils::bitmap::Readable as _;
+
+    /// Open a fresh test DB.
+    async fn open_db(context: Context) -> AnyTest {
+        let cfg = create_test_config(0, &context);
+        AnyTest::init(context, cfg).await.unwrap()
+    }
+
+    /// Active locations (bit=1) in `[pruned_bits, len)` of `db.bitmap`.
+    fn bitmap_active_locs(db: &AnyTest) -> Vec<u64> {
+        let b = &db.bitmap;
+        (b.pruned_bits()..b.len())
+            .filter(|loc| b.get_bit(*loc))
+            .collect()
+    }
+
+    /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap.
+    async fn assert_oracle_round_trip(db: AnyTest, context: Context, label: &str) -> AnyTest {
+        let pre_active = bitmap_active_locs(&db);
+        let pre_len = db.bitmap.len();
+        let pre_pruned = db.bitmap.pruned_bits();
+
+        db.commit().await.unwrap();
+        drop(db);
+
+        let db = open_db(context.with_label(label)).await;
+
+        assert_eq!(
+            db.bitmap.pruned_bits(),
+            pre_pruned,
+            "pruned_bits diverged on reopen",
+        );
+        assert_eq!(db.bitmap.len(), pre_len, "bitmap len diverged on reopen");
+        assert_eq!(
+            bitmap_active_locs(&db),
+            pre_active,
+            "active locations diverged on reopen",
+        );
+        db
+    }
+
+    /// CommitFloor convention: only the *current* `last_commit_loc` carries bit=1; every earlier
+    /// (now intermediate) commit boundary carries bit=0.
+    ///
+    /// Maintained by `apply_batch`'s explicit demote-then-promote pair on CommitFloor bits. If
+    /// the demote step were missed, intermediate commits would persist at bit=1.
+    #[test_traced]
+    fn current_commit_floor_bit_is_one_others_zero() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Apply three single-write batches; each produces one CommitFloor op.
+            let mut commit_locs = Vec::new();
+            for i in 0..3u64 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let batch = db
+                    .new_batch()
+                    .write(key, Some(vec![i as u8]))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                commit_locs.push(batch.new_last_commit_loc);
+                db.apply_batch(batch).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Setup sanity: three strictly-increasing commit locations, all within the bitmap.
+            assert_eq!(commit_locs.len(), 3);
+            assert!(*commit_locs[0] < *commit_locs[1]);
+            assert!(*commit_locs[1] < *commit_locs[2]);
+            assert!(*commit_locs[2] < db.bitmap.len());
+
+            // Earlier two commits are intermediate -> bit=0.
+            assert!(!db.bitmap.get_bit(*commit_locs[0]));
+            assert!(!db.bitmap.get_bit(*commit_locs[1]));
+            // Most recent commit is current -> bit=1.
+            assert!(db.bitmap.get_bit(*commit_locs[2]));
+
+            let db = assert_oracle_round_trip(db, context, "commit_floor").await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// `any::Db::rewind` restores bitmap state correctly.
+    ///
+    /// `any::rewind` is the sole writer of the bitmap during rewind; it must:
+    ///   1. truncate the bitmap to the rewind size,
+    ///   2. flip restored locs (committed snapshot entries the rewound tail had superseded) back
+    ///      to active,
+    ///   3. set the rewound tail's CommitFloor bit to 1 (the new current commit).
+    ///
+    /// The oracle round-trip catches all three: any divergence from `init_from_log`'s rebuild
+    /// fails the comparison.
+    #[test_traced]
+    fn rewind_restores_bitmap_to_target_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let k1 = Sha256::hash(&[1]);
+            let k2 = Sha256::hash(&[2]);
+
+            // Two committed batches; remember the size after the first.
+            let b1 = db
+                .new_batch()
+                .write(k1, Some(vec![10]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(b1).await.unwrap();
+            db.commit().await.unwrap();
+            let size_after_first = Location::new(*db.last_commit_loc + 1);
+
+            let b2 = db
+                .new_batch()
+                .write(k2, Some(vec![20]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(b2).await.unwrap();
+
+            // Setup sanity: both keys present, db has advanced past size_after_first.
+            assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(&k2).await.unwrap(), Some(vec![20]));
+            assert!(*db.last_commit_loc + 1 > *size_after_first);
+
+            // Rewind to the state after the first commit.
+            db.rewind(size_after_first).await.unwrap();
+
+            // Post-rewind: k2 gone, k1 remains.
+            assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
+            assert!(db.get(&k2).await.unwrap().is_none());
+
+            let db = assert_oracle_round_trip(db, context, "rewind").await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Floor-scan falls through to the uncommitted tail when the committed bitmap region runs
+    /// out of active bits.
+    ///
+    /// `next_candidate` returns set-bit locations within `[floor, bitmap.len)` (skipping inactive
+    /// ones), then sequential candidates beyond `bitmap.len` (uncommitted ancestor ops not
+    /// tracked in the bitmap). `is_active_at` revalidation in the floor-raise loop is the only
+    /// thing that prevents stale ancestor locations from being moved when a child batch
+    /// supersedes the same key.
+    ///
+    /// Setup: 1 committed key + uncommitted parent re-touching that key + uncommitted child that
+    /// supersedes the key AND writes many other keys. The added user mutations push
+    /// `total_steps` past the active bits available in the committed region, forcing the scan
+    /// to walk into the tail.
+    ///
+    /// Failure modes caught:
+    /// - tail-fallthrough boundary off-by-one → wrong root,
+    /// - missing `is_active_at` revalidation → parent's superseded loc gets moved → divergent
+    ///   root,
+    /// - bitmap state inconsistent with `init_from_log` → oracle reopen mismatch.
+    #[test_traced]
+    fn floor_scan_falls_through_to_uncommitted_tail() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let anchor = Sha256::hash(&[0xAA]);
+
+            // Commit one key.
+            let b = db
+                .new_batch()
+                .write(anchor, Some(vec![1]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(b).await.unwrap();
+
+            // Setup sanity: anchor in committed snapshot.
+            assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![1]));
+            let committed_bitmap_len = db.bitmap.len();
+
+            // Uncommitted parent: re-touch anchor at a location above the committed bitmap.
+            let parent = db
+                .new_batch()
+                .write(anchor, Some(vec![2]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert!(
+                parent.total_size > committed_bitmap_len,
+                "parent must extend past committed bitmap to exercise the tail path",
+            );
+
+            // Uncommitted child: supersede anchor + add 16 more writes. The extra user_steps
+            // ensure `total_steps` exceeds active bits in the committed region, forcing the
+            // floor-raise scan into the uncommitted tail.
+            let mut child_batch = parent.new_batch::<Sha256>();
+            child_batch = child_batch.write(anchor, Some(vec![3]));
+            for i in 0..16u64 {
+                let k = Sha256::hash(&(1000 + i).to_be_bytes());
+                child_batch = child_batch.write(k, Some(vec![i as u8]));
+            }
+            let child = child_batch.merkleize(&db, None).await.unwrap();
+            assert!(
+                child.total_size > committed_bitmap_len,
+                "child must include an uncommitted tail beyond committed bitmap",
+            );
+            let expected_root = child.root();
+
+            // Apply. If tail-fallthrough or revalidation were wrong, the produced root would
+            // diverge from the merkleize-time root.
+            db.apply_batch(child).await.unwrap();
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
+
+            let db = assert_oracle_round_trip(db, context, "tail").await;
             db.destroy().await.unwrap();
         });
     }

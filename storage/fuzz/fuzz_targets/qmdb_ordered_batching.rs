@@ -104,10 +104,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 translator: EightCap,
             };
 
-            let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.clone(), cfg, None, |_, _| {})
-                    .await
-                    .expect("init qmdb");
+            let mut db: GenericDb<F> = commonware_storage::qmdb::any::init(context.clone(), cfg)
+                .await
+                .expect("init qmdb");
             let mut last_commit = None;
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 

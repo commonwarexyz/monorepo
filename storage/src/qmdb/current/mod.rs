@@ -47,6 +47,14 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
+//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though
+//!   a CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
+//!   0. Maintaining this makes the chunk containing the latest commit deterministic across
+//!   init and `apply_batch`.
+//!
+//!   The bitmap lives on the inner `any::Db.bitmap`; `current::Db` reads through it for
+//!   grafted-tree leaves and proofs.
+//!
 //! - **Grafted tree**: An in-memory Merkle structure of digests at and above the
 //!   _grafting height_ in the ops tree. This is the core of how bitmap and ops state are combined
 //!   into a single authenticated structure (see below).
@@ -250,6 +258,7 @@ use crate::{
             operation::{Operation, Update},
             Config as AnyConfig,
         },
+        bitmap::Shared,
         operation::Committable,
     },
     translator::Translator,
@@ -339,30 +348,20 @@ where
     let (metadata, pruned_chunks, pinned_nodes) =
         db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
-    // Initialize the activity status bitmap.
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
+    // metadata, then hand it to `any` which becomes the sole owner. `any::init_from_log`
+    // populates it during snapshot rebuild.
+    let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
-    // Initialize the anydb with a callback that populates the status bitmap.
-    let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init(
-        context.with_label("any"),
-        config.into(),
-        Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location<F>>| {
-            status.push(append);
-            if let Some(loc) = loc {
-                status.set_bit(*loc, false);
-            }
-        },
-    )
-    .await?;
+    let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::new();
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
-        &status,
+        any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         &strategy,
@@ -376,13 +375,19 @@ where
         &any.log.merkle,
         hasher.clone(),
     );
-    let partial_chunk = db::partial_chunk(&status);
+    let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(
+        &hasher,
+        any.bitmap.as_ref(),
+        &storage,
+        partial_chunk,
+        &ops_root,
+    )
+    .await?;
 
     Ok(db::Db {
         any,
-        status: Arc::new(batch::SharedBitmap::new(status)),
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
@@ -1015,6 +1020,7 @@ pub mod tests {
     use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{test_group, test_traced};
+    use commonware_utils::bitmap::Readable;
 
     type OrderedFixedDb =
         ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
@@ -3036,8 +3042,9 @@ pub mod tests {
             // Sanity: c's pending write is still readable via the any-layer diff chain.
             assert_eq!(c.get(&key(250), &db).await.unwrap(), Some(val(99_999)));
 
-            // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
-            // chunks below the current pruned boundary.
+            // The actual prune-interaction test: apply c after prune. `any.apply_batch` writes
+            // diff entries directly into the (now more-pruned) bitmap; bits for locations below
+            // the pruning boundary cannot exist and are filtered by snapshot precedence.
             db.apply_batch(c).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
@@ -3344,15 +3351,17 @@ pub mod tests {
         });
     }
 
-    /// Regression: C's precomputed bitmap clears can target a chunk that
-    /// was pruned after parent P was committed.
+    /// Regression: C's diff entry has a stale `base_old_loc` (255) pointing into a chunk that
+    /// was pruned after parent P was committed. `committed_locs` precedence in
+    /// `any::Db::apply_batch` must override the stale value with P's rewrite location, so the
+    /// `set_bit(false)` call targets P's (post-floor-raise) loc, not the pruned chunk.
     ///
-    /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255
-    /// (end of chunk 0). P overwrites keys 1..254, whose floor raise
-    /// moves key(0) from 255 to tip, pushing the floor past chunk 0.
-    /// C is built from P and writes key(0); its base_old_loc is 255.
-    /// After committing P and pruning chunk 0, C's clear at 255 targets
-    /// the pruned chunk.
+    /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255 (end of chunk 0). P
+    /// overwrites keys 1..254; P's floor-raise moves key(0) from 255 to a fresh loc above 255.
+    /// C is built from P and writes key(0) again. After committing P and pruning chunk 0, C's
+    /// pre-merkleize `base_old_loc=255` is no longer the right clear target — `committed_locs`
+    /// substitutes P's rewrite loc instead. If that precedence path broke, apply would panic
+    /// (`set_bit` on a pruned bit).
     #[test_traced("WARN")]
     fn test_current_stale_bitmap_clears_after_prune() {
         let executor = deterministic::Runner::default();
@@ -3532,6 +3541,101 @@ pub mod tests {
 
             db.destroy().await.unwrap();
             ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: the bitmap chunks produced by the speculative `BitmapBatch` chain during
+    /// merkleize must equal the bytes that `any::Db::apply_batch` writes via diff-driven
+    /// updates. `current::Db::apply_batch` relies on this equivalence to install the precomputed
+    /// `batch.grafted` against the now-current bitmap.
+    ///
+    /// The workload spans multiple bitmap chunks and exercises:
+    /// - parent/child same-key overwrite (`committed_locs` precedence path),
+    /// - parent-create then child-delete (uncommitted-ancestor precedence),
+    /// - mixed deletes and overwrites in different chunks (clear-bit + set-bit paths).
+    #[test_traced("INFO")]
+    fn test_current_apply_chunks_match_speculative_chunks() {
+        const N: usize = 32;
+        const CHUNK_SIZE_BITS: u64 = commonware_utils::bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+        // Seed enough keys to cross at least one chunk boundary. Each batch also produces a
+        // CommitFloor op, so the bitmap grows past the user-visible key count.
+        const SEED_KEYS: u64 = CHUNK_SIZE_BITS + 50;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("spec_eq", &ctx))
+                    .await
+                    .unwrap();
+
+            // Seed all keys in one committed batch.
+            let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Setup sanity: the committed bitmap spans at least two chunks.
+            assert!(
+                Readable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
+                "setup must cross a chunk boundary",
+            );
+
+            // Parent (uncommitted): overwrites + delete + creates spread across the bitmap.
+            let parent = db
+                .new_batch()
+                .write(key(10), Some(val(110))) // overwrite (low chunk)
+                .write(key(50), None) // delete (low chunk)
+                .write(key(CHUNK_SIZE_BITS + 5), Some(val(120))) // overwrite (high chunk)
+                .write(key(SEED_KEYS), Some(val(130))) // create new key
+                .write(key(SEED_KEYS + 1), Some(val(131))) // create new key
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child (uncommitted, descendant of parent):
+            //   - same-key overwrite of parent's key(10)        -> committed_locs precedence
+            //   - delete of parent's just-created key(SEED_KEYS) -> uncommitted-create-child-delete
+            //   - additional delete + overwrite in mixed chunks -> set-bit + clear-bit coverage
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key(10), Some(val(210)))
+                .write(key(SEED_KEYS), None)
+                .write(key(75), None)
+                .write(key(CHUNK_SIZE_BITS + 30), Some(val(220)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
+            let speculative_chunks: Vec<[u8; N]> = {
+                let len = Readable::<N>::len(&child.bitmap);
+                let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
+                (0..chunk_count)
+                    .map(|idx| Readable::<N>::get_chunk(&child.bitmap, idx))
+                    .collect()
+            };
+            // Setup sanity: speculative state spans at least two chunks.
+            assert!(speculative_chunks.len() >= 2);
+
+            // Apply child (commits parent + child) and re-read every chunk from the committed
+            // bitmap. The two views must be byte-identical; otherwise the precomputed
+            // `batch.canonical_root` is no longer valid against the post-apply state.
+            db.apply_batch(child).await.unwrap();
+            let committed_chunks: Vec<[u8; N]> = {
+                let len = Readable::<N>::len(db.any.bitmap.as_ref());
+                let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
+                (0..chunk_count)
+                    .map(|idx| Readable::<N>::get_chunk(db.any.bitmap.as_ref(), idx))
+                    .collect()
+            };
+
+            assert_eq!(
+                speculative_chunks, committed_chunks,
+                "speculative chunks must equal post-apply committed chunks across all chunks",
+            );
+
+            db.destroy().await.unwrap();
         });
     }
 }

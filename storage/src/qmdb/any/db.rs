@@ -2,7 +2,10 @@
 //!
 //! The impl blocks in this file define shared functionality across all Any QMDB variants.
 
-use super::operation::{update::Update, Operation};
+use super::{
+    operation::{update::Update, Operation},
+    BITMAP_CHUNK_BYTES,
+};
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
@@ -12,16 +15,17 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        build_snapshot_from_log, delete_known_loc, operation::Operation as OperationTrait,
-        update_known_loc, Error,
+        bitmap::Shared, build_snapshot_from_log, delete_known_loc,
+        operation::Operation as OperationTrait, update_known_loc, Error,
     },
     Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::bitmap;
 use core::num::NonZeroU64;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S = Sequential> =
@@ -50,6 +54,9 @@ enum SnapshotUndo<F: Family, K> {
 /// - [crate::qmdb::any::ordered::variable::Db]
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
+///
+/// `N` is the bitmap chunk size in bytes; defaults to `BITMAP_CHUNK_BYTES`. `current::Db`
+/// overrides `N` to match its grafted-tree configuration.
 pub struct Db<
     F: Family,
     E: Context,
@@ -57,6 +64,7 @@ pub struct Db<
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Send + Sync,
+    const N: usize = BITMAP_CHUNK_BYTES,
     S: Strategy = Sequential,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
@@ -86,12 +94,25 @@ pub struct Db<
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
 
+    /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
+    /// persisted. A hint for floor-raise scans; merkleization re-verifies via `is_active_at`.
+    /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
+    /// tree leaves and proofs.
+    ///
+    /// # Invariants
+    ///
+    /// - `bitmap.len() == log.size()`.
+    /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
+    /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
+    ///   are 0.
+    pub(crate) bitmap: Arc<Shared<N>>,
+
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
 // Shared read-only functionality.
-impl<F, E, U, C, I, H, S> Db<F, E, C, I, H, U, S>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -242,7 +263,7 @@ where
 }
 
 // Functionality requiring Mutable journal.
-impl<F, E, U, C, I, H, S> Db<F, E, C, I, H, U, S>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -253,14 +274,26 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
+    /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
+    /// inactivity-floor check.
+    pub(crate) fn prune_bitmap(&mut self, prune_loc: Location<F>) {
+        self.bitmap.write().prune_to_bit(*prune_loc);
+    }
+
+    /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
+    ///
+    /// Journal pruning is section-granular, so the actual pruned boundary may be less than
+    /// the requested `prune_loc`. Returns that actual boundary so callers can keep the bitmap
+    /// aligned with the journal's retained start.
     ///
     /// # Errors
     ///
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
-    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
+    pub(crate) async fn prune_log(
+        &mut self,
+        prune_loc: Location<F>,
+    ) -> Result<Location<F>, crate::qmdb::Error<F>> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -268,8 +301,14 @@ where
             ));
         }
 
-        self.log.prune(prune_loc).await?;
+        Ok(self.log.prune(prune_loc).await?)
+    }
 
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
+        let actual_pruned = self.prune_log(prune_loc).await?;
+        self.prune_bitmap(actual_pruned);
         Ok(())
     }
 
@@ -311,16 +350,14 @@ where
     /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
     /// from `rewind` and reopen from storage.
     ///
-    /// Returns the list of locations restored to active state in the snapshot.
-    ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
-    pub async fn rewind(&mut self, size: Location<F>) -> Result<Vec<Location<F>>, Error<F>> {
+    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
         if rewind_size == current_size {
-            return Ok(Vec::new());
+            return Ok(());
         }
         if rewind_size == 0 || rewind_size > current_size {
             return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
@@ -405,29 +442,48 @@ where
         // restart-stable until a later commit/sync boundary.
         self.log.rewind(rewind_size).await?;
 
-        let mut restored_locs = Vec::new();
-        for undo in undos {
-            match undo {
-                SnapshotUndo::Replace {
-                    key,
-                    old_loc,
-                    new_loc,
-                } => {
-                    if new_loc < rewind_size {
-                        restored_locs.push(new_loc);
+        // Drop bitmap bits for ops at or above the rewind target. Restored locs below
+        // rewind_size flip back to active in the loop below. `rewind_size >= bitmap.pruned_bits()`
+        // is enforced upstream: directly via the `bounds.start` check above, or via
+        // `current::Db::rewind`'s explicit `pruned_bits` precondition. The debug_assert catches
+        // regressions.
+        {
+            let mut bitmap = self.bitmap.write();
+            debug_assert!(
+                bitmap.pruned_bits() <= rewind_size,
+                "bitmap pruned boundary exceeded journal retained start",
+            );
+            bitmap.truncate(rewind_size);
+
+            for undo in undos {
+                match undo {
+                    SnapshotUndo::Replace {
+                        key,
+                        old_loc,
+                        new_loc,
+                    } => {
+                        if new_loc < rewind_size {
+                            bitmap.set_bit(*new_loc, true);
+                        }
+                        update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
                     }
-                    update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
-                }
-                SnapshotUndo::Remove { key, old_loc } => {
-                    delete_known_loc(&mut self.snapshot, &key, old_loc)
-                }
-                SnapshotUndo::Insert { key, new_loc } => {
-                    if new_loc < rewind_size {
-                        restored_locs.push(new_loc);
+                    SnapshotUndo::Remove { key, old_loc } => {
+                        delete_known_loc(&mut self.snapshot, &key, old_loc)
                     }
-                    self.snapshot.insert(&key, new_loc);
+                    SnapshotUndo::Insert { key, new_loc } => {
+                        if new_loc < rewind_size {
+                            bitmap.set_bit(*new_loc, true);
+                        }
+                        self.snapshot.insert(&key, new_loc);
+                    }
                 }
             }
+
+            // The rewound tail's preceding op (validated above) is the new `last_commit_loc`.
+            // Set its bit to 1 to match the CommitFloor convention; previous intermediate
+            // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
+            // guaranteed by the early-return at the top of this function.
+            bitmap.set_bit(rewind_size - 1, true);
         }
 
         self.active_keys = self
@@ -439,12 +495,12 @@ where
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
 
-        Ok(restored_locs)
+        Ok(())
     }
 }
 
 // Functionality requiring Mutable + Persistable journal.
-impl<F, E, U, C, I, H, S> Db<F, E, C, I, H, U, S>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -455,46 +511,90 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
-    /// building events.
+    /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
+    /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
+    /// from grafted metadata).
     ///
     /// # Panics
     ///
-    /// Panics if the log is empty or the last operation is not a commit floor operation.
-    pub async fn init_from_log<Cb>(
+    /// Panics if the last operation is not a commit floor operation. Empty logs are handled
+    /// upstream by [`crate::qmdb::any::init_with_bitmap`].
+    pub(crate) async fn init_from_log(
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
-        known_inactivity_floor: Option<Location<F>>,
-        mut callback: Cb,
-    ) -> Result<Self, crate::qmdb::Error<F>>
-    where
-        Cb: FnMut(bool, Option<Location<F>>),
-    {
-        // If the last-known inactivity floor is behind the current floor, then invoke the callback
-        // appropriately to report the inactive bits.
-        let (last_commit_loc, inactivity_floor_loc, active_keys) = {
+        shared_bitmap: Option<Arc<Shared<N>>>,
+    ) -> Result<Self, crate::qmdb::Error<F>> {
+        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
-            let last_commit_loc = reader
-                .bounds()
-                .end
-                .checked_sub(1)
-                .expect("commit should exist");
+            let bounds = reader.bounds();
+            let last_commit_loc = bounds.end.checked_sub(1).expect("commit should exist");
             let last_commit = reader.read(last_commit_loc).await?;
             let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
-            if let Some(known_inactivity_floor) = known_inactivity_floor {
-                (*known_inactivity_floor..*inactivity_floor_loc)
-                    .for_each(|_| callback(false, None));
+
+            // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
+            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
+            // appends bits from the inactivity floor onward.
+            let bitmap = shared_bitmap.unwrap_or_else(|| {
+                let pruned_chunks =
+                    (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
+                let bm = bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
+                    .expect("pruned chunk count fits in u64 bits");
+                Arc::new(Shared::new(bm))
+            });
+
+            // Extend the bitmap up to the inactivity floor (zero-fill).
+            {
+                let mut guard = bitmap.write();
+                // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
+                // inactivity floor; otherwise `extend_to` would silently leave gaps.
+                debug_assert!(
+                    guard.pruned_bits() <= *inactivity_floor_loc,
+                    "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
+                    guard.pruned_bits(),
+                    *inactivity_floor_loc,
+                );
+                guard.extend_to(*inactivity_floor_loc);
             }
 
-            let active_keys =
-                build_snapshot_from_log(inactivity_floor_loc, &reader, &mut index, callback)
-                    .await?;
+            // Replay through `build_snapshot_from_log`. The closure fires synchronously between
+            // the helper's awaits, so each invocation does its own brief lock-update-release.
+            // Holding the guard across `.await` would not be `Send`-safe.
+            let active_keys = {
+                let bitmap = &bitmap;
+                build_snapshot_from_log(
+                    inactivity_floor_loc,
+                    &reader,
+                    &mut index,
+                    |is_active, old_loc| {
+                        let mut guard = bitmap.write();
+                        guard.push(is_active);
+                        if let Some(loc) = old_loc {
+                            guard.set_bit(*loc, false);
+                        }
+                    },
+                )
+                .await?
+            };
+
+            // CommitFloor convention: only the current `last_commit_loc` carries bit=1; earlier
+            // CommitFloors are 0. `build_snapshot_from_log` reports `is_active = (loc ==
+            // last_commit_loc)` for each CommitFloor op, so the per-op push above already
+            // encodes this.
+
             (
                 Location::new(last_commit_loc),
                 inactivity_floor_loc,
                 active_keys,
+                bitmap,
             )
         };
+
+        // The bitmap must have exactly one bit per retained log location.
+        if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size().await {
+            return Err(crate::qmdb::Error::DataCorrupted(
+                "bitmap length diverged from log size during init",
+            ));
+        }
 
         Ok(Self {
             log,
@@ -502,6 +602,7 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
+            bitmap,
             _update: core::marker::PhantomData,
         })
     }
@@ -523,7 +624,7 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, S> Persistable for Db<F, E, C, I, H, U, S>
+impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,

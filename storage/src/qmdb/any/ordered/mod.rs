@@ -34,8 +34,9 @@ impl<
         C: Contiguous<Item = Operation<F, K, V>>,
         I: Index<Value = Location<F>>,
         H: Hasher,
+        const N: usize,
         S: Strategy,
-    > Db<F, E, C, I, H, Update<K, V>, S>
+    > Db<F, E, C, I, H, Update<K, V>, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -254,7 +255,7 @@ pub(crate) fn find_prev_key<'a, K: Ord, V>(
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, C, I, H, S] Db<F, E, C, I, H, Update<K, V>, S>
+    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
     where {
         F: crate::merkle::Family,
         E: Context,
@@ -272,7 +273,7 @@ crate::qmdb::any::traits::impl_db_any! {
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_provable! {
-    [F, E, K, V, C, I, H, S] Db<F, E, C, I, H, Update<K, V>, S>
+    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
     where {
         F: crate::merkle::Family,
         E: Context,
