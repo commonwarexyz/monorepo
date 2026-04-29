@@ -29,11 +29,11 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable},
+        contiguous::{fixed, variable, Mutable, Reader as _},
     },
     merkle::{
+        full::{self, Merkle},
         hasher::Standard as StandardHasher,
-        journaled::{self, Journaled},
         Graftable, Location,
     },
     qmdb::{
@@ -95,7 +95,7 @@ impl<T: Translator, J: Clone> Config for super::Config<T, J> {
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, T, const N: usize>(
     context: E,
-    merkle_config: journaled::Config,
+    merkle_config: full::Config,
     log: J,
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -116,9 +116,9 @@ where
 {
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();
-    let merkle = Journaled::<F, _, _>::init_sync(
+    let merkle = Merkle::<F, _, _>::init_sync(
         context.with_label("merkle"),
-        journaled::SyncConfig {
+        full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
             pinned_nodes,
@@ -297,12 +297,27 @@ macro_rules! impl_current_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
-                qmdb::any::sync::has_local_target_state::<F, _, H>(
-                    context,
+                if !qmdb::any::sync::has_local_target_state::<F, _, H>(
+                    context.with_label("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
                 )
                 .await
+                {
+                    return false;
+                }
+
+                let Ok(journal) = <$journal>::init(
+                    context.with_label("local_target_journal_probe"),
+                    config.journal_config(),
+                )
+                .await
+                else {
+                    return false;
+                };
+                let bounds = journal.reader().await.bounds();
+
+                Location::new(bounds.start) <= target.range.start()
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies

@@ -16,7 +16,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, journaled},
+    merkle::{self, full},
     qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
     translator::EightCap,
 };
@@ -255,8 +255,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
-    journaled::Config {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config {
+    full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
@@ -341,12 +341,21 @@ fn cur_var_cfg(
 // -- Benchmark helpers --
 
 /// Single-batch benchmark: create batch, write updates, merkleize, read root.
+///
+/// If `seed_sync` is `true`, the seed database is fully synced before running the benchmark. A
+/// value of `false` will exercise the DB in a state where lookups during merkleize may be satisfied
+/// by the `Append` wrapper's tip buffer, which may be more reflective of a real application that
+/// calls only `commit()` for durability.
 async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     mut db: C,
     num_keys: u64,
     iters: u64,
+    seed_sync: bool,
 ) -> Duration {
     seed_db(&mut db, num_keys).await;
+    if seed_sync {
+        db.sync().await.unwrap();
+    }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
     let mut total = Duration::ZERO;
@@ -374,9 +383,13 @@ async fn run_chained_bench<
     mut db: C,
     num_keys: u64,
     iters: u64,
+    seed_sync: bool,
     fork_child: Fn,
 ) -> Duration {
     seed_db(&mut db, num_keys).await;
+    if seed_sync {
+        db.sync().await.unwrap();
+    }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
     let mut total = Duration::ZERO;
@@ -553,27 +566,32 @@ cfg_if::cfg_if! {
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for chained in [false, true] {
-        for num_keys in NUM_KEYS {
-            for &variant in VARIANTS {
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} num_keys={num_keys} chained={chained}",
-                        module_path!(),
-                        variant.name(),
-                    ),
-                    |b| {
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<Context>();
-                            dispatch_variant!(ctx, variant, |db| {
-                                if chained {
-                                    run_chained_bench(db, num_keys, iters, |p| p.new_batch()).await
-                                } else {
-                                    run_bench(db, num_keys, iters).await
-                                }
-                            })
-                        });
-                    },
-                );
+        for seed_sync in [false, true] {
+            for num_keys in NUM_KEYS {
+                for &variant in VARIANTS {
+                    c.bench_function(
+                        &format!(
+                            "{}/variant={} keys={num_keys} ch={chained} sync={seed_sync}",
+                            module_path!(),
+                            variant.name(),
+                        ),
+                        |b| {
+                            b.to_async(&runner).iter_custom(|iters| async move {
+                                let ctx = context::get::<Context>();
+                                dispatch_variant!(ctx, variant, |db| {
+                                    if chained {
+                                        run_chained_bench(db, num_keys, iters, seed_sync, |p| {
+                                            p.new_batch()
+                                        })
+                                        .await
+                                    } else {
+                                        run_bench(db, num_keys, iters, seed_sync).await
+                                    }
+                                })
+                            });
+                        },
+                    );
+                }
             }
         }
     }

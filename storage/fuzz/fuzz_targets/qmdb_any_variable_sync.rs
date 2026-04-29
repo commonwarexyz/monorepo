@@ -6,8 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, M
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{
-        hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily,
-        Location,
+        full::Config as MerkleConfig, hasher::Standard, mmb, mmr, Family as MerkleFamily, Location,
     },
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},

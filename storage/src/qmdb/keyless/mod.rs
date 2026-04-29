@@ -49,7 +49,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{journaled::Config as MerkleConfig, Family, Location, Proof},
+    merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{any::value::ValueEncoding, Error},
     Context, Persistable,
 };
@@ -59,10 +59,15 @@ use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
 pub mod batch;
+mod compact;
 pub mod fixed;
 mod operation;
 pub(crate) mod sync;
 pub mod variable;
+pub use compact::{
+    Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
+    UnmerkleizedBatch as CompactUnmerkleizedBatch,
+};
 pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.

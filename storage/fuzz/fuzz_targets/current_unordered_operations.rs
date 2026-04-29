@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Graftable, Location},
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };

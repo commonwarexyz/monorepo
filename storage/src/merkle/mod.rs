@@ -10,7 +10,9 @@ pub mod batch;
 pub(crate) mod conformance;
 pub mod hasher;
 #[cfg(feature = "std")]
-pub mod journaled;
+mod persisted;
+#[cfg(feature = "std")]
+pub use persisted::{compact, full};
 mod location;
 pub mod mem;
 pub mod mmb;
@@ -282,4 +284,8 @@ pub enum Error<F: Family> {
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
+
+    /// Rewind was attempted but no prior committed state is available.
+    #[error("rewind beyond history")]
+    RewindBeyondHistory,
 }

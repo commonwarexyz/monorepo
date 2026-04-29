@@ -408,8 +408,25 @@ impl<B: Blob> Append<B> {
     ///
     /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
     /// already validated that `offset + buf.len()` is within the blob's logical size.
+    ///
+    /// The page cache is consulted first to minimize the risk of writer starvation from a
+    /// burst of buffer reads (which jump ahead of queued writers on the buffer lock).
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        self.cache_ref.read_cached(self.id, buf, offset) == buf.len()
+        if self.cache_ref.read_cached(self.id, buf, offset) == buf.len() {
+            return true;
+        }
+        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
+            return false;
+        };
+        let Ok(buffer) = self.buffer.try_read() else {
+            return false;
+        };
+        if offset < buffer.offset || end_offset > buffer.size() {
+            return false;
+        }
+        let src_start = (offset - buffer.offset) as usize;
+        buf.copy_from_slice(&buffer.as_ref()[src_start..src_start + buf.len()]);
+        true
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -932,7 +949,7 @@ mod tests {
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{NZUsize, NZU16, NZU32};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
@@ -991,6 +1008,32 @@ mod tests {
                     &data[off as usize..off as usize + 4],
                 );
             }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_read_sync_all_in_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"try_read_sync_tip")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..20).collect();
+            append.append(&data).await.unwrap();
+
+            let mut buf = vec![0u8; data.len()];
+            assert!(append.try_read_sync(0, &mut buf));
+            assert_eq!(buf, data);
         });
     }
 
@@ -1404,7 +1447,7 @@ mod tests {
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
-                    .with_max_per_class(NZUsize!(2)),
+                    .with_max_per_class(NZU32!(2)),
                 &mut registry,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));

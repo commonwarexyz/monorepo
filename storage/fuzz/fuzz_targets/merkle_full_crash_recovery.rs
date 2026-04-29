@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Fuzz test for Merkle Journaled crash recovery with fault injection.
+//! Fuzz test for Merkle Merkle crash recovery with fault injection.
 //! Tests both MMR and MMB families.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
@@ -9,8 +9,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
 use commonware_storage::merkle::{
-    hasher::Standard as StandardHasher, journaled::Config, mmb, mmr, Family as MerkleFamily,
-    Location,
+    full::Config, hasher::Standard as StandardHasher, mmb, mmr, Family as MerkleFamily, Location,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
@@ -22,8 +21,7 @@ const DATA_SIZE: usize = 32;
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Journaled<F> =
-    commonware_storage::merkle::journaled::Journaled<F, deterministic::Context, Digest>;
+type Merkle<F> = commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -115,7 +113,7 @@ struct ExpectedBounds {
 }
 
 async fn run_operations<F: MerkleFamily>(
-    merkle: &mut Journaled<F>,
+    merkle: &mut Merkle<F>,
     hasher: &StandardHasher<Sha256>,
     operations: &[MerkleOperation],
 ) -> ExpectedBounds {
@@ -237,7 +235,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new();
-            let mut merkle = Journaled::<F>::init(
+            let mut merkle = Merkle::<F>::init(
                 ctx.with_label("merkle"),
                 &hasher,
                 merkle_config(
@@ -269,7 +267,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new();
-        let mut merkle = Journaled::<F>::init(
+        let mut merkle = Merkle::<F>::init(
             ctx.with_label("recovered"),
             &hasher,
             merkle_config(

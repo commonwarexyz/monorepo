@@ -187,7 +187,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
-            merkle_config: crate::mmr::journaled::Config {
+            merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),
                 items_per_blob: NZU64!(12), // intentionally small and janky size
@@ -595,7 +595,7 @@ pub(crate) mod test {
         use super::*;
         use crate::{
             merkle::{
-                mmr::{self, journaled::Mmr},
+                mmr::{self, full::Mmr},
                 Family as _,
             },
             qmdb::any::sync::tests::FromSyncTestable,

@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{
         self, batch,
+        full::Merkle,
         hasher::{Hasher as _, Standard as StandardHasher},
-        journaled::Journaled,
         Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
@@ -203,9 +203,8 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
 
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
+    /// fork has been applied.
     pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item>
     where
         Item: Encode,
@@ -270,7 +269,7 @@ where
 {
     /// Merkle structure where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) merkle: Journaled<F, E, H::Digest>,
+    pub(crate) merkle: Merkle<F, E, H::Digest>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
@@ -353,7 +352,7 @@ where
     /// Create a new [Journal] from the given components after aligning the Merkle structure with
     /// the journal.
     pub async fn from_components(
-        mut merkle: Journaled<F, E, H::Digest>,
+        mut merkle: Merkle<F, E, H::Digest>,
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -376,7 +375,7 @@ where
     /// structure are added. Items are added in batches of size `apply_batch_size` to avoid memory
     /// bloat.
     async fn align(
-        merkle: &mut Journaled<F, E, H::Digest>,
+        merkle: &mut Merkle<F, E, H::Digest>,
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: u64,
@@ -659,7 +658,7 @@ macro_rules! impl_journal_new {
             /// and the merkle structure will be aligned to match.
             pub async fn new(
                 context: E,
-                merkle_cfg: merkle::journaled::Config,
+                merkle_cfg: merkle::full::Config,
                 journal_cfg: $cfg_ty,
                 rewind_predicate: fn(&O) -> bool,
             ) -> Result<Self, Error<F>> {
@@ -669,7 +668,7 @@ macro_rules! impl_journal_new {
 
                 let hasher = StandardHasher::<H>::new();
                 let mut merkle =
-                    Journaled::init(context.with_label("merkle"), &hasher, merkle_cfg).await?;
+                    Merkle::init(context.with_label("merkle"), &hasher, merkle_cfg).await?;
                 Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
 
                 journal.sync().await?;
@@ -749,7 +748,7 @@ pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
     /// Initialize an authenticated [Journal] backed by this journal type.
     fn init<F: Family, H: Hasher>(
         context: E,
-        merkle_cfg: merkle::journaled::Config,
+        merkle_cfg: merkle::full::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&Self::Item) -> bool,
     ) -> impl core::future::Future<Output = Result<Journal<F, E, Self, H>, Error<F>>> + Send
@@ -814,7 +813,7 @@ mod tests {
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         merkle::{
-            journaled::{Config as MerkleConfig, Journaled},
+            full::{Config as MerkleConfig, Merkle},
             mmb, mmr,
         },
         qmdb::{
@@ -924,12 +923,12 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Journaled<F, deterministic::Context, Digest>,
+        Merkle<F, deterministic::Context, Digest>,
         ContiguousJournal<deterministic::Context, TestOp<F>>,
         StandardHasher<Sha256>,
     ) {
         let hasher = StandardHasher::new();
-        let merkle = Journaled::<F, _, Digest>::init(
+        let merkle = Merkle::<F, _, Digest>::init(
             context.with_label("mmr"),
             &hasher,
             merkle_config(suffix, &context),
@@ -2380,11 +2379,11 @@ mod tests {
         let child_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
         let batch_b = parent.new_batch::<Sha256>().add(create_operation::<F>(30));
         let child_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
-        drop(parent);
 
         // Apply child_a, then child_b should be stale.
         journal.apply_batch(&child_a).await.unwrap();
         let result = journal.apply_batch(&child_b).await;
+        drop(parent);
         assert!(
             matches!(
                 result,

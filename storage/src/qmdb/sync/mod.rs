@@ -23,6 +23,7 @@ pub(crate) use resolver::{FetchResult, Resolver};
 mod target;
 pub use target::Target;
 
+pub mod compact;
 mod requests;
 
 /// A [`Resolver`] whose associated types match a specific `Database`.
