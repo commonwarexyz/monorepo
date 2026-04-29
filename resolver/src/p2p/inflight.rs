@@ -317,10 +317,8 @@ mod tests {
             inflight.insert(key.clone(), timed.timer());
             inflight.deliver(key.clone(), peer, Bytes::from("v"));
 
-            let (_, delivered_key, valid) = inflight
-                .next_delivery()
-                .await
-                .expect("delivery completed");
+            let (_, delivered_key, valid) =
+                inflight.next_delivery().await.expect("delivery completed");
             assert_eq!(delivered_key, key);
             assert!(valid);
             inflight.complete(&key);
