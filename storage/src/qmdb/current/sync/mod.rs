@@ -51,6 +51,7 @@ use crate::{
             },
             FixedValue, VariableValue,
         },
+        bitmap::Shared,
         current::{
             db, grafting,
             ordered::{
@@ -142,26 +143,13 @@ where
     // init_from_log, which pads the gap between `pruned_chunks * CHUNK_SIZE_BITS` and the
     // journal's inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start() / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+    let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
-    // Build any::Db with bitmap callback.
-    //
-    // init_from_log replays the operations, building the snapshot (index) and invoking
-    // our callback for each operation to populate the bitmap.
-    let known_inactivity_floor = Location::<F>::new(status.len());
-    let any: AnyDb<F, E, J, I, H, U> = AnyDb::init_from_log(
-        index,
-        log,
-        Some(known_inactivity_floor),
-        |is_active: bool, old_loc: Option<Location<F>>| {
-            status.push(is_active);
-            if let Some(loc) = old_loc {
-                status.set_bit(*loc, false);
-            }
-        },
-    )
-    .await?;
+    // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
+    // during replay.
+    let any: AnyDb<F, E, J, I, H, U, N> = AnyDb::init_from_log(index, log, Some(bitmap)).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -191,7 +179,7 @@ where
     let hasher = StandardHasher::<H>::new();
     let grafted_tree = db::build_grafted_tree::<F, H, N>(
         &hasher,
-        &status,
+        any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
         thread_pool.as_ref(),
@@ -207,8 +195,8 @@ where
         &any.log.merkle,
         hasher.clone(),
     );
-    let partial = db::partial_chunk(&status);
-    let grafted_root = db::compute_grafted_root(&hasher, &status, &storage).await?;
+    let partial = db::partial_chunk(any.bitmap.as_ref());
+    let grafted_root = db::compute_grafted_root(&hasher, any.bitmap.as_ref(), &storage).await?;
     let ops_root = any.log.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
@@ -228,7 +216,6 @@ where
 
     let current_db = db::Db {
         any,
-        status: Arc::new(crate::qmdb::current::batch::SharedBitmap::new(status)),
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,

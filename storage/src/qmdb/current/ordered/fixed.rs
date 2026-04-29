@@ -164,7 +164,7 @@ pub mod test {
             db.prune(db.sync_boundary()).await.unwrap();
 
             assert!(
-                db.status.pruned_chunks() > 0,
+                db.any.bitmap.pruned_chunks() > 0,
                 "expected at least one pruned chunk"
             );
 

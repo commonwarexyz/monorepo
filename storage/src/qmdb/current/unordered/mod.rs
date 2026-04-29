@@ -441,8 +441,8 @@ pub mod tests {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
-            for i in start..db.status.len() {
-                if !db.status.get_bit(i) {
+            for i in start..db.any.bitmap.len() {
+                if !db.any.bitmap.get_bit(i) {
                     continue;
                 }
                 // Found an active operation! Create a proof for its active current key/value if

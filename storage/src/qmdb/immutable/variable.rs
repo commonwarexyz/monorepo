@@ -796,6 +796,14 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_variable_rewind_preserves_collision_bucket_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_preserves_collision_bucket(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_variable_rewind_pruned_target_errors_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
