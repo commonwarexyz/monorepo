@@ -169,6 +169,7 @@ mod tests {
 
             assert!(inflight.cancel(&MockKey(1)));
             assert!(!inflight.contains(&MockKey(1)));
+
             // Subsequent cancel of an absent key returns false.
             assert!(!inflight.cancel(&MockKey(1)));
         });
