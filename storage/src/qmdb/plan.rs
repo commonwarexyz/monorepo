@@ -9,7 +9,7 @@
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        append_batch::{AppendBatchView, BatchExtent},
+        append_batch::{AppendBatchView, BatchBounds},
         Error,
     },
 };
@@ -30,42 +30,42 @@ where
     B: AppendBatchView<F, D>,
     W: AppendBatchView<F, D>,
 {
-    let ancestor_extents: Vec<_> = ancestors
+    let ancestor_bounds: Vec<_> = ancestors
         .iter()
-        .map(|ancestor| *ancestor.extent())
+        .map(|ancestor| *ancestor.bounds())
         .collect();
-    extent(
+    bounds(
         last_commit_loc,
         inactivity_floor_loc,
-        batch.extent(),
-        &ancestor_extents,
+        batch.bounds(),
+        &ancestor_bounds,
     )
 }
 
-/// Validate that `extent` can extend the committed database state.
-pub(crate) fn extent<F: Family>(
+/// Validate that `bounds` can extend the committed database state.
+pub(crate) fn bounds<F: Family>(
     last_commit_loc: Location<F>,
     inactivity_floor_loc: Location<F>,
-    extent: &BatchExtent<F>,
-    ancestors: &[BatchExtent<F>],
+    bounds: &BatchBounds<F>,
+    ancestors: &[BatchBounds<F>],
 ) -> Result<Plan<F>, Error<F>> {
     let committed_size = last_commit_loc + 1;
-    extent.validate_stale(
+    bounds.validate_stale(
         *committed_size,
-        ancestors.iter().map(BatchExtent::total_size),
+        ancestors.iter().map(BatchBounds::total_size),
     )?;
-    extent.validate_floors(
+    bounds.validate_floors(
         inactivity_floor_loc,
         *committed_size,
         ancestors
             .iter()
             .map(|ancestor| (ancestor.total_size(), ancestor.commit_floor())),
     )?;
-    let next_last_commit_loc = extent.commit_loc();
+    let next_last_commit_loc = bounds.commit_loc();
     Ok(Plan {
         range: committed_size..(next_last_commit_loc + 1),
         next_last_commit_loc,
-        next_inactivity_floor_loc: extent.commit_floor(),
+        next_inactivity_floor_loc: bounds.commit_floor(),
     })
 }
 
@@ -86,9 +86,9 @@ impl<F: Family> Plan<F> {
         *self.range.start
     }
 
-    /// Return whether `extent` has not yet been reflected in the validated source state.
-    pub(crate) fn is_unapplied(&self, extent: &BatchExtent<F>) -> bool {
-        extent.is_unapplied(self.committed_size())
+    /// Return whether `bounds` has not yet been reflected in the validated source state.
+    pub(crate) fn is_unapplied(&self, bounds: &BatchBounds<F>) -> bool {
+        bounds.is_unapplied(self.committed_size())
     }
 
     /// Return the operation range written by the planned apply.
@@ -134,8 +134,8 @@ mod tests {
             next_last_commit_loc: Location::new(12),
             next_inactivity_floor_loc: Location::new(8),
         };
-        let applied = BatchExtent::<F>::from_item_count(7, 7, 2, Location::new(8));
-        let unapplied = BatchExtent::<F>::from_item_count(10, 10, 2, Location::new(8));
+        let applied = BatchBounds::<F>::from_item_count(7, 7, 2, Location::new(8));
+        let unapplied = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(8));
 
         assert_eq!(plan.committed_size(), 10);
         assert!(!plan.is_unapplied(&applied));

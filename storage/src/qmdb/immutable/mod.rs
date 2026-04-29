@@ -582,7 +582,7 @@ where
                 .insert_and_prune(key, entry.loc, |v| *v < oldest_retained);
         }
         for ancestor in &batch.ancestors {
-            if !validated.is_unapplied(&ancestor.extent) {
+            if !validated.is_unapplied(&ancestor.bounds) {
                 continue;
             }
             for (key, entry) in ancestor.diff.iter() {

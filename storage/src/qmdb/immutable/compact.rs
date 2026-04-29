@@ -25,7 +25,7 @@ use crate::{
     },
     qmdb::{
         any::value::ValueEncoding,
-        append_batch::{AppendBatchView, BatchExtent, BatchLineage, CompactBatch, ResolvedLineage},
+        append_batch::{AppendBatchView, BatchBounds, CompactBatch},
         compact_db::CompactDbInner,
         compact_witness::CompactCommit,
         operation::Key,
@@ -93,6 +93,17 @@ where
     }
 }
 
+enum Base<F: Family, D: Digest, K: Key, V: ValueEncoding>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    Db {
+        db_size: u64,
+        merkle_parent: Arc<crate::merkle::batch::MerkleizedBatch<F, D>>,
+    },
+    Child(Arc<MerkleizedBatch<F, D, K, V>>),
+}
+
 /// A speculative batch for a compact immutable db.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V>
@@ -103,7 +114,7 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    base: BatchLineage<F, H::Digest, MerkleizedBatch<F, H::Digest, K, V>>,
+    base: Base<F, H::Digest, K, V>,
     mutations: BTreeMap<K, V::Value>,
 }
 
@@ -130,8 +141,8 @@ where
         &self.compact.merkle
     }
 
-    fn extent(&self) -> &BatchExtent<F> {
-        &self.compact.extent
+    fn bounds(&self) -> &BatchBounds<F> {
+        &self.compact.bounds
     }
 }
 
@@ -158,7 +169,7 @@ where
         H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            base: BatchLineage::Child(Arc::clone(self)),
+            base: Base::Child(Arc::clone(self)),
             mutations: BTreeMap::new(),
         }
     }
@@ -179,7 +190,7 @@ where
         Operation<F, K, V>: Read<Cfg = C>,
     {
         Self {
-            base: BatchLineage::Db {
+            base: Base::Db {
                 db_size: committed_size,
                 merkle_parent: db.inner.merkle.to_batch(),
             },
@@ -211,12 +222,18 @@ where
         Operation<F, K, V>: Read<Cfg = C>,
     {
         let hasher = StandardHasher::<H>::new();
-        let ResolvedLineage {
-            base_size,
-            db_size,
-            merkle_parent,
-            ancestors,
-        } = self.base.resolve(MerkleizedBatch::ancestor_chain);
+        let (base_size, db_size, merkle_parent, ancestors) = match self.base {
+            Base::Db {
+                db_size,
+                merkle_parent,
+            } => (db_size, db_size, merkle_parent, Vec::new()),
+            Base::Child(parent) => (
+                parent.compact.bounds.total_size(),
+                parent.compact.bounds.db_size(),
+                Arc::clone(&parent.compact.merkle),
+                MerkleizedBatch::ancestor_chain(&parent),
+            ),
+        };
         let commit_op = Operation::Commit(metadata.clone(), inactivity_floor);
         let compact = db.inner.merkle.with_mem(|mem| {
             CompactBatch::from_encoded_ops(
@@ -356,11 +373,11 @@ where
     /// Create an owned merkleized batch representing the current committed state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let committed_size = *self.inner.size();
-        let extent = BatchExtent::quiescent(committed_size, self.inner.inactivity_floor_loc());
+        let bounds = BatchBounds::committed(committed_size, self.inner.inactivity_floor_loc());
         Arc::new(MerkleizedBatch {
             compact: CompactBatch {
                 merkle: self.inner.merkle.to_batch(),
-                extent,
+                bounds,
             },
             commit_metadata: self.inner.get_metadata(),
             ancestors: Vec::new(),

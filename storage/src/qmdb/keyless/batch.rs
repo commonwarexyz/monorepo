@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::value::ValueEncoding,
-        append_batch::{AppendBatchView, BatchExtent},
+        append_batch::{AppendBatchView, BatchBounds},
         Error,
     },
     Context, Persistable,
@@ -52,7 +52,7 @@ where
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>>>,
     /// Position bookkeeping plus the floor declared by this batch's commit.
-    pub(super) extent: BatchExtent<F>,
+    pub(super) bounds: BatchBounds<F>,
     /// Strong refs to uncommitted ancestors, newest-to-oldest.
     ///
     /// This is a wrapper-level chain for validation/read-through and may include itemless
@@ -68,8 +68,8 @@ where
         &self.journal_batch.inner
     }
 
-    fn extent(&self) -> &BatchExtent<F> {
-        &self.extent
+    fn bounds(&self) -> &BatchBounds<F> {
+        &self.bounds
     }
 }
 
@@ -85,7 +85,7 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
 where
     Operation<F, V>: EncodeShared,
 {
-    // Each batch's items extent [size - items.len(), size). We compute the range from the
+    // Each batch's items range [size - items.len(), size). We compute the range from the
     // journal (strong Arcs, always intact).
     let self_end = batch.journal_batch.size();
     let self_base = self_end - batch.journal_batch.items().len() as u64;
@@ -268,7 +268,7 @@ where
             .as_ref()
             .map(MerkleizedBatch::ancestor_chain)
             .unwrap_or_default();
-        let extent = BatchExtent::from_item_count(
+        let bounds = BatchBounds::from_item_count(
             self.base_size,
             self.db_size,
             item_count,
@@ -277,7 +277,7 @@ where
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
-            extent,
+            bounds,
             ancestors,
         })
     }
@@ -315,7 +315,7 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.extent.db_size() {
+        if loc_val >= self.bounds.db_size() {
             if let Some(op) = read_chain_op(self, loc_val) {
                 return Ok(op.into_value());
             }
@@ -353,7 +353,7 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.extent.db_size() {
+            if loc_val >= self.bounds.db_size() {
                 if let Some(op) = read_chain_op(self, loc_val) {
                     results.push(op.into_value());
                     continue;
@@ -388,8 +388,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.extent.total_size(),
-            db_size: self.extent.db_size(),
+            base_size: self.bounds.total_size(),
+            db_size: self.bounds.db_size(),
         }
     }
 }

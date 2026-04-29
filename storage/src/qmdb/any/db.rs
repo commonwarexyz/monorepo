@@ -73,12 +73,6 @@ pub struct Db<
     /// - There is always at least one commit operation in the log.
     pub(crate) log: AuthenticatedLog<F, E, C, H>,
 
-    /// Location of the last committed operation.
-    pub(crate) last_commit_loc: Location<F>,
-
-    /// Inactivity floor declared by the last committed batch.
-    pub(crate) inactivity_floor_loc: Location<F>,
-
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
@@ -102,6 +96,12 @@ pub struct Db<
     /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
     ///   are 0.
     pub(crate) bitmap: Arc<Shared<N>>,
+
+    /// Location of the last committed operation.
+    pub(crate) last_commit_loc: Location<F>,
+
+    /// Inactivity floor declared by the last committed batch.
+    pub(crate) inactivity_floor_loc: Location<F>,
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
@@ -586,11 +586,11 @@ where
 
         Ok(Self {
             log,
-            last_commit_loc,
-            inactivity_floor_loc,
             snapshot: index,
             active_keys,
             bitmap,
+            last_commit_loc,
+            inactivity_floor_loc,
             _update: core::marker::PhantomData,
         })
     }

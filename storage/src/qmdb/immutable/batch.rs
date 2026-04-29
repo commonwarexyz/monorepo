@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
-        append_batch::{AppendBatchView, BatchExtent},
+        append_batch::{AppendBatchView, BatchBounds},
         immutable::operation::Operation,
         operation::Key,
         Error,
@@ -65,7 +65,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     pub(super) journal_batch: Arc<JournalBatch<F, D, K, V>>,
 
     /// Position bookkeeping plus the floor declared by this batch's commit.
-    pub(super) extent: BatchExtent<F>,
+    pub(super) bounds: BatchBounds<F>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -85,8 +85,8 @@ impl<F: Family, D: Digest, K: Key, V: ValueEncoding> AppendBatchView<F, D>
         &self.journal_batch.inner
     }
 
-    fn extent(&self) -> &BatchExtent<F> {
-        &self.extent
+    fn bounds(&self) -> &BatchBounds<F> {
+        &self.bounds
     }
 }
 
@@ -264,7 +264,7 @@ where
             .as_ref()
             .map(MerkleizedBatch::ancestor_chain)
             .unwrap_or_default();
-        let extent = BatchExtent::from_item_count(
+        let bounds = BatchBounds::from_item_count(
             self.base_size,
             self.db_size,
             item_count,
@@ -273,7 +273,7 @@ where
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
-            extent,
+            bounds,
             diff: Arc::new(diff),
             ancestors,
         })
@@ -394,8 +394,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.extent.total_size(),
-            db_size: self.extent.db_size(),
+            base_size: self.bounds.total_size(),
+            db_size: self.bounds.db_size(),
         }
     }
 }
@@ -415,10 +415,10 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let journal_size = *self.last_commit_loc + 1;
         let journal_batch = self.journal.to_merkleized_batch();
-        let extent = BatchExtent::quiescent(journal_size, self.inactivity_floor_loc);
+        let bounds = BatchBounds::committed(journal_size, self.inactivity_floor_loc);
         Arc::new(MerkleizedBatch {
             journal_batch,
-            extent,
+            bounds,
             diff: Arc::new(Vec::new()),
             ancestors: Vec::new(),
         })

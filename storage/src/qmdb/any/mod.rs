@@ -2561,7 +2561,7 @@ mod bitmap_tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                commit_locs.push(batch.extent.commit_loc());
+                commit_locs.push(batch.bounds.commit_loc());
                 db.apply_batch(batch).await.unwrap();
             }
             db.commit().await.unwrap();
@@ -2682,7 +2682,7 @@ mod bitmap_tests {
                 .await
                 .unwrap();
             assert!(
-                parent.extent.total_size() > committed_bitmap_len,
+                parent.bounds.total_size() > committed_bitmap_len,
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
@@ -2697,7 +2697,7 @@ mod bitmap_tests {
             }
             let child = child_batch.merkleize(&db, None).await.unwrap();
             assert!(
-                child.extent.total_size() > committed_bitmap_len,
+                child.bounds.total_size() > committed_bitmap_len,
                 "child must include an uncommitted tail beyond committed bitmap",
             );
             let expected_root = child.root();

@@ -50,7 +50,7 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, append_batch::BatchExtent, plan::apply, Error},
+    qmdb::{any::value::ValueEncoding, append_batch::BatchBounds, plan::apply, Error},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -390,10 +390,10 @@ where
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V>> {
         let journal_size = *self.last_commit_loc + 1;
         let journal_batch = self.journal.to_merkleized_batch();
-        let extent = BatchExtent::quiescent(journal_size, self.inactivity_floor_loc);
+        let bounds = BatchBounds::committed(journal_size, self.inactivity_floor_loc);
         Arc::new(batch::MerkleizedBatch {
             journal_batch,
-            extent,
+            bounds,
             ancestors: Vec::new(),
         })
     }
