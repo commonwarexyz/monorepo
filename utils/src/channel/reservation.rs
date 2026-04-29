@@ -5,12 +5,17 @@ use super::mpsc::{
     error::{SendError, TrySendError},
     OwnedPermit,
 };
-use futures::future::BoxFuture;
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
+
+// The reserve future only reports channel closure; the message value is stored separately.
+type ReserveResult<T> = Result<OwnedPermit<T>, SendError<()>>;
+
+// Tokio's `reserve_owned` future is not nameable, so box it instead of exposing a future parameter.
+type ReserveFuture<T> = Pin<Box<dyn Future<Output = ReserveResult<T>> + Send>>;
 
 /// A reserved channel slot bundled with the value to send.
 #[must_use = "call send to deliver the reserved message"]
@@ -28,16 +33,13 @@ impl<T> Reserved<T> {
 
 /// A future that waits for a channel slot and keeps ownership of the value.
 #[must_use = "await the reservation to acquire a channel slot"]
-pub struct Reservation<'a, T> {
-    future: BoxFuture<'a, Result<OwnedPermit<T>, SendError<()>>>,
+pub struct Reservation<T> {
+    future: ReserveFuture<T>,
     value: Option<T>,
 }
 
-impl<'a, T> Reservation<'a, T> {
-    fn new(
-        future: impl Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + 'a,
-        value: T,
-    ) -> Self {
+impl<T> Reservation<T> {
+    fn new(future: impl Future<Output = ReserveResult<T>> + Send + 'static, value: T) -> Self {
         Self {
             future: Box::pin(future),
             value: Some(value),
@@ -45,9 +47,9 @@ impl<'a, T> Reservation<'a, T> {
     }
 }
 
-impl<T> Unpin for Reservation<'_, T> {}
+impl<T> Unpin for Reservation<T> {}
 
-impl<T> Future for Reservation<'_, T> {
+impl<T> Future for Reservation<T> {
     type Output = Result<Reserved<T>, SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -76,15 +78,15 @@ pub trait ReservationExt<T> {
     ///   [`Reserved::send`] to deliver the value.
     /// - `Err(_)` when the receiver has been dropped.
     #[must_use = "await and send any reservation"]
-    fn send_or_reserve<'a>(&self, value: T) -> Result<Option<Reservation<'a, T>>, SendError<T>>
+    fn send_or_reserve(&self, value: T) -> Result<Option<Reservation<T>>, SendError<T>>
     where
-        T: 'a;
+        T: 'static;
 }
 
 impl<T: Send> ReservationExt<T> for mpsc::Sender<T> {
-    fn send_or_reserve<'a>(&self, value: T) -> Result<Option<Reservation<'a, T>>, SendError<T>>
+    fn send_or_reserve(&self, value: T) -> Result<Option<Reservation<T>>, SendError<T>>
     where
-        T: 'a,
+        T: 'static,
     {
         match self.try_send(value) {
             Ok(()) => Ok(None),
@@ -185,22 +187,4 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(2));
     }
 
-    #[test_async]
-    async fn test_send_or_reserve_reservation_can_hold_borrowed_value() {
-        let messages = [String::from("pending"), String::from("reserved")];
-        let (sender, mut receiver) = mpsc::channel(1);
-        sender.try_send(messages[0].as_str()).unwrap();
-
-        let mut reservations: Vec<Reservation<'_, &str>> = Vec::new();
-        reservations.push(
-            sender
-                .send_or_reserve(messages[1].as_str())
-                .unwrap()
-                .expect("channel should be full"),
-        );
-
-        assert_eq!(receiver.recv().await, Some("pending"));
-        reservations.pop().unwrap().await.unwrap().send();
-        assert_eq!(receiver.recv().await, Some("reserved"));
-    }
 }

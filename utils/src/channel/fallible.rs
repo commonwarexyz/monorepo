@@ -17,9 +17,11 @@
 //! ```
 
 use super::{
-    mpsc, oneshot,
+    mpsc,
+    oneshot,
     reservation::{Reservation, ReservationExt},
 };
+use std::future::Future;
 
 /// Extension trait for channel operations that may fail due to disconnection.
 ///
@@ -47,7 +49,7 @@ pub trait FallibleExt<T> {
     ///     .request(|tx| Message::Dialable { responder: tx })
     ///     .await;
     /// ```
-    fn request<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = Option<R>> + Send
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -60,7 +62,7 @@ pub trait FallibleExt<T> {
         &self,
         make_msg: F,
         default: R,
-    ) -> impl std::future::Future<Output = R> + Send
+    ) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -69,7 +71,7 @@ pub trait FallibleExt<T> {
     ///
     /// This is a convenience wrapper around [`request`](Self::request) for types
     /// that implement [`Default`].
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = R> + Send
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
     where
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -119,7 +121,7 @@ pub trait AsyncFallibleExt<T> {
     /// may have been dropped during shutdown. The return value can
     /// be ignored if the caller doesn't need to know whether the
     /// send succeeded.
-    fn send_lossy(&self, msg: T) -> impl std::future::Future<Output = bool> + Send;
+    fn send_lossy(&self, msg: T) -> impl Future<Output = bool> + Send;
 
     /// Try to send a message without blocking, returning `true` if successful.
     ///
@@ -132,16 +134,16 @@ pub trait AsyncFallibleExt<T> {
     ///
     /// Returns `None` if the value was sent immediately or the receiver has been dropped.
     #[must_use = "await and send any reservation"]
-    fn send_or_reserve_lossy<'a>(&self, msg: T) -> Option<Reservation<'a, T>>
+    fn send_or_reserve_lossy(&self, msg: T) -> Option<Reservation<T>>
     where
-        T: 'a;
+        T: 'static;
 
     /// Send a request message containing a oneshot responder and await the response.
     ///
     /// Returns `None` if:
     /// - The receiver has been dropped (send fails)
     /// - The responder is dropped without sending (receive fails)
-    fn request<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = Option<R>> + Send
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -151,13 +153,13 @@ pub trait AsyncFallibleExt<T> {
         &self,
         make_msg: F,
         default: R,
-    ) -> impl std::future::Future<Output = R> + Send
+    ) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
 
     /// Send a request and return `R::default()` on failure.
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = R> + Send
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
     where
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
@@ -172,9 +174,9 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
         self.try_send(msg).is_ok()
     }
 
-    fn send_or_reserve_lossy<'a>(&self, msg: T) -> Option<Reservation<'a, T>>
+    fn send_or_reserve_lossy(&self, msg: T) -> Option<Reservation<T>>
     where
-        T: 'a,
+        T: 'static,
     {
         self.send_or_reserve(msg).ok().flatten()
     }
