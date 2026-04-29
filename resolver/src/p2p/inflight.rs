@@ -25,25 +25,30 @@ struct Entry<E: Clock> {
 }
 
 /// Tracks all in-flight fetch state.
-pub(super) struct Inflight<E: Clock, P: PublicKey, Key: Span> {
+pub(super) struct Inflight<E: Clock, P: PublicKey, Key: Span, Con: Consumer<Key = Key>> {
     /// Per-key entries tracking fetch duration timers and (when validating a response)
     /// the [Aborter] that cancels the in-flight consumer delivery.
     entries: HashMap<Key, Entry<E>>,
 
     /// Holds futures that resolve once the `Consumer` has validated fetched data.
     deliveries: AbortablePool<Delivery<P, Key>>,
+
+    /// Consumer cloned per delivery to validate fetched data.
+    consumer: Con,
 }
 
-impl<E: Clock, P: PublicKey, Key: Span> Default for Inflight<E, P, Key> {
-    fn default() -> Self {
+impl<E: Clock, P: PublicKey, Key: Span, Con: Consumer<Key = Key>> Inflight<E, P, Key, Con>
+where
+    Con::Value: Send + 'static,
+{
+    pub(super) fn new(consumer: Con) -> Self {
         Self {
             entries: HashMap::new(),
             deliveries: AbortablePool::default(),
+            consumer,
         }
     }
-}
 
-impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
     /// Returns true if there is an in-flight entry for the key.
     pub(super) fn contains(&self, key: &Key) -> bool {
         self.entries.contains_key(key)
@@ -107,18 +112,10 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
     /// Begin a consumer delivery for the entry, attaching the abort handle.
     /// Spawns `consumer.deliver(key, value)` as an in-flight future and records
     /// the result for later handling.
-    pub(super) fn start_delivery<Con, V>(
-        &mut self,
-        key: Key,
-        peer: P,
-        value: V,
-        mut consumer: Con,
-    ) where
-        Con: Consumer<Key = Key, Value = V>,
-        V: Send + 'static,
-    {
+    pub(super) fn start_delivery(&mut self, key: Key, peer: P, value: Con::Value) {
         let lookup_key = key.clone();
         let deliver_key = key.clone();
+        let mut consumer = self.consumer.clone();
         let aborter = self.deliveries.push(async move {
             let valid = consumer.deliver(deliver_key, value).await;
             Delivery { peer, key, valid }
@@ -152,7 +149,11 @@ mod tests {
     };
     use std::sync::Arc;
 
-    type TestInflight = Inflight<Context, PublicKey, MockKey>;
+    type TestInflight = Inflight<Context, PublicKey, MockKey, MockConsumer<MockKey, Bytes>>;
+
+    fn dummy_inflight() -> TestInflight {
+        Inflight::new(MockConsumer::dummy())
+    }
 
     fn make_timed(context: &Context) -> histogram::Timed<Context> {
         let registered = context.histogram("test_duration", "Test histogram", Buckets::LOCAL);
@@ -168,7 +169,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
 
             assert!(!inflight.contains(&MockKey(1)));
             inflight.insert(MockKey(1), timed.timer());
@@ -186,7 +187,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
 
             inflight.insert(MockKey(1), timed.timer());
             inflight.cancel(&MockKey(1));
@@ -201,7 +202,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
 
             inflight.insert(MockKey(1), timed.timer());
             inflight.complete(&MockKey(1));
@@ -216,7 +217,7 @@ mod tests {
     fn test_complete_panics_on_missing_key() {
         let runner = Runner::default();
         runner.start(|_context| async move {
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
             inflight.complete(&MockKey(1));
         });
     }
@@ -226,7 +227,7 @@ mod tests {
     fn test_clear_delivery_panics_on_missing_key() {
         let runner = Runner::default();
         runner.start(|_context| async move {
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
             inflight.clear_delivery(&MockKey(1));
         });
     }
@@ -236,7 +237,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
 
             inflight.insert(MockKey(1), timed.timer());
             inflight.insert(MockKey(2), timed.timer());
@@ -258,7 +259,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
+            let mut inflight: TestInflight = dummy_inflight();
 
             inflight.insert(MockKey(1), timed.timer());
             inflight.insert(MockKey(2), timed.timer());
@@ -277,14 +278,14 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
             let (consumer, mut events) = MockConsumer::<MockKey, Bytes>::new();
+            let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(7);
             let value = Bytes::from("data");
 
             inflight.insert(key.clone(), timed.timer());
-            inflight.start_delivery(key.clone(), peer.clone(), value.clone(), consumer);
+            inflight.start_delivery(key.clone(), peer.clone(), value.clone());
 
             let delivery = inflight.next_delivery().await.expect("delivery aborted");
             assert_eq!(delivery.key, key);
@@ -303,13 +304,13 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
             let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer());
-            inflight.start_delivery(key.clone(), peer, Bytes::from("v"), consumer);
+            inflight.start_delivery(key.clone(), peer, Bytes::from("v"));
 
             // Drop the entry (and its aborter) before the delivery future is ever polled.
             assert!(inflight.cancel(&key));
@@ -324,13 +325,13 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
-            let mut inflight: TestInflight = Inflight::default();
             let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer());
-            inflight.start_delivery(key, peer, Bytes::from("v"), consumer);
+            inflight.start_delivery(key, peer, Bytes::from("v"));
 
             assert_eq!(inflight.drain(), 1);
 

@@ -51,9 +51,6 @@ pub struct Engine<
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
 
-    /// Consumes data that is fetched from the network
-    consumer: Con,
-
     /// Produces data for incoming requests
     producer: Pro,
 
@@ -73,7 +70,7 @@ pub struct Engine<
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Tracks all in-flight fetch state
-    inflight: Inflight<E, P, Key>,
+    inflight: Inflight<E, P, Key, Con>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -124,14 +121,13 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                consumer: cfg.consumer,
                 producer: cfg.producer,
                 peer_provider: cfg.peer_provider,
                 blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
-                inflight: Inflight::default(),
+                inflight: Inflight::new(cfg.consumer),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -407,8 +403,7 @@ impl<
         };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight
-            .start_delivery(key, peer, response, self.consumer.clone());
+        self.inflight.start_delivery(key, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
