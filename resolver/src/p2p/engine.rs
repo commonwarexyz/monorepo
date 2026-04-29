@@ -262,9 +262,11 @@ impl<
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
+                        // Remove from fetcher and inflight
                         self.fetcher.retain(&predicate);
                         let count = self.inflight.retain(&predicate) as u64;
 
+                        // Metrics
                         if count == 0 {
                             self.metrics.cancel.inc(Status::Dropped);
                         } else {
@@ -274,9 +276,11 @@ impl<
                     Message::Clear => {
                         trace!("mailbox: clear");
 
+                        // Clear fetcher and drain inflight
                         self.fetcher.clear();
                         let count = self.inflight.drain() as u64;
 
+                        // Metrics
                         if count == 0 {
                             self.metrics.cancel.inc(Status::Dropped);
                         } else {
@@ -405,18 +409,15 @@ impl<
         };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        let mut consumer = self.consumer.clone();
-        let deliver_key = key.clone();
-        self.inflight.start_delivery(key, peer, async move {
-            consumer.deliver(deliver_key, response).await
-        });
+        self.inflight
+            .start_delivery(key, peer, response, self.consumer.clone());
     }
 
     /// Handle completed delivery to the consumer.
     async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
         if valid {
             self.metrics.fetch.inc(Status::Success);
-            self.inflight.complete(&key);
+            self.inflight.complete(&key); // records duration on drop
             self.fetcher.clear_targets(&key);
             return;
         }

@@ -1,3 +1,4 @@
+use crate::Consumer;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::histogram, Clock};
 use commonware_utils::{
@@ -66,7 +67,7 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
             return false;
         };
         // Dropping `entry` aborts the in-flight delivery (if any).
-        entry.timer.cancel();
+        entry.timer.cancel(); // don't record duration metric
         true
     }
 
@@ -108,15 +109,22 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
     }
 
     /// Begin a consumer delivery for the entry, attaching the abort handle.
-    /// The provided future runs the consumer's validation and resolves to whether
-    /// the delivered data was valid.
-    pub(super) fn start_delivery<F>(&mut self, key: Key, peer: P, deliver: F)
-    where
-        F: Future<Output = bool> + Send + 'static,
+    /// Spawns `consumer.deliver(key, value)` as an in-flight future and records
+    /// the result for later handling.
+    pub(super) fn start_delivery<Con, V>(
+        &mut self,
+        key: Key,
+        peer: P,
+        value: V,
+        mut consumer: Con,
+    ) where
+        Con: Consumer<Key = Key, Value = V>,
+        V: Send + 'static,
     {
         let lookup_key = key.clone();
+        let deliver_key = key.clone();
         let aborter = self.deliveries.push(async move {
-            let valid = deliver.await;
+            let valid = consumer.deliver(deliver_key, value).await;
             Delivery { peer, key, valid }
         });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
