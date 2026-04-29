@@ -26,7 +26,7 @@ pub enum Status {
 }
 
 /// Raw family backing a status [`Counter`]. Construct this and pass it to
-/// [`crate::Metrics::register`].
+/// [`crate::Observer::register`].
 pub type Raw = raw::Family<Label, raw::Counter>;
 
 /// A registered counter metric with a status label.

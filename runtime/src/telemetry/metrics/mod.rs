@@ -24,7 +24,7 @@ pub use prometheus_client::{
 };
 
 /// Underlying Prometheus metric types. Used when constructing a metric
-/// to pass to [`crate::Metrics::register`].
+/// to pass to [`crate::Observer::register`].
 pub mod raw {
     pub use prometheus_client::metrics::{
         counter::Counter,
