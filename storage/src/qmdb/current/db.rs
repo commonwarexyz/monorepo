@@ -19,7 +19,7 @@ use crate::{
             operation::{update::Update, Operation},
         },
         current::{
-            batch::{BitmapBatch, SharedBitmap},
+            batch::{BitmapBatch, ChunkOverlay, SharedBitmap},
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof},
         },
@@ -658,18 +658,9 @@ where
         // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Collect bitmap overlays from the batch chain. The `Arc<ChunkOverlay>`s we push here
-        //    are independent of the batch's layer chain, so the batch can be dropped before we
-        //    touch the shared bitmap below.
-        let mut overlays = Vec::new();
-        let mut current = &batch.bitmap;
-        while let super::batch::BitmapBatch::Layer(layer) = current {
-            if layer.overlay.len <= db_size {
-                break;
-            }
-            overlays.push(Arc::clone(&layer.overlay));
-            current = &layer.parent;
-        }
+        // 2. Collect bitmap overlays from the batch chain. These overlays are independent of
+        //    the layer chain, so the batch can be dropped before mutating the shared bitmap.
+        let overlays = collect_unapplied_overlays(&batch.bitmap, db_size);
 
         // 3. Apply grafted tree (merkle layer handles partial ancestor skipping).
         self.grafted_tree.apply_batch(&batch.grafted)?;
@@ -677,28 +668,53 @@ where
         // 4. Snapshot the canonical root before releasing the batch.
         let canonical_root = batch.canonical_root;
 
-        // 5. Release the batch so its chain's refs drop before we mutate the shared bitmap.
+        // 5. Apply bitmap effect. Dropping the batch releases its layer-chain refs before we
+        //    mutate the shared bitmap under the write lock.
         drop(batch);
-
-        // 6. Apply overlays in place under the write lock.
-        {
-            let mut guard = self.status.write();
-            if let Some(newest) = overlays.first() {
-                guard.extend_to(newest.len);
-            }
-            let pruned = guard.pruned_chunks();
-            for overlay in overlays.into_iter().rev() {
-                for (&idx, chunk) in &overlay.chunks {
-                    if idx >= pruned {
-                        guard.set_chunk_by_index(idx, chunk);
-                    }
-                }
-            }
-        }
+        apply_unapplied_overlays(&self.status, overlays);
 
         self.root = canonical_root;
 
         Ok(range)
+    }
+}
+
+/// Collect bitmap overlays that have not yet been reflected in a database of `committed_size`.
+///
+/// Returns `Arc` clones independent of the batch's layer chain so callers can drop the batch
+/// before applying these overlays under the bitmap write lock.
+fn collect_unapplied_overlays<const N: usize>(
+    bitmap: &BitmapBatch<N>,
+    committed_size: u64,
+) -> Vec<Arc<ChunkOverlay<N>>> {
+    let mut overlays = Vec::new();
+    let mut current = bitmap;
+    while let BitmapBatch::Layer(layer) = current {
+        if layer.overlay.len <= committed_size {
+            break;
+        }
+        overlays.push(Arc::clone(&layer.overlay));
+        current = &layer.parent;
+    }
+    overlays
+}
+
+/// Apply collected bitmap overlays oldest-to-newest to the committed bitmap.
+fn apply_unapplied_overlays<const N: usize>(
+    status: &SharedBitmap<N>,
+    overlays: Vec<Arc<ChunkOverlay<N>>>,
+) {
+    let mut guard = status.write();
+    if let Some(newest) = overlays.first() {
+        guard.extend_to(newest.len);
+    }
+    let pruned = guard.pruned_chunks();
+    for overlay in overlays.into_iter().rev() {
+        for (&idx, chunk) in &overlay.chunks {
+            if idx >= pruned {
+                guard.set_chunk_by_index(idx, chunk);
+            }
+        }
     }
 }
 

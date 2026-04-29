@@ -1369,6 +1369,26 @@ where
             Some(batch)
         })
     }
+
+    /// Validate that a database at `db_size` has not diverged from this batch chain.
+    fn validate_freshness(&self, db_size: u64) -> Result<(), crate::qmdb::Error<F>> {
+        let valid = db_size == self.db_size
+            || db_size == self.base_size
+            || self.ancestor_diff_ends.contains(&db_size);
+        if valid {
+            return Ok(());
+        }
+        Err(crate::qmdb::Error::StaleBatch {
+            db_size,
+            batch_db_size: self.db_size,
+            batch_base_size: self.base_size,
+        })
+    }
+
+    /// Return whether the ancestor diff at `idx` is already reflected in the committed database.
+    fn ancestor_committed(&self, idx: usize, db_size: u64) -> bool {
+        self.ancestor_diff_ends[idx] <= db_size
+    }
 }
 
 impl<F: Family, D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<F, D, U>
@@ -1526,18 +1546,7 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // Valid db_size values: batch.db_size (nothing committed), batch.base_size
-        // (all ancestors committed), or any ancestor_diff_ends[i] (partial commit).
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_diff_ends.contains(&db_size);
-        if !valid {
-            return Err(crate::qmdb::Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
+        batch.validate_freshness(db_size)?;
         let start_loc = Location::new(db_size);
 
         // 1. Apply journal (handles its own partial ancestor skipping).
@@ -1548,7 +1557,7 @@ where
         //    Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
         let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
+            if batch.ancestor_committed(i, db_size) {
                 for (key, entry) in ancestor_diff.iter() {
                     // parent-first order: .or_insert keeps the nearest committed.
                     committed_locs.entry(key).or_insert(entry.loc());
@@ -1570,7 +1579,7 @@ where
 
         // 4. Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
+            if batch.ancestor_committed(i, db_size) {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
