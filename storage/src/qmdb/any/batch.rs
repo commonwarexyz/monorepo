@@ -18,7 +18,7 @@ use crate::{
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
-        plan::bounds,
+        plan::Plan,
         update_known_loc,
     },
     Context,
@@ -1547,7 +1547,7 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        let plan = bounds(
+        let plan = Plan::new(
             self.last_commit_loc,
             self.inactivity_floor_loc,
             &batch.bounds,

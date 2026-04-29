@@ -34,39 +34,12 @@ where
         .iter()
         .map(|ancestor| *ancestor.bounds())
         .collect();
-    bounds(
+    Plan::new(
         last_commit_loc,
         inactivity_floor_loc,
         batch.bounds(),
         &ancestor_bounds,
     )
-}
-
-/// Validate that `bounds` can extend the committed database state.
-pub(crate) fn bounds<F: Family>(
-    last_commit_loc: Location<F>,
-    inactivity_floor_loc: Location<F>,
-    bounds: &BatchBounds<F>,
-    ancestors: &[BatchBounds<F>],
-) -> Result<Plan<F>, Error<F>> {
-    let committed_size = last_commit_loc + 1;
-    bounds.validate_stale(
-        *committed_size,
-        ancestors.iter().map(BatchBounds::total_size),
-    )?;
-    bounds.validate_floors(
-        inactivity_floor_loc,
-        *committed_size,
-        ancestors
-            .iter()
-            .map(|ancestor| (ancestor.total_size(), ancestor.commit_floor())),
-    )?;
-    let next_last_commit_loc = bounds.commit_loc();
-    Ok(Plan {
-        range: committed_size..(next_last_commit_loc + 1),
-        next_last_commit_loc,
-        next_inactivity_floor_loc: bounds.commit_floor(),
-    })
 }
 
 /// Validated commit-location transition for a batch apply.
@@ -81,6 +54,33 @@ pub(crate) struct Plan<F: Family> {
 }
 
 impl<F: Family> Plan<F> {
+    /// Validate that `bounds` can extend the committed database state.
+    pub(crate) fn new(
+        last_commit_loc: Location<F>,
+        inactivity_floor_loc: Location<F>,
+        bounds: &BatchBounds<F>,
+        ancestors: &[BatchBounds<F>],
+    ) -> Result<Self, Error<F>> {
+        let committed_size = last_commit_loc + 1;
+        bounds.validate_stale(
+            *committed_size,
+            ancestors.iter().map(BatchBounds::total_size),
+        )?;
+        bounds.validate_floors(
+            inactivity_floor_loc,
+            *committed_size,
+            ancestors
+                .iter()
+                .map(|ancestor| (ancestor.total_size(), ancestor.commit_floor())),
+        )?;
+        let next_last_commit_loc = bounds.commit_loc();
+        Ok(Self {
+            range: committed_size..(next_last_commit_loc + 1),
+            next_last_commit_loc,
+            next_inactivity_floor_loc: bounds.commit_floor(),
+        })
+    }
+
     /// Return the committed leaf count before this validated apply.
     pub(crate) fn committed_size(&self) -> u64 {
         *self.range.start
