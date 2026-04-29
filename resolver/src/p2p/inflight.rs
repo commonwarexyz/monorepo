@@ -8,13 +8,6 @@ use commonware_utils::{
 use futures::future::Aborted;
 use std::collections::HashMap;
 
-/// A completed delivery to the consumer.
-pub(super) struct Delivery<P: PublicKey, Key: Span> {
-    pub(super) peer: P,
-    pub(super) key: Key,
-    pub(super) valid: bool,
-}
-
 /// Tracks per-key state for an in-flight fetch.
 ///
 /// `delivery` is `Some` while the consumer is validating a response, and `None` while
@@ -31,7 +24,8 @@ pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key
     entries: HashMap<Key, Entry<E>>,
 
     /// Holds futures that resolve once the `Consumer` has validated fetched data.
-    deliveries: AbortablePool<Delivery<P, Key>>,
+    /// Each completion yields `(peer, key, valid)`.
+    deliveries: AbortablePool<(P, Key, bool)>,
 
     /// Consumer cloned per delivery to validate fetched data.
     consumer: Con,
@@ -113,20 +107,21 @@ where
         let mut consumer = self.consumer.clone();
         let aborter = self.deliveries.push(async move {
             let valid = consumer.deliver(deliver_key, value).await;
-            Delivery { peer, key, valid }
+            (peer, key, valid)
         });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
         assert!(entry.delivery.replace(aborter).is_none());
     }
 
-    /// Returns the next completed delivery, or [Aborted] if the delivery was canceled.
-    /// Clears the entry's delivery aborter so the slot is available for a retry.
-    pub(super) async fn next_delivery(&mut self) -> Result<Delivery<P, Key>, Aborted> {
-        let delivery = self.deliveries.next_completed().await?;
-        if let Some(entry) = self.entries.get_mut(&delivery.key) {
+    /// Returns the next completed delivery as `(peer, key, valid)`, or [Aborted] if the
+    /// delivery was canceled. Clears the entry's delivery aborter so the slot is available
+    /// for a retry.
+    pub(super) async fn next_delivery(&mut self) -> Result<(P, Key, bool), Aborted> {
+        let (peer, key, valid) = self.deliveries.next_completed().await?;
+        if let Some(entry) = self.entries.get_mut(&key) {
             entry.delivery = None;
         }
-        Ok(delivery)
+        Ok((peer, key, valid))
     }
 }
 
@@ -274,10 +269,11 @@ mod tests {
             inflight.insert(key.clone(), timed.timer());
             inflight.deliver(key.clone(), peer.clone(), value.clone());
 
-            let delivery = inflight.next_delivery().await.expect("delivery aborted");
-            assert_eq!(delivery.key, key);
-            assert_eq!(delivery.peer, peer);
-            assert!(delivery.valid);
+            let (delivered_peer, delivered_key, valid) =
+                inflight.next_delivery().await.expect("delivery aborted");
+            assert_eq!(delivered_key, key);
+            assert_eq!(delivered_peer, peer);
+            assert!(valid);
 
             // The consumer was actually invoked.
             let (k, v) = events.recv().await.unwrap();

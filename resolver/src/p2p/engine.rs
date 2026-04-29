@@ -1,7 +1,7 @@
 use super::{
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
-    inflight::{Delivery, Inflight},
+    inflight::Inflight,
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
@@ -285,7 +285,7 @@ impl<
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
-                let Delivery { peer, key, valid } = match delivery {
+                let (peer, key, valid) = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
                 };
