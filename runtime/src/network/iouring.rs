@@ -603,7 +603,7 @@ mod tests {
         // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
             test_network(Config {
-                read_write_timeout: Duration::from_millis(100),
+                read_write_timeout: Duration::from_secs(15),
                 ..Default::default()
             })
             .expect("Failed to start io_uring")

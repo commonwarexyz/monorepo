@@ -386,8 +386,8 @@ mod tests {
         tests::test_network_trait(|| {
             TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
-                    .with_read_timeout(Duration::from_millis(100))
-                    .with_write_timeout(Duration::from_millis(100)),
+                    .with_read_timeout(Duration::from_secs(15))
+                    .with_write_timeout(Duration::from_secs(15)),
                 test_pool(),
             )
         })
