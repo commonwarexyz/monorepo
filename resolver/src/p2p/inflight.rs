@@ -108,12 +108,18 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
     }
 
     /// Begin a consumer delivery for the entry, attaching the abort handle.
-    pub(super) fn start_delivery<F>(&mut self, key: &Key, fut: F)
+    /// The provided future runs the consumer's validation and resolves to whether
+    /// the delivered data was valid.
+    pub(super) fn start_delivery<F>(&mut self, key: Key, peer: P, deliver: F)
     where
-        F: Future<Output = Delivery<P, Key>> + Send + 'static,
+        F: Future<Output = bool> + Send + 'static,
     {
-        let aborter = self.deliveries.push(fut);
-        let entry = self.entries.get_mut(key).expect("inflight entry");
+        let lookup_key = key.clone();
+        let aborter = self.deliveries.push(async move {
+            let valid = deliver.await;
+            Delivery { peer, key, valid }
+        });
+        let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
         assert!(entry.delivery.replace(aborter).is_none());
     }
 

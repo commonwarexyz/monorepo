@@ -405,15 +405,10 @@ impl<
         };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        let delivery_key = key.clone();
         let mut consumer = self.consumer.clone();
-        self.inflight.start_delivery(&key, async move {
-            let valid = consumer.deliver(delivery_key.clone(), response).await;
-            Delivery {
-                peer,
-                key: delivery_key,
-                valid,
-            }
+        let deliver_key = key.clone();
+        self.inflight.start_delivery(key, peer, async move {
+            consumer.deliver(deliver_key, response).await
         });
     }
 
