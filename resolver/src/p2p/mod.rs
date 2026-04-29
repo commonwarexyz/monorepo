@@ -59,6 +59,7 @@ pub use config::Config;
 mod engine;
 pub use engine::Engine;
 mod fetcher;
+mod inflight;
 mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
@@ -468,19 +469,22 @@ mod tests {
             assert_eq!(started_key, key);
 
             mailbox1.cancel(key.clone()).await;
-            let event = cons_out1.recv().await.expect("consumer channel closed");
-            match event {
-                Event::Failed(key_actual) => assert_eq!(key_actual, key),
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
 
+            // Wait for the engine to process the cancel and drop the in-flight delivery future,
+            // which closes the gate channel.
+            context.sleep(Duration::from_millis(100)).await;
             assert!(gate_sender.send(()).is_err());
+
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
         });
     }
 
-    /// Tests that canceling a fetch request results in a failure event.
-    /// This test initiates a fetch request and immediately cancels it,
-    /// verifying that the consumer receives a failure notification instead of data.
+    /// Tests that canceling a fetch request leaves the consumer untouched.
+    /// This test initiates a fetch request and immediately cancels it, verifying
+    /// that the consumer does not receive any event.
     #[test_traced]
     fn test_cancel_fetch() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -506,13 +510,10 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             mailbox1.cancel(key.clone()).await;
 
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
         });
     }
 
@@ -612,17 +613,14 @@ mod tests {
             let key = Key(4);
             mailbox1.fetch(key.clone()).await;
             context.sleep(Duration::from_secs(5)).await;
-            mailbox1.cancel(key.clone()).await;
 
-            let event = cons_out1.recv().await.expect("Consumer channel closed");
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => {
-                    panic!("Fetch should have failed due to no peers")
-                }
-            }
+            // With no peers, no event should arrive
+            select! {
+                _ = cons_out1.recv() => panic!("Fetch should have failed due to no peers"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            mailbox1.cancel(key).await;
         });
     }
 
@@ -878,14 +876,11 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             mailbox1.cancel(key.clone()).await;
 
-            // Make sure we receive a failure event
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
+            // No event should arrive after cancel
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
         });
     }
 
@@ -977,17 +972,14 @@ mod tests {
             // Wait for some time (longer than retry timeout)
             context.sleep(Duration::from_secs(5)).await;
 
-            // Cancel the fetch for keyB
-            mailbox1.cancel(key_b.clone()).await;
+            // No success event should be received for keyB since the only peer with valid data is blocked
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
 
-            // Wait for failure event for keyB
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key_b);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
+            // Cancel the fetch for keyB
+            mailbox1.cancel(key_b).await;
 
             // Check oracle
             let blocked = oracle.blocked().await.unwrap();
@@ -1661,15 +1653,6 @@ mod tests {
             let key_clone = key.clone();
             mailbox1.retain(move |k| k != &key_clone).await;
 
-            // Consumer should receive failed event
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been retained out"),
-            }
-
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
@@ -1739,15 +1722,6 @@ mod tests {
 
             // Clear all fetches
             mailbox1.clear().await;
-
-            // Consumer should receive failed event
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been cleared"),
-            }
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;

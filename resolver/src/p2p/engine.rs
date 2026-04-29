@@ -1,6 +1,7 @@
 use super::{
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
+    inflight::{Delivery, Inflight},
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
@@ -19,12 +20,12 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
-    futures::{AbortablePool, Aborter, Pool as FuturesPool},
+    futures::Pool as FuturesPool,
     Span,
 };
 use futures::future::{self, Either};
 use rand::Rng;
-use std::{collections::HashMap, marker::PhantomData};
+use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -33,45 +34,6 @@ struct Serve<E: Clock, P: PublicKey> {
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
-}
-
-/// Represents a pending delivery to the consumer.
-struct Delivery<P: PublicKey, Key: Span> {
-    peer: P,
-    key: Key,
-    valid: bool,
-}
-
-/// Tracks per-key state for an in-flight fetch.
-///
-/// `delivery` is `Some` while the consumer is validating a response, and `None` while
-/// the request is still pending in the fetcher.
-struct Entry<E: Clock> {
-    timer: histogram::Timer<E>,
-    delivery: Option<Aborter>,
-}
-
-/// Tracks all in-flight fetch state.
-struct Inflight<E: Clock, P: PublicKey, Key: Span> {
-    /// Per-key entries tracking fetch duration timers and (when validating a response)
-    /// the [Aborter] that cancels the in-flight consumer delivery.
-    entries: HashMap<Key, Entry<E>>,
-
-    /// Holds futures that resolve once the `Consumer` has validated fetched data.
-    deliveries: AbortablePool<Delivery<P, Key>>,
-
-    /// Holds futures that notify the consumer about canceled fetches.
-    failures: FuturesPool<()>,
-}
-
-impl<E: Clock, P: PublicKey, Key: Span> Default for Inflight<E, P, Key> {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            deliveries: AbortablePool::default(),
-            failures: FuturesPool::default(),
-        }
-    }
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
@@ -210,7 +172,7 @@ impl<
                 let _ = self
                     .metrics
                     .fetch_active
-                    .try_set(self.fetcher.len_active() + self.inflight.deliveries.len());
+                    .try_set(self.fetcher.len_active() + self.inflight.active());
                 let _ = self
                     .metrics
                     .peers_blocked
@@ -231,8 +193,7 @@ impl<
             },
             on_stopped => {
                 debug!("shutdown");
-                self.inflight.entries.clear();
-                self.inflight.failures.cancel_all();
+                self.inflight.clear();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -268,7 +229,7 @@ impl<
                             trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
-                            let is_new = !self.inflight.entries.contains_key(&key);
+                            let is_new = !self.inflight.contains(&key);
 
                             // Update targets
                             match targets {
@@ -285,13 +246,8 @@ impl<
 
                             // Only start new fetch if not already in progress
                             if is_new {
-                                self.inflight.entries.insert(
-                                    key.clone(),
-                                    Entry {
-                                        timer: self.metrics.fetch_duration.timer(),
-                                        delivery: None,
-                                    },
-                                );
+                                self.inflight
+                                    .insert(key.clone(), self.metrics.fetch_duration.timer());
                                 self.fetcher.add_ready(key);
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
@@ -302,27 +258,15 @@ impl<
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
                         self.fetcher.cancel(&key);
-                        if let Some(entry) = self.inflight.entries.remove(&key) {
-                            // Dropping `entry` aborts the in-flight delivery (if any).
+                        if self.inflight.cancel(&key) {
                             guard.set(Status::Success);
-                            entry.timer.cancel(); // don't record duration metric
-                            self.notify_failed(key);
                         }
                     }
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
                         self.fetcher.retain(&predicate);
-                        let removed: Vec<_> = self
-                            .inflight
-                            .entries
-                            .extract_if(|k, _| !predicate(k))
-                            .collect();
-                        let count = removed.len() as u64;
-                        for (key, entry) in removed {
-                            entry.timer.cancel();
-                            self.notify_failed(key);
-                        }
+                        let count = self.inflight.retain(&predicate) as u64;
 
                         if count == 0 {
                             self.metrics.cancel.inc(Status::Dropped);
@@ -334,12 +278,7 @@ impl<
                         trace!("mailbox: clear");
 
                         self.fetcher.clear();
-                        let removed: Vec<_> = self.inflight.entries.drain().collect();
-                        let count = removed.len() as u64;
-                        for (key, entry) in removed {
-                            entry.timer.cancel();
-                            self.notify_failed(key);
-                        }
+                        let count = self.inflight.drain() as u64;
 
                         if count == 0 {
                             self.metrics.cancel.inc(Status::Dropped);
@@ -349,10 +288,8 @@ impl<
                     }
                 }
             },
-            // Handle completed failure notifications
-            _ = self.inflight.failures.next_completed() => {},
             // Handle completed consumer deliveries
-            delivery = self.inflight.deliveries.next_completed() => {
+            delivery = self.inflight.next_delivery() => {
                 let Delivery { peer, key, valid } = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
@@ -411,13 +348,6 @@ impl<
                 };
             },
         }
-    }
-
-    fn notify_failed(&mut self, key: Key) {
-        let mut consumer = self.consumer.clone();
-        self.inflight.failures.push(async move {
-            consumer.failed(key, ()).await;
-        });
     }
 
     /// Handles the case where the application responds to a request from an external peer.
@@ -480,7 +410,7 @@ impl<
         // The peer had the data, so deliver it to the consumer without blocking the engine.
         let delivery_key = key.clone();
         let mut consumer = self.consumer.clone();
-        let aborter = self.inflight.deliveries.push(async move {
+        self.inflight.start_delivery(&key, async move {
             let valid = consumer.deliver(delivery_key.clone(), response).await;
             Delivery {
                 peer,
@@ -488,22 +418,20 @@ impl<
                 valid,
             }
         });
-        let entry = self.inflight.entries.get_mut(&key).expect("inflight entry");
-        assert!(entry.delivery.replace(aborter).is_none());
     }
 
     /// Handle completed delivery to the consumer.
     async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
         if valid {
             self.metrics.fetch.inc(Status::Success);
-            self.inflight.entries.remove(&key).expect("inflight entry"); // records duration on drop
+            self.inflight.complete(&key);
             self.fetcher.clear_targets(&key);
             return;
         }
 
         // Invalid data: clear the delivery aborter, block the peer, and retry.
         // Blocking the peer also removes any targets associated with it.
-        self.inflight.entries.get_mut(&key).expect("inflight entry").delivery = None;
+        self.inflight.clear_delivery(&key);
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
