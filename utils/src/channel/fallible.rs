@@ -131,7 +131,7 @@ pub trait AsyncFallibleExt<T> {
     /// Attempts to send immediately, reserving the message when the channel is full.
     ///
     /// Returns `None` if the value was sent immediately or the receiver has been dropped.
-    #[must_use = "send any reservation"]
+    #[must_use = "await and send any reservation"]
     fn send_or_reserve_lossy<'a>(&self, msg: T) -> Option<Reservation<'a, T>>
     where
         T: 'a;
@@ -176,10 +176,7 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
     where
         T: 'a,
     {
-        match self.send_or_reserve(msg) {
-            Ok(None) | Err(_) => None,
-            Ok(Some(reservation)) => Some(reservation),
-        }
+        self.send_or_reserve(msg).ok().flatten()
     }
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>
@@ -422,29 +419,6 @@ mod tests {
             Some(TestMessage::FireAndForget(1))
         ));
         reservation.await.unwrap().send();
-        assert!(matches!(
-            rx.recv().await,
-            Some(TestMessage::FireAndForget(2))
-        ));
-    }
-
-    #[test_async]
-    async fn test_send_or_reserve_lossy_reserved_send() {
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(TestMessage::FireAndForget(1)).unwrap();
-
-        let reservation = tx
-            .send_or_reserve_lossy(TestMessage::FireAndForget(2))
-            .expect("receiver should be open");
-
-        assert!(matches!(
-            rx.recv().await,
-            Some(TestMessage::FireAndForget(1))
-        ));
-        assert!(reservation.await.is_ok_and(|reserved| {
-            reserved.send();
-            true
-        }));
         assert!(matches!(
             rx.recv().await,
             Some(TestMessage::FireAndForget(2))

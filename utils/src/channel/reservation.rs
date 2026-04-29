@@ -5,16 +5,12 @@ use super::mpsc::{
     error::{SendError, TrySendError},
     OwnedPermit,
 };
+use futures::future::BoxFuture;
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-
-// Tokio's `reserve_owned` future is not nameable, so box it to keep
-// `Reservation` storable without exposing a future type parameter.
-type ReserveFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<OwnedPermit<T>, SendError<()>>> + Send + 'a>>;
 
 /// A reserved channel slot bundled with the value to send.
 #[must_use = "call send to deliver the reserved message"]
@@ -36,7 +32,7 @@ impl<T> Reserved<T> {
 /// the original sender.
 #[must_use = "await the reservation to acquire a channel slot"]
 pub struct Reservation<'a, T> {
-    future: ReserveFuture<'a, T>,
+    future: BoxFuture<'a, Result<OwnedPermit<T>, SendError<()>>>,
     value: Option<T>,
 }
 
@@ -109,10 +105,6 @@ mod tests {
     use commonware_macros::test_async;
     use std::collections::BTreeMap;
 
-    struct Pending<'a, T> {
-        reservations: Vec<Reservation<'a, T>>,
-    }
-
     #[test]
     fn test_send_or_reserve_sends_immediately() {
         let (sender, mut receiver) = mpsc::channel(1);
@@ -184,16 +176,6 @@ mod tests {
                 .expect("channel should be full"),
         );
 
-        let mut pending: Pending<'_, i32> = Pending {
-            reservations: Vec::new(),
-        };
-        pending.reservations.push(
-            sender
-                .send_or_reserve(3)
-                .unwrap()
-                .expect("channel should be full"),
-        );
-
         assert_eq!(receiver.recv().await, Some(0));
         reservations.pop().unwrap().await.unwrap().send();
         assert_eq!(receiver.recv().await, Some(1));
@@ -204,8 +186,6 @@ mod tests {
             .unwrap()
             .send();
         assert_eq!(receiver.recv().await, Some(2));
-        pending.reservations.pop().unwrap().await.unwrap().send();
-        assert_eq!(receiver.recv().await, Some(3));
     }
 
     #[test_async]
@@ -214,10 +194,8 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(1);
         sender.try_send(messages[0].as_str()).unwrap();
 
-        let mut pending: Pending<'_, &str> = Pending {
-            reservations: Vec::new(),
-        };
-        pending.reservations.push(
+        let mut reservations: Vec<Reservation<'_, &str>> = Vec::new();
+        reservations.push(
             sender
                 .send_or_reserve(messages[1].as_str())
                 .unwrap()
@@ -225,7 +203,7 @@ mod tests {
         );
 
         assert_eq!(receiver.recv().await, Some("pending"));
-        pending.reservations.pop().unwrap().await.unwrap().send();
+        reservations.pop().unwrap().await.unwrap().send();
         assert_eq!(receiver.recv().await, Some("reserved"));
     }
 }
