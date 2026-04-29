@@ -6,7 +6,7 @@ use commonware_utils::{
     Span,
 };
 use futures::future::Aborted;
-use std::{collections::HashMap, future::Future};
+use std::collections::HashMap;
 
 /// A completed delivery to the consumer.
 pub(super) struct Delivery<P: PublicKey, Key: Span> {
@@ -104,15 +104,10 @@ where
         count
     }
 
-    /// Clear the delivery handle for an entry, leaving the entry in place.
-    pub(super) fn clear_delivery(&mut self, key: &Key) {
-        self.entries.get_mut(key).expect("inflight entry").delivery = None;
-    }
-
     /// Begin a consumer delivery for the entry, attaching the abort handle.
     /// Spawns `consumer.deliver(key, value)` as an in-flight future and records
     /// the result for later handling.
-    pub(super) fn start_delivery(&mut self, key: Key, peer: P, value: Con::Value) {
+    pub(super) fn deliver(&mut self, key: Key, peer: P, value: Con::Value) {
         let lookup_key = key.clone();
         let deliver_key = key.clone();
         let mut consumer = self.consumer.clone();
@@ -124,12 +119,14 @@ where
         assert!(entry.delivery.replace(aborter).is_none());
     }
 
-    /// Returns a future that resolves to the next completed delivery, or [Aborted] if
-    /// the delivery was canceled.
-    pub(super) fn next_delivery(
-        &mut self,
-    ) -> impl Future<Output = Result<Delivery<P, Key>, Aborted>> + '_ {
-        self.deliveries.next_completed()
+    /// Returns the next completed delivery, or [Aborted] if the delivery was canceled.
+    /// Clears the entry's delivery aborter so the slot is available for a retry.
+    pub(super) async fn next_delivery(&mut self) -> Result<Delivery<P, Key>, Aborted> {
+        let delivery = self.deliveries.next_completed().await?;
+        if let Some(entry) = self.entries.get_mut(&delivery.key) {
+            entry.delivery = None;
+        }
+        Ok(delivery)
     }
 }
 
@@ -223,16 +220,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "inflight entry")]
-    fn test_clear_delivery_panics_on_missing_key() {
-        let runner = Runner::default();
-        runner.start(|_context| async move {
-            let mut inflight: TestInflight = dummy_inflight();
-            inflight.clear_delivery(&MockKey(1));
-        });
-    }
-
-    #[test]
     fn test_retain_drops_non_matching_and_suppresses_metric() {
         let runner = Runner::default();
         runner.start(|context| async move {
@@ -274,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_start_delivery_completes_with_consumer_result() {
+    fn test_deliver_completes_with_consumer_result() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
@@ -285,7 +272,7 @@ mod tests {
             let value = Bytes::from("data");
 
             inflight.insert(key.clone(), timed.timer());
-            inflight.start_delivery(key.clone(), peer.clone(), value.clone());
+            inflight.deliver(key.clone(), peer.clone(), value.clone());
 
             let delivery = inflight.next_delivery().await.expect("delivery aborted");
             assert_eq!(delivery.key, key);
@@ -300,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn test_start_delivery_aborts_when_entry_dropped_before_poll() {
+    fn test_deliver_aborts_when_entry_dropped_before_poll() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
@@ -310,7 +297,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer());
-            inflight.start_delivery(key.clone(), peer, Bytes::from("v"));
+            inflight.deliver(key.clone(), peer, Bytes::from("v"));
 
             // Drop the entry (and its aborter) before the delivery future is ever polled.
             assert!(inflight.cancel(&key));
@@ -331,7 +318,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer());
-            inflight.start_delivery(key, peer, Bytes::from("v"));
+            inflight.deliver(key, peer, Bytes::from("v"));
 
             assert_eq!(inflight.drain(), 1);
 
