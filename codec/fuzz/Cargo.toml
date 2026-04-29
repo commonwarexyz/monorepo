@@ -17,6 +17,7 @@ thiserror.workspace = true
 
 [dependencies.commonware-codec]
 path = ".."
+features = ["arbitrary"]
 
 [[bin]]
 name = "roundtrip"
