@@ -305,6 +305,54 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_after_completion_is_idempotent() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let mut inflight: TestInflight = Inflight::new(consumer);
+            let peer = pubkey();
+            let key = MockKey(1);
+
+            inflight.insert(key.clone(), timed.timer());
+            inflight.deliver(key.clone(), peer, Bytes::from("v"));
+
+            let (_, delivered_key, valid) = inflight
+                .next_delivery()
+                .await
+                .expect("delivery completed");
+            assert_eq!(delivered_key, key);
+            assert!(valid);
+            inflight.complete(&key);
+
+            // Late cancel finds no entry; must not panic.
+            assert!(!inflight.cancel(&key));
+        });
+    }
+
+    #[test]
+    fn test_cancel_wins_race_with_completion() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let timed = make_timed(&context);
+            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let mut inflight: TestInflight = Inflight::new(consumer);
+            let peer = pubkey();
+            let key = MockKey(1);
+
+            inflight.insert(key.clone(), timed.timer());
+            inflight.deliver(key.clone(), peer, Bytes::from("v"));
+
+            // Cancel before any poll of the pool: drops the Aborter, removes the entry.
+            assert!(inflight.cancel(&key));
+
+            // Subsequent poll must yield Err (cancel won the race), not Ok.
+            let result = inflight.next_delivery().await;
+            assert!(matches!(result, Err(Aborted)));
+        });
+    }
+
+    #[test]
     fn test_drain_aborts_in_flight_deliveries() {
         let runner = Runner::default();
         runner.start(|context| async move {
