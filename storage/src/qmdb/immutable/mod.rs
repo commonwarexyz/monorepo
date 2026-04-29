@@ -1388,7 +1388,11 @@ pub(super) mod test {
     /// Regression: a key Set before the rewind boundary that translator-collides with a key in the
     /// rewound suffix must survive rewind. Earlier the snapshot remove pruned the entire translated
     /// bucket and dropped the retained key.
-    pub(crate) async fn test_immutable_rewind_preserves_collision_bucket<F: Family + RootSpec, V, C>(
+    pub(crate) async fn test_immutable_rewind_preserves_collision_bucket<
+        F: Family + RootSpec,
+        V,
+        C,
+    >(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

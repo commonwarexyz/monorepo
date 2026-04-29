@@ -69,7 +69,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{full::Config as MerkleConfig, Family, Location},
+    merkle::{full::Config as MerkleConfig, Bagging, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
@@ -108,6 +108,12 @@ pub struct Config<T: Translator, J, S: Strategy = Sequential> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Whether the operations root commits to the inactive-prefix split.
+    pub split_root: bool,
+
+    /// Bagging used by the operations root.
+    pub root_bagging: Bagging,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -168,8 +174,10 @@ where
         log.sync().await?;
     }
 
+    let split_root = cfg.split_root;
+    let root_bagging = cfg.root_bagging;
     let index = I::new(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap).await
+    db::Db::init_from_log(index, log, bitmap, split_root, root_bagging).await
 }
 
 #[cfg(test)]
@@ -178,7 +186,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
+        qmdb::{
+            self,
+            any::{FixedConfig, MerkleConfig, VariableConfig},
+        },
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
@@ -204,7 +215,7 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(crate) fn fixed_db_config<T: Translator + Default>(
+    pub(crate) fn fixed_db_config<F: qmdb::RootSpec, T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
@@ -225,10 +236,12 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
             },
             translator: T::default(),
+            split_root: true,
+            root_bagging: F::root_spec(0).bagging(),
         }
     }
 
-    pub(crate) fn variable_db_config<T: Translator + Default>(
+    pub(crate) fn variable_db_config<F: qmdb::RootSpec, T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ())> {
@@ -251,13 +264,15 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
             },
             translator: T::default(),
+            split_root: true,
+            root_bagging: F::root_spec(0).bagging(),
         }
     }
 
     use crate::{
         index::Unordered as UnorderedIndex,
         journal::contiguous::Mutable,
-        merkle::mmr,
+        merkle::{mmb, mmr},
         qmdb::any::{
             db::Db as AnyDb,
             operation::{update::Update as UpdateTrait, Operation as AnyOperation},
@@ -626,7 +641,10 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::{
+            mmr::StandardHasher,
+            qmdb::{verify_proof, RootSpec as _},
+        };
 
         const ELEMENTS: u64 = 1000;
 
@@ -694,7 +712,8 @@ pub(crate) mod test {
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            assert!(verify_proof(&hasher, &proof, loc, &ops, &root));
+            let spec = mmr::Family::root_spec(proof.inactive_peaks);
+            assert!(verify_proof(&hasher, &proof, loc, &ops, &root, spec));
         }
 
         db.destroy().await.unwrap();
@@ -748,7 +767,10 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::{
+            mmr::StandardHasher,
+            qmdb::{verify_proof, RootSpec as _},
+        };
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -784,7 +806,8 @@ pub(crate) mod test {
             &historical_proof,
             start_loc,
             &historical_ops,
-            &root_hash
+            &root_hash,
+            mmr::Family::root_spec(historical_proof.inactive_peaks),
         ));
 
         // Add more operations to the database
@@ -812,7 +835,8 @@ pub(crate) mod test {
             &historical_proof2,
             start_loc,
             &historical_ops2,
-            &root_hash
+            &root_hash,
+            mmr::Family::root_spec(historical_proof2.inactive_peaks),
         ));
 
         db.destroy().await.unwrap();
@@ -827,30 +851,42 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::{
+            mmr::StandardHasher,
+            qmdb::{verify_proof, RootSpec as _},
+        };
         use commonware_utils::NZU64;
 
-        // Add some operations
-        {
-            let mut batch = db.new_batch();
-            for i in 0u64..10 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value(i * 1000);
-                batch = batch.write(k, Some(v));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+        // Apply two single-write batches and capture the commit-boundary size after the
+        // first batch. `historical_proof` requires the historical size to land on a commit
+        // boundary when the db uses a split-root spec.
+        let mut historical_op_count = Location::new(0);
+        for i in 0u64..2 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            let merkleized = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            if i == 0 {
+                historical_op_count = db.bounds().await.end;
+            }
         }
 
-        let historical_op_count = Location::new(5);
+        let expected_ops_len = (*historical_op_count - 1) as usize;
         let (proof, ops) = db
             .historical_proof(historical_op_count, Location::new(1), NZU64!(10))
             .await
             .unwrap();
         assert_eq!(proof.leaves, historical_op_count);
-        assert_eq!(ops.len(), 4);
+        assert_eq!(ops.len(), expected_ops_len);
 
         let hasher = StandardHasher::<Sha256>::new();
+
+        let spec = mmr::Family::root_spec(proof.inactive_peaks);
 
         // Changing the proof digests should cause verification to fail
         {
@@ -862,7 +898,8 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
+                spec,
             ));
         }
 
@@ -876,7 +913,8 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
+                spec,
             ));
         }
 
@@ -892,7 +930,8 @@ pub(crate) mod test {
                     &proof,
                     Location::new(1),
                     &tampered_ops,
-                    &root_hash
+                    &root_hash,
+                    spec,
                 ));
             }
         }
@@ -907,7 +946,8 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &tampered_ops,
-                &root_hash
+                &root_hash,
+                spec,
             ));
         }
 
@@ -919,7 +959,8 @@ pub(crate) mod test {
                 &proof,
                 Location::new(2),
                 &ops,
-                &root_hash
+                &root_hash,
+                spec,
             ));
         }
 
@@ -931,7 +972,8 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &ops,
-                &invalid_root
+                &invalid_root,
+                spec,
             ));
         }
 
@@ -945,7 +987,8 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
+                spec,
             ));
         }
 
@@ -963,40 +1006,59 @@ pub(crate) mod test {
     {
         use commonware_utils::NZU64;
 
-        // Add 50 operations
-        {
-            let mut batch = db.new_batch();
-            for i in 0u64..50 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value(i * 1000);
-                batch = batch.write(k, Some(v));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+        // Apply a sequence of single-write batches and record the commit-boundary size
+        // reached after each. `historical_proof` requires the historical size to be a
+        // commit boundary when the db uses a split-root spec, so we anchor each test on
+        // one of the boundaries we recorded here rather than hardcoding sizes that depend
+        // on internal floor-raising behavior.
+        let initial_size = db.bounds().await.end;
+        let mut boundaries = vec![initial_size];
+        for i in 0u64..5 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            let merkleized = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            boundaries.push(db.bounds().await.end);
         }
 
-        // Test singleton database (historical size = 2 means 1 op after initial commit)
+        // Singleton historical state: only the initial CommitFloor is visible.
+        let singleton_size = boundaries[0];
         let (single_proof, single_ops) = db
-            .historical_proof(Location::new(2), Location::new(1), NZU64!(1))
+            .historical_proof(singleton_size, Location::new(0), NZU64!(1))
             .await
             .unwrap();
-        assert_eq!(single_proof.leaves, Location::new(2));
+        assert_eq!(single_proof.leaves, singleton_size);
         assert_eq!(single_ops.len(), 1);
 
-        // Test requesting more operations than available in historical position
+        // max_ops exceeds the ops remaining at this historical size, so the returned count
+        // is capped at `historical_size - start_loc`. Anchor at the earliest post-batch
+        // boundary that has at least 3 ops past `boundaries[1]`.
+        let limited_size = boundaries[2];
+        let limited_start = boundaries[1];
+        let expected_limited = (*limited_size - *limited_start) as usize;
+        assert!(expected_limited > 0);
         let (_limited_proof, limited_ops) = db
-            .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
+            .historical_proof(limited_size, limited_start, NZU64!(20))
             .await
             .unwrap();
-        assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+        assert_eq!(limited_ops.len(), expected_limited);
 
-        // Test proof at minimum historical position
+        // Standard historical proof anchored at an early commit boundary, requesting a
+        // bounded number of ops within the historical range.
+        let min_size = boundaries[2];
+        let max_ops = NZU64!(3);
+        let expected_min = core::cmp::min(max_ops.get(), *min_size - 1) as usize;
         let (min_proof, min_ops) = db
-            .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+            .historical_proof(min_size, Location::new(1), max_ops)
             .await
             .unwrap();
-        assert_eq!(min_proof.leaves, Location::new(4));
-        assert_eq!(min_ops.len(), 3);
+        assert_eq!(min_proof.leaves, min_size);
+        assert_eq!(min_ops.len(), expected_min);
 
         db.destroy().await.unwrap();
     }
@@ -1171,51 +1233,51 @@ pub(crate) mod test {
     // Defines MMR-only variants (for tests that require mmr::Family, e.g. proof verification).
     macro_rules! with_mmr_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
+            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
         };
     }
 
-    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $config) for each.
+    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $family, $config) for each.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
-            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of_mmb", MmbOrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, variable_db_config);
+            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, mmb::Family, variable_db_config);
+            $cb!($($args)*, "of_mmb", MmbOrderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, mmb::Family, variable_db_config);
         };
     }
 
-    // Runner macros - each receives common args followed by (label, type, config) from with_all_variants.
+    // Runner macros - each receives common args followed by (label, type, family, config) from with_all_variants.
     // Uses Box::pin to move futures to the heap and avoid stack overflow.
     macro_rules! test_with_reopen {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                let db = <$db>::init(ctx.clone(), $cfg::<$family, OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(
@@ -1223,7 +1285,7 @@ pub(crate) mod test {
                     db,
                     |ctx| {
                         Box::pin(async move {
-                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                            <$db>::init(ctx.clone(), $cfg::<$family, OneCap>(p, &ctx))
                                 .await
                                 .unwrap()
                         })
@@ -1237,11 +1299,11 @@ pub(crate) mod test {
     }
 
     macro_rules! test_with_make_value {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                let db = <$db>::init(ctx.clone(), $cfg::<$family, OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;
@@ -1382,10 +1444,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("e", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("e", &ctx),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             let batch = db.new_batch();
@@ -1409,10 +1473,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("m", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("m", &ctx),
+            )
+            .await
+            .unwrap();
 
             let metadata = val(42);
 
@@ -1437,10 +1503,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("g", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("g", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with key A.
             let ka = key(0);
@@ -1482,10 +1550,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("mg", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("mg", &ctx),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -1519,10 +1589,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("sg", &ctx))
-                    .await
-                    .unwrap();
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("sg", &ctx),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -1558,10 +1630,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("dr", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("dr", &ctx),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
 
@@ -1595,10 +1669,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("fr", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("fr", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with 100 keys.
             let init: Vec<_> = (0..100).map(|i| (key(i), Some(val(i)))).collect();
@@ -1639,10 +1715,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ar", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("ar", &ctx),
+            )
+            .await
+            .unwrap();
 
             // First batch: 5 keys.
             let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1668,10 +1746,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("dc", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("dc", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with keys 0..5.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1734,7 +1814,7 @@ pub(crate) mod test {
             let ctx_a = ctx.with_label("a");
             let mut db_a: UnorderedVariable = UnorderedVariableDb::init(
                 ctx_a.clone(),
-                variable_db_config::<OneCap>("cms-a", &ctx_a),
+                variable_db_config::<mmr::Family, OneCap>("cms-a", &ctx_a),
             )
             .await
             .unwrap();
@@ -1743,7 +1823,7 @@ pub(crate) mod test {
             let ctx_b = ctx.with_label("b");
             let mut db_b: UnorderedVariable = UnorderedVariableDb::init(
                 ctx_b.clone(),
-                variable_db_config::<OneCap>("cms-b", &ctx_b),
+                variable_db_config::<mmr::Family, OneCap>("cms-b", &ctx_b),
             )
             .await
             .unwrap();
@@ -1797,10 +1877,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("cd", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("cd", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate key A.
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1828,10 +1910,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("da", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("da", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate 5 keys.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1859,10 +1943,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("pf", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("pf", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate.
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1910,10 +1996,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("frc", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("frc", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with 50 keys.
             let init: Vec<_> = (0..50).map(|i| (key(i), Some(val(i)))).collect();
@@ -1964,10 +2052,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ab", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("ab", &ctx),
+            )
+            .await
+            .unwrap();
 
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
@@ -1999,7 +2089,7 @@ pub(crate) mod test {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_db_config::<OneCap>(partition, &ctx),
+                variable_db_config::<mmr::Family, OneCap>(partition, &ctx),
             )
             .await
             .unwrap();
@@ -2020,7 +2110,7 @@ pub(crate) mod test {
 
             let reopened: UnorderedVariable = UnorderedVariableDb::init(
                 context.with_label("reopen"),
-                variable_db_config::<OneCap>(partition, &context),
+                variable_db_config::<mmr::Family, OneCap>(partition, &context),
             )
             .await
             .unwrap();
@@ -2039,10 +2129,12 @@ pub(crate) mod test {
             const KEYS: u64 = 64;
 
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rp", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("rp", &ctx),
+            )
+            .await
+            .unwrap();
 
             let initial: Vec<_> = (0..KEYS).map(|i| (key(i), Some(val(i)))).collect();
             let first_range = commit_writes(&mut db, initial, None).await;
@@ -2096,10 +2188,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ri", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("ri", &ctx),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             let size_before = db.size().await;
@@ -2145,7 +2239,7 @@ pub(crate) mod test {
 
             let ctx = context.with_label("db");
             let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rf", &ctx))
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<mmr::Family, OneCap>("rf", &ctx))
                     .await
                     .unwrap();
 
@@ -2224,7 +2318,7 @@ pub(crate) mod test {
             const { assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS) };
 
             let ctx = context.with_label("db");
-            let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
+            let mut cfg = variable_db_config::<mmr::Family, OneCap>("rg", &ctx);
             cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
 
             let mut db: UnorderedVariable =
@@ -2317,7 +2411,7 @@ pub(crate) mod test {
     >;
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
-        let cfg = variable_db_config::<OneCap>(suffix, &context);
+        let cfg = variable_db_config::<mmr::Family, OneCap>(suffix, &context);
         super::init(context, cfg).await.unwrap()
     }
 
@@ -2457,10 +2551,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("pipe", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<mmr::Family, OneCap>("pipe", &ctx),
+            )
+            .await
+            .unwrap();
 
             {
                 let mut batch = db.new_batch();

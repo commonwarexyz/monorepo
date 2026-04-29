@@ -250,7 +250,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, full::Config as MerkleConfig, Bagging, Location},
     mmr::StandardHasher,
     qmdb::{
         any::{
@@ -301,6 +301,8 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
+            split_root: false,
+            root_bagging: Bagging::ForwardFold,
         }
     }
 }
@@ -376,7 +378,7 @@ where
         hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
-    let ops_root = any.log.root();
+    let ops_root = any.root();
     let root = db::compute_db_root(
         &hasher,
         any.bitmap.as_ref(),
