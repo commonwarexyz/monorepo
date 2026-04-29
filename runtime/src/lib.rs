@@ -602,7 +602,7 @@ stability_scope!(BETA {
         ///
         /// If the sink returns an error, part of the message may still be delivered.
         /// After any error, the sink is no longer reusable and subsequent sends will
-        /// return [Error::Closed].
+        /// return [`Error::Closed`].
         ///
         /// Dropping the future (e.g. via `select!`) also poisons the sink, since a
         /// partial write may have occurred.
@@ -623,7 +623,7 @@ stability_scope!(BETA {
         ///
         /// If the stream returns an error, partially read data may be discarded.
         /// After any error, the stream is no longer reusable and subsequent receives
-        /// will return [Error::Closed].
+        /// will return [`Error::Closed`].
         ///
         /// Dropping the future (e.g. via `select!`) also poisons the stream, since
         /// partially read data may be lost.

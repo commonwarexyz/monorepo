@@ -2,7 +2,10 @@
 
 use crate::{BufMut, Error, IoBufs};
 use bytes::{Bytes, BytesMut};
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    sync::Mutex,
+};
 use std::sync::Arc;
 
 /// Default buffer size (64 KB). Controls both how much data the stream
@@ -221,7 +224,7 @@ impl crate::Stream for Stream {
                 // Wake a blocked sender if the buffer drained below the limit.
                 if channel.buffer.len() <= channel.buffer_size {
                     if let Some(sender) = channel.drain_waiter.take() {
-                        let _ = sender.send(());
+                        sender.send_lossy(());
                     }
                 }
             }
