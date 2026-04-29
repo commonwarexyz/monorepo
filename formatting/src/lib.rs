@@ -6,16 +6,10 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-// `pub mod hex_literal;` is declared at the crate root (rather than inside the
-// `stability_scope!` block) so the `#[macro_export] macro_rules! hex` it
-// contains can be referenced via absolute paths within this crate.
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // BETA
-pub mod hex_literal;
+// Declared at the crate root (rather than inside the `stability_scope!` block
+// below) so the `#[macro_export] macro_rules! hex` it contains can be
+// referenced via absolute paths within this crate.
+commonware_macros::stability_mod!(BETA, pub mod hex_literal);
 
 commonware_macros::stability_scope!(BETA {
     extern crate alloc;
@@ -34,37 +28,23 @@ commonware_macros::stability_scope!(BETA {
     /// or is otherwise malformed. Does not strip a leading `0x` / `0X` prefix
     /// or any whitespace; see [from_hex_formatted] for that.
     pub fn from_hex(s: &str) -> Option<Vec<u8>> {
+        // `const_hex::decode` strips a leading `0x`/`0X` prefix automatically;
+        // reject it explicitly to preserve historical behavior.
         let bytes = s.as_bytes();
-        if !bytes.len().is_multiple_of(2) {
+        if bytes.starts_with(b"0x") || bytes.starts_with(b"0X") {
             return None;
         }
-        bytes
-            .chunks_exact(2)
-            .map(|chunk| {
-                let hi = decode_hex_digit(chunk[0])?;
-                let lo = decode_hex_digit(chunk[1])?;
-                Some((hi << 4) | lo)
-            })
-            .collect()
+        const_hex::decode(s).ok()
     }
 
     /// Converts a hexadecimal string to bytes, stripping ASCII whitespace and an
     /// optional `0x` / `0X` prefix. Commonly used in tests to encode external test
     /// vectors without modification.
     pub fn from_hex_formatted(s: &str) -> Option<Vec<u8>> {
+        // `const_hex::decode` already strips a leading `0x`/`0X` prefix, so we
+        // only need to remove ASCII whitespace ourselves.
         let s = s.replace(['\t', '\n', '\r', ' '], "");
-        let s = s.strip_prefix("0x").unwrap_or(&s);
-        from_hex(s)
-    }
-
-    #[inline]
-    const fn decode_hex_digit(byte: u8) -> Option<u8> {
-        match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        }
+        const_hex::decode(s).ok()
     }
 
     /// Display/Debug wrapper that renders bytes as lowercase hex without
