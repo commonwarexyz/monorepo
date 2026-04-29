@@ -127,10 +127,11 @@ const fn cache_line_size() -> usize {
 pub(crate) enum BufferPoolThreadCacheConfig {
     /// Enable thread-local caching.
     ///
-    /// `None` derives the per-thread cache size from the pool's expected
-    /// parallelism. Small per-class budgets may resolve to zero, disabling
-    /// thread-local caching so free buffers do not become stranded in other
-    /// threads.
+    /// `None` derives the per-thread cache size from the pool's per-class
+    /// capacity and expected parallelism, reserving about half of each class
+    /// for the shared freelist. Small per-class budgets may resolve to zero,
+    /// disabling thread-local caching so free buffers do not become stranded in
+    /// other threads.
     ///
     /// `Some(n)` uses an exact per-thread cache size for every size class.
     Enabled(Option<NonZeroUsize>),
@@ -164,7 +165,9 @@ pub struct BufferPoolConfig {
     /// Expected number of threads concurrently accessing the pool.
     ///
     /// This sizes the shared global freelist stripes. It is also used to derive
-    /// thread-cache capacity when the thread-cache policy is automatic.
+    /// thread-cache capacity when the thread-cache policy is automatic, using
+    /// approximately half of [`Self::max_per_class`] divided across expected
+    /// threads.
     pub parallelism: NonZeroUsize,
     /// Policy for sizing the per-thread local cache in each size class.
     ///
@@ -241,7 +244,9 @@ impl BufferPoolConfig {
     /// Returns a copy of this config with a new expected parallelism.
     ///
     /// This controls the minimum global-freelist stripe count, and controls
-    /// thread-cache capacity when the thread-cache policy is automatic.
+    /// thread-cache capacity when the thread-cache policy is automatic. The
+    /// automatic policy reserves about half of each class for the global
+    /// freelist and divides the remaining capacity across expected threads.
     pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.parallelism = parallelism;
         self
@@ -393,15 +398,15 @@ impl BufferPoolConfig {
 
     /// Resolves the effective per-thread cache size for each size class.
     ///
-    /// Derived capacities reserve half of the class budget for the shared
-    /// freelist so cross-thread reuse remains effective, and are capped at
-    /// eight buffers per thread. Small class budgets may resolve to zero.
+    /// Derived capacities divide half of the class budget across the expected
+    /// parallelism so cross-thread reuse remains effective. Small class budgets
+    /// may resolve to zero.
     fn resolve_thread_cache_capacity(&self) -> usize {
         match self.thread_cache_config {
             BufferPoolThreadCacheConfig::Enabled(None) => {
                 let max_per_class = self.max_per_class.get() as usize;
                 let effective_threads = self.parallelism.get().min(max_per_class);
-                (max_per_class / (2 * effective_threads)).min(8)
+                max_per_class / (2 * effective_threads)
             }
             BufferPoolThreadCacheConfig::Enabled(Some(thread_cache_capacity)) => {
                 thread_cache_capacity.get()
@@ -1510,9 +1515,16 @@ mod tests {
     #[test]
     fn test_parallelism_policy_resolves_thread_cache_capacity() {
         let page = page_size();
+
+        // Half the class budget is divided across expected threads.
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(8)));
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 4);
+
+        // Large classes scale past the previous eight-slot cap.
+        let pool = test_pool(test_config(page, page, 4096).with_parallelism(NZUsize!(8)));
+        let class_index = pool.inner.config.class_index(page).unwrap();
+        assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 256);
     }
 
     #[test]
