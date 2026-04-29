@@ -61,7 +61,8 @@ impl<E: Clock, P: PublicKey, Key: Span> Inflight<E, P, Key> {
     }
 
     /// Remove the in-flight entry for the key and cancel its duration timer (suppressing
-    /// the recording). Returns true if an entry was present.
+    /// the recording). If delivery validation was in progress, it is aborted and any
+    /// invalid result is discarded. Returns true if an entry was present.
     pub(super) fn cancel(&mut self, key: &Key) -> bool {
         let Some(entry) = self.entries.remove(key) else {
             return false;

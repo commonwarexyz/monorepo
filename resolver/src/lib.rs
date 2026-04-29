@@ -26,8 +26,10 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// The returned future may be dropped before completion if the
         /// application cancels the fetch via [`Resolver::cancel`],
-        /// [`Resolver::clear`], or [`Resolver::retain`]. Implementations must
-        /// make partial delivery progress cancel-safe.
+        /// [`Resolver::clear`], or [`Resolver::retain`]. When this happens,
+        /// the resolver discards the validation result. If the response would
+        /// have returned `false`, the peer is not blocked for that response.
+        /// Implementations must make partial delivery progress cancel-safe.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
@@ -83,12 +85,23 @@ commonware_macros::stability_scope!(BETA {
         ) -> impl Future<Output = ()> + Send;
 
         /// Cancel a fetch request.
+        ///
+        /// If response validation is in progress, cancellation may drop the
+        /// [`Consumer::deliver`] future before it reports whether the data was
+        /// valid. A dropped invalid result does not block the peer that sent
+        /// the response.
         fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
 
         /// Cancel all fetch requests.
+        ///
+        /// See [`cancel`](Self::cancel) for how cancellation affects
+        /// in-progress response validation.
         fn clear(&mut self) -> impl Future<Output = ()> + Send;
 
         /// Retain only the fetch requests that satisfy the predicate.
+        ///
+        /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
+        /// how cancellation affects in-progress response validation.
         fn retain(
             &mut self,
             predicate: impl Fn(&Self::Key) -> bool + Send + 'static,

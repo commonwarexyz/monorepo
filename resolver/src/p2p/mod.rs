@@ -13,6 +13,8 @@
 //!
 //! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
 //! and returns `true` if valid, completing the fetch, or `false` to retry.
+//! Canceling a fetch with in-progress response validation aborts that validation. If the aborted
+//! validation would have returned `false`, the peer is not blocked for that response.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
