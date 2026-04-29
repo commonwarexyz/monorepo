@@ -416,8 +416,7 @@ impl<
         }
 
         // Invalid data: clear the delivery aborter, block the peer, and retry.
-        // Blocking the peer also removes any targets associated with it.
-        self.inflight.clear_delivery(&key);
+        // Blocking the peer also removes any targets associated with it)
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
