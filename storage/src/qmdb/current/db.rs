@@ -167,8 +167,8 @@ where
     /// root.
     ///
     /// See the [Root structure](super) section in the module documentation.
-    pub fn ops_root(&self) -> H::Digest {
-        self.any.log.root()
+    pub const fn ops_root(&self) -> H::Digest {
+        self.any.root()
     }
 
     /// Returns a witness that this database's canonical root commits to its ops root.
@@ -211,7 +211,7 @@ where
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
-        let ops_root = self.any.log.root();
+        let ops_root = self.any.root();
         OperationProof::new(hasher, self.any.bitmap.as_ref(), &storage, loc, ops_root).await
     }
 
@@ -233,7 +233,7 @@ where
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
         let storage = self.grafted_storage();
-        let ops_root = self.any.log.root();
+        let ops_root = self.any.root();
         RangeProof::new_with_ops(
             hasher,
             self.any.bitmap.as_ref(),
@@ -388,7 +388,6 @@ where
 
         let prune_pos = Position::try_from(prune_loc)
             .map_err(|_| Error::<F>::DataCorrupted("prune location overflow"))?;
-        let root = *self.grafted_tree.root();
         let size = self.grafted_tree.size();
 
         let mut pinned = BTreeMap::new();
@@ -409,7 +408,7 @@ where
             retained.push(digest);
         }
 
-        self.grafted_tree = Mem::from_pruned_with_retained(root, prune_pos, pinned, retained);
+        self.grafted_tree = Mem::from_pruned_with_retained(prune_pos, pinned, retained);
         Ok(())
     }
 
@@ -549,7 +548,7 @@ where
             hasher.clone(),
         );
         let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
-        let ops_root = self.any.log.root();
+        let ops_root = self.any.root();
         let root = compute_db_root(
             &hasher,
             self.any.bitmap.as_ref(),
@@ -910,15 +909,10 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
     let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
     let mut grafted_tree = if pruned_chunks > 0 {
         let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
-        Mem::from_components(
-            &grafted_hasher,
-            Vec::new(),
-            grafted_pruning_boundary,
-            pinned_nodes.to_vec(),
-        )
-        .map_err(|_| Error::<F>::DataCorrupted("grafted tree rebuild failed"))?
+        Mem::from_components(Vec::new(), grafted_pruning_boundary, pinned_nodes.to_vec())
+            .map_err(|_| Error::<F>::DataCorrupted("grafted tree rebuild failed"))?
     } else {
-        Mem::new(&grafted_hasher)
+        Mem::new()
     };
 
     // Add each grafted leaf digest.

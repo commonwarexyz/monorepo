@@ -151,14 +151,14 @@ pub(crate) mod test {
     async fn open_db_generic<F: Family + RootSpec>(
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
-        let cfg = fixed_db_config::<TwoCap>("partition", &context);
+        let cfg = fixed_db_config::<mmr::Family, TwoCap>("partition", &context);
         crate::qmdb::any::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        let cfg = fixed_db_config::<mmr::Family, TwoCap>(&seed.to_string(), &context);
         AnyTest::init(context, cfg).await.unwrap()
     }
 

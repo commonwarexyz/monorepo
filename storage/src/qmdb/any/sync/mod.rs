@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::{self, full, hasher::Standard as StandardHasher, Location},
+    merkle::{self, full, hasher::Standard as StandardHasher, Location, RootSpec},
     qmdb::{
         self,
         any::{
@@ -59,6 +59,7 @@ pub async fn has_local_target_state<F, E, H>(
     context: E,
     merkle_config: full::Config,
     target: &qmdb::sync::Target<F, H::Digest>,
+    spec: RootSpec,
 ) -> bool
 where
     F: merkle::Family,
@@ -70,6 +71,7 @@ where
         context.with_label("local_target_probe"),
         merkle_config,
         &hasher,
+        spec,
     )
     .await;
     // Size + root identify a unique state, so if they match the target's we can reuse
@@ -82,6 +84,7 @@ where
 }
 
 /// Shared helper to build a [Db] from sync components.
+#[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, T>(
     context: E,
     merkle_config: full::Config,
@@ -90,6 +93,8 @@ async fn build_db<F, E, U, I, H, C, T>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    split_root: bool,
+    root_bagging: merkle::Bagging,
 ) -> Result<Db<F, E, C, I, H, U>, qmdb::Error<F>>
 where
     F: merkle::Family,
@@ -110,7 +115,6 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &hasher,
     )
     .await?;
 
@@ -123,7 +127,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None).await?;
+    let db = Db::init_from_log(index, log, None, split_root, root_bagging).await?;
 
     Ok(db)
 }
@@ -161,6 +165,8 @@ macro_rules! impl_sync_database {
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
+                let split_root = config.split_root;
+                let root_bagging = config.root_bagging;
                 build_db::<F, _, $update<K, V>, _, H, _, T>(
                     context,
                     merkle_config,
@@ -169,6 +175,8 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    split_root,
+                    root_bagging,
                 )
                 .await
             }
@@ -178,16 +186,36 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    target.range.start(),
+                );
                 qmdb::any::sync::has_local_target_state::<F, _, H>(
                     context,
                     config.merkle_config.clone(),
                     target,
+                    RootSpec::from_split_policy(
+                        config.split_root,
+                        config.root_bagging,
+                        inactive_peaks,
+                    ),
                 )
                 .await
             }
 
             fn root(&self) -> Self::Digest {
-                self.log.root()
+                crate::qmdb::any::db::Db::root(self)
+            }
+
+            fn proof_spec(
+                config: &Self::Config,
+                proof: &crate::merkle::Proof<Self::Family, Self::Digest>,
+            ) -> RootSpec {
+                RootSpec::from_split_policy(
+                    config.split_root,
+                    config.root_bagging,
+                    proof.inactive_peaks,
+                )
             }
         }
     };
