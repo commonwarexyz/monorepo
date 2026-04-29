@@ -13,8 +13,21 @@ struct FuzzInput {
     b: u32,
 }
 
+fn exercise_arbitrary_impl(a: u32, b: u32) {
+    let mut seed = [0u8; 8];
+    seed[..4].copy_from_slice(&a.to_le_bytes());
+    seed[4..].copy_from_slice(&b.to_le_bytes());
+    let mut u = arbitrary::Unstructured::new(&seed);
+    match NonEmptyRange::<u32>::arbitrary(&mut u) {
+        Ok(r) => assert!(r.start() < r.end()),
+        Err(arbitrary::Error::IncorrectFormat | arbitrary::Error::NotEnoughData) => {}
+        Err(e) => panic!("unexpected arbitrary error: {e:?}"),
+    }
+}
+
 fn fuzz(input: FuzzInput) {
     let FuzzInput { a, b } = input;
+    exercise_arbitrary_impl(a, b);
     let range = a..b;
 
     let result = NonEmptyRange::new(range.clone());

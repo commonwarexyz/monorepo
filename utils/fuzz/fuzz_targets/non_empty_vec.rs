@@ -22,10 +22,28 @@ enum Op {
     Mutate { swap_a: usize, swap_b: usize },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     init: Vec<u8>,
     ops: Vec<Op>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let discriminant: u8 = u.arbitrary()?;
+        let init = if discriminant == 0 {
+            Vec::new()
+        } else {
+            let first: u8 = u.arbitrary()?;
+            let rest: Vec<u8> = u.arbitrary()?;
+            let mut v = Vec::with_capacity(1 + rest.len());
+            v.push(first);
+            v.extend(rest);
+            v
+        };
+        let ops: Vec<Op> = u.arbitrary()?;
+        Ok(Self { init, ops })
+    }
 }
 
 fn check_invariants(nev: &NonEmptyVec<u8>, model: &[u8]) {
@@ -196,6 +214,8 @@ fn apply(op: Op, nev: &mut NonEmptyVec<u8>, model: &mut Vec<u8>) {
 }
 
 fn fuzz(input: FuzzInput) {
+    ADDITIONAL_METHODS.call_once(|| exercise_additional_methods(0));
+
     if input.init.is_empty() {
         let err = NonEmptyVec::<u8>::try_from(Vec::<u8>::new()).unwrap_err();
         assert_eq!(err, commonware_utils::vec::Error::Empty);
@@ -221,7 +241,6 @@ fn fuzz(input: FuzzInput) {
 
     let mut init = input.init;
     init.truncate(MAX_LEN);
-    ADDITIONAL_METHODS.call_once(|| exercise_additional_methods(init[0]));
 
     let mut nev = NonEmptyVec::<u8>::try_from(init.clone()).expect("non-empty input");
     let from_unchecked = NonEmptyVec::from_unchecked(init.clone());
