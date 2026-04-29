@@ -86,8 +86,7 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// If response validation is in progress, cancellation may drop the
         /// [`Consumer::deliver`] future before it reports whether the data was
-        /// valid. A dropped invalid result does not block the peer that sent
-        /// the response.
+        /// valid.
         fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
 
         /// Cancel all fetch requests.

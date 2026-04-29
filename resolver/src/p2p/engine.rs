@@ -72,7 +72,7 @@ pub struct Engine<
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
-    /// Tracks all in-flight fetch state.
+    /// Tracks all in-flight fetch state
     inflight: Inflight<E, P, Key>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
@@ -265,8 +265,6 @@ impl<
                         // Remove from fetcher and inflight
                         self.fetcher.retain(&predicate);
                         let count = self.inflight.retain(&predicate) as u64;
-
-                        // Metrics
                         if count == 0 {
                             self.metrics.cancel.inc(Status::Dropped);
                         } else {
@@ -279,8 +277,6 @@ impl<
                         // Clear fetcher and drain inflight
                         self.fetcher.clear();
                         let count = self.inflight.drain() as u64;
-
-                        // Metrics
                         if count == 0 {
                             self.metrics.cancel.inc(Status::Dropped);
                         } else {
@@ -291,11 +287,8 @@ impl<
             },
             // Handle completed consumer deliveries
             delivery = self.inflight.next_delivery() => {
-                // Err means the delivery was aborted because its inflight entry was
-                // dropped (via Cancel, Retain, Clear, or shutdown) before the consumer
-                // finished validating. The dropping side already cleaned up state. If
-                // validation would have failed, the peer is not blocked for that aborted
-                // result.
+                // If the delivery was aborted, its inflight entry was dropped (via
+                // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
                 let Delivery { peer, key, valid } = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
