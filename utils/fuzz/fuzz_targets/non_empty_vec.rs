@@ -183,14 +183,15 @@ fn apply(op: Op, nev: &mut NonEmptyVec<u8>, model: &mut Vec<u8>) {
         Op::ResizeWith { new_len, seed } => {
             let target = (new_len as usize).clamp(1, MAX_LEN);
             let target = NonZeroUsize::new(target).unwrap();
-            let mut next = seed;
+            let mut actual_next = seed;
             nev.resize_with(target, || {
-                next = next.wrapping_add(1);
-                next
+                actual_next = actual_next.wrapping_add(1);
+                actual_next
             });
+            let mut expected_next = seed;
             while model.len() < target.get() {
-                next = next.wrapping_add(1);
-                model.push(next);
+                expected_next = expected_next.wrapping_add(1);
+                model.push(expected_next);
             }
             model.truncate(target.get());
         }
