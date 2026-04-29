@@ -10,7 +10,7 @@ use commonware_storage::{
     mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
-        verify_proof, RootSpec,
+        verify_proof, Bagging,
     },
     translator::TwoCap,
 };
@@ -122,7 +122,7 @@ fn db_config(
 
 /// Assign locations to pending keys based on sorted order (matching BTreeMap
 /// iteration in `merkleize()`).
-fn assign_pending_locations<F: MerkleFamily + RootSpec>(
+fn assign_pending_locations<F: MerkleFamily + Bagging>(
     pending: &[(Digest, Vec<u8>)],
     base: Location<F>,
     keys_set: &mut Vec<(Digest, Location<F>)>,
@@ -137,7 +137,7 @@ fn assign_pending_locations<F: MerkleFamily + RootSpec>(
     }
 }
 
-fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::seeded(input.seed);
 
     runner.start(|context| {
@@ -275,7 +275,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, suffix: &str) {
                                     safe_start,
                                     &ops,
                                     &root,
-                                    F::root_spec(proof.inactive_peaks),
+                                    proof.inactive_peaks,
                                 );
                             }
                         }

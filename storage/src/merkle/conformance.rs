@@ -1,6 +1,6 @@
 //! Shared conformance test utilities and stability tests for Merkle-family structures.
 
-use crate::merkle::{hasher::Hasher, mem::Mem, Family, RootSpec};
+use crate::merkle::{hasher::Hasher, mem::Mem, Family};
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256, Sha256};
 
@@ -58,7 +58,7 @@ impl Conformance for MmrRootStability {
         let hasher = Standard::new();
         let mmr = crate::mmr::mem::Mmr::new();
         build_test_mem(&hasher, mmr, seed)
-            .root(&hasher, RootSpec::FULL_FORWARD)
+            .root(&hasher, 0)
             .unwrap()
             .to_vec()
     }
@@ -75,7 +75,7 @@ impl Conformance for MmbRootStability {
         let hasher = Standard::new();
         let mmb = crate::mmb::mem::Mmb::new();
         build_test_mem(&hasher, mmb, seed)
-            .root(&hasher, RootSpec::FULL_FORWARD)
+            .root(&hasher, 0)
             .unwrap()
             .to_vec()
     }

@@ -15,7 +15,7 @@ use commonware_storage::{
             value::FixedEncoding,
             FixedConfig as Config,
         },
-        verify_proof, RootSpec,
+        verify_proof, Bagging,
     },
     translator::EightCap,
 };
@@ -58,7 +58,7 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(223);
 const PAGE_CACHE_SIZE: usize = 100;
 
-async fn commit_pending<F: MerkleFamily + RootSpec>(
+async fn commit_pending<F: MerkleFamily + Bagging>(
     db: &mut GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
@@ -76,7 +76,7 @@ async fn commit_pending<F: MerkleFamily + RootSpec>(
     committed_state.extend(pending_expected.drain());
 }
 
-fn fuzz_family<F: MerkleFamily + RootSpec>(data: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily + Bagging>(data: &FuzzInput, suffix: &str) {
     let hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
 
@@ -105,7 +105,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(data: &FuzzInput, suffix: &str) {
                 },
                 translator: EightCap,
                 split_root: true,
-                root_bagging: F::root_spec(0).bagging(),
+                root_bagging: <F as commonware_storage::qmdb::Bagging>::BAGGING,
             };
 
             let mut db: GenericDb<F> =
@@ -181,7 +181,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(data: &FuzzInput, suffix: &str) {
                                 adjusted_start,
                                 &log,
                                 &current_root,
-                                F::root_spec(proof.inactive_peaks),
+                                proof.inactive_peaks,
                             ),
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
                         );

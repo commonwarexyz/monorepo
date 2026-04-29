@@ -11,7 +11,7 @@ use commonware_storage::{
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
-        sync, RootSpec,
+        sync, Bagging,
     },
     translator::TwoCap,
 };
@@ -90,7 +90,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config<F: RootSpec>(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+fn test_config<F: Bagging>(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
@@ -109,7 +109,7 @@ fn test_config<F: RootSpec>(test_name: &str, pooler: &impl BufferPooler) -> Conf
         },
         translator: TwoCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: <F as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -122,7 +122,7 @@ async fn test_sync<F, R>(
     sync_id: usize,
 ) -> bool
 where
-    F: MerkleFamily + RootSpec,
+    F: MerkleFamily + Bagging,
     R: sync::resolver::Resolver<
         Family = F,
         Digest = commonware_cryptography::sha256::Digest,
@@ -159,7 +159,7 @@ where
     }
 }
 
-fn fuzz_family<F: MerkleFamily + RootSpec>(input: &mut FuzzInput, test_name: &str) {
+fn fuzz_family<F: MerkleFamily + Bagging>(input: &mut FuzzInput, test_name: &str) {
     input.commit_counter = 0;
     let runner = deterministic::Runner::default();
 

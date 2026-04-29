@@ -7,7 +7,7 @@ use commonware_storage::{
     bmt::Builder as BmtBuilder,
     merkle::{
         hasher::Standard, mem::Mem, mmb, mmr, verification, Bagging, Family as MerkleFamily,
-        Location, RootSpec,
+        Location,
     },
 };
 use futures::executor::block_on;
@@ -127,57 +127,69 @@ where
     }
 }
 
-fn supported_root_specs<F: MerkleFamily>(merkle: &Mem<F, Digest>) -> Vec<RootSpec> {
+fn supported_root_specs<F: MerkleFamily>(merkle: &Mem<F, Digest>) -> Vec<(Bagging, usize)> {
     let peak_count = F::peaks(merkle.size()).count();
-    let mut specs = Vec::with_capacity(2 + 2 * (peak_count + 1));
+    let mut specs = Vec::with_capacity(2 * (peak_count + 1));
     let mut push_unique = |spec| {
         if !specs.contains(&spec) {
             specs.push(spec);
         }
     };
-
-    push_unique(RootSpec::FULL_FORWARD);
-    push_unique(RootSpec::Full {
-        bagging: Bagging::BackwardFold,
-    });
     for inactive_peaks in 0..=peak_count {
-        push_unique(RootSpec::split_forward(inactive_peaks));
-        push_unique(RootSpec::split_backward(inactive_peaks));
+        push_unique((Bagging::ForwardFold, inactive_peaks));
+        push_unique((Bagging::BackwardFold, inactive_peaks));
     }
     specs
 }
 
 fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
-    let hasher = Standard::<Sha256>::new();
+    let build_hasher = Standard::<Sha256>::new();
     let mut merkle = Mem::<F, Digest>::new();
     let batch = {
         let mut batch = merkle.new_batch();
         for digest in digests {
-            batch = batch.add(&hasher, digest);
+            batch = batch.add(&build_hasher, digest);
         }
-        batch.merkleize(&merkle, &hasher)
+        batch.merkleize(&merkle, &build_hasher)
     };
     merkle.apply_batch(&batch).unwrap();
 
-    for spec in supported_root_specs(&merkle) {
-        let root = merkle.root(&hasher, spec).unwrap();
+    for (bagging, inactive_peaks) in supported_root_specs(&merkle) {
+        let hasher = Standard::<Sha256>::with_bagging(bagging);
+        let root = merkle.root(&hasher, inactive_peaks).unwrap();
         for (leaf, element) in digests.iter().enumerate() {
             let loc = Location::<F>::new(leaf as u64);
-            let original_proof = merkle.proof(&hasher, loc, spec).unwrap();
-            assert!(original_proof.verify_element_inclusion(&hasher, element, loc, &root, spec));
+            let original_proof = merkle.proof(&hasher, loc, inactive_peaks).unwrap();
+            assert!(original_proof.verify_element_inclusion(
+                &hasher,
+                element,
+                loc,
+                &root,
+                inactive_peaks
+            ));
 
             let mut mutated_proof = original_proof.clone();
             mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
             assert_ne!(mutated_proof, original_proof);
-            assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, &root, spec));
+            assert!(!mutated_proof.verify_element_inclusion(
+                &hasher,
+                element,
+                loc,
+                &root,
+                inactive_peaks
+            ));
 
             for mutation in &input.mutations {
                 let mut mutated_proof = original_proof.clone();
                 mutate_proof_bytes(&mut mutated_proof, mutation, &256);
                 if mutated_proof != original_proof {
-                    assert!(
-                        !mutated_proof.verify_element_inclusion(&hasher, element, loc, &root, spec)
-                    );
+                    assert!(!mutated_proof.verify_element_inclusion(
+                        &hasher,
+                        element,
+                        loc,
+                        &root,
+                        inactive_peaks
+                    ));
                 }
             }
         }
@@ -195,7 +207,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         batch.merkleize(&merkle, &hasher)
     };
     merkle.apply_batch(&batch).unwrap();
-    let root = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+    let root = merkle.root(&hasher, 0).unwrap();
 
     let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
         (0, 0)
@@ -208,32 +220,18 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         (i1.min(i2), i1.abs_diff(i2) + 1)
     };
     let start_loc = Location::<F>::new(start_idx as u64);
-    let Ok(original_proof) = merkle.range_proof(
-        &hasher,
-        start_loc..start_loc + range_len as u64,
-        RootSpec::FULL_FORWARD,
-    ) else {
+    let Ok(original_proof) =
+        merkle.range_proof(&hasher, start_loc..start_loc + range_len as u64, 0)
+    else {
         return;
     };
     let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
-    assert!(original_proof.verify_range_inclusion(
-        &hasher,
-        &range_elements,
-        start_loc,
-        &root,
-        RootSpec::FULL_FORWARD
-    ));
+    assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root, 0));
 
     let mut mutated_proof = original_proof.clone();
     mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
     assert_ne!(mutated_proof, original_proof);
-    assert!(!mutated_proof.verify_range_inclusion(
-        &hasher,
-        &range_elements,
-        start_loc,
-        &root,
-        RootSpec::FULL_FORWARD
-    ));
+    assert!(!mutated_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root, 0));
 
     for mutation in &input.mutations {
         let mut mutated_proof = original_proof.clone();
@@ -244,19 +242,20 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
                 &range_elements,
                 start_loc,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             ));
         }
     }
 
-    for spec in supported_root_specs(&merkle) {
-        let root = merkle.root(&hasher, spec).unwrap();
+    for (bagging, inactive_peaks) in supported_root_specs(&merkle) {
+        let hasher = Standard::<Sha256>::with_bagging(bagging);
+        let root = merkle.root(&hasher, inactive_peaks).unwrap();
         let Ok(original_proof) = block_on(verification::historical_range_proof(
             &hasher,
             &merkle,
             merkle.leaves(),
             start_loc..start_loc + range_len as u64,
-            spec,
+            inactive_peaks,
         )) else {
             continue;
         };
@@ -265,7 +264,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
             &range_elements,
             start_loc,
             &root,
-            spec,
+            inactive_peaks,
         ));
 
         let mut mutated_proof = original_proof.clone();
@@ -276,7 +275,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
             &range_elements,
             start_loc,
             &root,
-            spec,
+            inactive_peaks,
         ));
 
         for mutation in &input.mutations {
@@ -288,7 +287,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
                     &range_elements,
                     start_loc,
                     &root,
-                    spec,
+                    inactive_peaks,
                 ));
             }
         }

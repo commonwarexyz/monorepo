@@ -8,7 +8,7 @@ use commonware_storage::{
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable},
     qmdb::{
         current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
-        RootSpec,
+        Bagging,
     },
     translator::OneCap,
 };
@@ -110,7 +110,7 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn fuzz_family<F: Graftable + RootSpec>(input: &FuzzInput, test_name: &str) {
+fn fuzz_family<F: Graftable + Bagging>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
     let test_name = test_name.to_string();

@@ -1,8 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::merkle::{
-    self, mem::Mem, Family, Location, LocationRangeExt as _, RootSpec,
-};
+use commonware_storage::merkle::{self, mem::Mem, Family, Location, LocationRangeExt as _};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -35,7 +33,7 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
             };
             mem.apply_batch(&batch).unwrap();
         });
-        let root = mem.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mem.root(&hasher, 0).unwrap();
 
         // Generate SAMPLE_SIZE random starts without replacement and create/verify range proofs
         for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000] {
@@ -66,15 +64,13 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
                             let hasher = StandardHasher::<Sha256>::new();
                             block_on(async {
                                 for range in samples {
-                                    let proof = mem
-                                        .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-                                        .unwrap();
+                                    let proof = mem.range_proof(&hasher, range.clone(), 0).unwrap();
                                     assert!(proof.verify_range_inclusion(
                                         &hasher,
                                         &elements[range.to_usize_range()],
                                         range.start,
                                         &root,
-                                        RootSpec::FULL_FORWARD,
+                                        0,
                                     ));
                                 }
                             })

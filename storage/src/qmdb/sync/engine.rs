@@ -332,7 +332,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::new(),
+            hasher: StandardHasher::<DB::Hasher>::with_bagging(DB::root_bagging(&config.db_config)),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
@@ -702,7 +702,7 @@ where
             && self.pinned_nodes.is_none()
             && !self.local_target_state_available
             && start_loc == self.target.range.start();
-        let proof_spec = DB::proof_spec(&self.config, &proof);
+        let inactive_peaks = DB::proof_inactive_peaks(&self.config, &proof);
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
@@ -712,7 +712,7 @@ where
                 start_loc,
                 nodes,
                 target_root,
-                proof_spec,
+                inactive_peaks,
             )
         } else {
             proof.verify_range_inclusion(
@@ -720,7 +720,7 @@ where
                 &elements,
                 start_loc,
                 target_root,
-                proof_spec,
+                inactive_peaks,
             )
         };
 

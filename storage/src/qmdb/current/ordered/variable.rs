@@ -15,7 +15,7 @@ use crate::{
         any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
         operation::Key,
-        Error, RootSpec,
+        Bagging, Error,
     },
     translator::Translator,
     Context,
@@ -35,7 +35,7 @@ pub type Db<F, E, K, V, H, T, const N: usize> = super::db::Db<
 >;
 
 impl<
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Key,
         V: VariableValue,
@@ -81,7 +81,7 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable + RootSpec,
+            F: Graftable + Bagging,
             E: Context,
             K: Key,
             V: VariableValue,

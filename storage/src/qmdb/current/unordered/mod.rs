@@ -31,7 +31,7 @@ pub mod tests {
             },
             current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
             store::tests::{TestKey, TestValue},
-            Error, RootSpec,
+            Bagging, Error,
         },
         translator::TwoCap,
         Persistable,
@@ -60,7 +60,7 @@ pub mod tests {
     /// and verifies state is preserved across close/reopen cycles.
     pub fn test_build_small_close_reopen<F, C, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         C: DbAny<F> + BitmapPrunedBits,
         C::Key: TestKey,
         <C as DbAny<F>>::Value: TestValue,
@@ -160,7 +160,7 @@ pub mod tests {
     pub(super) fn test_verify_proof_over_bits_in_uncommitted_chunk<F, C, V, Fn, Fut>(
         mut open_db: Fn,
     ) where
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -329,7 +329,7 @@ pub mod tests {
     /// proof, and that adding extra chunks causes verification to fail.
     pub(super) fn test_range_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -415,7 +415,7 @@ pub mod tests {
     /// wrong keys, wrong values, and wrong roots.
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -505,7 +505,7 @@ pub mod tests {
     /// value's proof fails.
     pub(super) fn test_proving_repeated_updates<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,

@@ -82,7 +82,6 @@
 
 use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
-    RootSpec,
 };
 use alloc::{
     collections::BTreeMap,
@@ -568,12 +567,13 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         None
     }
 
-    /// Compute the root digest after this batch's mutations using `spec`.
+    /// Compute the root digest after this batch's mutations using `inactive_peaks` and the bagging
+    /// carried by `hasher`.
     pub fn root(
         &self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
         let leaves = self.leaves();
         let peaks: Vec<D> = F::peaks(self.size())
@@ -583,37 +583,39 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
                     .expect("peak missing")
             })
             .collect();
-        hasher.root(leaves, spec, peaks.iter())
+        hasher.root(leaves, inactive_peaks, peaks.iter())
     }
 
-    /// Inclusion proof for the element at `loc` using an explicit root spec.
+    /// Inclusion proof for the element at `loc` using `inactive_peaks` and the bagging carried by
+    /// `hasher`.
     pub fn proof(
         &self,
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
-        self.range_proof(hasher, loc..loc + 1, spec)
+        self.range_proof(hasher, loc..loc + 1, inactive_peaks)
             .map_err(|e| match e {
                 Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
                 _ => e,
             })
     }
 
-    /// Inclusion proof for all elements in `range` using an explicit root spec.
+    /// Inclusion proof for all elements in `range` using `inactive_peaks` and the bagging carried
+    /// by `hasher`.
     pub fn range_proof(
         &self,
         hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         crate::merkle::proof::build_range_proof(
             hasher,
             self.leaves(),
-            spec,
+            inactive_peaks,
             range,
             |pos| Self::get_node(self, pos),
             Error::ElementPruned,
@@ -672,7 +674,7 @@ impl<F: Family, D: Digest> Readable for MerkleizedBatch<F, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, mem::Mem, RootSpec};
+    use crate::merkle::{hasher::Standard, mem::Mem};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
@@ -680,11 +682,11 @@ mod tests {
     type H = Standard<Sha256>;
 
     fn mem_root<F: Family>(mem: &Mem<F, D>, hasher: &H) -> D {
-        mem.root(hasher, RootSpec::FULL_FORWARD).unwrap()
+        mem.root(hasher, 0).unwrap()
     }
 
     fn batch_root<F: Family>(base: &Mem<F, D>, batch: &MerkleizedBatch<F, D>, hasher: &H) -> D {
-        batch.root(base, hasher, RootSpec::FULL_FORWARD).unwrap()
+        batch.root(base, hasher, 0).unwrap()
     }
 
     fn build_reference<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
@@ -744,13 +746,13 @@ mod tests {
             applied.apply_batch(&merkleized).unwrap();
             let loc = Location::<F>::new(55);
             let element = hasher.digest(&55u64.to_be_bytes());
-            let proof = applied.proof(&hasher, loc, RootSpec::FULL_FORWARD).unwrap();
+            let proof = applied.proof(&hasher, loc, 0).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
                 &element,
                 loc,
                 &batch_root(&applied, &merkleized, &hasher),
-                RootSpec::FULL_FORWARD,
+                0,
             ));
         });
     }
@@ -830,13 +832,13 @@ mod tests {
             for i in [0u64, 25, 55, 65, 69] {
                 let loc = Location::<F>::new(i);
                 let element = hasher.digest(&i.to_be_bytes());
-                let proof = applied.proof(&hasher, loc, RootSpec::FULL_FORWARD).unwrap();
+                let proof = applied.proof(&hasher, loc, 0).unwrap();
                 assert!(proof.verify_element_inclusion(
                     &hasher,
                     &element,
                     loc,
                     &batch_root(&applied, &mb, &hasher),
-                    RootSpec::FULL_FORWARD,
+                    0,
                 ));
             }
         });
@@ -936,18 +938,16 @@ mod tests {
             applied.apply_batch(&m).unwrap();
             let loc = Location::<F>::new(55);
             let element = hasher.digest(&55u64.to_be_bytes());
-            let proof = applied.proof(&hasher, loc, RootSpec::FULL_FORWARD).unwrap();
+            let proof = applied.proof(&hasher, loc, 0).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
                 &element,
                 loc,
                 &batch_root(&applied, &m, &hasher),
-                RootSpec::FULL_FORWARD,
+                0,
             ));
             let range = Location::<F>::new(50)..Location::new(55);
-            let rp = applied
-                .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-                .unwrap();
+            let rp = applied.range_proof(&hasher, range.clone(), 0).unwrap();
             let elements: Vec<D> = (50u64..55)
                 .map(|i| hasher.digest(&i.to_be_bytes()))
                 .collect();
@@ -956,7 +956,7 @@ mod tests {
                 &elements,
                 range.start,
                 &batch_root(&applied, &m, &hasher),
-                RootSpec::FULL_FORWARD,
+                0,
             ));
         });
     }
@@ -1038,16 +1038,10 @@ mod tests {
             applied.apply_batch(&m).unwrap();
             let loc = Location::<F>::new(80);
             let element = hasher.digest(&80u64.to_be_bytes());
-            let proof = applied.proof(&hasher, loc, RootSpec::FULL_FORWARD).unwrap();
-            assert!(proof.verify_element_inclusion(
-                &hasher,
-                &element,
-                loc,
-                &expected_root,
-                RootSpec::FULL_FORWARD
-            ));
+            let proof = applied.proof(&hasher, loc, 0).unwrap();
+            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root, 0));
             assert!(matches!(
-                applied.proof(&hasher, Location::new(0), RootSpec::FULL_FORWARD),
+                applied.proof(&hasher, Location::new(0), 0),
                 Err(Error::ElementPruned(_))
             ));
         });

@@ -1,5 +1,5 @@
 use crate::{
-    merkle::{Family, Location, Proof, RootSpec},
+    merkle::{Bagging, Family, Location, Proof},
     qmdb::sync::Journal,
     translator::Translator,
 };
@@ -75,6 +75,13 @@ pub trait Database: Sized + Send {
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
 
-    /// Return the root spec for verifying an ops proof against this database's configured policy.
-    fn proof_spec(config: &Self::Config, proof: &Proof<Self::Family, Self::Digest>) -> RootSpec;
+    /// Return the inactive_peaks count for verifying an ops proof against this database's
+    /// configured policy. The bagging is supplied via the hasher passed to verification.
+    fn proof_inactive_peaks(
+        config: &Self::Config,
+        proof: &Proof<Self::Family, Self::Digest>,
+    ) -> usize;
+
+    /// Bagging policy used by this database when computing roots/proofs.
+    fn root_bagging(config: &Self::Config) -> Bagging;
 }

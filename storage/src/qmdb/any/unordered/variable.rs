@@ -11,7 +11,7 @@ use crate::{
     qmdb::{
         any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error, RootSpec,
+        Bagging, Error,
     },
     translator::Translator,
     Context,
@@ -27,7 +27,7 @@ pub type Operation<F, K, V> = unordered::Operation<F, K, VariableEncoding<V>>;
 pub type Db<F, E, K, V, H, T> =
     super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
 
-impl<F: Family + RootSpec, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator>
+impl<F: Family + Bagging, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator>
     Db<F, E, K, V, H, T>
 where
     Operation<F, K, V>: Codec,
@@ -56,7 +56,7 @@ pub mod partitioned {
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error, RootSpec,
+            Bagging, Error,
         },
         translator::Translator,
         Context,
@@ -83,7 +83,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family + RootSpec,
+            F: Family + Bagging,
             E: Context,
             K: Key,
             V: VariableValue,
@@ -160,7 +160,7 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             split_root: true,
-            root_bagging: <mmr::Family as crate::qmdb::RootSpec>::root_spec(0).bagging(),
+            root_bagging: <mmr::Family as crate::qmdb::Bagging>::BAGGING,
         }
     }
 

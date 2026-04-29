@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::merkle::{self, mem::Mem, Family, Location, RootSpec};
+use commonware_storage::merkle::{self, mem::Mem, Family, Location};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -32,7 +32,7 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
             };
             mem.apply_batch(&batch).unwrap();
         });
-        let root = mem.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mem.root(&hasher, 0).unwrap();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
@@ -53,15 +53,9 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
                         block_on(async {
                             let hasher = StandardHasher::<Sha256>::new();
                             for (loc, element) in samples {
-                                let proof =
-                                    mem.proof(&hasher, loc, RootSpec::FULL_FORWARD).unwrap();
-                                assert!(proof.verify_element_inclusion(
-                                    &hasher,
-                                    &element,
-                                    loc,
-                                    &root,
-                                    RootSpec::FULL_FORWARD
-                                ));
+                                let proof = mem.proof(&hasher, loc, 0).unwrap();
+                                assert!(proof
+                                    .verify_element_inclusion(&hasher, &element, loc, &root, 0));
                             }
                         });
                     },

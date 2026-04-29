@@ -3637,4 +3637,58 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Regression: a `current::Db` over `mmb::Family` commits its ops root with full-forward
+    /// bagging, so `verify_proof` must be invoked with a forward hasher (not the family-default
+    /// backward hasher) to accept proofs returned by `ops_historical_proof`.
+    #[test_traced("INFO")]
+    fn test_current_mmb_ops_historical_proof_verifies_with_full_forward_spec() {
+        use crate::{merkle::hasher::Standard, qmdb::verify_proof};
+        use commonware_utils::NZU64;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedFixedMmbDb = UnorderedFixedMmbDb::init(
+                ctx.clone(),
+                fixed_config::<OneCap>("mmb-ops-proof", &ctx),
+            )
+            .await
+            .unwrap();
+
+            let writes: Vec<(Digest, Option<Digest>)> =
+                (0u64..16).map(|i| (key(i), Some(val(i)))).collect();
+            commit_writes(&mut db, writes).await.unwrap();
+
+            let ops_root = db.ops_root();
+            let historical_size = db.bounds().await.end;
+            let (proof, ops) = db
+                .ops_historical_proof(historical_size, Location::new(0), NZU64!(32))
+                .await
+                .unwrap();
+
+            let hasher = Standard::<Sha256>::new();
+            let hasher_backward = Standard::<Sha256>::backward();
+
+            assert!(verify_proof(
+                &hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root,
+                proof.inactive_peaks,
+            ));
+
+            assert!(!verify_proof(
+                &hasher_backward,
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root,
+                proof.inactive_peaks,
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
 }

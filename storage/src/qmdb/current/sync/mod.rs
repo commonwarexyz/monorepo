@@ -34,7 +34,7 @@ use crate::{
     merkle::{
         full::{self, Merkle},
         hasher::Standard as StandardHasher,
-        Bagging, Graftable, Location, Proof, RootSpec,
+        Bagging, Graftable, Location, Proof,
     },
     qmdb::{
         self,
@@ -288,7 +288,8 @@ macro_rules! impl_current_sync_database {
                     context.with_label("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
-                    RootSpec::FULL_FORWARD,
+                    0,
+                    Bagging::ForwardFold,
                 )
                 .await
                 {
@@ -314,11 +315,15 @@ macro_rules! impl_current_sync_database {
                 self.any.root()
             }
 
-            fn proof_spec(
+            fn proof_inactive_peaks(
                 _config: &Self::Config,
                 _proof: &Proof<Self::Family, Self::Digest>,
-            ) -> RootSpec {
-                RootSpec::FULL_FORWARD
+            ) -> usize {
+                0
+            }
+
+            fn root_bagging(_config: &Self::Config) -> Bagging {
+                Bagging::ForwardFold
             }
         }
     };
