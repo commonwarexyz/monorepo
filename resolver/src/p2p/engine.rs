@@ -42,13 +42,36 @@ struct Delivery<P: PublicKey, Key: Span> {
     valid: bool,
 }
 
-/// Tracks in-flight state for a fetched key.
+/// Tracks per-key state for an in-flight fetch.
 ///
 /// `delivery` is `Some` while the consumer is validating a response, and `None` while
 /// the request is still pending in the fetcher.
-struct Inflight<E: Clock> {
+struct Entry<E: Clock> {
     timer: histogram::Timer<E>,
     delivery: Option<Aborter>,
+}
+
+/// Tracks all in-flight fetch state.
+struct Inflight<E: Clock, P: PublicKey, Key: Span> {
+    /// Per-key entries tracking fetch duration timers and (when validating a response)
+    /// the [Aborter] that cancels the in-flight consumer delivery.
+    entries: HashMap<Key, Entry<E>>,
+
+    /// Holds futures that resolve once the `Consumer` has validated fetched data.
+    deliveries: AbortablePool<Delivery<P, Key>>,
+
+    /// Holds futures that notify the consumer about canceled fetches.
+    failures: FuturesPool<()>,
+}
+
+impl<E: Clock, P: PublicKey, Key: Span> Default for Inflight<E, P, Key> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            deliveries: AbortablePool::default(),
+            failures: FuturesPool::default(),
+        }
+    }
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
@@ -87,15 +110,8 @@ pub struct Engine<
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
-    /// Tracks fetch duration timers and (when validating a response) the
-    /// [Aborter] that cancels the in-flight consumer delivery.
-    inflight: HashMap<Key, Inflight<E>>,
-
-    /// Holds futures that resolve once the `Consumer` has validated fetched data.
-    deliveries: AbortablePool<Delivery<P, Key>>,
-
-    /// Holds futures that notify the consumer about canceled fetches.
-    failures: FuturesPool<()>,
+    /// Tracks all in-flight fetch state.
+    inflight: Inflight<E, P, Key>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -153,9 +169,7 @@ impl<
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
-                inflight: HashMap::new(),
-                deliveries: AbortablePool::default(),
-                failures: FuturesPool::default(),
+                inflight: Inflight::default(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -196,7 +210,7 @@ impl<
                 let _ = self
                     .metrics
                     .fetch_active
-                    .try_set(self.fetcher.len_active() + self.deliveries.len());
+                    .try_set(self.fetcher.len_active() + self.inflight.deliveries.len());
                 let _ = self
                     .metrics
                     .peers_blocked
@@ -217,8 +231,8 @@ impl<
             },
             on_stopped => {
                 debug!("shutdown");
-                self.inflight.clear();
-                self.failures.cancel_all();
+                self.inflight.entries.clear();
+                self.inflight.failures.cancel_all();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -254,7 +268,7 @@ impl<
                             trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
-                            let is_new = !self.inflight.contains_key(&key);
+                            let is_new = !self.inflight.entries.contains_key(&key);
 
                             // Update targets
                             match targets {
@@ -271,9 +285,9 @@ impl<
 
                             // Only start new fetch if not already in progress
                             if is_new {
-                                self.inflight.insert(
+                                self.inflight.entries.insert(
                                     key.clone(),
-                                    Inflight {
+                                    Entry {
                                         timer: self.metrics.fetch_duration.timer(),
                                         delivery: None,
                                     },
@@ -288,10 +302,10 @@ impl<
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
                         self.fetcher.cancel(&key);
-                        if let Some(inflight) = self.inflight.remove(&key) {
-                            // Dropping `inflight` aborts the in-flight delivery (if any).
+                        if let Some(entry) = self.inflight.entries.remove(&key) {
+                            // Dropping `entry` aborts the in-flight delivery (if any).
                             guard.set(Status::Success);
-                            inflight.timer.cancel(); // don't record duration metric
+                            entry.timer.cancel(); // don't record duration metric
                             self.notify_failed(key);
                         }
                     }
@@ -301,11 +315,12 @@ impl<
                         self.fetcher.retain(&predicate);
                         let removed: Vec<_> = self
                             .inflight
+                            .entries
                             .extract_if(|k, _| !predicate(k))
                             .collect();
                         let count = removed.len() as u64;
-                        for (key, inflight) in removed {
-                            inflight.timer.cancel();
+                        for (key, entry) in removed {
+                            entry.timer.cancel();
                             self.notify_failed(key);
                         }
 
@@ -319,10 +334,10 @@ impl<
                         trace!("mailbox: clear");
 
                         self.fetcher.clear();
-                        let removed: Vec<_> = self.inflight.drain().collect();
+                        let removed: Vec<_> = self.inflight.entries.drain().collect();
                         let count = removed.len() as u64;
-                        for (key, inflight) in removed {
-                            inflight.timer.cancel();
+                        for (key, entry) in removed {
+                            entry.timer.cancel();
                             self.notify_failed(key);
                         }
 
@@ -335,9 +350,9 @@ impl<
                 }
             },
             // Handle completed failure notifications
-            _ = self.failures.next_completed() => {},
+            _ = self.inflight.failures.next_completed() => {},
             // Handle completed consumer deliveries
-            delivery = self.deliveries.next_completed() => {
+            delivery = self.inflight.deliveries.next_completed() => {
                 let Delivery { peer, key, valid } = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
@@ -400,7 +415,7 @@ impl<
 
     fn notify_failed(&mut self, key: Key) {
         let mut consumer = self.consumer.clone();
-        self.failures.push(async move {
+        self.inflight.failures.push(async move {
             consumer.failed(key, ()).await;
         });
     }
@@ -465,7 +480,7 @@ impl<
         // The peer had the data, so deliver it to the consumer without blocking the engine.
         let delivery_key = key.clone();
         let mut consumer = self.consumer.clone();
-        let aborter = self.deliveries.push(async move {
+        let aborter = self.inflight.deliveries.push(async move {
             let valid = consumer.deliver(delivery_key.clone(), response).await;
             Delivery {
                 peer,
@@ -473,22 +488,22 @@ impl<
                 valid,
             }
         });
-        let inflight = self.inflight.get_mut(&key).expect("inflight entry");
-        assert!(inflight.delivery.replace(aborter).is_none());
+        let entry = self.inflight.entries.get_mut(&key).expect("inflight entry");
+        assert!(entry.delivery.replace(aborter).is_none());
     }
 
     /// Handle completed delivery to the consumer.
     async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
         if valid {
             self.metrics.fetch.inc(Status::Success);
-            self.inflight.remove(&key).expect("inflight entry"); // records duration on drop
+            self.inflight.entries.remove(&key).expect("inflight entry"); // records duration on drop
             self.fetcher.clear_targets(&key);
             return;
         }
 
         // Invalid data: clear the delivery aborter, block the peer, and retry.
         // Blocking the peer also removes any targets associated with it.
-        self.inflight.get_mut(&key).expect("inflight entry").delivery = None;
+        self.inflight.entries.get_mut(&key).expect("inflight entry").delivery = None;
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
