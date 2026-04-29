@@ -55,6 +55,7 @@ use thiserror::Error;
 
 pub mod any;
 pub(crate) mod batch_core;
+pub(crate) mod commit_state;
 pub(crate) mod compact_db;
 pub(crate) mod compact_witness;
 #[cfg(test)]

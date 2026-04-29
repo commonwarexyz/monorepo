@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::value::ValueEncoding,
-        batch_core::{AppendBatchCore, ChainMeta, HasAncestors, HasCore},
+        batch_core::{AppendBatchCore, BatchSpan, HasAncestors, HasCore},
         Error,
     },
     Context, Persistable,
@@ -266,11 +266,11 @@ where
             .as_ref()
             .map(MerkleizedBatch::ancestor_chain)
             .unwrap_or_default();
-        let chain =
-            ChainMeta::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
+        let span =
+            BatchSpan::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
         let core = AppendBatchCore {
             merkle: Arc::clone(&journal.inner),
-            chain,
+            span,
         };
 
         Arc::new(MerkleizedBatch {
@@ -314,7 +314,7 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.core.chain.db_size {
+        if loc_val >= self.core.span().db_size() {
             if let Some(op) = read_chain_op(self, loc_val) {
                 return Ok(op.into_value());
             }
@@ -352,7 +352,7 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.core.chain.db_size {
+            if loc_val >= self.core.span().db_size() {
                 if let Some(op) = read_chain_op(self, loc_val) {
                     results.push(op.into_value());
                     continue;
@@ -387,8 +387,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.core.chain.total_size,
-            db_size: self.core.chain.db_size,
+            base_size: self.core.span().total_size(),
+            db_size: self.core.span().db_size(),
         }
     }
 }

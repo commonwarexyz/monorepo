@@ -102,8 +102,7 @@ where
 
         let db = Self {
             journal,
-            last_commit_loc,
-            inactivity_floor_loc,
+            state: qmdb::commit_state::CommitState::new(last_commit_loc, inactivity_floor_loc),
         };
 
         db.sync().await?;

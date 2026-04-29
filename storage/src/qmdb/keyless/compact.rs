@@ -25,7 +25,7 @@ use crate::{
     },
     qmdb::{
         any::value::ValueEncoding,
-        batch_core::{AppendBatchCore, BatchBase, ChainMeta, HasAncestors, HasCore, ResolvedBase},
+        batch_core::{AppendBatchCore, BatchBase, BatchSpan, HasAncestors, HasCore, ResolvedBase},
         compact_db::CompactDbInner,
         compact_witness::CompactCommit,
         sync::compact as compact_sync,
@@ -323,27 +323,29 @@ where
     pub(crate) fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
-    ) -> Result<compact_sync::State<F, Operation<F, V>, H::Digest>, compact_sync::ServeError<F, H::Digest>>
-    {
+    ) -> Result<
+        compact_sync::State<F, Operation<F, V>, H::Digest>,
+        compact_sync::ServeError<F, H::Digest>,
+    > {
         self.inner.compact_state(target)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V> {
-        let committed_size = *self.inner.last_commit_loc + 1;
+        let committed_size = *self.inner.size();
         UnmerkleizedBatch::new(self, committed_size)
     }
 
     /// Create an owned merkleized batch representing the current committed state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V>> {
-        let committed_size = *self.inner.last_commit_loc + 1;
-        let chain = ChainMeta::quiescent(committed_size, self.inner.inactivity_floor_loc);
+        let committed_size = *self.inner.size();
+        let span = BatchSpan::quiescent(committed_size, self.inner.inactivity_floor_loc());
         Arc::new(MerkleizedBatch {
             core: AppendBatchCore {
                 merkle: self.inner.merkle.to_batch(),
-                chain,
+                span,
             },
-            commit_metadata: self.inner.last_commit_metadata.clone(),
+            commit_metadata: self.inner.get_metadata(),
             ancestors: Vec::new(),
         })
     }
@@ -364,17 +366,10 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let db_size = *self.inner.last_commit_loc + 1;
-        batch
-            .core
-            .validate_apply(self.inner.inactivity_floor_loc, db_size, &batch.ancestors)?;
-
+        let validated = self.inner.state.validate(&batch.core, &batch.ancestors)?;
         self.inner.merkle.apply_batch(&batch.core.merkle)?;
         self.inner.last_commit_metadata = batch.commit_metadata.clone();
-        Ok(batch.core.commit_to(
-            &mut self.inner.last_commit_loc,
-            &mut self.inner.inactivity_floor_loc,
-        ))
+        Ok(validated.commit(&mut self.inner.state))
     }
 
     /// Durably persist the current db state to disk.

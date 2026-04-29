@@ -88,6 +88,7 @@ use crate::{
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
+        commit_state::{CommitState, ValidatedApply},
         operation::{Key, Operation as _},
         Error,
     },
@@ -155,12 +156,8 @@ pub struct Immutable<
     /// Only references operations of type [Operation::Set].
     pub(crate) snapshot: Index<T, Location<F>>,
 
-    /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location<F>,
-
-    /// The inactivity floor declared by the last committed batch.
-    /// Operations before this location are considered inactive by the application.
-    pub(crate) inactivity_floor_loc: Location<F>,
+    /// Shared commit-pointer state.
+    pub(crate) state: CommitState<F>,
 }
 
 // Shared read-only functionality.
@@ -221,14 +218,13 @@ where
         Ok(Self {
             journal,
             snapshot,
-            last_commit_loc,
-            inactivity_floor_loc,
+            state: CommitState::new(last_commit_loc, inactivity_floor_loc),
         })
     }
 
     /// Return the inactivity floor location declared by the last committed batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.inactivity_floor_loc
+        self.state.inactivity_floor_loc()
     }
 
     /// Return the Location of the next operation appended to this db.
@@ -247,7 +243,7 @@ where
     /// upper bound on [`Self::prune`]'s `loc`. For immutable databases, this equals the
     /// inactivity floor declared by the last committed batch.
     pub const fn sync_boundary(&self) -> Location<F> {
-        self.inactivity_floor_loc
+        self.state.inactivity_floor_loc()
     }
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
@@ -349,7 +345,7 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
-        let last_commit_loc = self.last_commit_loc;
+        let last_commit_loc = self.state.last_commit_loc();
         let Operation::Commit(metadata, _floor) = self
             .journal
             .journal
@@ -415,10 +411,10 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        if loc > self.inactivity_floor_loc {
+        if loc > self.state.inactivity_floor_loc() {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
-                self.inactivity_floor_loc,
+                self.state.inactivity_floor_loc(),
             ));
         }
         self.journal.prune(loc).await?;
@@ -447,7 +443,7 @@ where
     /// [`Immutable::sync`].
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
+        let current_size = *self.state.size();
         if rewind_size == current_size {
             return Ok(());
         }
@@ -487,7 +483,7 @@ where
             (rewind_last_loc, rewind_floor, rewound_keys)
         };
 
-        let old_floor = self.inactivity_floor_loc;
+        let old_floor = self.state.inactivity_floor_loc();
 
         // Journal rewind happens before in-memory snapshot updates. If a later step fails, this
         // handle may be internally diverged and must be dropped by the caller.
@@ -513,8 +509,7 @@ where
             }
         }
 
-        self.last_commit_loc = rewind_last_loc;
-        self.inactivity_floor_loc = rewind_floor;
+        self.state.restore(rewind_last_loc, rewind_floor);
 
         Ok(())
     }
@@ -561,8 +556,37 @@ where
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V> {
-        let journal_size = *self.last_commit_loc + 1;
+        let journal_size = *self.state.size();
         batch::UnmerkleizedBatch::new(self, journal_size)
+    }
+
+    /// Apply this batch's key-location diff to the in-memory snapshot.
+    ///
+    /// The tip batch wins over unapplied ancestors for duplicate keys. Already-committed ancestors
+    /// are skipped because their effects are already reflected in the snapshot.
+    fn apply_snapshot_diff(
+        &mut self,
+        batch: &batch::MerkleizedBatch<F, H::Digest, K, V>,
+        validated: &ValidatedApply<F>,
+        oldest_retained: u64,
+    ) {
+        let mut seen = HashSet::new();
+        for (key, entry) in batch.diff.iter() {
+            seen.insert(key.clone());
+            self.snapshot
+                .insert_and_prune(key, entry.loc, |v| *v < oldest_retained);
+        }
+        for ancestor in &batch.ancestors {
+            if !validated.is_unapplied(ancestor.core.span()) {
+                continue;
+            }
+            for (key, entry) in ancestor.diff.iter() {
+                if seen.insert(key.clone()) {
+                    self.snapshot
+                        .insert_and_prune(key, entry.loc, |v| *v < oldest_retained);
+                }
+            }
+        }
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -596,37 +620,14 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
-        let db_size = *self.last_commit_loc + 1;
-        batch
-            .core
-            .validate_apply(self.inactivity_floor_loc, db_size, &batch.ancestors)?;
+        let validated = self.state.validate(&batch.core, &batch.ancestors)?;
         // Apply journal.
         self.journal.apply_batch(&batch.journal_batch).await?;
 
-        // Apply snapshot inserts. Child first (child wins via `seen`), then
-        // uncommitted ancestor batches.
         let bounds = self.journal.reader().await.bounds();
-        let mut seen = HashSet::new();
-        for (key, entry) in batch.diff.iter() {
-            seen.insert(key.clone());
-            self.snapshot
-                .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
-        }
-        for ancestor in &batch.ancestors {
-            if ancestor.core.chain.total_size <= db_size {
-                continue;
-            }
-            for (key, entry) in ancestor.diff.iter() {
-                if seen.insert(key.clone()) {
-                    self.snapshot
-                        .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
-                }
-            }
-        }
+        self.apply_snapshot_diff(&batch, &validated, bounds.start);
 
-        Ok(batch
-            .core
-            .commit_to(&mut self.last_commit_loc, &mut self.inactivity_floor_loc))
+        Ok(validated.commit(&mut self.state))
     }
 }
 
@@ -1182,7 +1183,7 @@ pub(super) mod test {
         .unwrap();
 
         // op_count is 4 (initial_commit, k1, k2, commit), last_commit is at location 3
-        assert_eq!(*db.last_commit_loc, 3);
+        assert_eq!(*db.state.last_commit_loc(), 3);
 
         // Second batch with floor=5 (the new commit location).
         db.apply_batch(
@@ -1271,7 +1272,7 @@ pub(super) mod test {
             commit_sets(&mut db, [(key1, value1), (key2, value2)], Some(metadata_a)).await;
         let size_before = db.bounds().await.end;
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.state.last_commit_loc();
         assert_eq!(size_before, first_range.end);
 
         let metadata_b = Sha256::fill(55u8);
@@ -1286,7 +1287,7 @@ pub(super) mod test {
         db.rewind(size_before).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().await.end, size_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.state.last_commit_loc(), last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1298,7 +1299,7 @@ pub(super) mod test {
         let db = open_db(context.with_label("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().await.end, size_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.state.last_commit_loc(), last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1349,7 +1350,7 @@ pub(super) mod test {
                 floor,
             )
             .await;
-            db.prune(db.last_commit_loc).await.unwrap();
+            db.prune(db.state.last_commit_loc()).await.unwrap();
 
             if db.bounds().await.start > first_range.start {
                 break;
@@ -2586,7 +2587,7 @@ pub(super) mod test {
             .merkleize(&db, None, Location::new(2));
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.state.last_commit_loc();
         let floor_before = db.inactivity_floor_loc();
 
         let err = db.apply_batch(c).await.unwrap_err();
@@ -2598,7 +2599,7 @@ pub(super) mod test {
 
         // Database state must be unchanged on a rejected chain.
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.state.last_commit_loc(), last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
@@ -2632,7 +2633,7 @@ pub(super) mod test {
             .merkleize(&db, None, Location::new(0));
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.state.last_commit_loc();
         let floor_before = db.inactivity_floor_loc();
 
         let err = db.apply_batch(b).await.unwrap_err();
@@ -2645,7 +2646,7 @@ pub(super) mod test {
 
         // Database state must be unchanged on a rejected chain.
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.state.last_commit_loc(), last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
@@ -2816,7 +2817,7 @@ pub(super) mod test {
         .await
         .unwrap();
         db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.state.last_commit_loc(), commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
@@ -2843,7 +2844,7 @@ pub(super) mod test {
                 if *p == *commit_loc + 1 && *f == *commit_loc));
 
         // State preserved across the prune; root unchanged; commit metadata still readable.
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.state.last_commit_loc(), commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -2854,7 +2855,7 @@ pub(super) mod test {
         db.sync().await.unwrap();
         drop(db);
         let mut db = open_db(context.with_label("reopened")).await;
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.state.last_commit_loc(), commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         // The commit op at `commit_loc` is the anchor that survived pruning — its metadata
@@ -2880,7 +2881,7 @@ pub(super) mod test {
         .await
         .unwrap();
         db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc, next_commit_loc);
+        assert_eq!(db.state.last_commit_loc(), next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
         // New key readable; keys from the pre-prune batch remain excluded.
@@ -2981,7 +2982,7 @@ pub(super) mod test {
         db.commit().await.unwrap();
 
         let bad_key = Sha256::fill(99u8);
-        let bad_loc = db.last_commit_loc;
+        let bad_loc = db.state.last_commit_loc();
         db.snapshot.insert(&bad_key, bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();

@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
-        batch_core::{AppendBatchCore, ChainMeta, HasAncestors, HasCore},
+        batch_core::{AppendBatchCore, BatchSpan, HasAncestors, HasCore},
         immutable::operation::Operation,
         operation::Key,
         Error,
@@ -260,11 +260,11 @@ where
             .as_ref()
             .map(MerkleizedBatch::ancestor_chain)
             .unwrap_or_default();
-        let chain =
-            ChainMeta::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
+        let span =
+            BatchSpan::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
         let core = AppendBatchCore {
             merkle: Arc::clone(&journal_merkleized.inner),
-            chain,
+            span,
         };
 
         Arc::new(MerkleizedBatch {
@@ -392,8 +392,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.core.chain.total_size,
-            db_size: self.core.chain.db_size,
+            base_size: self.core.span().total_size(),
+            db_size: self.core.span().db_size(),
         }
     }
 }
@@ -411,13 +411,13 @@ where
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
-        let journal_size = *self.last_commit_loc + 1;
+        let journal_size = *self.state.size();
         let journal_batch = self.journal.to_merkleized_batch();
-        let chain = ChainMeta::quiescent(journal_size, self.inactivity_floor_loc);
+        let span = BatchSpan::quiescent(journal_size, self.state.inactivity_floor_loc());
         Arc::new(MerkleizedBatch {
             core: AppendBatchCore {
                 merkle: Arc::clone(&journal_batch.inner),
-                chain,
+                span,
             },
             journal_batch,
             diff: Arc::new(Vec::new()),

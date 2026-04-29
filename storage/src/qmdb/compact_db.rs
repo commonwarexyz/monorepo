@@ -19,6 +19,7 @@ use crate::{
         compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location, Proof,
     },
     qmdb::{
+        commit_state::CommitState,
         compact_witness::{self, CompactCommit, Witness, WitnessSource},
         sync::compact as compact_sync,
         Error,
@@ -39,9 +40,8 @@ where
     C: Clone + Send + Sync + 'static,
 {
     pub(crate) merkle: compact_merkle::Merkle<F, E, H::Digest>,
-    pub(crate) last_commit_loc: Location<F>,
+    pub(crate) state: CommitState<F>,
     pub(crate) last_commit_metadata: Option<Op::Metadata>,
-    pub(crate) inactivity_floor_loc: Location<F>,
     pub(crate) commit_codec_config: C,
     /// Cache of the last durably servable compact state. Rebuilt from persisted witness bytes
     /// on reopen/rewind and refreshed on `sync`. Intentionally lags behind unsynced in-memory
@@ -83,9 +83,8 @@ where
 
         Ok(Self {
             merkle,
-            last_commit_loc,
+            state: CommitState::new(last_commit_loc, inactivity_floor_loc),
             last_commit_metadata,
-            inactivity_floor_loc,
             commit_codec_config,
             witness: RwLock::new(witness),
         })
@@ -99,14 +98,13 @@ where
         commit_codec_config: C,
     ) -> Result<Self, Error<F>> {
         let (witness, last_commit_metadata, inactivity_floor_loc) =
-            compact_witness::init_compact_state::<F, E, H, Op>(&mut merkle, &commit_codec_config)
+            compact_witness::init_compact_witness::<F, E, H, Op>(&mut merkle, &commit_codec_config)
                 .await?;
         let last_commit_loc = Location::new(*witness.leaf_count - 1);
         Ok(Self {
             merkle,
-            last_commit_loc,
+            state: CommitState::new(last_commit_loc, inactivity_floor_loc),
             last_commit_metadata,
-            inactivity_floor_loc,
             commit_codec_config,
             witness: RwLock::new(witness),
         })
@@ -117,15 +115,15 @@ where
     }
 
     pub(crate) const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+        self.state.last_commit_loc()
     }
 
     pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.inactivity_floor_loc
+        self.state.inactivity_floor_loc()
     }
 
     pub(crate) fn size(&self) -> Location<F> {
-        Location::new(*self.last_commit_loc + 1)
+        self.state.size()
     }
 
     pub(crate) fn get_metadata(&self) -> Option<Op::Metadata> {
@@ -144,8 +142,7 @@ where
     pub(crate) fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
-    ) -> Result<compact_sync::State<F, Op, H::Digest>, compact_sync::ServeError<F, H::Digest>>
-    {
+    ) -> Result<compact_sync::State<F, Op, H::Digest>, compact_sync::ServeError<F, H::Digest>> {
         let witness = self.cloned_witness();
         let current = witness.target();
         if target.root != current.root || target.leaf_count != current.leaf_count {
@@ -189,8 +186,8 @@ where
             )
             .await?;
         self.last_commit_metadata = last_commit_metadata;
-        self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = Location::new(*witness.leaf_count - 1);
+        self.state
+            .restore(Location::new(*witness.leaf_count - 1), inactivity_floor_loc);
         self.store_witness(witness);
         Ok(())
     }
@@ -213,13 +210,16 @@ where
     }
 
     fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+        self.state.last_commit_loc()
     }
 
     fn encode_current_commit_op(&self) -> Vec<u8> {
-        Op::build_commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
-            .encode()
-            .to_vec()
+        Op::build_commit(
+            self.last_commit_metadata.clone(),
+            self.state.inactivity_floor_loc(),
+        )
+        .encode()
+        .to_vec()
     }
 
     fn witness_cache(&self) -> &RwLock<Witness<F, H::Digest>> {

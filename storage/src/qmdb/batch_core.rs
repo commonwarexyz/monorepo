@@ -6,7 +6,6 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
-use core::ops::Range;
 use std::sync::Arc;
 
 /// Root state for an unmerkleized batch.
@@ -38,16 +37,16 @@ pub(crate) struct ResolvedBase<F: Family, D: Digest, W> {
     pub(crate) ancestors: Vec<Arc<W>>,
 }
 
-/// Per-batch chain state: positions and the floor declared by this batch's commit.
-pub(crate) struct ChainMeta<F: Family> {
+/// Span covered by a merkleized batch and the floor declared by its commit.
+pub(crate) struct BatchSpan<F: Family> {
     /// Leaf count this batch starts at; equals `db_size` when the batch has no ancestors.
-    pub(crate) base_size: u64,
+    base_size: u64,
     /// Committed leaf count when the batch chain was forked. Used for stale-batch detection.
-    pub(crate) db_size: u64,
+    db_size: u64,
     /// Leaf count after this batch (data ops + the commit leaf) is applied.
-    pub(crate) total_size: u64,
+    total_size: u64,
     /// Inactivity floor declared by this batch's commit operation.
-    pub(crate) new_floor: Location<F>,
+    new_floor: Location<F>,
 }
 
 /// Lets per-variant `MerkleizedBatch` wrappers expose their shared [`AppendBatchCore`] for
@@ -90,8 +89,8 @@ where
                 ancestors: Vec::new(),
             },
             Self::Child(parent) => ResolvedBase {
-                base_size: parent.core().chain.total_size,
-                db_size: parent.core().chain.db_size,
+                base_size: parent.core().span.total_size(),
+                db_size: parent.core().span.db_size(),
                 merkle_parent: Arc::clone(&parent.core().merkle),
                 ancestors: W::ancestor_chain(&parent),
             },
@@ -99,7 +98,7 @@ where
     }
 }
 
-impl<F: Family> ChainMeta<F> {
+impl<F: Family> BatchSpan<F> {
     /// Build metadata for a committed state with no speculative appends. Used by `to_batch` to
     /// represent the database tip as an empty batch; all three positions collapse to `size`.
     pub(crate) const fn quiescent(size: u64, new_floor: Location<F>) -> Self {
@@ -125,6 +124,26 @@ impl<F: Family> ChainMeta<F> {
             total_size: base_size + item_count as u64 + 1,
             new_floor,
         }
+    }
+
+    /// Return the committed leaf count when this batch chain forked.
+    pub(crate) const fn db_size(&self) -> u64 {
+        self.db_size
+    }
+
+    /// Return the leaf count after this batch is applied.
+    pub(crate) const fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Return the inactivity floor declared by this batch's commit operation.
+    pub(crate) const fn commit_floor(&self) -> Location<F> {
+        self.new_floor
+    }
+
+    /// Return whether this span has not yet been reflected in a database of `current_db_size`.
+    pub(crate) const fn is_unapplied(&self, current_db_size: u64) -> bool {
+        self.total_size > current_db_size
     }
 
     /// Return the location of the commit operation ending this chain.
@@ -198,7 +217,7 @@ pub(crate) struct AppendBatchCore<F: Family, D: Digest> {
     /// Speculative Merkle batch built from this chain's leaves.
     pub(crate) merkle: Arc<batch::MerkleizedBatch<F, D>>,
     /// Position bookkeeping plus the floor declared by this batch's commit.
-    pub(crate) chain: ChainMeta<F>,
+    pub(crate) span: BatchSpan<F>,
 }
 
 impl<F: Family, D: Digest> AppendBatchCore<F, D> {
@@ -208,7 +227,7 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         mem: &merkle::mem::Mem<F, D>,
         hasher: &impl MerkleHasher<F, Digest = D>,
         leaves: &[D],
-        chain: ChainMeta<F>,
+        span: BatchSpan<F>,
     ) -> Self {
         let mut batch = parent.new_batch();
         for digest in leaves {
@@ -216,7 +235,7 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         }
         Self {
             merkle: batch.merkleize(mem, hasher),
-            chain,
+            span,
         }
     }
 
@@ -246,18 +265,23 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         let pos = Position::try_from(commit_loc).expect("valid leaf location");
         leaves.push(hasher.leaf_digest(pos, &commit_op.encode()));
 
-        let chain = ChainMeta::from_item_count(base_size, db_size, leaves.len() - 1, new_floor);
-        Self::from_leaf_digests(parent, mem, hasher, &leaves, chain)
+        let span = BatchSpan::from_item_count(base_size, db_size, leaves.len() - 1, new_floor);
+        Self::from_leaf_digests(parent, mem, hasher, &leaves, span)
     }
 
     /// Return the location of the commit operation ending this batch.
     pub(crate) fn commit_loc(&self) -> Location<F> {
-        self.chain.commit_loc()
+        self.span.commit_loc()
     }
 
     /// Return the inactivity floor declared by this batch's commit operation.
     pub(crate) const fn commit_floor(&self) -> Location<F> {
-        self.chain.new_floor
+        self.span.commit_floor()
+    }
+
+    /// Return the span covered by this batch.
+    pub(crate) const fn span(&self) -> &BatchSpan<F> {
+        &self.span
     }
 
     /// Return the speculative root.
@@ -275,35 +299,77 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
     where
         W: HasCore<F, D>,
     {
-        self.chain.validate_stale(
+        self.span.validate_stale(
             current_db_size,
             ancestors
                 .iter()
-                .map(|ancestor| ancestor.core().chain.total_size),
+                .map(|ancestor| ancestor.core().span.total_size()),
         )?;
-        self.chain.validate_floors(
+        self.span.validate_floors(
             starting_floor,
             current_db_size,
             ancestors.iter().map(|ancestor| {
                 (
-                    ancestor.core().chain.total_size,
+                    ancestor.core().span.total_size(),
                     ancestor.core().commit_floor(),
                 )
             }),
         )
     }
+}
 
-    /// Advance the database's committed-chain pointers and return the location range this
-    /// batch wrote. Intended to run after the backing Merkle or journal has accepted the batch,
-    /// so the wrapper does not duplicate the bookkeeping in its `apply_batch` tail.
-    pub(crate) fn commit_to(
-        &self,
-        last_commit_loc: &mut Location<F>,
-        inactivity_floor_loc: &mut Location<F>,
-    ) -> Range<Location<F>> {
-        let start_loc = *last_commit_loc + 1;
-        *last_commit_loc = self.commit_loc();
-        *inactivity_floor_loc = self.commit_floor();
-        start_loc..Location::new(self.chain.total_size)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::merkle::mmr;
+
+    type F = mmr::Family;
+
+    #[test]
+    fn batch_span_validates_stale_sizes() {
+        let span = BatchSpan::<F>::from_item_count(10, 10, 2, Location::new(12));
+
+        assert!(span.validate_stale(10, []).is_ok());
+        assert!(span.validate_stale(12, [12]).is_ok());
+
+        let err = span.validate_stale(11, []).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::StaleBatch {
+                db_size: 11,
+                batch_db_size: 10,
+                batch_base_size: 10,
+            }
+        ));
+    }
+
+    #[test]
+    fn batch_span_validates_floor_monotonicity() {
+        let span = BatchSpan::<F>::from_item_count(10, 10, 2, Location::new(8));
+
+        assert!(span
+            .validate_floors(Location::new(5), 10, [(12, Location::new(7))])
+            .is_ok());
+
+        let err = span
+            .validate_floors(Location::new(5), 10, [(12, Location::new(4))])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::FloorRegressed(floor, previous)
+                if floor == Location::new(4) && previous == Location::new(5)
+        ));
+    }
+
+    #[test]
+    fn batch_span_rejects_floor_beyond_commit() {
+        let span = BatchSpan::<F>::from_item_count(10, 10, 2, Location::new(13));
+
+        let err = span.validate_floors(Location::new(5), 10, []).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::FloorBeyondSize(floor, commit)
+                if floor == Location::new(13) && commit == Location::new(12)
+        ));
     }
 }

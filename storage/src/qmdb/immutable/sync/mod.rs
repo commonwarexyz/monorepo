@@ -124,8 +124,10 @@ where
         let db = Self {
             journal,
             snapshot,
-            last_commit_loc,
-            inactivity_floor_loc,
+            state: crate::qmdb::commit_state::CommitState::new(
+                last_commit_loc,
+                inactivity_floor_loc,
+            ),
         };
 
         db.sync().await?;

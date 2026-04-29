@@ -318,7 +318,7 @@ where
 /// Returns the cached serve state plus the typed last-commit fields the caller needs to populate
 /// its own in-memory state. After this returns, the active slot is guaranteed to have a servable
 /// frontier/witness pair, so later reopen and rewind paths can assume that invariant.
-pub(crate) async fn init_compact_state<F, E, H, Op>(
+pub(crate) async fn init_compact_witness<F, E, H, Op>(
     merkle: &mut compact::Merkle<F, E, H::Digest>,
     commit_codec_config: &Op::CommitCfg,
 ) -> Result<LoadedWitness<F, H::Digest, Op::Metadata>, Error<F>>
