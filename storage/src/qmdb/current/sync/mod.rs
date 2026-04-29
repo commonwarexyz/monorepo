@@ -151,8 +151,7 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap)).await?;
+    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(index, log, Some(bitmap)).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
