@@ -87,7 +87,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding,
-        batch::{apply, Plan},
+        batch::Plan,
         build_snapshot_from_log,
         operation::{Key, Operation as _},
         Error,
@@ -626,23 +626,21 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
-        let validated = apply(
+        let plan = Plan::new(
             self.last_commit_loc,
             self.inactivity_floor_loc,
-            batch.as_ref(),
-            &batch.ancestors,
+            &batch.bounds,
+            batch.ancestors.iter().map(|ancestor| ancestor.bounds),
         )?;
         // Apply journal.
         self.journal.apply_batch(&batch.journal_batch).await?;
 
         let bounds = self.journal.reader().await.bounds();
-        self.apply_snapshot_diff(&batch, &validated, bounds.start);
+        self.apply_snapshot_diff(&batch, &plan, bounds.start);
 
-        Ok({
-            self.last_commit_loc = validated.next_last_commit_loc();
-            self.inactivity_floor_loc = validated.next_inactivity_floor_loc();
-            validated.range()
-        })
+        self.last_commit_loc = plan.next_last_commit_loc();
+        self.inactivity_floor_loc = plan.next_inactivity_floor_loc();
+        Ok(plan.operation_range())
     }
 }
 

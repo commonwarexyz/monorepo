@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
-        batch::{AppendBatchView, BatchBounds},
+        batch::Bounds,
         immutable::operation::Operation,
         operation::Key,
         Error,
@@ -65,7 +65,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     pub(super) journal_batch: Arc<JournalBatch<F, D, K, V>>,
 
     /// Position bookkeeping plus the floor declared by this batch's commit.
-    pub(super) bounds: BatchBounds<F>,
+    pub(super) bounds: Bounds<F>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -76,18 +76,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// This is a wrapper-level chain for validation/read-through and may include itemless
     /// `to_batch` markers that the journal layer intentionally filters out.
     pub(super) ancestors: Vec<Arc<Self>>,
-}
-
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> AppendBatchView<F, D>
-    for MerkleizedBatch<F, D, K, V>
-{
-    fn merkle(&self) -> &Arc<crate::merkle::batch::MerkleizedBatch<F, D>> {
-        &self.journal_batch.inner
-    }
-
-    fn bounds(&self) -> &BatchBounds<F> {
-        &self.bounds
-    }
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
@@ -264,12 +252,8 @@ where
             .as_ref()
             .map(MerkleizedBatch::ancestor_chain)
             .unwrap_or_default();
-        let bounds = BatchBounds::from_item_count(
-            self.base_size,
-            self.db_size,
-            item_count,
-            inactivity_floor,
-        );
+        let bounds =
+            Bounds::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
@@ -294,7 +278,7 @@ where
 
     /// Return the speculative root.
     pub fn root(&self) -> D {
-        <Self as AppendBatchView<F, D>>::root(self)
+        self.journal_batch.inner.root()
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
@@ -394,8 +378,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.bounds.total_size(),
-            db_size: self.bounds.db_size(),
+            base_size: self.bounds.new_size(),
+            db_size: self.bounds.committed_size(),
         }
     }
 }
@@ -415,7 +399,7 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let journal_size = *self.last_commit_loc + 1;
         let journal_batch = self.journal.to_merkleized_batch();
-        let bounds = BatchBounds::committed(journal_size, self.inactivity_floor_loc);
+        let bounds = Bounds::committed(journal_size, self.inactivity_floor_loc);
         Arc::new(MerkleizedBatch {
             journal_batch,
             bounds,

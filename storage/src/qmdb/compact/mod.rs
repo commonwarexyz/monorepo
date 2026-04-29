@@ -1,6 +1,8 @@
+pub(crate) mod batch;
 pub(crate) mod db;
 pub(crate) mod witness;
 
+pub(crate) use batch::Batch;
 pub(crate) use db::CompactDbInner;
 #[cfg(test)]
 pub(crate) use witness::{commit_op_key, proof_key};

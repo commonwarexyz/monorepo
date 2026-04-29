@@ -52,7 +52,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::value::ValueEncoding,
-        batch::{apply, BatchBounds},
+        batch::{Bounds, Plan},
         Error,
     },
     Context, Persistable,
@@ -395,7 +395,7 @@ where
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V>> {
         let journal_size = *self.last_commit_loc + 1;
         let journal_batch = self.journal.to_merkleized_batch();
-        let bounds = BatchBounds::committed(journal_size, self.inactivity_floor_loc);
+        let bounds = Bounds::committed(journal_size, self.inactivity_floor_loc);
         Arc::new(batch::MerkleizedBatch {
             journal_batch,
             bounds,
@@ -433,18 +433,18 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let validated = apply(
+        let plan = Plan::new(
             self.last_commit_loc,
             self.inactivity_floor_loc,
-            batch.as_ref(),
-            &batch.ancestors,
+            &batch.bounds,
+            batch.ancestors.iter().map(|ancestor| ancestor.bounds),
         )?;
         self.journal.apply_batch(&batch.journal_batch).await?;
 
         let range = {
-            self.last_commit_loc = validated.next_last_commit_loc();
-            self.inactivity_floor_loc = validated.next_inactivity_floor_loc();
-            validated.range()
+            self.last_commit_loc = plan.next_last_commit_loc();
+            self.inactivity_floor_loc = plan.next_inactivity_floor_loc();
+            plan.operation_range()
         };
         debug!(size = ?range.end, "applied batch");
         Ok(range)

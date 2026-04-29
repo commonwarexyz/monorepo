@@ -25,8 +25,8 @@ use crate::{
     },
     qmdb::{
         any::value::ValueEncoding,
-        batch::{apply, AppendBatchView, BatchBounds, CompactBatch},
-        compact::{CompactCommit, CompactDbInner},
+        batch::{Bounds, Plan},
+        compact::{Batch as CompactBatch, CompactCommit, CompactDbInner},
         sync::compact as compact_sync,
         Error,
     },
@@ -123,19 +123,6 @@ where
     pub(super) ancestors: Vec<Arc<Self>>,
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding> AppendBatchView<F, D> for MerkleizedBatch<F, D, V>
-where
-    Operation<F, V>: EncodeShared,
-{
-    fn merkle(&self) -> &Arc<crate::merkle::batch::MerkleizedBatch<F, D>> {
-        &self.compact.merkle
-    }
-
-    fn bounds(&self) -> &BatchBounds<F> {
-        &self.compact.bounds
-    }
-}
-
 impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
@@ -217,8 +204,8 @@ where
                 merkle_parent,
             } => (db_size, db_size, merkle_parent, Vec::new()),
             Base::Child(parent) => (
-                parent.compact.bounds.total_size(),
-                parent.compact.bounds.db_size(),
+                parent.compact.bounds.new_size(),
+                parent.compact.bounds.committed_size(),
                 Arc::clone(&parent.compact.merkle),
                 MerkleizedBatch::ancestor_chain(&parent),
             ),
@@ -358,7 +345,7 @@ where
     /// Create an owned merkleized batch representing the current committed state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V>> {
         let committed_size = *self.inner.size();
-        let bounds = BatchBounds::committed(committed_size, self.inner.inactivity_floor_loc());
+        let bounds = Bounds::committed(committed_size, self.inner.inactivity_floor_loc());
         Arc::new(MerkleizedBatch {
             compact: CompactBatch {
                 merkle: self.inner.merkle.to_batch(),
@@ -385,19 +372,20 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let validated = apply(
+        let plan = Plan::new(
             self.inner.last_commit_loc,
             self.inner.inactivity_floor_loc,
-            &batch.compact,
-            &batch.ancestors,
+            &batch.compact.bounds,
+            batch
+                .ancestors
+                .iter()
+                .map(|ancestor| ancestor.compact.bounds),
         )?;
         self.inner.merkle.apply_batch(&batch.compact.merkle)?;
         self.inner.last_commit_metadata = batch.commit_metadata.clone();
-        Ok({
-            self.inner.last_commit_loc = validated.next_last_commit_loc();
-            self.inner.inactivity_floor_loc = validated.next_inactivity_floor_loc();
-            validated.range()
-        })
+        self.inner.last_commit_loc = plan.next_last_commit_loc();
+        self.inner.inactivity_floor_loc = plan.next_inactivity_floor_loc();
+        Ok(plan.operation_range())
     }
 
     /// Durably persist the current db state to disk.

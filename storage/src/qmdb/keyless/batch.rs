@@ -4,11 +4,7 @@ use super::{operation::Operation, Keyless};
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{
-        any::value::ValueEncoding,
-        batch::{AppendBatchView, BatchBounds},
-        Error,
-    },
+    qmdb::{any::value::ValueEncoding, batch::Bounds, Error},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -52,25 +48,12 @@ where
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>>>,
     /// Position bookkeeping plus the floor declared by this batch's commit.
-    pub(super) bounds: BatchBounds<F>,
+    pub(super) bounds: Bounds<F>,
     /// Strong refs to uncommitted ancestors, newest-to-oldest.
     ///
     /// This is a wrapper-level chain for validation/read-through and may include itemless
     /// `to_batch` markers that the journal layer intentionally filters out.
     pub(super) ancestors: Vec<Arc<Self>>,
-}
-
-impl<F: Family, D: Digest, V: ValueEncoding> AppendBatchView<F, D> for MerkleizedBatch<F, D, V>
-where
-    Operation<F, V>: EncodeShared,
-{
-    fn merkle(&self) -> &Arc<crate::merkle::batch::MerkleizedBatch<F, D>> {
-        &self.journal_batch.inner
-    }
-
-    fn bounds(&self) -> &BatchBounds<F> {
-        &self.bounds
-    }
 }
 
 /// Read a single operation from the parent chain at the given location.
@@ -268,12 +251,8 @@ where
             .as_ref()
             .map(MerkleizedBatch::ancestor_chain)
             .unwrap_or_default();
-        let bounds = BatchBounds::from_item_count(
-            self.base_size,
-            self.db_size,
-            item_count,
-            inactivity_floor,
-        );
+        let bounds =
+            Bounds::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
@@ -297,7 +276,7 @@ where
 
     /// Return the speculative root.
     pub fn root(&self) -> D {
-        <Self as AppendBatchView<F, D>>::root(self)
+        self.journal_batch.inner.root()
     }
 
     /// Read a value at `loc`.
@@ -315,7 +294,7 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.bounds.db_size() {
+        if loc_val >= self.bounds.committed_size() {
             if let Some(op) = read_chain_op(self, loc_val) {
                 return Ok(op.into_value());
             }
@@ -353,7 +332,7 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.bounds.db_size() {
+            if loc_val >= self.bounds.committed_size() {
                 if let Some(op) = read_chain_op(self, loc_val) {
                     results.push(op.into_value());
                     continue;
@@ -388,8 +367,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.bounds.total_size(),
-            db_size: self.bounds.db_size(),
+            base_size: self.bounds.new_size(),
+            db_size: self.bounds.committed_size(),
         }
     }
 }

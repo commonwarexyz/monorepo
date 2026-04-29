@@ -14,7 +14,7 @@ use crate::{
             ordered::{find_next_key, find_prev_key},
             ValueEncoding,
         },
-        batch::{BatchBounds, Plan},
+        batch::{Bounds, Plan},
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
@@ -120,7 +120,7 @@ where
     fn base_size(&self) -> u64 {
         match self {
             Self::Db { db_size, .. } => *db_size,
-            Self::Child(parent) => parent.bounds.total_size(),
+            Self::Child(parent) => parent.bounds.new_size(),
         }
     }
 
@@ -131,7 +131,7 @@ where
     fn db_size(&self) -> u64 {
         match self {
             Self::Db { db_size, .. } => *db_size,
-            Self::Child(parent) => parent.bounds.db_size(),
+            Self::Child(parent) => parent.bounds.committed_size(),
         }
     }
 
@@ -219,7 +219,7 @@ where
     parent: Option<Weak<Self>>,
 
     /// Log range covered by this batch and the floor declared by its commit.
-    pub(crate) bounds: BatchBounds<F>,
+    pub(crate) bounds: Bounds<F>,
 
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
@@ -231,7 +231,7 @@ where
 
     /// Each ancestor's log range. A batch is committed when its range ends at or before the
     /// current DB size.
-    pub(crate) ancestor_bounds: Vec<BatchBounds<F>>,
+    pub(crate) ancestor_bounds: Vec<Bounds<F>>,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -695,8 +695,7 @@ where
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestor_bounds: Vec<_> = self.ancestors.iter().map(|a| a.bounds).collect();
-        let bounds =
-            BatchBounds::from_item_count(self.base_size, self.db_size, op_count - 1, floor);
+        let bounds = Bounds::from_item_count(self.base_size, self.db_size, op_count - 1, floor);
         debug_assert_eq!(bounds.commit_loc(), commit_loc);
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
@@ -1550,7 +1549,7 @@ where
             self.last_commit_loc,
             self.inactivity_floor_loc,
             &batch.bounds,
-            &batch.ancestor_bounds,
+            batch.ancestor_bounds.iter().copied(),
         )?;
 
         // Apply journal (handles its own partial ancestor skipping).
@@ -1617,7 +1616,7 @@ where
         self.active_keys = batch.total_active_keys;
         self.last_commit_loc = plan.next_last_commit_loc();
         self.inactivity_floor_loc = plan.next_inactivity_floor_loc();
-        Ok(plan.range())
+        Ok(plan.operation_range())
     }
 }
 
@@ -1640,7 +1639,7 @@ where
             journal_batch: self.log.to_merkleized_batch(),
             diff: Arc::new(Vec::new()),
             parent: None,
-            bounds: BatchBounds::committed(journal_size, self.inactivity_floor_loc),
+            bounds: Bounds::committed(journal_size, self.inactivity_floor_loc),
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
             ancestor_bounds: Vec::new(),

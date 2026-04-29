@@ -1,77 +1,70 @@
-//! Shared batch algebra for QMDB variants.
+//! Shared validation for QMDB batch application.
+//!
+//! Variant batches own their operations, Merkle data, and read-through behavior. This module only
+//! describes the log positions and inactivity floor needed to validate and publish a batch.
+//!
+//! `Bounds` is the batch's proposal: where it starts, what committed state it was built from, where
+//! it ends, and which inactivity floor its commit declares. `Plan` is the accepted transition
+//! derived from those bounds against the database's current commit state.
 
 use crate::{
-    merkle::{self, batch, hasher::Hasher as MerkleHasher, Family, Location, Position},
+    merkle::{Family, Location},
     qmdb::Error,
 };
-use commonware_codec::Encode;
-use commonware_cryptography::Digest;
 use core::ops::Range;
-use std::sync::Arc;
 
-/// Log bounds covered by a merkleized batch and the floor declared by its commit.
+/// Proposed log positions for a merkleized batch.
+///
+/// A batch carries these bounds before it is applied. `Plan::new` validates them against the
+/// database tip and turns them into the commit-state transition to publish after effects succeed.
 #[derive(Clone, Copy)]
-pub(crate) struct BatchBounds<F: Family> {
-    /// Leaf count this batch starts at; equals `db_size` when the batch has no ancestors.
+pub(crate) struct Bounds<F: Family> {
+    /// Leaf count before this batch's local operations.
     base_size: u64,
     /// Committed leaf count when the batch chain was forked. Used for stale-batch detection.
-    db_size: u64,
+    committed_size: u64,
     /// Leaf count after this batch (data ops + the commit leaf) is applied.
-    total_size: u64,
+    new_size: u64,
     /// Inactivity floor declared by this batch's commit operation.
     commit_floor: Location<F>,
 }
 
-/// View of a merkleized append batch used by shared validation and child-batch creation.
-pub(crate) trait AppendBatchView<F: Family, D: Digest> {
-    /// Speculative Merkle batch built from this chain's leaves.
-    fn merkle(&self) -> &Arc<batch::MerkleizedBatch<F, D>>;
-
-    /// Log bounds plus the floor declared by this batch's commit.
-    fn bounds(&self) -> &BatchBounds<F>;
-
-    /// Return the speculative root.
-    fn root(&self) -> D {
-        self.merkle().root()
-    }
-}
-
-impl<F: Family> BatchBounds<F> {
+impl<F: Family> Bounds<F> {
     /// Build metadata for a committed state with no speculative appends. Used by `to_batch` to
     /// represent the database tip as an empty batch; all three positions collapse to `size`.
     pub(crate) const fn committed(size: u64, commit_floor: Location<F>) -> Self {
         Self {
             base_size: size,
-            db_size: size,
-            total_size: size,
+            committed_size: size,
+            new_size: size,
             commit_floor,
         }
     }
 
-    /// Build metadata for a batch of `item_count` data ops plus one trailing commit leaf.
-    /// `total_size` becomes `base_size + item_count + 1`.
+    /// Build bounds for `item_count` data ops plus one trailing commit leaf.
+    /// `new_size` becomes `base_size + item_count + 1`.
     pub(crate) const fn from_item_count(
         base_size: u64,
-        db_size: u64,
+        committed_size: u64,
         item_count: usize,
         commit_floor: Location<F>,
     ) -> Self {
         Self {
             base_size,
-            db_size,
-            total_size: base_size + item_count as u64 + 1,
+            committed_size,
+            new_size: base_size + item_count as u64 + 1,
             commit_floor,
         }
     }
 
-    /// Return the committed leaf count when this batch chain forked.
-    pub(crate) const fn db_size(&self) -> u64 {
-        self.db_size
+    /// Return the committed leaf count when this batch chain was created.
+    pub(crate) const fn committed_size(&self) -> u64 {
+        self.committed_size
     }
 
     /// Return the leaf count after this batch is applied.
-    pub(crate) const fn total_size(&self) -> u64 {
-        self.total_size
+    pub(crate) const fn new_size(&self) -> u64 {
+        self.new_size
     }
 
     /// Return the inactivity floor declared by this batch's commit operation.
@@ -81,13 +74,13 @@ impl<F: Family> BatchBounds<F> {
 
     /// Return whether this batch has not yet been reflected in a database of `current_db_size`.
     pub(crate) const fn is_unapplied(&self, current_db_size: u64) -> bool {
-        self.total_size > current_db_size
+        self.new_size > current_db_size
     }
 
     /// Return the location of the commit operation ending this chain.
     pub(crate) fn commit_loc(&self) -> Location<F> {
-        debug_assert!(self.total_size > 0);
-        Location::new(self.total_size - 1)
+        debug_assert!(self.new_size > 0);
+        Location::new(self.new_size - 1)
     }
 
     /// Validate that the current database size can reach this batch.
@@ -99,7 +92,7 @@ impl<F: Family> BatchBounds<F> {
         current_db_size: u64,
         ancestor_ends: impl IntoIterator<Item = u64>,
     ) -> Result<(), Error<F>> {
-        if current_db_size == self.db_size || current_db_size == self.base_size {
+        if current_db_size == self.committed_size || current_db_size == self.base_size {
             return Ok(());
         }
         if ancestor_ends.into_iter().any(|end| end == current_db_size) {
@@ -107,7 +100,7 @@ impl<F: Family> BatchBounds<F> {
         }
         Err(Error::StaleBatch {
             db_size: current_db_size,
-            batch_db_size: self.db_size,
+            batch_db_size: self.committed_size,
             batch_base_size: self.base_size,
         })
     }
@@ -149,142 +142,47 @@ impl<F: Family> BatchBounds<F> {
     }
 }
 
-/// Concrete append-batch view for compact variants.
+/// Validated transition from the current database tip to an accepted batch state.
 ///
-/// Full variants derive their Merkle view from the authenticated journal batch. Compact variants
-/// do not carry a journal batch, so they store this Merkle state and bounds directly.
-pub(crate) struct CompactBatch<F: Family, D: Digest> {
-    /// Speculative Merkle batch built from this chain's leaves.
-    pub(crate) merkle: Arc<batch::MerkleizedBatch<F, D>>,
-    /// Log bounds plus the floor declared by this batch's commit.
-    pub(crate) bounds: BatchBounds<F>,
-}
-
-impl<F: Family, D: Digest> AppendBatchView<F, D> for CompactBatch<F, D> {
-    fn merkle(&self) -> &Arc<batch::MerkleizedBatch<F, D>> {
-        &self.merkle
-    }
-
-    fn bounds(&self) -> &BatchBounds<F> {
-        &self.bounds
-    }
-}
-
-impl<F: Family, D: Digest> CompactBatch<F, D> {
-    /// Build a compact batch by merkleizing pre-computed leaf digests.
-    fn from_leaf_digests(
-        parent: Arc<batch::MerkleizedBatch<F, D>>,
-        mem: &merkle::mem::Mem<F, D>,
-        hasher: &impl MerkleHasher<F, Digest = D>,
-        leaves: &[D],
-        bounds: BatchBounds<F>,
-    ) -> Self {
-        let mut batch = parent.new_batch();
-        for digest in leaves {
-            batch = batch.add_leaf_digest(*digest);
-        }
-        Self {
-            merkle: batch.merkleize(mem, hasher),
-            bounds,
-        }
-    }
-
-    /// Build a compact batch by hashing encoded operations at consecutive locations.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_encoded_ops<H, Op>(
-        parent: Arc<batch::MerkleizedBatch<F, D>>,
-        mem: &merkle::mem::Mem<F, D>,
-        hasher: &H,
-        base_size: u64,
-        db_size: u64,
-        commit_floor: Location<F>,
-        data_ops: impl ExactSizeIterator<Item = Op>,
-        commit_op: Op,
-    ) -> Self
-    where
-        H: MerkleHasher<F, Digest = D>,
-        Op: Encode,
-    {
-        let mut leaves = Vec::with_capacity(data_ops.len() + 1);
-        for (i, op) in data_ops.enumerate() {
-            let loc = Location::<F>::new(base_size + i as u64);
-            let pos = Position::try_from(loc).expect("valid leaf location");
-            leaves.push(hasher.leaf_digest(pos, &op.encode()));
-        }
-        let commit_loc = Location::<F>::new(base_size + leaves.len() as u64);
-        let pos = Position::try_from(commit_loc).expect("valid leaf location");
-        leaves.push(hasher.leaf_digest(pos, &commit_op.encode()));
-
-        let bounds =
-            BatchBounds::from_item_count(base_size, db_size, leaves.len() - 1, commit_floor);
-        Self::from_leaf_digests(parent, mem, hasher, &leaves, bounds)
-    }
-
-    /// Return the speculative root.
-    pub(crate) fn root(&self) -> D {
-        self.merkle.root()
-    }
-}
-
-/// Validate that `batch` can extend the committed database state.
-pub(crate) fn apply<F, D, B, W>(
-    last_commit_loc: Location<F>,
-    inactivity_floor_loc: Location<F>,
-    batch: &B,
-    ancestors: &[Arc<W>],
-) -> Result<Plan<F>, Error<F>>
-where
-    F: Family,
-    D: Digest,
-    B: AppendBatchView<F, D>,
-    W: AppendBatchView<F, D>,
-{
-    let ancestor_bounds: Vec<_> = ancestors
-        .iter()
-        .map(|ancestor| *ancestor.bounds())
-        .collect();
-    Plan::new(
-        last_commit_loc,
-        inactivity_floor_loc,
-        batch.bounds(),
-        &ancestor_bounds,
-    )
-}
-
-/// Validated commit-location transition for a batch apply.
-///
-/// This is not a transaction boundary. Database-specific effects run after validation and before
-/// publishing the next commit locations; those effects may still fail according to each database's
-/// existing fatal-error rules.
+/// `Plan::new` checks that the batch can be applied, but it does not mutate the database. Callers
+/// should first run their variant-specific effects (journal append, Merkle update, snapshot update)
+/// and only then publish these next commit locations.
 pub(crate) struct Plan<F: Family> {
-    range: Range<Location<F>>,
+    operation_range: Range<Location<F>>,
     next_last_commit_loc: Location<F>,
     next_inactivity_floor_loc: Location<F>,
 }
 
 impl<F: Family> Plan<F> {
     /// Validate that `bounds` can extend the committed database state.
-    pub(crate) fn new(
+    pub(crate) fn new<I>(
         last_commit_loc: Location<F>,
         inactivity_floor_loc: Location<F>,
-        bounds: &BatchBounds<F>,
-        ancestors: &[BatchBounds<F>],
-    ) -> Result<Self, Error<F>> {
+        bounds: &Bounds<F>,
+        ancestors: I,
+    ) -> Result<Self, Error<F>>
+    where
+        I: Clone + IntoIterator<Item = Bounds<F>>,
+        I::IntoIter: DoubleEndedIterator,
+    {
         let committed_size = last_commit_loc + 1;
         bounds.validate_stale(
             *committed_size,
-            ancestors.iter().map(BatchBounds::total_size),
+            ancestors
+                .clone()
+                .into_iter()
+                .map(|bounds| bounds.new_size()),
         )?;
         bounds.validate_floors(
             inactivity_floor_loc,
             *committed_size,
             ancestors
-                .iter()
-                .map(|ancestor| (ancestor.total_size(), ancestor.commit_floor())),
+                .into_iter()
+                .map(|ancestor| (ancestor.new_size(), ancestor.commit_floor())),
         )?;
         let next_last_commit_loc = bounds.commit_loc();
         Ok(Self {
-            range: committed_size..(next_last_commit_loc + 1),
+            operation_range: committed_size..(next_last_commit_loc + 1),
             next_last_commit_loc,
             next_inactivity_floor_loc: bounds.commit_floor(),
         })
@@ -292,17 +190,17 @@ impl<F: Family> Plan<F> {
 
     /// Return the committed leaf count before this validated apply.
     pub(crate) fn committed_size(&self) -> u64 {
-        *self.range.start
+        *self.operation_range.start
     }
 
-    /// Return whether `bounds` has not yet been reflected in the validated source state.
-    pub(crate) fn is_unapplied(&self, bounds: &BatchBounds<F>) -> bool {
+    /// Return whether `bounds` has not yet been reflected in the validated committed state.
+    pub(crate) fn is_unapplied(&self, bounds: &Bounds<F>) -> bool {
         bounds.is_unapplied(self.committed_size())
     }
 
-    /// Return the operation range written by the planned apply.
-    pub(crate) fn range(&self) -> Range<Location<F>> {
-        self.range.clone()
+    /// Return the operation range covered by the planned apply.
+    pub(crate) fn operation_range(&self) -> Range<Location<F>> {
+        self.operation_range.clone()
     }
 
     /// Return the commit location that becomes current after the planned apply succeeds.
@@ -325,7 +223,7 @@ mod tests {
 
     #[test]
     fn batch_bounds_validates_stale_sizes() {
-        let bounds = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(12));
+        let bounds = Bounds::<F>::from_item_count(10, 10, 2, Location::new(12));
 
         assert!(bounds.validate_stale(10, []).is_ok());
         assert!(bounds.validate_stale(12, [12]).is_ok());
@@ -343,7 +241,7 @@ mod tests {
 
     #[test]
     fn batch_bounds_validates_floor_monotonicity() {
-        let bounds = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(8));
+        let bounds = Bounds::<F>::from_item_count(10, 10, 2, Location::new(8));
 
         assert!(bounds
             .validate_floors(Location::new(5), 10, [(12, Location::new(7))])
@@ -361,7 +259,7 @@ mod tests {
 
     #[test]
     fn batch_bounds_rejects_floor_beyond_commit() {
-        let bounds = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(13));
+        let bounds = Bounds::<F>::from_item_count(10, 10, 2, Location::new(13));
 
         let err = bounds
             .validate_floors(Location::new(5), 10, [])
@@ -371,5 +269,33 @@ mod tests {
             Error::FloorBeyondSize(floor, commit)
                 if floor == Location::new(13) && commit == Location::new(12)
         ));
+    }
+
+    #[test]
+    fn plan_describes_commit_location_transition() {
+        let plan = Plan::<F> {
+            operation_range: Location::new(1)..Location::new(4),
+            next_last_commit_loc: Location::new(3),
+            next_inactivity_floor_loc: Location::new(2),
+        };
+
+        assert_eq!(plan.operation_range(), Location::new(1)..Location::new(4));
+        assert_eq!(plan.next_last_commit_loc(), Location::new(3));
+        assert_eq!(plan.next_inactivity_floor_loc(), Location::new(2));
+    }
+
+    #[test]
+    fn plan_tracks_committed_size_for_effects() {
+        let plan = Plan::<F> {
+            operation_range: Location::new(10)..Location::new(13),
+            next_last_commit_loc: Location::new(12),
+            next_inactivity_floor_loc: Location::new(8),
+        };
+        let applied = Bounds::<F>::from_item_count(7, 7, 2, Location::new(8));
+        let unapplied = Bounds::<F>::from_item_count(10, 10, 2, Location::new(8));
+
+        assert_eq!(plan.committed_size(), 10);
+        assert!(!plan.is_unapplied(&applied));
+        assert!(plan.is_unapplied(&unapplied));
     }
 }
