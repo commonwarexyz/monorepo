@@ -420,7 +420,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 1"));
 
-            let (gate_sender, gate_receiver) = oneshot::channel();
+            let (mut gate_sender, gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(gate_receiver);
 
             let scheme = schemes.remove(0);
@@ -451,10 +451,8 @@ mod tests {
 
             mailbox1.cancel(key.clone()).await;
 
-            // Wait for the engine to process the cancel and drop the in-flight delivery future,
-            // which closes the gate channel.
-            context.sleep(Duration::from_millis(100)).await;
-            assert!(gate_sender.send(()).is_err());
+            // Engine cancel must drop the in-flight delivery future, which closes the gate.
+            gate_sender.closed().await;
 
             select! {
                 _ = cons_out1.recv() => panic!("unexpected event"),
@@ -586,8 +584,7 @@ mod tests {
                 prod1,
             );
 
-            let key = Key(4);
-            mailbox1.fetch(key.clone()).await;
+            mailbox1.fetch(Key(4)).await;
             context.sleep(Duration::from_secs(5)).await;
 
             // With no peers, no event should arrive
@@ -595,8 +592,6 @@ mod tests {
                 _ = cons_out1.recv() => panic!("Fetch should have failed due to no peers"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
-
-            mailbox1.cancel(key).await;
         });
     }
 
