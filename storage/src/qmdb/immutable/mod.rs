@@ -2585,7 +2585,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // Live floor is 0 (from the seeded initial commit).
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
@@ -2639,7 +2639,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // a: 1 set + commit at loc 2; declare floor=3 (one past the commit -- invalid).
         // b: tip valid on its own (floor=0 <= b's commit_loc), but a's floor is bad.
