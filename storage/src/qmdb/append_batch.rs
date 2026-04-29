@@ -214,9 +214,9 @@ impl<F: Family, D: Digest> CompactBatch<F, D> {
         let pos = Position::try_from(commit_loc).expect("valid leaf location");
         leaves.push(hasher.leaf_digest(pos, &commit_op.encode()));
 
-        let range =
+        let bounds =
             BatchBounds::from_item_count(base_size, db_size, leaves.len() - 1, commit_floor);
-        Self::from_leaf_digests(parent, mem, hasher, &leaves, range)
+        Self::from_leaf_digests(parent, mem, hasher, &leaves, bounds)
     }
 
     /// Return the speculative root.
@@ -233,13 +233,13 @@ mod tests {
     type F = mmr::Family;
 
     #[test]
-    fn batch_range_validates_stale_sizes() {
-        let range = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(12));
+    fn batch_bounds_validates_stale_sizes() {
+        let bounds = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(12));
 
-        assert!(range.validate_stale(10, []).is_ok());
-        assert!(range.validate_stale(12, [12]).is_ok());
+        assert!(bounds.validate_stale(10, []).is_ok());
+        assert!(bounds.validate_stale(12, [12]).is_ok());
 
-        let err = range.validate_stale(11, []).unwrap_err();
+        let err = bounds.validate_stale(11, []).unwrap_err();
         assert!(matches!(
             err,
             Error::StaleBatch {
@@ -251,14 +251,14 @@ mod tests {
     }
 
     #[test]
-    fn batch_range_validates_floor_monotonicity() {
-        let range = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(8));
+    fn batch_bounds_validates_floor_monotonicity() {
+        let bounds = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(8));
 
-        assert!(range
+        assert!(bounds
             .validate_floors(Location::new(5), 10, [(12, Location::new(7))])
             .is_ok());
 
-        let err = range
+        let err = bounds
             .validate_floors(Location::new(5), 10, [(12, Location::new(4))])
             .unwrap_err();
         assert!(matches!(
@@ -269,10 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn batch_range_rejects_floor_beyond_commit() {
-        let range = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(13));
+    fn batch_bounds_rejects_floor_beyond_commit() {
+        let bounds = BatchBounds::<F>::from_item_count(10, 10, 2, Location::new(13));
 
-        let err = range.validate_floors(Location::new(5), 10, []).unwrap_err();
+        let err = bounds
+            .validate_floors(Location::new(5), 10, [])
+            .unwrap_err();
         assert!(matches!(
             err,
             Error::FloorBeyondSize(floor, commit)

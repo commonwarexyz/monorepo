@@ -156,10 +156,11 @@ pub struct Immutable<
     /// Only references operations of type [Operation::Set].
     pub(crate) snapshot: Index<T, Location<F>>,
 
-    /// Location of the last committed operation.
+    /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
 
-    /// Inactivity floor declared by the last committed batch.
+    /// The inactivity floor declared by the last committed batch.
+    /// Operations before this location are considered inactive by the application.
     pub(crate) inactivity_floor_loc: Location<F>,
 }
 

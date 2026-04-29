@@ -93,10 +93,11 @@ where
     /// Authenticated journal of operations.
     journal: authenticated::Journal<F, E, C, H>,
 
-    /// Location of the last committed operation.
+    /// The location of the last commit, if any.
     last_commit_loc: Location<F>,
 
-    /// Inactivity floor declared by the last committed batch.
+    /// The inactivity floor declared by the last committed batch. Operations at locations below
+    /// this value are considered inactive by the application and may be pruned.
     inactivity_floor_loc: Location<F>,
 }
 
