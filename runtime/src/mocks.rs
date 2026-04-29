@@ -56,7 +56,7 @@ impl Channel {
         (
             Sink {
                 channel: channel.clone(),
-                poisoned: false,
+                state: SinkState::Open,
             },
             Stream {
                 channel,
@@ -118,13 +118,38 @@ impl Drop for RecvWaiterGuard {
 /// A mock sink that implements the Sink trait.
 pub struct Sink {
     channel: Arc<Mutex<Channel>>,
-    poisoned: bool,
+    state: SinkState,
+}
+
+/// Lifecycle state for the mock sink half.
+enum SinkState {
+    /// Sends may be attempted.
+    Open,
+    /// A send is currently in progress.
+    Sending,
+    /// The sink has been closed.
+    Closed,
+}
+
+impl Sink {
+    fn close(&mut self) {
+        if matches!(self.state, SinkState::Closed) {
+            return;
+        }
+        self.channel.lock().close_sink();
+        self.state = SinkState::Closed;
+    }
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        if self.poisoned {
-            return Err(Error::Closed);
+        match self.state {
+            SinkState::Open => {}
+            SinkState::Sending => {
+                self.close();
+                return Err(Error::Closed);
+            }
+            SinkState::Closed => return Err(Error::Closed),
         }
 
         let drain_recv = {
@@ -132,7 +157,7 @@ impl crate::Sink for Sink {
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
-                self.poisoned = true;
+                self.state = SinkState::Sending;
                 return Err(Error::SendFailed);
             }
 
@@ -155,7 +180,7 @@ impl crate::Sink for Sink {
                 if let Err(data) = os_send.send(data) {
                     channel.restore_front(data);
                     if !channel.stream_alive {
-                        self.poisoned = true;
+                        self.state = SinkState::Sending;
                         return Err(Error::SendFailed);
                     }
                 }
@@ -173,13 +198,14 @@ impl crate::Sink for Sink {
             }
         };
 
-        // Pre-poison so that cancellation leaves the sink permanently closed.
-        self.poisoned = true;
+        // Mark the sink as sending before awaiting so cancellation can be
+        // detected by the next send.
+        self.state = SinkState::Sending;
 
         // Wait for the receiver to drain the buffer.
         match drain_recv.await {
             Ok(()) => {
-                self.poisoned = false;
+                self.state = SinkState::Open;
                 Ok(())
             }
             Err(_) => Err(Error::SendFailed),
@@ -189,8 +215,7 @@ impl crate::Sink for Sink {
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        let mut channel = self.channel.lock();
-        channel.close_sink();
+        self.close();
     }
 }
 

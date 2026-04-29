@@ -14,10 +14,28 @@ use tracing::warn;
 pub struct Sink {
     write_timeout: Duration,
     sink: OwnedWriteHalf,
-    poisoned: bool,
+    state: SinkState,
+}
+
+/// Lifecycle state for the write-half of a connection.
+enum SinkState {
+    /// Sends may be attempted.
+    Open,
+    /// A send is currently in progress.
+    Sending,
+    /// The write-half has been shut down.
+    Closed,
 }
 
 impl Sink {
+    async fn close(&mut self) {
+        if matches!(self.state, SinkState::Closed) {
+            return;
+        }
+        let _ = self.sink.shutdown().await;
+        self.state = SinkState::Closed;
+    }
+
     async fn send_single(&mut self, buf: &[u8]) -> Result<(), Error> {
         self.sink
             .write_all(buf)
@@ -35,13 +53,18 @@ impl Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        if self.poisoned {
-            return Err(Error::Closed);
+        match self.state {
+            SinkState::Open => {}
+            SinkState::Sending => {
+                self.close().await;
+                return Err(Error::Closed);
+            }
+            SinkState::Closed => return Err(Error::Closed),
         }
 
-        // Pre-poison so that cancellation leaves the sink permanently closed
-        // rather than silently corrupted.
-        self.poisoned = true;
+        // Mark the sink as sending before awaiting so cancellation can be
+        // detected by the next send.
+        self.state = SinkState::Sending;
 
         let write_timeout = self.write_timeout;
         let bufs = bufs.into();
@@ -57,14 +80,14 @@ impl crate::Sink for Sink {
             .await
             .map_or(Err(Error::Timeout), identity);
 
-        // A failed send leaves the write half unusable.
+        // A failed send leaves the write-half unusable.
         if result.is_err() {
-            let _ = self.sink.shutdown().await;
+            self.close().await;
             return result;
         }
 
-        // Unpoison on success.
-        self.poisoned = false;
+        // Mark the sink reusable on success.
+        self.state = SinkState::Open;
         Ok(())
     }
 }
@@ -156,7 +179,7 @@ impl crate::Listener for Listener {
             Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
-                poisoned: false,
+                state: SinkState::Open,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
@@ -331,7 +354,7 @@ impl crate::Network for Network {
             Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
-                poisoned: false,
+                state: SinkState::Open,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,

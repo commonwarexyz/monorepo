@@ -302,8 +302,18 @@ pub struct Sink {
     handle: iouring::Handle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
-    /// Tracks whether a previous send failure has made this sink unusable.
-    poisoned: bool,
+    /// Tracks this sink's lifecycle.
+    state: SinkState,
+}
+
+/// Lifecycle state for the write-half of a connection.
+enum SinkState {
+    /// Sends may be attempted.
+    Open,
+    /// A send is currently in progress.
+    Sending,
+    /// The write-half has been shut down.
+    Closed,
 }
 
 impl Sink {
@@ -313,11 +323,15 @@ impl Sink {
             fd,
             handle,
             timeout,
-            poisoned: false,
+            state: SinkState::Open,
         }
     }
 
-    fn shutdown(&self) {
+    fn close(&mut self) {
+        if matches!(self.state, SinkState::Closed) {
+            return;
+        }
+
         // Best-effort write-half shutdown so the peer can observe that no more
         // bytes will be sent after this sink becomes unusable.
         //
@@ -326,19 +340,25 @@ impl Sink {
         unsafe {
             libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_WR);
         }
+        self.state = SinkState::Closed;
     }
 }
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        self.shutdown();
+        self.close();
     }
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        if self.poisoned {
-            return Err(Error::Closed);
+        match self.state {
+            SinkState::Open => {}
+            SinkState::Sending => {
+                self.close();
+                return Err(Error::Closed);
+            }
+            SinkState::Closed => return Err(Error::Closed),
         }
 
         let bufs = bufs.into();
@@ -346,23 +366,23 @@ impl crate::Sink for Sink {
             return Ok(());
         }
 
-        // Pre-poison so that cancellation leaves the sink permanently closed
-        // rather than silently corrupted.
-        self.poisoned = true;
+        // Mark the sink as sending before awaiting so cancellation can be
+        // detected by the next send.
+        self.state = SinkState::Sending;
 
         let result = self
             .handle
             .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
             .await;
 
-        // A failed send leaves the write half unusable.
+        // A failed send leaves the write-half unusable.
         if result.is_err() {
-            self.shutdown();
+            self.close();
             return result;
         }
 
-        // Unpoison on success.
-        self.poisoned = false;
+        // Mark the sink reusable on success.
+        self.state = SinkState::Open;
         Ok(())
     }
 }
