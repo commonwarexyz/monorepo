@@ -1388,6 +1388,8 @@ version = "2026.4.0"
 dependencies = [
  "commonware-macros",
  "const-hex",
+ "criterion",
+ "rand 0.8.5",
 ]
 
 [[package]]
