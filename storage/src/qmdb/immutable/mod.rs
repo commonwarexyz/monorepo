@@ -493,11 +493,11 @@ where
         // handle may be internally diverged and must be dropped by the caller.
         self.journal.rewind(rewind_size).await?;
 
-        // Remove suffix keys from the snapshot. After reopen, the snapshot may
-        // have been rebuilt from a higher floor, so some suffix keys might not
-        // be present -- use remove() which is tolerant of missing keys.
+        // Remove keys that were set in the range [rewind_size, current_size) from the snapshot.
+        let rewind_loc = Location::<F>::new(rewind_size);
         for key in &rewound_keys {
-            self.snapshot.remove(key);
+            // Filter by location to make sure we don't also prune keys that happen to collide.
+            self.snapshot.prune(key, |loc| *loc >= rewind_loc);
         }
 
         // If the rewind target has a lower floor than the current snapshot was
@@ -1323,6 +1323,51 @@ pub(super) mod test {
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
         assert_eq!(db.get(&key3).await.unwrap(), None);
         assert_eq!(db.get(&key4).await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Regression: a key Set before the rewind boundary that translator-collides with a key in the
+    /// rewound suffix must survive rewind. Earlier the snapshot remove pruned the entire translated
+    /// bucket and dropped the retained key.
+    pub(crate) async fn test_immutable_rewind_preserves_collision_bucket<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        // Two keys sharing the first two bytes collide under TwoCap.
+        let mut k1_bytes = [0u8; 32];
+        let mut k2_bytes = [0u8; 32];
+        k1_bytes[0] = 0xAA;
+        k1_bytes[1] = 0xBB;
+        k2_bytes[0] = 0xAA;
+        k2_bytes[1] = 0xBB;
+        k1_bytes[31] = 0x01;
+        k2_bytes[31] = 0x02;
+        let key1 = Digest::from(k1_bytes);
+        let key2 = Digest::from(k2_bytes);
+        let value1 = Sha256::fill(11u8);
+        let value2 = Sha256::fill(22u8);
+
+        commit_sets(&mut db, [(key1, value1)], None).await;
+        let size_after_first = db.bounds().await.end;
+        commit_sets(&mut db, [(key2, value2)], None).await;
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
+
+        db.rewind(size_after_first).await.unwrap();
+
+        // The retained key must still be readable; pre-fix this returned None because the
+        // translator bucket was wiped by the suffix-key remove.
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }
