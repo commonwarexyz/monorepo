@@ -77,10 +77,14 @@ mod tests {
                     CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
                     NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
                 },
-                verifying::MockVerifyingApp,
+                verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
+        simplex::{
+            elector::{Config as ElectorConfig, Elector as _, RoundRobin},
+            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+            types::Proposal,
+        },
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
@@ -94,6 +98,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::channel::fallible::OneshotExt;
     use commonware_utils::{NZUsize, NZU16};
     use std::time::Duration;
 
@@ -424,6 +429,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -545,6 +551,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -761,6 +768,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -851,6 +859,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -928,6 +937,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -1120,6 +1130,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: limited_epocher,
                 strategy: Sequential,
             };
@@ -1222,6 +1233,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -1388,6 +1400,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -1510,6 +1523,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -1552,6 +1566,131 @@ mod tests {
             assert!(
                 !certify.await.expect("certify result missing"),
                 "certify should propagate deferred application verify failure"
+            );
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_verify_predicted_next_leader_uses_prefetched_full_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let participant_set = participants.clone().try_into().expect("set should build");
+            let round_robin_elector = RoundRobin::<Sha256>::default().build(&participant_set);
+            let proposal_round = Round::new(Epoch::zero(), View::new(1));
+            let leader_idx = usize::from(round_robin_elector.elect(proposal_round, None));
+            let next_leader_idx =
+                usize::from(round_robin_elector.predict_next_leader(proposal_round));
+            assert_ne!(leader_idx, next_leader_idx, "test requires distinct leaders");
+
+            let leader_setup = CodingHarness::setup_validator_with_round_robin_elector(
+                context.with_label("leader"),
+                &mut oracle,
+                participants[leader_idx].clone(),
+                ConstantProvider::new(schemes[leader_idx].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::default(),
+                Some(round_robin_elector.clone()),
+            )
+            .await;
+            let follower_setup = CodingHarness::setup_validator_with_round_robin_elector(
+                context.with_label("next_leader"),
+                &mut oracle,
+                participants[next_leader_idx].clone(),
+                ConstantProvider::new(schemes[next_leader_idx].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::default(),
+                Some(round_robin_elector.clone()),
+            )
+            .await;
+
+            let leader = participants[leader_idx].clone();
+            let next_leader = participants[next_leader_idx].clone();
+            setup_network_links(&mut oracle, &[leader.clone(), next_leader.clone()], LINK).await;
+
+            let leader_shards = leader_setup.extra;
+            let follower_marshal = follower_setup.mailbox;
+            let follower_shards = follower_setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let (mock_app, verify_started, release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
+                GatedVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: follower_marshal.clone(),
+                shards: follower_shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[next_leader_idx].clone()),
+                round_robin_elector: Some(round_robin_elector.clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let parent_round = Round::new(Epoch::zero(), View::new(0));
+            let parent_context = CodingCtx {
+                round: parent_round,
+                leader: leader.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            follower_shards.proposed(parent_round, coded_parent).await;
+
+            let verify_context = CodingCtx {
+                round: proposal_round,
+                leader: leader.clone(),
+                parent: (parent_round.view(), parent_commitment),
+            };
+            let block = make_coding_block(
+                verify_context.clone(),
+                parent.digest(),
+                Height::new(2),
+                200,
+            );
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            leader_shards.proposed(proposal_round, coded_block).await;
+
+            let verify_rx = marshaled.verify(verify_context, commitment).await;
+            select! {
+                _ = verify_started => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("predicted next leader should start deferred verification from prefetched full block");
+                },
+            }
+
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        result.expect("verify result missing"),
+                        "predicted next leader should not wait for assigned shard readiness"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("predicted next leader should return from verify before application verification completes");
+                },
+            }
+
+            let certify_rx = marshaled.certify(proposal_round, commitment).await;
+            release_verify.send_lossy(());
+            assert!(
+                certify_rx.await.expect("certify result missing"),
+                "certify should still wait for deferred verification result"
             );
         })
     }
@@ -1709,6 +1848,7 @@ mod tests {
                 marshal: setup.mailbox,
                 shards: setup.extra,
                 scheme_provider: EmptyProvider,
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -1814,6 +1954,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -1932,6 +2073,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -2046,6 +2188,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -2136,6 +2279,7 @@ mod tests {
                 marshal: marshal.clone(),
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                round_robin_elector: None,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };

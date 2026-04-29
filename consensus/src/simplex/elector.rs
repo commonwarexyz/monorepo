@@ -146,6 +146,16 @@ pub struct RoundRobinElector<S: Scheme> {
     _phantom: PhantomData<S>,
 }
 
+impl<S: Scheme> RoundRobinElector<S> {
+    /// Predicts the next leader after `round` without a certificate.
+    ///
+    /// This uses the already-built round-robin permutation, so shuffled
+    /// electors preserve the exact successor order consensus is using.
+    pub fn predict_next_leader(&self, round: Round) -> Participant {
+        self.elect(Round::new(round.epoch(), round.view().next()), None)
+    }
+}
+
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
         let n = self.permutation.len();

@@ -145,6 +145,7 @@ use crate::{
         types::{CodedBlock, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
+    simplex::elector::RoundRobinElector,
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
 };
@@ -156,11 +157,15 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
+    utils::{
+        codec::{WrappedBackgroundReceiver, WrappedSender},
+        mux::Muxer,
+    },
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    iobuf::EncodeExt,
     spawn_cell,
     telemetry::metrics::{GaugeExt, HistogramExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
@@ -172,7 +177,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -209,16 +214,50 @@ enum BlockSubscriptionKey<D> {
     Digest(D),
 }
 
+const SHARD_SUBCHANNEL: commonware_p2p::Channel = 0;
+const FULL_BLOCK_SUBCHANNEL: commonware_p2p::Channel = 1;
+
+trait FastPathContext<P> {
+    fn proposal_round(&self) -> Option<Round>;
+    fn proposal_leader(&self) -> Option<&P>;
+}
+
+impl<P: PublicKey> FastPathContext<P> for crate::simplex::types::Context<Commitment, P> {
+    fn proposal_round(&self) -> Option<Round> {
+        Some(self.round)
+    }
+
+    fn proposal_leader(&self) -> Option<&P> {
+        Some(&self.leader)
+    }
+}
+
+impl<P> FastPathContext<P> for () {
+    fn proposal_round(&self) -> Option<Round> {
+        None
+    }
+
+    fn proposal_leader(&self) -> Option<&P> {
+        None
+    }
+}
+
 /// Configuration for the [`Engine`].
+#[expect(
+    private_bounds,
+    reason = "The fast-path context helper is internal and keeps the public engine generic over test-only block contexts."
+)]
 pub struct Config<P, S, X, D, C, H, B, T>
 where
     P: PublicKey,
     S: Provider<Scope = Epoch>,
+    S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
     D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
+    B::Context: FastPathContext<P>,
     T: Strategy,
 {
     /// The scheme provider.
@@ -232,6 +271,14 @@ where
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
+
+    /// Built round-robin elector used to predict the next leader.
+    ///
+    /// When configured, proposers forward the full [`CodedBlock`] to the
+    /// predicted next leader as a best-effort fast path. This must be the
+    /// exact built [`RoundRobinElector`] used by consensus so shuffled
+    /// permutations stay consistent.
+    pub round_robin_elector: Option<RoundRobinElector<S::Scheme>>,
 
     /// The strategy used for parallel computation.
     pub strategy: T,
@@ -269,6 +316,10 @@ where
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
+#[expect(
+    private_bounds,
+    reason = "The fast-path context helper is internal and keeps the public engine generic over test-only block contexts."
+)]
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
@@ -279,6 +330,7 @@ where
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
+    B::Context: FastPathContext<P>,
     P: PublicKey,
     T: Strategy,
 {
@@ -299,6 +351,9 @@ where
 
     /// [`Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
+
+    /// Built round-robin elector used to predict the next leader.
+    round_robin_elector: Option<RoundRobinElector<S::Scheme>>,
 
     /// The strategy used for parallel shard verification.
     strategy: T,
@@ -334,6 +389,13 @@ where
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
     reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C, H>>>,
 
+    /// Locally proposed commitments.
+    ///
+    /// Only local proposals resolve assigned-shard readiness immediately when
+    /// cached. Remotely prefetched full blocks must still wait for the leader's
+    /// assigned shard.
+    locally_proposed_commitments: BTreeSet<Commitment>,
+
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
     ///
@@ -356,6 +418,10 @@ where
     metrics: ShardMetrics<P>,
 }
 
+#[expect(
+    private_bounds,
+    reason = "The fast-path context helper is internal and keeps the public engine generic over test-only block contexts."
+)]
 impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
@@ -366,6 +432,7 @@ where
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
+    B::Context: FastPathContext<P>,
     P: PublicKey,
     T: Strategy,
 {
@@ -381,6 +448,7 @@ where
                 blocker: config.blocker,
                 shard_codec_cfg: config.shard_codec_cfg,
                 block_codec_cfg: config.block_codec_cfg,
+                round_robin_elector: config.round_robin_elector,
                 strategy: config.strategy,
                 state: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
@@ -390,6 +458,7 @@ where
                 latest_primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
+                locally_proposed_commitments: BTreeSet::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
                 metrics,
@@ -411,21 +480,50 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
+        let (muxer, mut mux_handle) = Muxer::new(
+            self.context.with_label("shard_mux"),
+            sender,
+            receiver,
+            self.background_channel_capacity,
+        );
+        let _mux_handle = muxer.start();
+        let (shard_sender, shard_receiver) = mux_handle
+            .register(SHARD_SUBCHANNEL)
+            .await
+            .expect("shard subchannel must register exactly once");
+        let (mut block_sender, block_receiver) = mux_handle
+            .register(FULL_BLOCK_SUBCHANNEL)
+            .await
+            .expect("full block subchannel must register exactly once");
+        let _mux_registration_handle = mux_handle;
+
         let mut sender = WrappedSender::<_, Shard<C, H>>::new(
             self.context.network_buffer_pool().clone(),
-            sender,
+            shard_sender,
         );
         let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
             WrappedBackgroundReceiver::new(
                 self.context.with_label("shard_ingress"),
-                receiver,
+                shard_receiver,
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
                 self.background_channel_capacity,
                 &self.strategy,
             );
+        let (block_receiver_service, mut block_receiver): (
+            _,
+            mpsc::Receiver<(P, CodedBlock<B, C, H>)>,
+        ) = WrappedBackgroundReceiver::new(
+            self.context.with_label("full_block_ingress"),
+            block_receiver,
+            self.block_codec_cfg.clone(),
+            self.blocker.clone(),
+            self.background_channel_capacity,
+            &self.strategy,
+        );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
+        let _block_receiver_handle = block_receiver_service.start();
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -467,7 +565,8 @@ where
                 return;
             } => match message {
                 Message::Proposed { block, round } => {
-                    self.broadcast_shards(&mut sender, round, block).await;
+                    self.broadcast_shards(&mut sender, &mut block_sender, round, block)
+                        .await;
                 }
                 Message::Discovered {
                     commitment,
@@ -550,6 +649,12 @@ where
                     self.buffer_peer_shard(peer, shard);
                 }
             },
+            Some((peer, block)) = block_receiver.recv() else {
+                debug!("full block receiver closed, stopping shard engine");
+                return;
+            } => {
+                self.handle_network_block(peer, block);
+            },
         }
     }
 
@@ -564,9 +669,55 @@ where
             return self
                 .state
                 .get(&commitment)
-                .is_some_and(|s| !s.is_assigned_shard_verified());
+                .is_none_or(|state| !state.is_assigned_shard_verified());
         }
         true
+    }
+
+    fn handle_network_block(&mut self, sender: P, block: CodedBlock<B, C, H>) {
+        let commitment = block.commitment();
+        if self.reconstructed_blocks.contains_key(&commitment) {
+            return;
+        }
+        if !self.should_cache_network_block(&sender, &block) {
+            return;
+        }
+
+        debug!(%commitment, ?sender, "cached prefetched full block");
+        self.cache_block(Arc::new(block));
+    }
+
+    fn should_cache_network_block(&self, sender: &P, block: &CodedBlock<B, C, H>) -> bool {
+        let Some(round_robin_elector) = self.round_robin_elector.as_ref() else {
+            return false;
+        };
+
+        let context = block.context();
+        let Some(round) = context.proposal_round() else {
+            return false;
+        };
+        let Some(leader) = context.proposal_leader() else {
+            return false;
+        };
+        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+            return false;
+        };
+        let participants = scheme.participants();
+        let Some(me) = scheme.me() else {
+            return false;
+        };
+
+        let expected_config = crate::marshal::coding::types::coding_config_for_participants(
+            u16::try_from(participants.len()).expect("too many participants"),
+        );
+        if block.config() != expected_config {
+            return false;
+        }
+        if participants.position(sender).is_none() || sender != leader {
+            return false;
+        }
+
+        round_robin_elector.predict_next_leader(round) == me
     }
 
     /// Attempts to reconstruct a [`CodedBlock`] from the checked [`Shard`]s present in the
@@ -649,9 +800,6 @@ where
         leader: P,
         round: Round,
     ) {
-        if self.reconstructed_blocks.contains_key(&commitment) {
-            return;
-        }
         let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, ignoring external proposal");
             return;
@@ -755,9 +903,10 @@ where
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
-    async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
+    async fn broadcast_shards<Sr: Sender<PublicKey = P>, Sb: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        block_sender: &mut Sb,
         round: Round,
         mut block: CodedBlock<B, C, H>,
     ) {
@@ -824,9 +973,21 @@ where
                 .await;
         }
 
+        if let Some(round_robin_elector) = &self.round_robin_elector {
+            let next_leader = round_robin_elector.predict_next_leader(round);
+            if next_leader != me {
+                let next_leader = participants[usize::from(next_leader)].clone();
+                let encoded_block = block.encode_with_pool(self.context.network_buffer_pool());
+                let _ = block_sender
+                    .send(Recipients::One(next_leader), encoded_block, true)
+                    .await;
+            }
+        }
+
         // Cache the block so we don't have to reconstruct it again.
         let block = Arc::new(block);
         self.cache_block(block);
+        self.locally_proposed_commitments.insert(commitment);
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
@@ -917,11 +1078,11 @@ where
             return;
         }
 
-        // When there is no reconstruction state but the block is already in
-        // the cache, the local node was the proposer. Proposers trivially
-        // have all shards, so resolve immediately.
+        // When there is no reconstruction state but the commitment came from a
+        // local proposal, the proposer trivially has all shards. Remotely
+        // prefetched full blocks still need the leader's assigned shard.
         if !self.state.contains_key(&commitment)
-            && self.reconstructed_blocks.contains_key(&commitment)
+            && self.locally_proposed_commitments.contains(&commitment)
         {
             response.send_lossy(());
             return;
@@ -1028,11 +1189,14 @@ where
         if let Some(height) = self.reconstructed_blocks.get(&through).map(|b| b.height()) {
             self.reconstructed_blocks
                 .retain(|_, block| block.height() > height);
+            self.locally_proposed_commitments
+                .retain(|commitment| self.reconstructed_blocks.contains_key(commitment));
         }
 
         // Always clear direct state/subscriptions for the pruned commitment.
         // This avoids dangling waiters when prune is called for a commitment
         // that was never reconstructed locally.
+        self.locally_proposed_commitments.remove(&through);
         self.drop_subscriptions(through);
         let Some(round) = self.state.remove(&through).map(|state| state.round()) else {
             return;
@@ -1511,8 +1675,10 @@ mod tests {
     use super::*;
     use crate::{
         marshal::{
-            coding::types::coding_config_for_participants, mocks::block::Block as MockBlock,
+            coding::types::coding_config_for_participants,
+            mocks::{block::Block as MockBlock, harness::genesis_commitment},
         },
+        simplex::elector::{Config as ElectorConfig, RoundRobin},
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
@@ -1530,10 +1696,11 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Control, Link, Oracle},
+        utils::mux::GlobalSender,
         Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner};
+    use commonware_runtime::{deterministic, IoBufs, Quota, Runner};
     use commonware_utils::{
         channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
     };
@@ -1651,12 +1818,16 @@ mod tests {
     type H = Sha256;
     type P = PublicKey;
     type C = ReedSolomon<H>;
+    type FastPathCtx = crate::simplex::types::Context<Commitment, P>;
+    type FastPathB = MockBlock<Sha256Digest, FastPathCtx>;
     type X = Control<P, deterministic::Context>;
     type O = Oracle<P, deterministic::Context>;
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
     type D = simulated::Manager<P, deterministic::Context>;
     type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential>;
+    type FastPathShardEngine<S> =
+        Engine<deterministic::Context, Prov, X, D, S, H, FastPathB, P, Sequential>;
     type ChurningShardEngine<S> =
         Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
 
@@ -1668,6 +1839,41 @@ mod tests {
         assert!(is_blocked, "expected {blocker} to have blocked {blocked}");
     }
 
+    #[derive(Clone)]
+    struct TestSender {
+        sender: GlobalSender<NetworkSender>,
+    }
+
+    impl TestSender {
+        fn new(sender: NetworkSender) -> Self {
+            Self {
+                sender: GlobalSender::new(sender),
+            }
+        }
+
+        async fn send(
+            &mut self,
+            recipients: Recipients<P>,
+            payload: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> Result<Vec<P>, simulated::Error> {
+            self.sender
+                .send(SHARD_SUBCHANNEL, recipients, payload, priority)
+                .await
+        }
+
+        async fn send_block(
+            &mut self,
+            recipients: Recipients<P>,
+            payload: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> Result<Vec<P>, simulated::Error> {
+            self.sender
+                .send(FULL_BLOCK_SUBCHANNEL, recipients, payload, priority)
+                .await
+        }
+    }
+
     /// A participant in the test network with its engine mailbox and blocker.
     struct Peer<S: CodingScheme = C> {
         /// The peer's public key.
@@ -1677,7 +1883,7 @@ mod tests {
         /// The mailbox for sending messages to the peer's shard engine.
         mailbox: Mailbox<B, S, H, P>,
         /// Raw network sender for injecting messages (e.g., byzantine behavior).
-        sender: NetworkSender,
+        sender: TestSender,
     }
 
     /// A non-participant in the test network with its engine mailbox.
@@ -1688,7 +1894,7 @@ mod tests {
         /// The mailbox for sending messages to the peer's shard engine.
         mailbox: Mailbox<B, S, H, P>,
         /// Raw network sender for injecting messages.
-        sender: NetworkSender,
+        sender: TestSender,
     }
 
     /// Test fixture for setting up multiple participants with shard engines.
@@ -1806,6 +2012,7 @@ mod tests {
                             maximum_shard_size: MAX_SHARD_SIZE,
                         },
                         block_codec_cfg: (),
+                        round_robin_elector: None,
                         strategy: STRATEGY,
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
@@ -1821,7 +2028,7 @@ mod tests {
                         public_key: peer_key.clone(),
                         index: participant,
                         mailbox,
-                        sender: sender_clone,
+                        sender: TestSender::new(sender_clone),
                     });
                 }
 
@@ -1843,6 +2050,7 @@ mod tests {
                             maximum_shard_size: MAX_SHARD_SIZE,
                         },
                         block_codec_cfg: (),
+                        round_robin_elector: None,
                         strategy: STRATEGY,
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
@@ -1857,7 +2065,7 @@ mod tests {
                     non_participants.push(NonParticipant {
                         public_key: np_key.clone(),
                         mailbox,
-                        sender: sender_clone,
+                        sender: TestSender::new(sender_clone),
                     });
                 }
 
@@ -2579,11 +2787,12 @@ mod tests {
                 let non_participant_pk = non_participant_key.public_key();
 
                 let non_participant_control = oracle.control(non_participant_pk.clone());
-                let (mut non_participant_sender, _non_participant_receiver) =
+                let (non_participant_sender, _non_participant_receiver) =
                     non_participant_control
                         .register(0, TEST_QUOTA)
                         .await
                         .expect("registration should succeed");
+                let mut non_participant_sender = TestSender::new(non_participant_sender);
                 oracle
                     .add_link(
                         non_participant_pk.clone(),
@@ -2640,11 +2849,12 @@ mod tests {
                 let non_participant_pk = non_participant_key.public_key();
 
                 let non_participant_control = oracle.control(non_participant_pk.clone());
-                let (mut non_participant_sender, _non_participant_receiver) =
+                let (non_participant_sender, _non_participant_receiver) =
                     non_participant_control
                         .register(0, TEST_QUOTA)
                         .await
                         .expect("registration should succeed");
+                let mut non_participant_sender = TestSender::new(non_participant_sender);
                 oracle
                     .add_link(
                         non_participant_pk.clone(),
@@ -3719,10 +3929,11 @@ mod tests {
                 .expect("registration should succeed");
 
             let future_peer_control = oracle.control(future_peer_pk.clone());
-            let (mut future_peer_sender, _future_peer_receiver) = future_peer_control
+            let (future_peer_sender, _future_peer_receiver) = future_peer_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut future_peer_sender = TestSender::new(future_peer_sender);
             oracle
                 .add_link(future_peer_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
                 .await
@@ -3753,6 +3964,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
@@ -3860,9 +4072,10 @@ mod tests {
             oracle.manager().track(0, participants.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (_leader_control, mut leader_sender, _leader_receiver) = registrations
+            let (_leader_control, leader_sender, _leader_receiver) = registrations
                 .remove(&leader_pk)
                 .expect("leader should be registered");
+            let mut leader_sender = TestSender::new(leader_sender);
             let (broadcaster_control, broadcaster_sender, broadcaster_receiver) = registrations
                 .remove(&broadcaster_pk)
                 .expect("broadcaster should be registered");
@@ -3887,6 +4100,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
@@ -3910,6 +4124,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
@@ -4560,6 +4775,138 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_prefetched_full_block_does_not_imply_assigned_shard_ready_before_discovered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut private_keys = (0..4)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|key| key.public_key());
+            let participants: Set<P> =
+                Set::from_iter_dedup(private_keys.iter().map(|key| key.public_key()));
+            let leader_pk = private_keys[0].public_key();
+            let victim_pk = private_keys[1].public_key();
+
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+            oracle
+                .manager()
+                .track(0, participants.clone())
+                .await;
+
+            let leader_control = oracle.control(leader_pk.clone());
+            let (leader_sender, _leader_receiver) = leader_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+            let victim_control = oracle.control(victim_pk.clone());
+            let (victim_sender, victim_receiver) = victim_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+            oracle
+                .add_link(leader_pk.clone(), victim_pk.clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+
+            let round_robin_elector = RoundRobin::<Sha256>::default().build(&participants);
+            let victim_scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[1].clone(),
+            )
+            .expect("signer scheme should be created");
+            let config: Config<_, _, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(victim_scheme),
+                blocker: victim_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                round_robin_elector: Some(round_robin_elector),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_provider: oracle.manager(),
+            };
+            let (engine, mailbox): (_, Mailbox<FastPathB, C, H, P>) =
+                FastPathShardEngine::new(context.with_label("victim"), config);
+            engine.start((victim_sender, victim_receiver));
+
+            let round = Round::zero();
+            let block_context = FastPathCtx {
+                round,
+                leader: leader_pk.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let block = FastPathB::new::<H>(
+                block_context,
+                Sha256Digest::EMPTY,
+                Height::new(1),
+                100,
+            );
+            let coded_block = CodedBlock::<FastPathB, C, H>::new(
+                block,
+                coding_config_for_participants(participants.len() as u16),
+                &STRATEGY,
+            );
+            let commitment = coded_block.commitment();
+
+            let block_sub = mailbox.subscribe(commitment).await;
+            let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment).await;
+
+            let mut leader_sender = TestSender::new(leader_sender);
+            leader_sender
+                .send_block(
+                    Recipients::One(victim_pk.clone()),
+                    coded_block.encode(),
+                    true,
+                )
+                .await
+                .expect("prefetch send should succeed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            let prefetched = block_sub.await.expect("full block should be cached immediately");
+            assert_eq!(prefetched.commitment(), commitment);
+            assert!(
+                matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                "full block cache must not satisfy assigned shard readiness"
+            );
+
+            let leader_shard = coded_block.shard(1).expect("missing victim shard");
+            leader_sender
+                .send(
+                    Recipients::One(victim_pk.clone()),
+                    leader_shard.encode(),
+                    true,
+                )
+                .await
+                .expect("leader shard send should succeed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+            assert!(
+                matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                "pre-discovered leader shard should stay buffered until leader is announced"
+            );
+
+            mailbox.discovered(commitment, leader_pk, round).await;
+            select! {
+                _ = shard_sub => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("assigned shard should resolve after discovered ingests buffered leader shard");
+                },
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_broadcast_routes_participant_and_non_participant_shards() {
         let fixture = Fixture {
             num_non_participants: 1,
@@ -4721,10 +5068,11 @@ mod tests {
 
             // Register the leader so it can send shards.
             let leader_control = oracle.control(leader_pk.clone());
-            let (mut leader_sender, _leader_receiver) = leader_control
+            let (leader_sender, _leader_receiver) = leader_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut leader_sender = TestSender::new(leader_sender);
             oracle
                 .add_link(leader_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
                 .await
@@ -4748,6 +5096,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
@@ -4859,6 +5208,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 16,
                 peer_buffer_size: NZUsize!(4),
@@ -4964,10 +5314,11 @@ mod tests {
                 .expect("registration should succeed");
 
             let leader_control = oracle.control(leader_pk.clone());
-            let (mut leader_sender, _leader_receiver) = leader_control
+            let (leader_sender, _leader_receiver) = leader_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut leader_sender = TestSender::new(leader_sender);
             oracle
                 .add_link(leader_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
                 .await
@@ -4992,6 +5343,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
@@ -5103,28 +5455,32 @@ mod tests {
                 .expect("registration should succeed");
 
             let peer2_control = oracle.control(peer2_pk.clone());
-            let (mut peer2_sender, _peer2_receiver) = peer2_control
+            let (peer2_sender, _peer2_receiver) = peer2_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut peer2_sender = TestSender::new(peer2_sender);
 
             let peer4_control = oracle.control(peer4_pk.clone());
-            let (mut peer4_sender, _peer4_receiver) = peer4_control
+            let (peer4_sender, _peer4_receiver) = peer4_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut peer4_sender = TestSender::new(peer4_sender);
 
             let peer5_control = oracle.control(peer5_pk.clone());
-            let (mut peer5_sender, _peer5_receiver) = peer5_control
+            let (peer5_sender, _peer5_receiver) = peer5_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut peer5_sender = TestSender::new(peer5_sender);
 
             let peer6_control = oracle.control(peer6_pk.clone());
-            let (mut peer6_sender, _peer6_receiver) = peer6_control
+            let (peer6_sender, _peer6_receiver) = peer6_control
                 .register(0, TEST_QUOTA)
                 .await
                 .expect("registration should succeed");
+            let mut peer6_sender = TestSender::new(peer6_sender);
 
             // Only secondary peers that will forward shards are connected to the receiver (not the leader).
             for sender in [&peer2_pk, &peer4_pk, &peer5_pk, &peer6_pk] {
@@ -5152,6 +5508,7 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
+                round_robin_elector: None,
                 strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),

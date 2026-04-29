@@ -18,9 +18,14 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context digest matches the consensus context and waits for validation of
-//! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
-//! relayed to all other participants to aid in block reconstruction.
+//! ensures the commitment's context digest matches the consensus context and, for normal
+//! participants, waits for validation of the shard assigned by the proposer. If that shard is
+//! valid, the assigned shard is relayed to all other participants to aid in block reconstruction.
+//!
+//! When the local validator is the predicted next leader under round-robin election, the leader also
+//! forwards the full block on a fast path. In that case `verify()` follows the standard deferred
+//! wrapper's behavior: it waits for the full block and checks the embedded context, then begins
+//! deferred application verification without waiting for assigned-shard readiness.
 //!
 //! A participant may still reconstruct the full block from gossiped shards before its designated
 //! leader-delivered shard arrives. That is sufficient for later certification and repair flows, but it
@@ -93,7 +98,7 @@ use crate::{
         },
         core, Update,
     },
-    simplex::{scheme::Scheme, types::Context, Plan},
+    simplex::{elector::RoundRobinElector, scheme::Scheme, types::Context, Plan},
     types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
@@ -120,7 +125,7 @@ use commonware_utils::{
     },
     NZU16,
 };
-use futures::future::{ready, try_join, Either, Ready};
+use futures::future::{ready, select as select_future, try_join, Either, Ready};
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
@@ -152,6 +157,8 @@ where
     pub shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
     pub scheme_provider: Z,
+    /// Built round-robin elector used to predict the next leader.
+    pub round_robin_elector: Option<RoundRobinElector<Z::Scheme>>,
     /// Strategy for parallel operations.
     pub strategy: S,
     /// Strategy for determining epoch boundaries.
@@ -181,6 +188,7 @@ where
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
+    round_robin_elector: Option<RoundRobinElector<Z::Scheme>>,
     epocher: ES,
     strategy: S,
     verification_tasks: VerificationTasks<Commitment>,
@@ -219,6 +227,7 @@ where
             marshal,
             shards,
             scheme_provider,
+            round_robin_elector,
             strategy,
             epocher,
         } = cfg;
@@ -259,6 +268,7 @@ where
             marshal,
             shards,
             scheme_provider,
+            round_robin_elector,
             strategy,
             epocher,
             verification_tasks: VerificationTasks::new(),
@@ -269,6 +279,52 @@ where
             proposal_parent_fetch_duration,
             erasure_encode_duration,
         }
+    }
+
+    fn should_prefetch_from_shards(&self, scheme: &Z::Scheme, round: Round) -> bool {
+        let Some(round_robin_elector) = self.round_robin_elector.as_ref() else {
+            return false;
+        };
+        let Some(me) = scheme.me() else {
+            return false;
+        };
+
+        round_robin_elector.predict_next_leader(round) == me
+    }
+
+    async fn subscribe_deferred_verify_block(
+        context: E,
+        shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
+        marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
+        round: Round,
+        commitment: Commitment,
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+        if let Some(block) = shards.get(commitment).await {
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy((*block).clone());
+            return rx;
+        }
+
+        let shard_rx = shards.subscribe(commitment).await;
+        let marshal_rx = marshal.subscribe_by_commitment(Some(round), commitment).await;
+
+        let (tx, rx) = oneshot::channel();
+        context
+            .with_label("deferred_verify_block_race")
+            .with_attribute("round", round)
+            .spawn(move |_| async move {
+                let block = match select_future(shard_rx, marshal_rx).await {
+                    Either::Left((Ok(block), _)) => Some((*block).clone()),
+                    Either::Right((Ok(block), _)) => Some(block),
+                    Either::Left((Err(_), marshal_rx)) => marshal_rx.await.ok(),
+                    Either::Right((Err(_), shard_rx)) => shard_rx.await.ok().map(|block| (*block).clone()),
+                };
+
+                if let Some(block) = block {
+                    tx.send_lossy(block);
+                }
+            });
+        rx
     }
 
     /// Verifies a proposed block within epoch boundaries.
@@ -293,6 +349,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
+        block_rx: Option<oneshot::Receiver<CodedBlock<B, C, H>>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
@@ -343,10 +400,13 @@ where
                     };
                     (parent, block)
                 } else {
-                    // No prefetched block, fetch both parent and block
-                    let block_request = marshal
-                        .subscribe_by_commitment(Some(round), commitment)
-                        .await;
+                    // No prefetched block, fetch both parent and block.
+                    let block_request = match block_rx {
+                        Some(block_rx) => block_rx,
+                        None => marshal
+                            .subscribe_by_commitment(Some(round), commitment)
+                            .await,
+                    };
                     let block_requests = try_join(parent_request, block_request);
 
                     select! {
@@ -800,6 +860,17 @@ where
             return rx;
         }
 
+        let round = consensus_context.round;
+        let should_prefetch = self.should_prefetch_from_shards(scheme.as_ref(), round);
+        let validity_rx = if should_prefetch {
+            None
+        } else {
+            match scheme.me() {
+                Some(_) => Some(self.shards.subscribe_assigned_shard_verified(payload).await),
+                None => None,
+            }
+        };
+
         // Inform the shard engine of an externally proposed commitment.
         self.shards
             .discovered(
@@ -809,20 +880,100 @@ where
             )
             .await;
 
+        // The predicted next leader can begin verification from the prefetched full block
+        // without waiting for assigned-shard readiness.
+        if should_prefetch {
+            let block_rx = Self::subscribe_deferred_verify_block(
+                self.context.clone(),
+                self.shards.clone(),
+                self.marshal.clone(),
+                round,
+                payload,
+            )
+            .await;
+
+            let mut marshaled = self.clone();
+            let (task_tx, task_rx) = oneshot::channel();
+            self.verification_tasks.insert(round, payload, task_rx);
+
+            let (mut tx, rx) = oneshot::channel();
+            self.context
+                .with_label("optimistic_verify_prefetched")
+                .with_attribute("round", round)
+                .spawn(move |_| async move {
+                    let block = select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping optimistic prefetched verification"
+                            );
+                            return;
+                        },
+                        result = block_rx => match result {
+                            Ok(block) => block,
+                            Err(_) => {
+                                debug!(
+                                    ?payload,
+                                    reason = "failed to fetch prefetched block for optimistic verification",
+                                    "skipping optimistic prefetched verification"
+                                );
+                                return;
+                            }
+                        },
+                    };
+
+                    if block.context() != consensus_context {
+                        debug!(
+                            ?consensus_context,
+                            block_context = ?block.context(),
+                            "block-embedded context does not match consensus context during prefetched optimistic verification"
+                        );
+                        task_tx.send_lossy(false);
+                        tx.send_lossy(false);
+                        return;
+                    }
+
+                    let verify_rx = marshaled.deferred_verify(
+                        consensus_context,
+                        payload,
+                        Some(block),
+                        None,
+                        Stage::Verified,
+                    );
+                    tx.send_lossy(true);
+                    if let Ok(result) = verify_rx.await {
+                        task_tx.send_lossy(result);
+                    }
+                });
+            return rx;
+        }
+
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
-        let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
+        let block_rx = if should_prefetch {
+            Some(
+                Self::subscribe_deferred_verify_block(
+                    self.context.clone(),
+                    self.shards.clone(),
+                    self.marshal.clone(),
+                    round,
+                    payload,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let task = self.deferred_verify(consensus_context, payload, None, block_rx, Stage::Verified);
         self.verification_tasks.insert(round, payload, task);
 
-        match scheme.me() {
-            Some(_) => {
+        match validity_rx {
+            Some(validity_rx) => {
                 // Subscribe to assigned shard verification. For participants, this
                 // only completes once the leader-delivered shard for our
                 // assigned index has been verified. Reconstructing the block
                 // from peer gossip is useful for certification later, but is
                 // not enough to emit a notarize vote.
-                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context
                     .with_label("shard_validity_wait")
@@ -954,6 +1105,7 @@ where
                     embedded_context,
                     payload,
                     Some(block),
+                    None,
                     Stage::Certified,
                 );
                 if let Ok(result) = verify_rx.await {

@@ -18,6 +18,7 @@ use crate::{
         Identifier,
     },
     simplex::{
+        elector::RoundRobinElector,
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
@@ -2324,37 +2325,15 @@ pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestam
     CodingB::new::<Sha256>(context, parent, height, timestamp)
 }
 
-impl TestHarness for CodingHarness {
-    type ApplicationBlock = CodingB;
-    type Variant = CodingVariant;
-    type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type ValidatorExtra = ShardsMailbox;
-    type Commitment = Commitment;
-
-    async fn setup_validator(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-    ) -> ValidatorSetup<Self> {
-        Self::setup_validator_with(
-            context,
-            oracle,
-            validator,
-            provider,
-            NZUsize!(1),
-            Application::default(),
-        )
-        .await
-    }
-
-    async fn setup_validator_with(
+impl CodingHarness {
+    pub async fn setup_validator_with_round_robin_elector(
         context: deterministic::Context,
         oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        application: Application<CodingB>,
+        round_robin_elector: Option<RoundRobinElector<S>>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
@@ -2476,6 +2455,7 @@ impl TestHarness for CodingHarness {
                 maximum_shard_size: 1024 * 1024,
             },
             block_codec_cfg: (),
+            round_robin_elector,
             strategy: Sequential,
             mailbox_size: 10,
             peer_buffer_size: NZUsize!(64),
@@ -2502,6 +2482,51 @@ impl TestHarness for CodingHarness {
             height,
             actor_handle,
         }
+    }
+}
+
+impl TestHarness for CodingHarness {
+    type ApplicationBlock = CodingB;
+    type Variant = CodingVariant;
+    type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type ValidatorExtra = ShardsMailbox;
+    type Commitment = Commitment;
+
+    async fn setup_validator(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+    ) -> ValidatorSetup<Self> {
+        Self::setup_validator_with(
+            context,
+            oracle,
+            validator,
+            provider,
+            NZUsize!(1),
+            Application::default(),
+        )
+        .await
+    }
+
+    async fn setup_validator_with(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+    ) -> ValidatorSetup<Self> {
+        Self::setup_validator_with_round_robin_elector(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            None,
+        )
+        .await
     }
 
     fn make_test_block(
@@ -2662,6 +2687,7 @@ impl TestHarness for CodingHarness {
                 maximum_shard_size: 1024 * 1024,
             },
             block_codec_cfg: (),
+            round_robin_elector: None,
             strategy: Sequential,
             mailbox_size: 10,
             peer_buffer_size: NZUsize!(64),
