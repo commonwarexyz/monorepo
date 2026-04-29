@@ -1,6 +1,11 @@
-use crate::{mmr::Location, qmdb::sync::Journal, translator::Translator};
+use crate::{
+    merkle::{Family, Location},
+    qmdb::sync::Journal,
+    translator::Translator,
+};
 use commonware_cryptography::Digest;
-use std::{future::Future, ops::Range};
+use commonware_utils::range::NonEmptyRange;
+use std::future::Future;
 
 pub trait Config {
     type JournalConfig;
@@ -30,10 +35,12 @@ impl<J: Clone> Config for crate::qmdb::keyless::Config<J> {
         self.log.clone()
     }
 }
+
 pub trait Database: Sized + Send {
+    type Family: Family;
     type Op: Send;
-    type Journal: Journal<Context = Self::Context, Op = Self::Op>;
-    type Config: Config<JournalConfig = <Self::Journal as Journal>::Config>;
+    type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
+    type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -46,30 +53,21 @@ pub trait Database: Sized + Send {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
+        range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<crate::merkle::mmr::Family>>> + Send;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Returns whether persisted local state already matches the requested sync target.
     ///
-    /// Databases can override this to allow the sync engine to complete immediately
-    /// when an on-disk database already matches the target and can be rebuilt without
-    /// fetching fresh boundary pins.
-    ///
-    /// # Caller contract
-    ///
-    /// `target.range.start()` **must** equal the committed inactivity floor of
-    /// the target state (i.e. the floor carried by the last `CommitFloor` op).
-    /// Implementations are free to verify only that the persisted tree size and
-    /// root match and to skip checking the persisted merkle pruning boundary
-    /// directly. Callers that set `target.range.start()` below the committed
-    /// floor (or that prune their own database past the committed floor) can cause
-    /// a later [`Self::from_sync_result`] rebuild to fail with `MissingNode` even
-    /// though this function returned `true`.
+    /// Databases can override this to let the sync engine finish immediately when an
+    /// on-disk database already reflects the target. Simple append-only variants may
+    /// verify only the persisted tree size and root. Variants with additional
+    /// pruning-dependent state should also ensure their persisted lower bound still
+    /// covers `target.range.start()`.
     fn has_local_target_state(
         _context: Self::Context,
         _config: &Self::Config,
-        _target: &crate::qmdb::sync::Target<Self::Digest>,
+        _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
     ) -> impl Future<Output = bool> + Send {
         async { false }
     }

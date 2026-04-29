@@ -408,8 +408,25 @@ impl<B: Blob> Append<B> {
     ///
     /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
     /// already validated that `offset + buf.len()` is within the blob's logical size.
+    ///
+    /// The page cache is consulted first to minimize the risk of writer starvation from a
+    /// burst of buffer reads (which jump ahead of queued writers on the buffer lock).
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        self.cache_ref.read_cached(self.id, buf, offset) == buf.len()
+        if self.cache_ref.read_cached(self.id, buf, offset) == buf.len() {
+            return true;
+        }
+        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
+            return false;
+        };
+        let Ok(buffer) = self.buffer.try_read() else {
+            return false;
+        };
+        if offset < buffer.offset || end_offset > buffer.size() {
+            return false;
+        }
+        let src_start = (offset - buffer.offset) as usize;
+        buf.copy_from_slice(&buffer.as_ref()[src_start..src_start + buf.len()]);
+        true
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -857,12 +874,6 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Implementation note: rewinding the blob across a page boundary potentially results in
-        // stale data remaining in the page cache. We don't proactively purge the data
-        // within this function since it would be inaccessible anyway. Instead we ensure it is
-        // always updated should the blob grow back to the point where we have new data for the same
-        // page, if any old data hasn't expired naturally by then.
-
         let logical_page_size = self.cache_ref.page_size();
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
@@ -888,6 +899,12 @@ impl<B: Blob> Append<B> {
         // Resize the underlying blob.
         blob_guard.blob.resize(new_physical_size).await?;
         blob_guard.partial_page_state = None;
+
+        // Evict cached pages at or beyond the new full-page boundary. The page at `full_pages` (if
+        // partial) is now owned by the tip buffer, and anything above is beyond the new logical
+        // size. Leaving their pre-resize contents in the cache lets `try_read_sync` (which bypasses
+        // the tip buffer) observe stale bytes once the tip is repopulated.
+        self.cache_ref.invalidate_from(self.id, full_pages);
 
         // Update blob state and buffer based on the desired logical size. The partial page data is
         // read with CRC validation; the validated length may exceed partial_bytes (reflecting the
@@ -927,12 +944,12 @@ impl<B: Blob> Append<B> {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, BufferPool, BufferPoolConfig, Metrics as _, Runner as _, Storage as _,
+        deterministic, telemetry::metrics::Registry, BufferPool, BufferPoolConfig, Metrics as _,
+        Runner as _, Storage as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
-    use prometheus_client::registry::Registry;
+    use commonware_utils::{NZUsize, NZU16, NZU32};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
@@ -991,6 +1008,32 @@ mod tests {
                     &data[off as usize..off as usize + 4],
                 );
             }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_read_sync_all_in_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"try_read_sync_tip")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..20).collect();
+            append.append(&data).await.unwrap();
+
+            let mut buf = vec![0u8; data.len()];
+            assert!(append.try_read_sync(0, &mut buf));
+            assert_eq!(buf, data);
         });
     }
 
@@ -1404,7 +1447,7 @@ mod tests {
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
-                    .with_max_per_class(NZUsize!(2)),
+                    .with_max_per_class(NZU32!(2)),
                 &mut registry,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
@@ -2452,6 +2495,54 @@ mod tests {
                 matches!(result, Err(crate::Error::InvalidChecksum)),
                 "Expected InvalidChecksum when shrinking to corrupted page, got: {:?}",
                 result
+            );
+        });
+    }
+
+    #[test]
+    fn test_resize_invalidates_cache() {
+        // Regression: shrinking a blob across a page boundary must drop cached pages for the
+        // truncated region. Before the fix, `try_read_sync` (which bypasses the tip buffer)
+        // would observe pre-resize bytes at offsets later reclaimed by new appends.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let (blob, blob_size) = context
+                .open("test_partition", b"resize_invalidates_cache")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write + sync a full page so it lands in the page cache. Use a distinct byte
+            // pattern so a stale cache read would be obvious.
+            let page_size = PAGE_SIZE.get() as usize;
+            let old_bytes = vec![0xAAu8; page_size];
+            append.append(&old_bytes).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Confirm page 0 is reachable via the cache-only fast path.
+            let mut probe = vec![0u8; 16];
+            assert!(append.try_read_sync(0, &mut probe));
+            assert_eq!(probe, vec![0xAAu8; 16]);
+
+            // Rewind to 0 (crossing the page boundary) and append a new, distinct pattern.
+            append.resize(0).await.unwrap();
+            let new_bytes = vec![0xBBu8; 16];
+            append.append(&new_bytes).await.unwrap();
+
+            // The cache must not serve pre-resize bytes. Either try_read_sync misses (cache
+            // was invalidated) or it returns the new pattern; it must never return 0xAA.
+            let mut probe = vec![0u8; 16];
+            let hit = append.try_read_sync(0, &mut probe);
+            assert!(
+                !hit || probe == new_bytes,
+                "try_read_sync served stale pre-resize bytes: {probe:?}"
             );
         });
     }

@@ -1,7 +1,11 @@
 //! Core traits for encoding and decoding.
 
 use crate::error::Error;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -23,19 +27,85 @@ pub trait EncodeSize {
     /// Returns the encoded size of this value (in bytes).
     fn encode_size(&self) -> usize;
 
+    /// Returns the total encoded size of a sequence, excluding any container-specific length
+    /// prefix.
+    ///
+    /// Container implementations call this hook so element types can provide a more efficient
+    /// aggregate size calculation. The default preserves normal element-by-element sizing.
+    /// Fixed-size implementations compute `SIZE * len`, which avoids an O(n) sizing prepass
+    /// before containers such as `Vec<T>` allocate their output buffer.
+    ///
+    /// This hook exists because stable Rust cannot express the overlapping specialized
+    /// container impls that would otherwise provide this aggregate path directly.
+    ///
+    /// This is hidden from generated documentation because it is an implementation hook for
+    /// codec's container types, not part of the intended user-facing API. Most users should
+    /// implement [EncodeSize::encode_size] or [FixedSize] instead.
+    #[doc(hidden)]
+    #[inline]
+    fn encode_size_slice(values: &[Self]) -> usize
+    where
+        Self: Sized,
+    {
+        values.iter().map(EncodeSize::encode_size).sum()
+    }
+
     /// Returns the encoded size excluding bytes passed to [`BufsMut::push`]
     /// during [`Write::write_bufs`]. Used to size the working buffer for inline
     /// writes. Override alongside [`Write::write_bufs`] for types where large
     /// [`Bytes`] fields go via push; failing to do so will over-allocate.
+    #[inline]
     fn encode_inline_size(&self) -> usize {
         self.encode_size()
+    }
+
+    /// Returns the total inline encoded size of a sequence, excluding any container-specific
+    /// length prefix.
+    ///
+    /// This hidden hook is the slice equivalent of [EncodeSize::encode_inline_size]. The
+    /// default preserves normal element-by-element sizing. Fixed-size implementations override
+    /// this to compute `SIZE * len`, matching [EncodeSize::encode_size_slice] for the
+    /// [`Write::write_bufs`] path.
+    ///
+    /// This hook exists because stable Rust cannot express the overlapping specialized
+    /// container impls that would otherwise provide this aggregate path directly.
+    ///
+    /// This is hidden from generated documentation for the same reason as
+    /// [EncodeSize::encode_size_slice].
+    #[doc(hidden)]
+    #[inline]
+    fn encode_inline_size_slice(values: &[Self]) -> usize
+    where
+        Self: Sized,
+    {
+        values
+            .iter()
+            .map(EncodeSize::encode_inline_size)
+            .sum::<usize>()
     }
 }
 
 // Automatically implement `EncodeSize` for types that are `FixedSize`.
 impl<T: FixedSize> EncodeSize for T {
+    #[inline]
     fn encode_size(&self) -> usize {
         Self::SIZE
+    }
+
+    #[inline]
+    fn encode_size_slice(values: &[Self]) -> usize
+    where
+        Self: Sized,
+    {
+        Self::SIZE * values.len()
+    }
+
+    #[inline]
+    fn encode_inline_size_slice(values: &[Self]) -> usize
+    where
+        Self: Sized,
+    {
+        Self::encode_size_slice(values)
     }
 }
 
@@ -46,11 +116,56 @@ pub trait Write {
     /// Implementations should panic if the buffer doesn't have enough capacity.
     fn write(&self, buf: &mut impl BufMut);
 
+    /// Writes the encoded payload for a sequence, excluding any container-specific length
+    /// prefix.
+    ///
+    /// Container implementations call this hook so element types can provide a more efficient
+    /// aggregate write path. The default preserves normal element-by-element encoding.
+    ///
+    /// This hook exists because stable Rust cannot express the overlapping specialized
+    /// container impls that would otherwise provide this aggregate path directly.
+    ///
+    /// This is hidden from generated documentation because it is an implementation hook for
+    /// codec's container types, not part of the intended user-facing API. Most users should
+    /// implement [Write::write] instead.
+    #[doc(hidden)]
+    #[inline]
+    fn write_slice(values: &[Self], buf: &mut impl BufMut)
+    where
+        Self: Sized,
+    {
+        for item in values {
+            item.write(buf);
+        }
+    }
+
     /// Writes to a [`BufsMut`], allowing existing [`Bytes`] chunks to be
     /// appended via [`BufsMut::push`] instead of written inline. Must encode
     /// to the same format as [`Write::write`]. Defaults to [`Write::write`].
+    #[inline]
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         self.write(buf);
+    }
+
+    /// Writes the encoded payload for a sequence to a [`BufsMut`], excluding any
+    /// container-specific length prefix.
+    ///
+    /// This hidden hook is the slice equivalent of [Write::write_bufs]. The default preserves
+    /// normal element-by-element encoding.
+    ///
+    /// This hook exists because stable Rust cannot express the overlapping specialized
+    /// container impls that would otherwise provide this aggregate path directly.
+    ///
+    /// This is hidden from generated documentation for the same reason as [Write::write_slice].
+    #[doc(hidden)]
+    #[inline]
+    fn write_slice_bufs(values: &[Self], buf: &mut impl BufsMut)
+    where
+        Self: Sized,
+    {
+        for item in values {
+            item.write_bufs(buf);
+        }
     }
 }
 
@@ -71,6 +186,44 @@ pub trait Read: Sized {
     /// Returns [Error] if decoding fails due to invalid data, insufficient bytes in the buffer,
     /// or violation of constraints imposed by the `cfg`.
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
+
+    /// Reads `len` values from the buffer into a vector.
+    ///
+    /// Container implementations call this hook so element types can provide a more efficient
+    /// vector read path. The default preserves normal element-by-element decoding.
+    ///
+    /// This hook exists because stable Rust cannot express the overlapping specialized
+    /// container impls that would otherwise provide this aggregate path directly.
+    ///
+    /// This is hidden from generated documentation because it is an implementation hook for
+    /// codec's container types, not part of the intended user-facing API. Most users should
+    /// implement [Read::read_cfg] instead.
+    #[doc(hidden)]
+    #[inline]
+    fn read_vec(buf: &mut impl Buf, len: usize, cfg: &Self::Cfg) -> Result<Vec<Self>, Error> {
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            values.push(Self::read_cfg(buf, cfg)?);
+        }
+        Ok(values)
+    }
+
+    /// Reads exactly `N` values from the buffer into an array.
+    ///
+    /// This hidden hook is the array equivalent of [Read::read_vec]. The default preserves
+    /// normal element-by-element decoding.
+    ///
+    /// This hook exists because stable Rust cannot express the overlapping specialized array
+    /// impls that would otherwise provide this aggregate path directly.
+    ///
+    /// This is hidden from generated documentation for the same reason as [Read::read_vec].
+    #[doc(hidden)]
+    #[inline]
+    fn read_array<const N: usize>(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<[Self; N], Error> {
+        Ok(Self::read_vec(buf, N, cfg)?
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("array length should match capacity")))
+    }
 }
 
 /// Trait combining [Write] and [EncodeSize] for types that can be fully encoded.

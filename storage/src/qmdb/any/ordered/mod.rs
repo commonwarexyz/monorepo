@@ -16,10 +16,6 @@ use futures::{
     future::try_join_all,
     stream::{self, Stream},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Bound,
-};
 
 pub mod fixed;
 pub mod variable;
@@ -160,8 +156,9 @@ where
     where
         V: 'a,
     {
-        let start_iter = self.snapshot.get(&start);
-        let mut init_pending = self.fetch_all_updates(start_iter).await?;
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let start_locs: Vec<Location<F>> = self.snapshot.get(&start).copied().collect();
+        let mut init_pending = self.fetch_all_updates(start_locs.iter()).await?;
         init_pending.retain(|x| x.key >= start);
 
         Ok(stream::unfold(
@@ -172,16 +169,21 @@ where
                     return Some((Ok((item.key, item.value)), (driver_key, pending)));
                 }
 
-                let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key) else {
-                    return None; // DB is empty
+                // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+                let locs: Vec<Location<F>> = {
+                    let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key)
+                    else {
+                        return None; // DB is empty
+                    };
+                    if wrapped {
+                        return None; // End of DB
+                    }
+                    iter.copied().collect()
                 };
-                if wrapped {
-                    return None; // End of DB
-                }
 
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
                 // fetch a much larger batch of "pending" keys.
-                match self.fetch_all_updates(iter).await {
+                match self.fetch_all_updates(locs.iter()).await {
                     Ok(mut pending) => {
                         let item = pending.pop().expect("pending is not empty");
                         let key = item.key.clone();
@@ -210,18 +212,16 @@ where
     }
 }
 
-/// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
-/// first key if `key` is the last key.
+/// Returns the next key to `key` within `possible_next` (a sorted, deduplicated slice). The
+/// result will "cycle around" to the first key if `key` is the last key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
-    let next = possible_next
-        .range((Bound::Excluded(key), Bound::Unbounded))
-        .next();
-    if let Some(next) = next {
-        return next.clone();
+pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
+    let idx = possible_next.partition_point(|k| k <= key);
+    if idx < possible_next.len() {
+        return possible_next[idx].clone();
     }
     possible_next
         .first()
@@ -229,97 +229,66 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>
         .clone()
 }
 
-/// Returns the previous key to `key` within `possible_previous`. The result will "cycle around"
-/// to the last key if `key` is the first key.
+/// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
+/// The result will "cycle around" to the last entry if `key` is the first key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
 pub(crate) fn find_prev_key<'a, K: Ord, V>(
     key: &K,
-    possible_previous: &'a BTreeMap<K, V>,
+    possible_previous: &'a [(K, V)],
 ) -> (&'a K, &'a V) {
-    let prev = possible_previous
-        .range((Bound::Unbounded, Bound::Excluded(key)))
-        .next_back();
-    if let Some(prev) = prev {
-        return prev;
-    }
-    possible_previous
-        .iter()
-        .next_back()
-        .expect("possible_previous should not be empty")
+    let idx = possible_previous.partition_point(|(k, _)| k < key);
+    let (k, v) = if idx > 0 {
+        &possible_previous[idx - 1]
+    } else {
+        possible_previous
+            .last()
+            .expect("possible_previous should not be empty")
+    };
+    (k, v)
 }
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_db_any! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
+    [F, E, K, V, C, I, H] Db<F, E, C, I, H, Update<K, V>>
     where {
+        F: crate::merkle::Family,
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmr::Family, K, V>>,
-        I: Index<Value = crate::mmr::Location> + 'static,
+        C: PersistableMutableLog<Operation<F, K, V>>,
+        I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
-        Operation<crate::merkle::mmr::Family, K, V>: Codec,
+        Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
     }
-    Family = crate::merkle::mmr::Family, Key = K, Value = V::Value, Digest = H::Digest
+    Family = F, Key = K, Value = V::Value, Digest = H::Digest
 }
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_provable! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
+    [F, E, K, V, C, I, H] Db<F, E, C, I, H, Update<K, V>>
     where {
+        F: crate::merkle::Family,
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmr::Family, K, V>>,
-        I: Index<Value = crate::mmr::Location> + 'static,
+        C: PersistableMutableLog<Operation<F, K, V>>,
+        I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
-        Operation<crate::merkle::mmr::Family, K, V>: Codec,
+        Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
     }
-    Family = crate::merkle::mmr::Family, Operation = Operation<crate::merkle::mmr::Family, K, V>
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_db_any! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmb::Family, E, C, I, H, Update<K, V>>
-    where {
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmb::Family, K, V>>,
-        I: Index<Value = crate::merkle::Location<crate::merkle::mmb::Family>> + 'static,
-        H: Hasher,
-        Operation<crate::merkle::mmb::Family, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = crate::merkle::mmb::Family, Key = K, Value = V::Value, Digest = H::Digest
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_provable! {
-    [E, K, V, C, I, H] Db<crate::merkle::mmb::Family, E, C, I, H, Update<K, V>>
-    where {
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<crate::merkle::mmb::Family, K, V>>,
-        I: Index<Value = crate::merkle::Location<crate::merkle::mmb::Family>> + 'static,
-        H: Hasher,
-        Operation<crate::merkle::mmb::Family, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = crate::merkle::mmb::Family, Operation = Operation<crate::merkle::mmb::Family, K, V>
+    Family = F, Operation = Operation<F, K, V>
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        merkle::mmr,
+        merkle::Family,
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -328,17 +297,15 @@ mod test {
     use core::{future::Future, pin::Pin};
 
     pub(crate) async fn test_ordered_any_db_empty<
-        D: DbAny<mmr::Family, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        F: Family,
+        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
         assert!(db.get_metadata().await.unwrap().is_none());
-        assert!(matches!(
-            db.prune(db.inactivity_floor_loc().await).await,
-            Ok(())
-        ));
+        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
@@ -361,10 +328,7 @@ mod test {
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
-        assert!(matches!(
-            db.prune(db.inactivity_floor_loc().await).await,
-            Ok(())
-        ));
+        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.with_label("reopen2")).await;
@@ -384,7 +348,8 @@ mod test {
     }
 
     pub(crate) async fn test_ordered_any_db_basic<
-        D: DbAny<mmr::Family, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        F: Family,
+        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         mut db: D,
@@ -577,7 +542,7 @@ mod test {
 
         // Pruning inactive ops should not affect current state or root.
         let root = db.root();
-        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+        db.prune(db.sync_boundary().await).await.unwrap();
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -586,7 +551,8 @@ mod test {
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
-        D: DbAny<mmr::Family, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        F: Family,
+        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         mut db: D,
     ) {

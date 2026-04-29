@@ -16,7 +16,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{journaled::Config as MerkleConfig, mmb},
+    merkle::{full::Config as MerkleConfig, mmb},
     qmdb::current::{unordered::fixed::Db as CurrentDb, BitmapPrunedBits, FixedConfig as Config},
     translator::TwoCap,
 };
@@ -215,7 +215,7 @@ async fn commit_pending(
 }
 
 async fn prune_to_floor(db: &mut Db, reference_db: &Db, context: &str) {
-    db.prune(db.inactivity_floor_loc())
+    db.prune(db.sync_boundary())
         .await
         .expect("prune should not fail");
     assert_matches_reference(db, reference_db, context).await;

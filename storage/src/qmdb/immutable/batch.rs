@@ -44,7 +44,7 @@ where
     H: CHasher,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
-    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<K, V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>>,
 
     /// Pending mutations.
     mutations: BTreeMap<K, V::Value>,
@@ -65,7 +65,7 @@ where
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<K, V>>>,
+    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -92,6 +92,13 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
     /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
     pub(super) ancestor_diff_ends: Vec<u64>,
+
+    /// The inactivity floor declared by each ancestor batch's commit operation.
+    /// 1:1 with `ancestor_diffs` and `ancestor_diff_ends`.
+    pub(super) ancestor_new_inactivity_floor_locs: Vec<Location<F>>,
+
+    /// The inactivity floor declared by this batch's commit operation.
+    pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
@@ -100,7 +107,7 @@ where
     K: Key,
     V: ValueEncoding,
     H: CHasher,
-    Operation<K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C, T>(
@@ -109,7 +116,7 @@ where
     ) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -139,7 +146,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -163,15 +170,86 @@ where
         db.get(key).await
     }
 
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, T>(
+        &self,
+        keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+        T: Translator,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local mutations.
+            if let Some(value) = self.mutations.get(*key) {
+                results.push(Some(value.clone()));
+                continue;
+            }
+
+            // Check parent diff chain.
+            let mut found = false;
+            if let Some(parent) = self.parent.as_ref() {
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                    results.push(Some(entry.value.clone()));
+                    found = true;
+                }
+                if !found {
+                    for batch in parent.ancestors() {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                            results.push(Some(entry.value.clone()));
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None);
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// `inactivity_floor` declares that all operations before this location are inactive.
+    /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     pub fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T>,
         metadata: Option<V::Value>,
+        inactivity_floor: Location<F>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, K, V>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -179,7 +257,7 @@ where
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
-        let mut ops: Vec<Operation<K, V>> = Vec::with_capacity(self.mutations.len() + 1);
+        let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(self.mutations.len());
 
         for (key, value) in self.mutations {
@@ -189,7 +267,7 @@ where
         }
         debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
 
-        ops.push(Operation::Commit(metadata));
+        ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
 
@@ -202,12 +280,15 @@ where
 
         let mut ancestor_diffs = Vec::new();
         let mut ancestor_diff_ends = Vec::new();
+        let mut ancestor_new_inactivity_floor_locs = Vec::new();
         if let Some(parent) = &self.parent {
             ancestor_diffs.push(Arc::clone(&parent.diff));
             ancestor_diff_ends.push(parent.total_size);
+            ancestor_new_inactivity_floor_locs.push(parent.new_inactivity_floor_loc);
             for batch in parent.ancestors() {
                 ancestor_diffs.push(Arc::clone(&batch.diff));
                 ancestor_diff_ends.push(batch.total_size);
+                ancestor_new_inactivity_floor_locs.push(batch.new_inactivity_floor_loc);
             }
         }
 
@@ -220,13 +301,15 @@ where
             db_size: self.db_size,
             ancestor_diffs,
             ancestor_diff_ends,
+            ancestor_new_inactivity_floor_locs,
+            new_inactivity_floor_loc: inactivity_floor,
         })
     }
 }
 
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
 where
-    Operation<K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
 {
     /// Return the speculative root.
     pub fn root(&self) -> D {
@@ -251,7 +334,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -265,6 +348,66 @@ where
             }
         }
         db.get(key).await
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, H, T>(
+        &self,
+        keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+        H: CHasher<Digest = D>,
+        T: Translator,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local diff.
+            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
+                results.push(Some(entry.value.clone()));
+                continue;
+            }
+
+            // Walk parent chain.
+            let mut found = false;
+            for batch in self.ancestors() {
+                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                    results.push(Some(entry.value.clone()));
+                    found = true;
+                    break;
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None);
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
@@ -292,7 +435,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
@@ -309,6 +452,8 @@ where
             db_size: journal_size,
             ancestor_diffs: Vec::new(),
             ancestor_diff_ends: Vec::new(),
+            ancestor_new_inactivity_floor_locs: Vec::new(),
+            new_inactivity_floor_loc: self.inactivity_floor_loc,
         })
     }
 }

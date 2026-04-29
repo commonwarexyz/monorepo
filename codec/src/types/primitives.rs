@@ -22,8 +22,12 @@ use crate::{
     util::at_least, varint::UInt, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt,
     Write,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 // Numeric types implementation
 macro_rules! impl_numeric {
@@ -50,7 +54,6 @@ macro_rules! impl_numeric {
     };
 }
 
-impl_numeric!(u8, get_u8, put_u8);
 impl_numeric!(u16, get_u16, put_u16);
 impl_numeric!(u32, get_u32, put_u32);
 impl_numeric!(u64, get_u64, put_u64);
@@ -62,6 +65,53 @@ impl_numeric!(i64, get_i64, put_i64);
 impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
+
+impl Write for u8 {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_u8(*self);
+    }
+
+    #[inline]
+    fn write_slice(values: &[Self], buf: &mut impl BufMut) {
+        buf.put_slice(values);
+    }
+
+    #[inline]
+    fn write_slice_bufs(values: &[Self], buf: &mut impl BufsMut) {
+        buf.put_slice(values);
+    }
+}
+
+impl Read for u8 {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        at_least(buf, 1)?;
+        Ok(buf.get_u8())
+    }
+
+    #[inline]
+    fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
+        at_least(buf, len)?;
+        let mut values = vec![0; len];
+        buf.copy_to_slice(&mut values);
+        Ok(values)
+    }
+
+    #[inline]
+    fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
+        at_least(buf, N)?;
+        let mut values = [0; N];
+        buf.copy_to_slice(&mut values);
+        Ok(values)
+    }
+}
+
+impl FixedSize for u8 {
+    const SIZE: usize = 1;
+}
 
 macro_rules! impl_nonzero {
     ($nz:ty, $inner:ty, $name:expr) => {
@@ -147,27 +197,34 @@ impl FixedSize for bool {
     const SIZE: usize = 1;
 }
 
-// Constant-size array implementation
-impl<const N: usize> Write for [u8; N] {
+// Arrays can always be written and read when their element can. This gives arrays
+// with variable-size elements `Write`, `Read`, and therefore `Decode`, but not
+// `Encode`. A generic `EncodeSize for [T; N]` would overlap with the blanket
+// `EncodeSize` implementation for all `FixedSize` types, so only arrays whose
+// elements are fixed-size become `FixedSize` and therefore `Encode`/`Codec`.
+impl<T: Write, const N: usize> Write for [T; N] {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put(&self[..]);
+        T::write_slice(self, buf);
     }
-}
 
-impl<const N: usize> Read for [u8; N] {
-    type Cfg = ();
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        at_least(buf, N)?;
-        let mut dst = [0; N];
-        buf.copy_to_slice(&mut dst);
-        Ok(dst)
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        T::write_slice_bufs(self, buf);
     }
 }
 
-impl<const N: usize> FixedSize for [u8; N] {
-    const SIZE: usize = N;
+impl<T: Read, const N: usize> Read for [T; N] {
+    type Cfg = T::Cfg;
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        T::read_array(buf, cfg)
+    }
+}
+
+impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
+    const SIZE: usize = T::SIZE * N;
 }
 
 impl Write for () {
@@ -235,9 +292,12 @@ impl<T: Read> Read for Option<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{Decode, DecodeExt, Encode, EncodeFixed};
-    use bytes::{Bytes, BytesMut};
+    use super::{
+        super::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
+        *,
+    };
+    use crate::{CodecFixed, Decode, DecodeExt, Encode, EncodeFixed};
+    use bytes::{Buf, Bytes, BytesMut};
     use paste::paste;
 
     // Float tests
@@ -334,10 +394,131 @@ mod tests {
 
     #[test]
     fn test_array() {
-        let values = [1u8, 2, 3];
-        let encoded = values.encode();
+        // Arrays whose elements are fixed-size get the full `Codec` stack.
+        fn assert_codec_fixed<T: CodecFixed<Cfg = ()>>() {}
+        assert_codec_fixed::<[u8; 3]>();
+        assert_codec_fixed::<[u16; 3]>();
+
+        // `[u8; N]` encodes exactly N payload bytes, with no length prefix.
+        let bytes = [1u8, 2, 3];
+        let encoded = bytes.encode();
         let decoded = <[u8; 3]>::decode(encoded).unwrap();
-        assert_eq!(values, decoded);
+        assert_eq!(bytes, decoded);
+        assert_eq!(<[u8; 3] as FixedSize>::SIZE, 3);
+
+        // Fixed-size array decoding must reject both truncated payloads and trailing data.
+        assert!(matches!(
+            <[u8; 3]>::decode([0x01, 0x02].as_slice()),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            <[u8; 3]>::decode([0x01, 0x02, 0x03, 0x04].as_slice()),
+            Err(Error::ExtraData(1))
+        ));
+
+        // Larger fixed-size elements compose normally and preserve big-endian encoding.
+        let words = [0x0102u16, 0x0304u16, 0x0506u16];
+        let encoded = words.encode();
+        assert_eq!(encoded, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06][..]);
+        let decoded = <[u16; 3]>::decode(encoded).unwrap();
+        assert_eq!(words, decoded);
+        assert_eq!(words.encode_size(), 6);
+        assert_eq!(<[u16; 3] as FixedSize>::SIZE, 6);
+
+        // Nested arrays inherit the same fixed-size encoding from their elements.
+        let nested = [[0x0102u16, 0x0304u16], [0x0506u16, 0x0708u16]];
+        let encoded = nested.encode();
+        assert_eq!(
+            encoded,
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08][..]
+        );
+        let decoded = <[[u16; 2]; 2]>::decode(encoded).unwrap();
+        assert_eq!(nested, decoded);
+
+        // Arrays of configurable elements pass the element config through each read.
+        let decoded =
+            <[usize; 2]>::decode_cfg(Bytes::from_static(&[0x01, 0x02]), &(..).into()).unwrap();
+        assert_eq!(decoded, [1, 2]);
+
+        // Arrays with variable-size elements can still be written and read, even though
+        // they cannot use `Encode` because they do not have a generic `EncodeSize` impl.
+        let variable = [vec![1u8, 2], vec![3u8, 4, 5]];
+        let mut encoded = BytesMut::new();
+        variable.write(&mut encoded);
+        assert_eq!(encoded, &[0x02, 0x01, 0x02, 0x03, 0x03, 0x04, 0x05][..]);
+
+        let mut encoded = encoded.freeze();
+        let decoded = <[Vec<u8>; 2]>::read_cfg(&mut encoded, &((..).into(), ())).unwrap();
+        assert_eq!(variable, decoded);
+        assert_eq!(encoded.remaining(), 0);
+    }
+
+    #[test]
+    fn test_array_specialization_selection() {
+        // `[u8; N]` has no length prefix, so the entire write is one bulk payload write.
+        let mut buf = TrackingWriteBuf::new();
+        [1u8, 2, 3].write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 0);
+
+        // Other array element types keep the generic per-element write path.
+        let mut buf = TrackingWriteBuf::new();
+        [Byte(1), Byte(2), Byte(3)].write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 3);
+
+        // `write_bufs` mirrors `write` for byte arrays.
+        let mut buf = TrackingWriteBuf::new();
+        [1u8, 2, 3].write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 0);
+        assert_eq!(buf.push_calls, 0);
+
+        // Arrays delegate `write_bufs` to element implementations that push chunks.
+        let mut buf = TrackingWriteBuf::new();
+        [
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ]
+        .write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 2);
+        assert_eq!(buf.push_calls, 2);
+
+        // `[u8; N]` reads the fixed-size payload with one bulk copy.
+        let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);
+        let value = <[u8; 3]>::read_cfg(&mut buf, &()).unwrap();
+        assert_eq!(value, [1, 2, 3]);
+        assert_eq!(buf.copy_to_slice_calls, 1);
+        assert_eq!(buf.get_u8_calls, 0);
+
+        // Other array element types still read one element at a time.
+        let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);
+        let value = <[Byte; 3]>::read_cfg(&mut buf, &()).unwrap();
+        assert_eq!(value, [Byte(1), Byte(2), Byte(3)]);
+        assert_eq!(buf.copy_to_slice_calls, 0);
+        assert_eq!(buf.get_u8_calls, 3);
+    }
+
+    #[test]
+    fn test_array_write_bufs_equivalence() {
+        fn assert_equivalent<T: Write>(value: &T) {
+            let mut write = BytesMut::new();
+            value.write(&mut write);
+
+            let mut write_bufs = TrackingWriteBuf::new();
+            value.write_bufs(&mut write_bufs);
+
+            assert_eq!(write.freeze(), write_bufs.freeze());
+        }
+
+        assert_equivalent(&[1u8, 2, 3]);
+        assert_equivalent(&[0x0102u16, 0x0304, 0x0506]);
+        assert_equivalent(&[Byte(1), Byte(2), Byte(3)]);
+        assert_equivalent(&[
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ]);
     }
 
     #[test]
@@ -513,8 +694,8 @@ mod tests {
         );
 
         // Fixed-size array
-        assert_eq!([1, 2, 3].encode(), &[0x01, 0x02, 0x03][..]);
-        assert_eq!([].encode(), &[][..]);
+        assert_eq!([1u8, 2, 3].encode(), &[0x01, 0x02, 0x03][..]);
+        assert_eq!([0u8; 0].encode(), &[][..]);
 
         // Option
         assert_eq!(Some(42u32).encode(), &[0x01, 0x00, 0x00, 0x00, 0x2A][..]);

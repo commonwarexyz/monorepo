@@ -1,9 +1,9 @@
 //! Keyless database types and helpers for the sync example.
 //!
 //! A `keyless` database is append-only: operations are stored by location rather than by key.
-//! It supports `Append(value)` and `Commit(metadata)` operations. For sync, the engine targets
-//! the Merkle root over all operations, and the client reconstructs the same state by replaying
-//! the fetched operations.
+//! It supports `Append(value)` and `Commit(metadata, floor)` operations. For sync, the engine
+//! targets the Merkle root over all operations, and the client reconstructs the same state by
+//! replaying the fetched operations.
 
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
@@ -11,13 +11,14 @@ use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
-        journaled::Config as MmrConfig,
+        full::Config as MmrConfig,
         mmr::{self, Location, Proof},
     },
     qmdb::{
         self,
         keyless::{self, fixed},
         operation::Committable,
+        sync::compact,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -28,7 +29,7 @@ use tracing::error;
 pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher>;
 
 /// Operation type alias.
-pub type Operation = fixed::Operation<Value>;
+pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the keyless variant.
 pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)) -> fixed::Config {
@@ -56,10 +57,14 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
 }
 
 /// Create deterministic test operations for demonstration purposes.
-/// Generates Append operations and periodic Commit operations.
-pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
+///
+/// Generates Append operations and periodic Commit operations. Every commit in the stream
+/// carries `starting_loc` as its inactivity floor. Pass `0` for a fresh db; for growth, pass
+/// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
+pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
+    let floor = Location::new(starting_loc);
 
     for i in 0..count {
         let value = {
@@ -71,24 +76,24 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Append(value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None));
+            operations.push(Operation::Commit(None, floor));
         }
     }
 
-    // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1))));
+    // Always end with a commit.
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), floor));
     operations
 }
 
-impl<E> super::Syncable for Database<E>
+impl<E> super::ExampleDatabase for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
     type Family = mmr::Family;
     type Operation = Operation;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_test_operations(count, seed)
+    fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Self::Operation> {
+        create_test_operations(count, seed, starting_loc)
     }
 
     async fn add_operations(
@@ -107,8 +112,8 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata) => {
-                    let merkleized = batch.merkleize(self, metadata);
+                Operation::Commit(metadata, floor) => {
+                    let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
@@ -118,18 +123,29 @@ where
         Ok(())
     }
 
+    fn current_floor(&self) -> u64 {
+        *self.last_commit_loc()
+    }
+
     fn root(&self) -> Key {
         self.root()
     }
 
+    fn name() -> &'static str {
+        "keyless"
+    }
+}
+
+impl<E> super::Syncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
     async fn size(&self) -> Location {
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        // Keyless databases have no inactivity floor concept.
-        // Use the pruning boundary, same as immutable.
-        self.bounds().await.start
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
     }
 
     async fn historical_proof(
@@ -144,26 +160,34 @@ where
     async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<Key>, qmdb::Error<mmr::Family>> {
         self.pinned_nodes_at(loc).await
     }
+}
 
-    fn name() -> &'static str {
-        "keyless"
+impl<E> super::CompactSyncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    async fn current_target(&self) -> compact::Target<Self::Family, Key> {
+        compact::Target {
+            root: self.root(),
+            leaf_count: self.bounds().await.end,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::databases::Syncable;
+    use crate::databases::ExampleDatabase;
     use commonware_runtime::deterministic;
 
     type KeylessDb = Database<deterministic::Context>;
 
     #[test]
     fn test_create_test_operations() {
-        let ops = <KeylessDb as Syncable>::create_test_operations(5, 12345);
+        let ops = <KeylessDb as ExampleDatabase>::create_test_operations(5, 12345, 0);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::Commit(Some(_)) = &ops[5] {
+        if let Operation::Commit(Some(_), _) = &ops[5] {
             // ok
         } else {
             panic!("last operation should be a commit with metadata");
@@ -173,12 +197,12 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Operations should be deterministic based on seed
-        let ops1 = <KeylessDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <KeylessDb as Syncable>::create_test_operations(3, 12345);
+        let ops1 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
+        let ops2 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 12345, 0);
         assert_eq!(ops1, ops2);
 
         // Different seeds should produce different operations
-        let ops3 = <KeylessDb as Syncable>::create_test_operations(3, 54321);
+        let ops3 = <KeylessDb as ExampleDatabase>::create_test_operations(3, 54321, 0);
         assert_ne!(ops1, ops3);
     }
 }

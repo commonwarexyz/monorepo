@@ -27,8 +27,8 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
+curve25519-dalek = { workspace = true, features = ["digest"] }
 ecdsa.workspace = true
-ed25519-consensus = { workspace = true, default-features = false }
 num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 p256 = { workspace = true, features = ["ecdsa"] }
@@ -95,7 +95,6 @@ std = [
 	"crc-fast",
 	"crc-fast?/std",
 	"ecdsa/std",
-	"ed25519-consensus/std",
 	"getrandom/std",
 	"num-rational",
 	"num-traits",

@@ -10,7 +10,9 @@ pub mod batch;
 pub(crate) mod conformance;
 pub mod hasher;
 #[cfg(feature = "std")]
-pub mod journaled;
+mod persisted;
+#[cfg(feature = "std")]
+pub use persisted::{compact, full};
 mod location;
 pub mod mem;
 pub mod mmb;
@@ -67,7 +69,7 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// Return the peaks of a structure with the given `size` as `(position, height)` pairs
     /// in canonical oldest-to-newest order (suitable for
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
-    fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
+    fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
 
     /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
     ///
@@ -282,4 +284,8 @@ pub enum Error<F: Family> {
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
+
+    /// Rewind was attempted but no prior committed state is available.
+    #[error("rewind beyond history")]
+    RewindBeyondHistory,
 }

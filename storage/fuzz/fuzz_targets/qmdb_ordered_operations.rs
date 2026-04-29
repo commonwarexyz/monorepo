@@ -7,7 +7,7 @@ use commonware_storage::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location, Proof},
-    mmr::journaled::Config as MerkleConfig,
+    mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
             db::Db as AnyDb,

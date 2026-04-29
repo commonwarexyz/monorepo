@@ -32,14 +32,32 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
+//! # Specialization
+//!
+//! Byte-oriented container paths use hidden trait hooks on [Write], [Read], and [EncodeSize] to
+//! select bulk-copy implementations while keeping generic fallbacks. Container implementations
+//! call hooks such as `T::write_slice`, `T::read_vec`, and `T::encode_size_slice`. The default
+//! methods preserve element-by-element behavior, while concrete element implementations can
+//! override only the paths they can make faster.
+//!
+//! Encoding specialization has two parts: aggregate sizing and aggregate writing. For example,
+//! `Vec<u8>::encode()` first asks for the output size, then writes the bytes. The [EncodeSize]
+//! slice hooks let fixed-size elements compute `SIZE * len` without scanning every element, while
+//! the [Write] slice hooks let byte containers write the payload with one bulk copy.
+//!
+//! These hooks keep the container code generic: a container like `Vec<T>` calls one element-level
+//! method for sizing, writing, or reading, and the element implementation decides whether the
+//! default element-by-element behavior or a bulk path applies.
+//!
 //! # Supported Types
 //!
 //! Natively supports encoding/decoding for:
 //! - Primitives: [bool],
 //!   [u8], [u16], [u32], [u64], [u128],
 //!   [i8], [i16], [i32], [i64], [i128],
-//!   [f32], [f64], [u8; N],
-//!   and [usize] (must fit within a [u32] for cross-platform compatibility).
+//!   [f32], [f64], and [usize] (must fit within a [u32] for cross-platform compatibility).
+//! - Arrays: `[T; N]` supports [Write] and [Read] when `T` does, and supports [FixedSize],
+//!   [Encode], [Codec], [EncodeFixed], and [CodecFixed] when `T: FixedSize`.
 //! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Common External Types: [::bytes::Bytes]

@@ -427,7 +427,7 @@ pub(crate) mod test {
 
             // Test that apply_batch + sync w/ pruning will raise the activity floor.
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             assert_eq!(db.snapshot.items(), 857);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -494,7 +494,7 @@ pub(crate) mod test {
                 db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
             }
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
             let inactivity_floor_loc = db.inactivity_floor_loc();
@@ -1656,7 +1656,7 @@ pub(crate) mod test {
         use super::*;
         use crate::{
             merkle::{
-                mmr::{self, journaled::Mmr},
+                mmr::{self, full::Mmr},
                 Family as _,
             },
             qmdb::any::sync::tests::FromSyncTestable,
@@ -1666,9 +1666,9 @@ pub(crate) mod test {
         type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
-            type Mmr = TestMmr;
+            type Merkle = TestMmr;
 
-            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
                 (self.log.merkle, self.log.journal)
             }
 

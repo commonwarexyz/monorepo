@@ -383,6 +383,7 @@ impl<D: Digest> CheckingData<D> {
     ///
     /// We're also give a `checksum` matrix used to check the shards we receive.
     fn reckon(
+        namespace: &[u8],
         config: &Config,
         commitment: &Summary,
         data_bytes: usize,
@@ -391,6 +392,7 @@ impl<D: Digest> CheckingData<D> {
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE);
+        transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let expected_commitment = transcript.summarize();
@@ -517,6 +519,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     type Error = Error;
 
     fn encode(
+        namespace: &[u8],
         config: &Config,
         data: impl bytes::Buf,
         strategy: &impl Strategy,
@@ -550,6 +553,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
 
         // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
+        transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
@@ -595,6 +599,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     }
 
     fn weaken(
+        namespace: &[u8],
         config: &Config,
         commitment: &Self::Commitment,
         index: u16,
@@ -605,6 +610,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             shard: shard.rows,
         };
         let checking_data = CheckingData::reckon(
+            namespace,
             config,
             commitment,
             shard.data_bytes,
@@ -703,10 +709,11 @@ mod tests {
             extra_shards: NZU16!(1),
         };
         let data = b"duplicate shard coverage";
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+        let (commitment, shards) =
+            Zoda::<Sha256>::encode(b"", &config, &data[..], &STRATEGY).unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _weak_shard0) =
-            Zoda::<Sha256>::weaken(&config, &commitment, 0, shard0).unwrap();
+            Zoda::<Sha256>::weaken(b"", &config, &commitment, 0, shard0).unwrap();
         let duplicate = CheckedShard {
             index: checked_shard0.index,
             shard: checked_shard0.shard.clone(),
@@ -759,7 +766,7 @@ mod tests {
         };
         let data = vec![0x5Au8; 256 * 1024];
         let (commitment, mut shards) =
-            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+            Zoda::<Sha256>::encode(b"", &config, &data[..], &STRATEGY).unwrap();
 
         let leader_i = 0usize;
         let a_i = 1usize;
@@ -768,6 +775,7 @@ mod tests {
         // Apply a shift to the checksums
         {
             let (checking_data, _, _) = Zoda::<Sha256>::weaken(
+                b"",
                 &config,
                 &commitment,
                 leader_i as u16,
@@ -791,14 +799,14 @@ mod tests {
         }
 
         assert!(matches!(
-            Zoda::<Sha256>::weaken(&config, &commitment, b_i as u16, shards[b_i].clone()),
+            Zoda::<Sha256>::weaken(b"", &config, &commitment, b_i as u16, shards[b_i].clone()),
             Err(Error::InvalidWeakShard)
         ));
 
         // Without robust Fiat-Shamir, this will succeed.
         // This should be rejected once follower-specific challenge binding is fixed.
         assert!(matches!(
-            Zoda::<Sha256>::weaken(&config, &commitment, a_i as u16, shards[a_i].clone()),
+            Zoda::<Sha256>::weaken(b"", &config, &commitment, a_i as u16, shards[a_i].clone()),
             Err(Error::InvalidWeakShard)
         ));
     }

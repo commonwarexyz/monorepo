@@ -346,11 +346,7 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(
-            &mut self,
-            id: u64,
-            peers: R,
-        ) -> impl Future<Output = ()> + Send
+        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send;
     }
@@ -382,11 +378,7 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(
-            &mut self,
-            id: u64,
-            peers: R,
-        ) -> impl Future<Output = ()> + Send
+        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
         where
             R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
 

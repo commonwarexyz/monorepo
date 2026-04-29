@@ -4,22 +4,22 @@
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
 //!
-//! This module is a thin wrapper around the generic `Journaled` type, specialized for the
+//! This module is a thin wrapper around the generic `Merkle` type, specialized for the
 //! MMR [Family]. It re-exports [Config], [SyncConfig], and the append-only
-//! [`UnmerkleizedBatch`] wrapper from `merkle::journaled`. Async proof methods (`proof`,
+//! [`UnmerkleizedBatch`] wrapper from `merkle::full`. Async proof methods (`proof`,
 //! `range_proof`, `historical_proof`, `historical_range_proof`) and the `Storage<F>` impl are
-//! provided by the generic `Journaled` in `merkle::journaled`.
+//! provided by the generic `Merkle` in `merkle::full`.
 
 /// Configuration for a journal-backed MMR.
-pub use crate::merkle::journaled::Config;
-pub use crate::merkle::journaled::UnmerkleizedBatch;
+pub use crate::merkle::full::Config;
+pub use crate::merkle::full::UnmerkleizedBatch;
 use crate::merkle::mmr::Family;
 
-/// Configuration for initializing a journaled MMR for synchronization.
-pub type SyncConfig<D> = crate::merkle::journaled::SyncConfig<Family, D>;
+/// Configuration for initializing a full MMR for synchronization.
+pub type SyncConfig<D> = crate::merkle::full::SyncConfig<Family, D>;
 
 /// A MMR backed by a fixed-item-length journal.
-pub type Mmr<E, D> = crate::merkle::journaled::Journaled<Family, E, D>;
+pub type Mmr<E, D> = crate::merkle::full::Merkle<Family, E, D>;
 
 #[cfg(test)]
 mod tests {
@@ -33,7 +33,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {
@@ -54,9 +54,9 @@ mod tests {
         }
     }
 
-    /// Test that the journaled MMR produces the same root as the in-memory reference.
+    /// Test that the full MMR produces the same root as the in-memory reference.
     #[test]
-    fn test_journaled_mmr_batched_root() {
+    fn test_full_mmr_batched_root() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
@@ -65,7 +65,7 @@ mod tests {
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let mut journaled_mmr = Mmr::init(
+            let mut mmr = Mmr::init(
                 context.clone(),
                 &Standard::<Sha256>::new(),
                 test_config(&context),
@@ -73,21 +73,21 @@ mod tests {
             .await
             .unwrap();
 
-            let mut batch = journaled_mmr.new_batch();
+            let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let batch = journaled_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            journaled_mmr.apply_batch(&batch).unwrap();
-            assert_eq!(journaled_mmr.root(), *expected_root);
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap();
+            assert_eq!(mmr.root(), *expected_root);
 
-            journaled_mmr.destroy().await.unwrap();
+            mmr.destroy().await.unwrap();
         });
     }
 
     #[test]
-    fn test_journaled_mmr_peek_root_empty_journal() {
+    fn test_full_mmr_peek_root_empty_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new();
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_pop() {
+    fn test_full_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 200;
@@ -231,12 +231,12 @@ mod tests {
     /// Create batch A, merkleize, create batch B via `merkleized_a.new_batch()`,
     /// merkleize, apply, and verify root matches a reference MMR.
     #[test_traced]
-    fn test_journaled_mmr_batch_stacking() {
+    fn test_full_mmr_batch_stacking() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new();
 
-            // Build base journaled MMR with 10 elements.
+            // Build base full MMR with 10 elements.
             let mut mmr = Mmr::init(
                 context.clone(),
                 &Standard::<Sha256>::new(),
@@ -339,7 +339,7 @@ mod tests {
             // "fresh start" path (clear_to_size).
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(&context),
-                range: Location::new(100)..Location::new(200),
+                range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
             let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)

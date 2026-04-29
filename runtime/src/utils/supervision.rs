@@ -221,9 +221,8 @@ impl Drop for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::MetricHandle;
+    use crate::{telemetry::metrics::raw::Gauge, utils::MetricHandle};
     use futures::future::{pending, AbortHandle, Abortable};
-    use prometheus_client::metrics::gauge::Gauge;
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
         let gauge = Gauge::default();

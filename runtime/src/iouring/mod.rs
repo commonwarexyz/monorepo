@@ -85,9 +85,10 @@
 //! 3. Ready-queue requests that were already admitted and need another SQE.
 //! 4. Fresh requests drained from the channel, until waiter or SQ capacity is hit.
 //!
-//! During shutdown, there is no new channel work, so the drain phase continues
-//! servicing cancellations and the ready queue until requests complete, time
-//! out, or are abandoned by `shutdown_timeout`.
+//! After the channel has closed and buffered channel work has been drained,
+//! there is no new channel work, so the drain phase continues servicing
+//! cancellations and the ready queue until requests complete, time out, or are
+//! abandoned by `shutdown_timeout`.
 //!
 //! ## Wake Handling
 //!
@@ -105,13 +106,19 @@
 //!
 //! ## Shutdown Process
 //!
-//! When the request channel closes, the event loop enters a drain phase:
+//! When the request channel is closed and no buffered requests remain, the event
+//! loop enters a drain phase:
 //! 1. Stops accepting new requests
 //! 2. Waits for all in-flight requests to complete or be cancelled
 //! 3. If `shutdown_timeout` is configured, abandons remaining requests after the timeout
 //! 4. Cleans up and exits. Dropping the last submitter latches one wake and, if a
 //!    target is currently armed, signals it immediately so shutdown is observed
 //!    promptly whether the loop is already blocked or about to sleep.
+//!
+//! If waiter capacity is full when the last submitter disconnects, buffered
+//! channel work is still drained as capacity becomes available before drain
+//! begins. `shutdown_timeout` bounds only the drain phase after that buffered
+//! work has been drained.
 //!
 //! ## Liveness Model
 //!
@@ -148,7 +155,10 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{
+    telemetry::metrics::{raw, Gauge, Register},
+    Error, IoBufMut, IoBufs,
+};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
@@ -160,7 +170,6 @@ use io_uring::{
     types::{SubmitArgs, Timespec},
     IoUring,
 };
-use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
 use std::{
     collections::VecDeque,
@@ -177,6 +186,9 @@ mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
 use waker::{Waker, HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
+mod spinner;
+pub use spinner::Config as SpinnerConfig;
+use spinner::Spinner;
 
 /// Maximum rounded ring size accepted by [`Config::size`].
 ///
@@ -198,16 +210,14 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(registry: &mut Registry) -> Self {
-        let metrics = Self {
-            pending_operations: Gauge::default(),
-        };
-        registry.register(
-            "pending_operations",
-            "Number of active logical requests in the io_uring loop",
-            metrics.pending_operations.clone(),
-        );
-        metrics
+    pub fn new(registry: &mut impl Register) -> Self {
+        Self {
+            pending_operations: registry.register(
+                "pending_operations",
+                "Number of active logical requests in the io_uring loop",
+                raw::Gauge::default(),
+            ),
+        }
     }
 }
 
@@ -238,17 +248,21 @@ pub struct Config {
     /// Deadlines are clamped to this horizon. This value should be set to the
     /// largest expected per-request deadline budget.
     pub max_request_timeout: Duration,
-    /// The maximum time the io_uring event loop will wait for in-flight requests
-    /// to complete before abandoning them during shutdown.
+    /// The maximum time the io_uring event loop will wait during the drain phase
+    /// after producer disconnect has been fully observed and buffered channel
+    /// work has been drained.
+    ///
     /// If None, the event loop will wait indefinitely for in-flight requests
-    /// to complete before shutting down. In this case, the caller should be careful
-    /// to ensure that the requests submitted to the io_uring will eventually complete.
+    /// to complete during that drain phase. In this case, the caller should be
+    /// careful to ensure that submitted requests will eventually complete.
     pub shutdown_timeout: Option<Duration>,
     /// Tick granularity used by the userspace timeout wheel.
     ///
     /// Smaller values increase timing precision but increase wakeup and wheel
     /// processing frequency.
     pub timeout_wheel_tick: Duration,
+    /// Adaptive idle spinner configuration.
+    pub idle_spinner: SpinnerConfig,
 }
 
 impl Default for Config {
@@ -260,6 +274,7 @@ impl Default for Config {
             max_request_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
             timeout_wheel_tick: Duration::from_millis(5),
+            idle_spinner: SpinnerConfig::default(),
         }
     }
 }
@@ -330,6 +345,7 @@ impl Handle {
     }
 
     /// Submit a logical recv request and wait for its completion.
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     pub async fn recv(
         &self,
@@ -371,6 +387,7 @@ impl Handle {
     }
 
     /// Submit a logical positioned read request and wait for its completion.
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn read_at(
         &self,
@@ -447,6 +464,7 @@ pub(crate) struct IoUringLoop {
     ready_queue: VecDeque<WaiterId>,
     pending_cancels: VecDeque<WaiterId>,
     timeout_wheel: TimeoutWheel,
+    idle_spinner: Spinner,
     waker: Waker,
     wake_rearm_needed: bool,
     processed_seq: u32,
@@ -506,7 +524,7 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Handle, Self) {
+    pub(crate) fn new(mut cfg: Config, registry: &mut impl Register) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
@@ -536,8 +554,8 @@ impl IoUringLoop {
             cfg.timeout_wheel_tick,
             Instant::now(),
         );
+        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.pending(0));
         let waiters = Waiters::new(size);
-
         let handle = Handle {
             inner: Arc::new(HandleInner {
                 sender: Some(sender),
@@ -555,6 +573,7 @@ impl IoUringLoop {
                 ready_queue: VecDeque::with_capacity(size),
                 pending_cancels: VecDeque::with_capacity(size),
                 timeout_wheel,
+                idle_spinner,
                 waker,
                 wake_rearm_needed: true,
                 processed_seq: 0,
@@ -625,9 +644,18 @@ impl IoUringLoop {
             // If the ring is truly idle, avoid `io_uring_enter` entirely and
             // wait on the shared wake state via futex until a producer changes
             // it. This bypasses the eventfd wake path when there are no active
-            // waiters.
+            // waiters. Before parking, spin briefly to avoid the futex
+            // round-trip when work is imminent.
             if self.waiters.is_empty() {
-                self.waker.park_idle(self.processed_seq);
+                if self
+                    .idle_spinner
+                    .spin(|| self.waker.pending(self.processed_seq))
+                {
+                    continue;
+                }
+                if let Some(park_duration) = self.waker.park_idle(self.processed_seq) {
+                    self.idle_spinner.on_wake(park_duration);
+                }
                 continue;
             }
 
@@ -1087,10 +1115,9 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IoBuf, IoBufMut};
+    use crate::{telemetry::metrics::Registry, IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
-    use prometheus_client::registry::Registry;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
         io::Write,
@@ -1798,7 +1825,8 @@ mod tests {
     fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
         // Verify timeout-wheel advancement ignores stale entries from a reused waiter slot.
         let cfg = Config {
-            max_request_timeout: Duration::from_millis(100),
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(100),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1851,12 +1879,12 @@ mod tests {
 
         // At tick 1, only the stale old entry should expire. The new waiter must
         // stay active and no cancel should be queued.
-        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(10));
         iouring.advance_timeouts();
         assert!(iouring.pending_cancels.is_empty());
 
         // At tick 3, the real timeout should queue cancellation.
-        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
+        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(10));
         iouring.advance_timeouts();
         assert_eq!(iouring.pending_cancels.len(), 1);
     }

@@ -26,11 +26,12 @@ fn bench_size<S: PhasedScheme>(name: &str) {
                 data
             };
 
-            let (commitment, mut shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+            let (commitment, mut shards) =
+                S::encode(b"", &config, data.as_slice(), &STRATEGY).unwrap();
             let strong_shard = shards.pop().unwrap();
             let my_index = config.minimum_shards.get() + config.extra_shards.get() - 1;
             let (_, _, weak_shard) =
-                S::weaken(&config, &commitment, my_index, strong_shard.clone()).unwrap();
+                S::weaken(b"", &config, &commitment, my_index, strong_shard.clone()).unwrap();
 
             println!(
                 "{} (strong_shard)/msg_len={} chunks={}: {} B",

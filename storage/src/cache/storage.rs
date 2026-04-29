@@ -4,9 +4,11 @@ use crate::{
     rmap::RMap,
 };
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Buf, BufMut, Metrics, Storage};
+use commonware_runtime::{
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
+    Buf, BufMut, Metrics, Storage,
+};
 use futures::{future::try_join_all, pin_mut, StreamExt};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -118,18 +120,10 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         }
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let items_tracked = context.gauge("items_tracked", "Number of items tracked");
+        let gets = context.counter("gets", "Number of gets performed");
+        let has = context.counter("has", "Number of has performed");
+        let syncs = context.counter("syncs", "Number of syncs called");
         let _ = items_tracked.try_set(indices.len());
 
         // Return populated cache

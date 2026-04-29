@@ -56,6 +56,12 @@
 //! For positions in the committed structure, callers fall through to [`Mem::get_node`]
 //! (or an adapter that layers a batch over a `Mem`).
 //!
+//! # Batch invalidation
+//!
+//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
+//! applied. Invalid batches must not be used: their methods may return incorrect data rather than
+//! erroring.
+//!
 //! # Example (MMR)
 //!
 //! ```ignore
@@ -78,7 +84,7 @@ use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
 use alloc::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -95,6 +101,15 @@ cfg_if::cfg_if! {
 #[cfg(feature = "std")]
 pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
 
+/// Push a dirty node position into its height bucket, growing the outer Vec as needed.
+fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
+    let h = height as usize;
+    if buckets.len() <= h {
+        buckets.resize_with(h + 1, Vec::new);
+    }
+    buckets[h].push(pos);
+}
+
 // ---------------------------------------------------------------------------
 // UnmerkleizedBatch
 // ---------------------------------------------------------------------------
@@ -105,7 +120,11 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest> {
     parent: Arc<MerkleizedBatch<F, D>>,
     appended: Vec<D>,
     overwrites: BTreeMap<Position<F>, D>,
-    dirty_nodes: BTreeSet<(u32, Position<F>)>,
+    /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
+    /// holds positions at that height in push order (monotonically increasing for
+    /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
+    /// in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
+    dirty_nodes: Vec<Vec<Position<F>>>,
     #[cfg(feature = "std")]
     pool: Option<ThreadPool>,
 }
@@ -117,7 +136,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             parent,
             appended: Vec::new(),
             overwrites: BTreeMap::new(),
-            dirty_nodes: BTreeSet::new(),
+            dirty_nodes: Vec::new(),
             #[cfg(feature = "std")]
             pool: None,
         }
@@ -179,8 +198,12 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
     ///
     /// Walks from peak to leaf (top-down) using [`path::Iterator`], then inserts dirty markers
-    /// bottom-up so that an early exit is possible when hitting a node that was already
-    /// dirtied by a prior `update_leaf`.
+    /// bottom-up. Bottom-up ordering enables a best-effort early exit: if the node at a given
+    /// height matches the most recently pushed entry for that bucket, we stop walking since
+    /// the walk that pushed it already marked everything above. This catches consecutive
+    /// shared-path walks in O(1); non-consecutive duplicates (a prior walk for a different
+    /// subtree landed in the bucket after the shared ancestors) are not detected here and are
+    /// collapsed by the per-bucket sort+dedup in `merkleize`.
     fn mark_dirty(&mut self, loc: Location<F>) {
         let mut first_leaf = Location::new(0);
         for (peak_pos, height) in F::peaks(self.size()) {
@@ -197,9 +220,11 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
                 len += 1;
             }
             for &(parent_pos, _, h) in buf[..len].iter().rev() {
-                if !self.dirty_nodes.insert((h, parent_pos)) {
+                let h_idx = h as usize;
+                if self.dirty_nodes.get(h_idx).and_then(|b| b.last()) == Some(&parent_pos) {
                     break;
                 }
+                push_dirty(&mut self.dirty_nodes, h, parent_pos);
             }
             return;
         }
@@ -215,7 +240,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         for height in heights {
             let pos = self.size();
             self.appended.push(D::EMPTY);
-            self.dirty_nodes.insert((height, pos));
+            push_dirty(&mut self.dirty_nodes, height, pos);
         }
 
         self
@@ -225,6 +250,22 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
+    }
+
+    /// Validate that `loc` refers to an in-bounds, non-pruned leaf and return its position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LeafOutOfBounds`] if `loc` is beyond the current leaf count, or
+    /// [`Error::ElementPruned`] if the leaf has been pruned.
+    fn validate_loc(&self, loc: Location<F>) -> Result<Position<F>, Error<F>> {
+        if loc >= self.leaves() {
+            return Err(Error::LeafOutOfBounds(loc));
+        }
+        if loc < self.parent.pruning_boundary() {
+            return Err(Error::ElementPruned(Position::try_from(loc)?));
+        }
+        Position::try_from(loc)
     }
 
     /// Update the leaf at `loc` to `element`.
@@ -239,14 +280,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         loc: Location<F>,
         element: &[u8],
     ) -> Result<Self, Error<F>> {
-        let leaves = self.leaves();
-        if loc >= leaves {
-            return Err(Error::LeafOutOfBounds(loc));
-        }
-        if loc < self.parent.pruning_boundary() {
-            return Err(Error::ElementPruned(Position::try_from(loc)?));
-        }
-        let pos = Position::try_from(loc)?;
+        let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
@@ -256,17 +290,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Overwrite the digest of an existing leaf and mark ancestors dirty.
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(mut self, loc: Location<F>, digest: D) -> Result<Self, Error<F>> {
-        let leaves = self.leaves();
-        if loc >= leaves {
-            return Err(Error::LeafOutOfBounds(loc));
-        }
-        if loc < self.parent.pruning_boundary() {
-            return Err(Error::ElementPruned(Position::try_from(loc)?));
-        }
-        let pos = Position::try_from(loc)?;
-        if F::position_to_location(pos).is_none() {
-            return Err(Error::NonLeaf(pos));
-        }
+        let pos = self.validate_loc(loc)?;
         self.store_node(pos, digest);
         self.mark_dirty(loc);
         Ok(self)
@@ -275,18 +299,12 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Batch update multiple leaf digests.
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_batched(mut self, updates: &[(Location<F>, D)]) -> Result<Self, Error<F>> {
-        let leaves = self.leaves();
-        let prune_boundary = self.parent.pruning_boundary();
+        // Validate all first so a later failure can't leave a partially-applied batch.
         for (loc, _) in updates {
-            if *loc >= leaves {
-                return Err(Error::LeafOutOfBounds(*loc));
-            }
-            if *loc < prune_boundary {
-                return Err(Error::ElementPruned(Position::try_from(*loc)?));
-            }
+            self.validate_loc(*loc)?;
         }
         for (loc, digest) in updates {
-            let pos = Position::try_from(*loc).unwrap();
+            let pos = Position::try_from(*loc).expect("validated above");
             self.store_node(pos, *digest);
             self.mark_dirty(*loc);
         }
@@ -300,22 +318,29 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D>> {
-        let dirty: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
-
+        // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
+        // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
+        // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
+        let mut buckets = core::mem::take(&mut self.dirty_nodes);
+        for bucket in &mut buckets {
+            bucket.sort();
+            bucket.dedup();
+        }
         #[cfg(feature = "std")]
         if let Some(pool) = self.pool.take() {
-            if dirty.len() >= MIN_TO_PARALLELIZE {
-                self.merkleize_parallel(base, hasher, &pool, &dirty);
+            let total: usize = buckets.iter().map(Vec::len).sum();
+            if total >= MIN_TO_PARALLELIZE {
+                self.merkleize_parallel(base, hasher, &pool, &buckets);
             } else {
-                self.merkleize_serial(base, hasher, &dirty);
+                self.merkleize_serial(base, hasher, &buckets);
             }
             self.pool = Some(pool);
         } else {
-            self.merkleize_serial(base, hasher, &dirty);
+            self.merkleize_serial(base, hasher, &buckets);
         }
 
         #[cfg(not(feature = "std"))]
-        self.merkleize_serial(base, hasher, &dirty);
+        self.merkleize_serial(base, hasher, &buckets);
 
         // Compute root from peaks.
         let leaves = self.leaves();
@@ -348,9 +373,22 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         &mut self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
-        dirty: &[(u32, Position<F>)],
+        buckets: &[Vec<Position<F>>],
     ) {
-        for &(height, pos) in dirty {
+        for (height, positions) in buckets.iter().enumerate() {
+            self.merkleize_bucket_serial(base, hasher, positions, height as u32);
+        }
+    }
+
+    /// Compute digests for one height's dirty nodes serially.
+    fn merkleize_bucket_serial(
+        &mut self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        positions: &[Position<F>],
+        height: u32,
+    ) {
+        for &pos in positions {
             let (left, right) = F::children(pos, height);
             let left_d = self.get_node(base, left).expect("left child missing");
             let right_d = self.get_node(base, right).expect("right child missing");
@@ -359,39 +397,27 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         }
     }
 
-    /// Process dirty nodes in parallel, grouping by height. Falls back to serial
-    /// when the remaining count drops below the threshold.
+    /// Process dirty nodes in parallel, one height bucket at a time. Falls back to serial
+    /// for buckets below the parallelization threshold.
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
-        dirty: &[(u32, Position<F>)],
+        buckets: &[Vec<Position<F>>],
     ) {
-        let mut same_height = Vec::new();
-        let mut current_height = dirty.first().map_or(1, |&(h, _)| h);
-        for (i, &(height, pos)) in dirty.iter().enumerate() {
-            if height == current_height {
-                same_height.push(pos);
+        for (height, positions) in buckets.iter().enumerate() {
+            if positions.is_empty() {
                 continue;
             }
-            if same_height.len() < MIN_TO_PARALLELIZE {
-                self.merkleize_serial(base, hasher, &dirty[i - same_height.len()..]);
-                return;
+            let height = height as u32;
+            if positions.len() < MIN_TO_PARALLELIZE {
+                self.merkleize_bucket_serial(base, hasher, positions, height);
+            } else {
+                self.compute_height_parallel(base, hasher, pool, positions, height);
             }
-            self.compute_height_parallel(base, hasher, pool, &same_height, current_height);
-            same_height.clear();
-            current_height = height;
-            same_height.push(pos);
         }
-
-        if same_height.len() < MIN_TO_PARALLELIZE {
-            self.merkleize_serial(base, hasher, &dirty[dirty.len() - same_height.len()..]);
-            return;
-        }
-
-        self.compute_height_parallel(base, hasher, pool, &same_height, current_height);
     }
 
     /// Compute digests for nodes at the same height in parallel, then store sequentially.
@@ -570,9 +596,8 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
 
     /// Create a child batch on top of this merkleized batch.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
+    /// fork has been applied.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D> {
         let batch = UnmerkleizedBatch::new(Arc::clone(self));
         #[cfg(feature = "std")]

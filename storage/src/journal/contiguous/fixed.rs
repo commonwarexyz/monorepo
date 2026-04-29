@@ -233,24 +233,44 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         let pruning_boundary = self.guard.pruning_boundary;
         let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
 
-        // Group positions by section and translate to section-local positions.
-        let mut result = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+        // Phase 1: Drain page-cache hits synchronously.
+        let mut result: Vec<Option<A>> = Vec::with_capacity(positions.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
+
+        for (i, &pos) in positions.iter().enumerate() {
+            if let Some(item) = self.guard.try_read_sync(pos, items_per_blob) {
+                result.push(Some(item));
+            } else {
+                result.push(None);
+                miss_indices.push(i);
+                miss_positions.push(pos);
+            }
+        }
+
+        if miss_positions.is_empty() {
+            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
+        }
+
+        // Phase 2: Read cache misses grouped by section (sequential).
+        let mut reusable_buf = vec![0u8; miss_positions.len() * chunk_size];
+        let mut disk_offset = 0;
 
         let mut group_start = 0;
-        while group_start < positions.len() {
-            let section = positions[group_start] / items_per_blob;
+        while group_start < miss_positions.len() {
+            let section = miss_positions[group_start] / items_per_blob;
             let section_start = section * items_per_blob;
             let first_in_section = pruning_boundary.max(section_start);
 
-            // Find the end of this section group (positions are sorted).
             let mut group_end = group_start + 1;
-            while group_end < positions.len() && positions[group_end] / items_per_blob == section {
+            while group_end < miss_positions.len()
+                && miss_positions[group_end] / items_per_blob == section
+            {
                 group_end += 1;
             }
 
             let group_len = group_end - group_start;
-            let section_positions: Vec<u64> = positions[group_start..group_end]
+            let section_positions: Vec<u64> = miss_positions[group_start..group_end]
                 .iter()
                 .map(|&pos| pos - first_in_section)
                 .collect();
@@ -270,11 +290,15 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                     other => other,
                 })?;
 
-            result.extend(items);
+            for (item, &miss_idx) in items.into_iter().zip(&miss_indices[disk_offset..]) {
+                result[miss_idx] = Some(item);
+            }
+
+            disk_offset += group_len;
             group_start = group_end;
         }
 
-        Ok(result)
+        Ok(result.into_iter().map(|r| r.unwrap()).collect())
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
@@ -998,7 +1022,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 
     async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
         context: E,
-        merkle_cfg: crate::merkle::journaled::Config,
+        merkle_cfg: crate::merkle::full::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
     ) -> Result<

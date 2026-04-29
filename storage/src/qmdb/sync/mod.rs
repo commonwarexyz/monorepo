@@ -23,14 +23,32 @@ pub(crate) use resolver::{FetchResult, Resolver};
 mod target;
 pub use target::Target;
 
+pub mod compact;
 mod requests;
 
+/// A [`Resolver`] whose associated types match a specific `Database`.
+///
+/// Blanket-impled for any matching `Resolver`, so callers never implement this directly.
+pub trait DbResolver<DB: Database>:
+    Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+{
+}
+
+impl<DB, R> DbResolver<DB> for R
+where
+    DB: Database,
+    R: Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
+{
+}
+
 /// Create/open a database and sync it to a target state
-pub async fn sync<DB, R>(config: Config<DB, R>) -> Result<DB, Error<R::Error, DB::Digest>>
+pub async fn sync<DB, R>(
+    config: Config<DB, R>,
+) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
-    R: resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
+    R: DbResolver<DB>,
 {
     Engine::new(config).await?.sync().await
 }

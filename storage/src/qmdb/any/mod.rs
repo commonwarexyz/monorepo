@@ -69,7 +69,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{journaled::Config as MerkleConfig, Family, Location},
+    merkle::{full::Config as MerkleConfig, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         operation::Committable,
@@ -289,7 +289,7 @@ pub(crate) mod test {
             db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
-        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+        db.prune(db.sync_boundary().await).await.unwrap();
         let root = db.root();
         let op_count = db.size().await;
         let inactivity_floor_loc = db.inactivity_floor_loc().await;
@@ -642,7 +642,7 @@ pub(crate) mod test {
         }
         // Commit + sync with pruning raises inactivity floor.
         db.sync().await.unwrap();
-        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+        db.prune(db.sync_boundary().await).await.unwrap();
 
         // Drop & reopen and ensure state matches.
         let root = db.root();
@@ -2036,7 +2036,7 @@ pub(crate) mod test {
                     .collect();
                 commit_writes(&mut db, updates, None).await;
 
-                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.prune(db.sync_boundary()).await.unwrap();
                 let bounds = db.bounds().await;
                 if bounds.start > first_range.start {
                     break;

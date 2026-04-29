@@ -107,12 +107,15 @@ struct Cache {
     /// # Invariants
     ///
     /// Each `index` entry maps to exactly one `entries` slot, and that entry always has a
-    /// matching key.
+    /// matching key. (The converse is not true: after [Self::invalidate_from] a slot may retain
+    /// a stale key that is no longer present in `index`.)
     index: HashMap<(u64, u64), usize>,
 
     /// Metadata for each cache slot.
     ///
-    /// Each `entries` slot has exactly one corresponding `index` entry.
+    /// Every entry reachable via `index` has a matching key here. Slots that were invalidated by
+    /// [Self::invalidate_from] retain their stale key but are unreachable from `index` and will
+    /// be reclaimed by the Clock evictor on the next sweep.
     entries: Vec<CacheEntry>,
 
     /// Per-slot page buffers allocated from the pool.
@@ -137,6 +140,12 @@ struct Cache {
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
 struct CacheEntry {
     /// The cache key which is composed of the blob id and page number of the page.
+    ///
+    /// # Invariant
+    ///
+    /// Every live cache slot has a matching entry in `index`. Slots that have been invalidated (see
+    /// [Cache::invalidate_from]) retain their stale key here but are no longer reachable via
+    /// `index` and will be reclaimed first by the Clock evictor.
     key: (u64, u64),
 
     /// A bit indicating whether this page was recently referenced.
@@ -425,6 +434,13 @@ impl CacheRef {
 
         buf.len()
     }
+
+    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
+    /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
+    /// buffer (or future writes) now owns.
+    pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
+        self.cache.write().invalidate_from(blob_id, start_page);
+    }
 }
 
 impl Cache {
@@ -525,7 +541,8 @@ impl Cache {
             return;
         }
 
-        // Cache full: find slot to evict using Clock algorithm
+        // Cache full: find slot to evict using Clock algorithm. Invalidated slots (`referenced =
+        // false`, stale `entry.key` no longer in `index`) are reclaimed on the first sweep.
         while self.entries[self.clock].referenced.load(Ordering::Relaxed) {
             self.entries[self.clock]
                 .referenced
@@ -533,10 +550,15 @@ impl Cache {
             self.clock = (self.clock + 1) % self.entries.len();
         }
 
-        // Evict and replace
+        // Evict and replace. Only drop the old `entry.key` from `index` when it still points
+        // to this slot: after `invalidate_from` a slot may hold a stale key that has since
+        // been re-cached at a different slot, and an unconditional `remove` would orphan
+        // that live entry.
         let slot = self.clock;
         let entry = &mut self.entries[slot];
-        assert!(self.index.remove(&entry.key).is_some());
+        if self.index.get(&entry.key) == Some(&slot) {
+            self.index.remove(&entry.key);
+        }
         self.index.insert(key, slot);
         entry.key = key;
         entry.referenced.store(true, Ordering::Relaxed);
@@ -544,6 +566,21 @@ impl Cache {
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.entries.len();
+    }
+
+    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. The slots keep their
+    /// (now stale) `entry.key` so the Clock evictor can reclaim them; `read_at` and the
+    /// duplicate-update path never reach them because `index` no longer maps to them.
+    fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
+        self.index.retain(|&(bid, page_num), &mut slot| {
+            if bid != blob_id || page_num < start_page {
+                return true;
+            }
+            self.entries[slot]
+                .referenced
+                .store(false, Ordering::Relaxed);
+            false
+        });
     }
 }
 
@@ -578,14 +615,13 @@ async fn fetch_cacheable_page(
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, Clock as _,
-        IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, BufferPool,
+        BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
     use futures::future::pending;
-    use prometheus_client::registry::Registry;
     use std::{
         num::NonZeroU16,
         sync::{
@@ -594,6 +630,11 @@ mod tests {
         },
         time::Duration,
     };
+
+    fn test_pool() -> BufferPool {
+        let mut registry = Registry::default();
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
+    }
 
     // Logical page size (what CacheRef uses and what gets cached).
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -710,8 +751,7 @@ mod tests {
 
     #[test_traced]
     fn test_cache_basic() {
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
@@ -753,6 +793,56 @@ mod tests {
             &buf[..PAGE_SIZE.get() as usize - 2],
             [1; PAGE_SIZE.get() as usize - 2]
         );
+    }
+
+    #[test_traced]
+    fn test_invalidate_from_does_not_orphan_re_cached_page() {
+        // Regression: when the Clock evictor lands on an invalidated slot whose stale key has
+        // since been re-cached at a different slot, the old index entry (pointing to the
+        // live slot) must not be removed.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
+        let blob_id = 0u64;
+        let page_size = PAGE_SIZE.get() as usize;
+
+        // Fill both slots, then invalidate them so both carry stale keys with referenced=false.
+        cache.cache(blob_id, &vec![0xAA; page_size], 0);
+        cache.cache(blob_id, &vec![0xBB; page_size], 1);
+        cache.invalidate_from(blob_id, 0);
+
+        // Re-cache page 1. Clock sits at slot 0, which is referenced=false, so the insert
+        // lands at slot 0 (slot 1 still holds its stale (blob, 1) key).
+        cache.cache(blob_id, &vec![0xCC; page_size], 1);
+        let mut buf = vec![0u8; page_size];
+        assert_eq!(
+            cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64),
+            page_size,
+            "page 1 should be readable after re-cache"
+        );
+        assert_eq!(buf, vec![0xCC; page_size]);
+
+        // Cache a new page. Clock now advances to slot 1 (still referenced=false), evicts it.
+        // With the buggy unconditional `index.remove(entry.key)` this would remove the live
+        // (blob, 1) -> slot 0 mapping, orphaning slot 0.
+        cache.cache(blob_id, &vec![0xDD; page_size], 2);
+
+        // Slot 0 must still be reachable via its live index entry.
+        let mut buf = vec![0u8; page_size];
+        assert_eq!(
+            cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64),
+            page_size,
+            "live page 1 was orphaned by stale-slot eviction"
+        );
+        assert_eq!(buf, vec![0xCC; page_size]);
+
+        // And the newly cached page 2 is also reachable.
+        let mut buf = vec![0u8; page_size];
+        assert_eq!(
+            cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64 * 2),
+            page_size
+        );
+        assert_eq!(buf, vec![0xDD; page_size]);
     }
 
     #[test_traced]
@@ -1135,8 +1225,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_all_cached() {
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
         let page0 = vec![0xAA; PAGE_SIZE.get() as usize];
@@ -1166,8 +1255,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_none_cached() {
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
 
@@ -1186,8 +1274,7 @@ mod tests {
     fn test_read_cached_many_scattered_misses() {
         // Verify that read_cached_many checks ALL ranges, not just up to the
         // first miss. Pages 0 and 2 are cached, page 1 is not.
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
 

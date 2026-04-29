@@ -788,7 +788,7 @@ pub(crate) mod test {
         use super::*;
         use crate::{
             merkle::{
-                mmr::{self, journaled::Mmr},
+                mmr::{self, full::Mmr},
                 Family as _,
             },
             qmdb::any::sync::tests::FromSyncTestable,
@@ -798,9 +798,9 @@ pub(crate) mod test {
         type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
-            type Mmr = TestMmr;
+            type Merkle = TestMmr;
 
-            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
                 (self.log.merkle, self.log.journal)
             }
 

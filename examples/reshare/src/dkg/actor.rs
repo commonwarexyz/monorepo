@@ -28,29 +28,20 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Clock,
-    ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
+    spawn_cell,
+    telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
+    Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    Storage as RuntimeStorage,
 };
 use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Peer {
-    peer: String,
-}
-
-impl Peer {
-    fn new<P: PublicKey>(pk: &P) -> Self {
-        Self {
-            peer: pk.to_string(),
-        }
-    }
+/// Per-peer label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+struct Peer<P: PublicKey> {
+    peer: P,
 }
 
 /// Wire message type for DKG protocol communication.
@@ -135,8 +126,8 @@ where
     failed_epochs: Counter,
     our_reveals: Counter,
     all_reveals: Counter,
-    latest_share: Family<Peer, Gauge>,
-    latest_ack: Family<Peer, Gauge>,
+    latest_share: GaugeFamily<Peer<C::PublicKey>>,
+    latest_ack: GaugeFamily<Peer<C::PublicKey>>,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -154,29 +145,17 @@ where
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
         // Create metrics
-        let successful_epochs = Counter::default();
-        let failed_epochs = Counter::default();
-        let our_reveals = Counter::default();
-        let all_reveals = Counter::default();
-        let latest_share = Family::<Peer, Gauge>::default();
-        let latest_ack = Family::<Peer, Gauge>::default();
-        context.register(
-            "successful_epochs",
-            "successful epochs",
-            successful_epochs.clone(),
-        );
-        context.register("failed_epochs", "failed epochs", failed_epochs.clone());
-        context.register("our_reveals", "our share was revealed", our_reveals.clone());
-        context.register("all_reveals", "all share reveals", all_reveals.clone());
-        context.register(
+        let successful_epochs = context.counter("successful_epochs", "successful epochs");
+        let failed_epochs = context.counter("failed_epochs", "failed epochs");
+        let our_reveals = context.counter("our_reveals", "our share was revealed");
+        let all_reveals = context.counter("all_reveals", "all share reveals");
+        let latest_share = context.family(
             "latest_share",
             "epoch of latest valid share received per dealer",
-            latest_share.clone(),
         );
-        context.register(
+        let latest_ack = context.family(
             "latest_ack",
             "epoch of latest valid ack received per player",
-            latest_ack.clone(),
         );
 
         (
@@ -400,7 +379,7 @@ where
                                         if let Some(ack) = response {
                                             let _ = self
                                                 .latest_share
-                                                .get_or_create(&Peer::new(&sender_pk))
+                                                .get_or_create_by(&sender_pk)
                                                 .try_set_max(epoch.get());
 
                                             let payload =
@@ -426,7 +405,7 @@ where
                                         if added {
                                             let _ = self
                                                 .latest_ack
-                                                .get_or_create(&Peer::new(&sender_pk))
+                                                .get_or_create_by(&sender_pk)
                                                 .try_set_max(epoch.get());
                                         }
                                     }

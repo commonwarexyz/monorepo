@@ -54,6 +54,9 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
+pub(crate) mod compact_witness;
+#[cfg(test)]
+mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
@@ -113,6 +116,16 @@ pub enum Error<F: Family> {
         batch_db_size: u64,
         batch_base_size: u64,
     },
+
+    /// The batch's inactivity floor is lower than the database's current floor.
+    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    FloorRegressed(Location<F>, Location<F>),
+
+    /// The batch's inactivity floor exceeds its own commit operation's location. The floor
+    /// must not sit past the commit, since a subsequent `prune(floor)` would then remove the
+    /// last readable commit from the journal.
+    #[error("floor beyond commit location: floor {0} > commit loc {1}")]
+    FloorBeyondSize(Location<F>, Location<F>),
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
