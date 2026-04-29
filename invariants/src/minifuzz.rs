@@ -51,7 +51,7 @@
 //! it.
 
 use arbitrary::Unstructured;
-use commonware_formatting::from_hex_formatted;
+use commonware_formatting::from_hex;
 use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore as _, SeedableRng};
 use std::{
@@ -102,7 +102,7 @@ impl Branch {
     }
 
     fn try_from_hex(s: &str) -> Option<Self> {
-        let bytes: [u8; 12] = from_hex_formatted(s)?.try_into().ok()?;
+        let bytes: [u8; 12] = from_hex(s)?.try_into().ok()?;
         let seed = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let thread = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let size = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);

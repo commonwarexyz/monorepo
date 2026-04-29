@@ -1178,6 +1178,7 @@ name = "commonware-conformance"
 version = "2026.4.0"
 dependencies = [
  "commonware-conformance-macros",
+ "commonware-formatting",
  "commonware-macros",
  "futures",
  "serde",

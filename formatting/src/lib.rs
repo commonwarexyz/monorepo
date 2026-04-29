@@ -22,25 +22,10 @@ commonware_macros::stability_scope!(BETA {
         const_hex::encode(bytes)
     }
 
-    /// Converts a hexadecimal string to bytes.
-    ///
-    /// Returns [None] if the input has odd length, contains non-hex characters,
-    /// or is otherwise malformed. Does not strip a leading `0x` / `0X` prefix
-    /// or any whitespace; see [from_hex_formatted] for that.
-    pub fn from_hex(s: &str) -> Option<Vec<u8>> {
-        // `const_hex::decode` strips a leading `0x`/`0X` prefix automatically;
-        // reject it explicitly to preserve historical behavior.
-        let bytes = s.as_bytes();
-        if bytes.starts_with(b"0x") || bytes.starts_with(b"0X") {
-            return None;
-        }
-        const_hex::decode(s).ok()
-    }
-
     /// Converts a hexadecimal string to bytes, stripping ASCII whitespace and an
     /// optional `0x` / `0X` prefix. Commonly used in tests to encode external test
     /// vectors without modification.
-    pub fn from_hex_formatted(s: &str) -> Option<Vec<u8>> {
+    pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         // `const_hex::decode` already strips a leading `0x`/`0X` prefix, so we
         // only need to remove ASCII whitespace ourselves.
         let s = s.replace(['\t', '\n', '\r', ' '], "");
@@ -68,6 +53,12 @@ commonware_macros::stability_scope!(BETA {
     /// }
     /// ```
     pub struct Hex<T: AsRef<[u8]>>(pub T);
+
+    impl<T: AsRef<[u8]>> From<T> for Hex<T> {
+        fn from(value: T) -> Self {
+            Self(value)
+        }
+    }
 
     impl<T: AsRef<[u8]>> fmt::Display for Hex<T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -102,29 +93,38 @@ commonware_macros::stability_scope!(BETA {
 
 #[cfg(test)]
 mod tests {
-    use crate::{from_hex, from_hex_formatted, Hex};
+    use crate::{from_hex, Hex};
 
     #[test]
-    fn test_hex() {
-        // Empty bytes
-        let b: &[u8] = &[];
-        let h = crate::hex(b);
-        assert_eq!(h, "");
-        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
+    fn test_hex_roundtrip() {
+        for bytes in [&[][..], &[0x01], &[0x01, 0x02, 0x03]] {
+            let encoded = crate::hex(bytes);
+            assert_eq!(from_hex(&encoded).unwrap(), bytes.to_vec());
+        }
+    }
 
-        // Single byte
-        let b: &[u8] = &[0x01];
-        let h = crate::hex(b);
-        assert_eq!(h, "01");
-        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
+    #[test]
+    fn test_from_hex() {
+        let expected: Vec<u8> = vec![0x01, 0x02, 0x03];
 
-        // Multiple bytes
-        let b: &[u8] = &[0x01, 0x02, 0x03];
-        let h = crate::hex(b);
-        assert_eq!(h, "010203");
-        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
+        // No formatting
+        assert_eq!(from_hex("010203").unwrap(), expected);
 
-        // Odd number of characters
+        // Whitespace
+        assert_eq!(from_hex("01 02 03").unwrap(), expected);
+
+        // 0x prefix
+        assert_eq!(from_hex("0x010203").unwrap(), expected);
+
+        // 0x prefix + mixed whitespace (tabs, newlines, spaces, carriage returns)
+        let h = "    \n\n0x\r\n01
+                            02\t03\n";
+        assert_eq!(from_hex(h).unwrap(), expected);
+
+        // Empty string
+        assert_eq!(from_hex(""), Some(vec![]));
+
+        // Odd length
         assert!(from_hex("0102030").is_none());
 
         // Invalid hex character
@@ -132,37 +132,6 @@ mod tests {
 
         // Invalid `+`
         assert!(from_hex("+123").is_none());
-
-        // Empty string
-        assert_eq!(from_hex(""), Some(vec![]));
-
-        // `0x` prefix is NOT stripped by from_hex.
-        assert!(from_hex("0x010203").is_none());
-    }
-
-    #[test]
-    fn test_from_hex_formatted() {
-        let expected: Vec<u8> = vec![0x01, 0x02, 0x03];
-
-        // No formatting
-        assert_eq!(from_hex_formatted("010203").unwrap(), expected);
-
-        // Whitespace
-        assert_eq!(from_hex_formatted("01 02 03").unwrap(), expected);
-
-        // 0x prefix
-        assert_eq!(from_hex_formatted("0x010203").unwrap(), expected);
-
-        // 0x prefix + mixed whitespace (tabs, newlines, spaces, carriage returns)
-        let h = "    \n\n0x\r\n01
-                            02\t03\n";
-        assert_eq!(from_hex_formatted(h).unwrap(), expected);
-
-        // Invalid character is still rejected
-        assert!(from_hex_formatted("01g3").is_none());
-
-        // Odd length is still rejected
-        assert!(from_hex_formatted("0102030").is_none());
     }
 
     #[test]
@@ -195,5 +164,16 @@ mod tests {
     fn test_hex_newtype_debug() {
         let bytes = [0xff, 0x00];
         assert_eq!(format!("{:?}", Hex(&bytes[..])), "ff00");
+    }
+
+    #[test]
+    fn test_hex_newtype_from() {
+        let bytes = [0x01u8, 0x02, 0xab, 0xcd];
+
+        // From<T> for Hex<T> is callable both ways round.
+        let from_slice: Hex<&[u8]> = (&bytes[..]).into();
+        assert_eq!(format!("{from_slice}"), "0102abcd");
+        let from_owned: Hex<Vec<u8>> = bytes.to_vec().into();
+        assert_eq!(format!("{from_owned}"), "0102abcd");
     }
 }

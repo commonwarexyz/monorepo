@@ -335,12 +335,7 @@ pub(crate) mod tests {
 
     pub fn create_private_key() -> PrivateKeyInner {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
-        PrivateKeyInner::decode(
-            commonware_formatting::from_hex_formatted(HEX)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap()
+        PrivateKeyInner::decode(commonware_formatting::from_hex(HEX).unwrap().as_ref()).unwrap()
     }
 
     pub fn parse_vector_keypair(
@@ -351,7 +346,7 @@ pub(crate) mod tests {
         let public_key = parse_public_key_as_compressed(qx, qy);
         (
             PrivateKeyInner::decode(
-                commonware_formatting::from_hex_formatted(private_key)
+                commonware_formatting::from_hex(private_key)
                     .unwrap()
                     .as_ref(),
             )
@@ -365,8 +360,8 @@ pub(crate) mod tests {
     }
 
     pub fn parse_public_key_as_compressed_vector(qx: &str, qy: &str) -> Vec<u8> {
-        let qx = commonware_formatting::from_hex_formatted(&padding_odd_length_hex(qx)).unwrap();
-        let qy = commonware_formatting::from_hex_formatted(&padding_odd_length_hex(qy)).unwrap();
+        let qx = commonware_formatting::from_hex(&padding_odd_length_hex(qx)).unwrap();
+        let qy = commonware_formatting::from_hex(&padding_odd_length_hex(qy)).unwrap();
         let mut compressed = Vec::with_capacity(qx.len() + 1);
         if qy.last().unwrap().is_multiple_of(2) {
             compressed.push(0x02);
@@ -378,8 +373,8 @@ pub(crate) mod tests {
     }
 
     pub fn parse_public_key_as_uncompressed_vector(qx: &str, qy: &str) -> Vec<u8> {
-        let qx = commonware_formatting::from_hex_formatted(qx).unwrap();
-        let qy = commonware_formatting::from_hex_formatted(qy).unwrap();
+        let qx = commonware_formatting::from_hex(qx).unwrap();
+        let qy = commonware_formatting::from_hex(qy).unwrap();
         let mut uncompressed_public_key = Vec::with_capacity(65);
         uncompressed_public_key.push(0x04);
         uncompressed_public_key.extend_from_slice(&qx);
@@ -583,13 +578,13 @@ pub(crate) mod tests {
     ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>) {
         let public_key = parse_public_key_as_compressed(qx, qy);
         let signature = parse_signature(r, s);
-        let message = commonware_formatting::from_hex_formatted(m).unwrap();
+        let message = commonware_formatting::from_hex(m).unwrap();
         (public_key, signature, message)
     }
 
     pub fn parse_signature(r: &str, s: &str) -> p256::ecdsa::Signature {
-        let vec_r = commonware_formatting::from_hex_formatted(r).unwrap();
-        let vec_s = commonware_formatting::from_hex_formatted(s).unwrap();
+        let vec_r = commonware_formatting::from_hex(r).unwrap();
+        let vec_s = commonware_formatting::from_hex(s).unwrap();
         let f1 = p256::FieldBytes::from_slice(&vec_r);
         let f2 = p256::FieldBytes::from_slice(&vec_s);
         p256::ecdsa::Signature::from_scalars(*f1, *f2).unwrap()

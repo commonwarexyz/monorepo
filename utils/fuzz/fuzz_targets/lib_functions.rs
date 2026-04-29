@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_formatting::{from_hex, from_hex_formatted, hex};
+use commonware_formatting::{from_hex, hex};
 use commonware_utils::{
     modulo, union, union_unique, Faults, N3f1, NZDuration, NZUsize, NonZeroDuration, NZU16, NZU32,
     NZU64, NZU8,
@@ -100,7 +100,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::FromHexFormatted { hex_str } => {
-            let result = from_hex_formatted(&hex_str);
+            let result = from_hex(&hex_str);
 
             if let Some(decoded) = result.clone() {
                 let clean_hex = hex(&decoded);
@@ -108,7 +108,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             let with_prefix = format!("0x{hex_str}");
-            from_hex_formatted(&with_prefix);
+            from_hex(&with_prefix);
         }
 
         FuzzInput::MaxFaults { n } => {

@@ -442,7 +442,7 @@ mod tests {
 
     fn parse_private_key(private_key: &str) -> Result<PrivateKey, CodecError> {
         PrivateKey::decode(
-            commonware_formatting::from_hex_formatted(private_key)
+            commonware_formatting::from_hex(private_key)
                 .unwrap()
                 .as_ref(),
         )
@@ -450,18 +450,14 @@ mod tests {
 
     fn parse_public_key(public_key: &str) -> Result<PublicKey, CodecError> {
         PublicKey::decode(
-            commonware_formatting::from_hex_formatted(public_key)
+            commonware_formatting::from_hex(public_key)
                 .unwrap()
                 .as_ref(),
         )
     }
 
     fn parse_signature(signature: &str) -> Result<Signature, CodecError> {
-        Signature::decode(
-            commonware_formatting::from_hex_formatted(signature)
-                .unwrap()
-                .as_ref(),
-        )
+        Signature::decode(commonware_formatting::from_hex(signature).unwrap().as_ref())
     }
 
     #[test]

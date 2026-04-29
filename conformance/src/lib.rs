@@ -143,17 +143,6 @@ impl ConformanceFile {
     }
 }
 
-/// Encode bytes as a lowercase hex string.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    let mut result = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        result.push(HEX_CHARS[(byte >> 4) as usize] as char);
-        result.push(HEX_CHARS[(byte & 0x0f) as usize] as char);
-    }
-    result
-}
-
 /// Acquire an exclusive lock on the conformance file.
 ///
 /// Uses OS-level file locking which is automatically released when the
@@ -188,7 +177,7 @@ pub async fn compute_conformance_hash<C: Conformance>(n_cases: usize) -> String 
         hasher.update(&committed);
     }
 
-    hex_encode(&hasher.finalize())
+    commonware_formatting::hex(&hasher.finalize())
 }
 
 /// Run conformance tests using the [`Conformance`] trait.
@@ -340,14 +329,6 @@ async fn regenerate_conformance<C: Conformance>(type_name: &str, n_cases: usize,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_hex_encode() {
-        assert_eq!(hex_encode(&[]), "");
-        assert_eq!(hex_encode(&[0x00]), "00");
-        assert_eq!(hex_encode(&[0xff]), "ff");
-        assert_eq!(hex_encode(&[0x12, 0x34, 0xab, 0xcd]), "1234abcd");
-    }
 
     // Test conformance trait with a simple implementation
     struct SimpleConformance;
