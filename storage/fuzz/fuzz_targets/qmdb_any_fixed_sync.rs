@@ -91,7 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+fn test_config<F: RootSpec>(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
@@ -109,6 +109,8 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
             page_cache,
         },
         translator: TwoCap,
+        split_root: true,
+        root_bagging: F::root_spec(0).bagging(),
     }
 }
 
@@ -128,7 +130,7 @@ where
         Op = FixedOperation<F, Key, Value>,
     >,
 {
-    let db_config = test_config(test_name, &context);
+    let db_config = test_config::<F>(test_name, &context);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
@@ -164,7 +166,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &mut FuzzInput, test_name: &st
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config::<F>(&test_name, &context);
         let mut db: FixedDb<F> = Db::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db");
@@ -261,7 +263,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &mut FuzzInput, test_name: &st
                     pending_writes.clear();
                     drop(db);
 
-                    let cfg = test_config(&test_name, &context);
+                    let cfg = test_config::<F>(&test_name, &context);
                     db = Db::init(
                         context
                             .with_label("db")

@@ -135,7 +135,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
-fn test_config(
+fn test_config<F: RootSpec>(
     test_name: &str,
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
@@ -158,6 +158,8 @@ fn test_config(
             page_cache,
         },
         translator: TwoCap,
+        split_root: true,
+        root_bagging: F::root_spec(0).bagging(),
     }
 }
 
@@ -167,7 +169,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config::<F>(&test_name, &context);
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db");
@@ -323,7 +325,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, test_name: &str) {
                     historical_roots.clear();
                     drop(db);
 
-                    let cfg = test_config(&test_name, &context);
+                    let cfg = test_config::<F>(&test_name, &context);
                     db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context
                             .with_label("db")
