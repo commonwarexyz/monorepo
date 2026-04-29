@@ -32,16 +32,15 @@ fn bench_decode_formatted(c: &mut Criterion) {
             &format!("{}/input=pristine size={size}", module_path!()),
             |b| {
                 b.iter(|| {
-                    black_box(commonware_formatting::from_hex_formatted(black_box(&pristine)))
+                    black_box(commonware_formatting::from_hex_formatted(black_box(
+                        &pristine,
+                    )))
                 });
             },
         );
-        c.bench_function(
-            &format!("{}/input=ugly size={size}", module_path!()),
-            |b| {
-                b.iter(|| black_box(commonware_formatting::from_hex_formatted(black_box(&ugly))));
-            },
-        );
+        c.bench_function(&format!("{}/input=ugly size={size}", module_path!()), |b| {
+            b.iter(|| black_box(commonware_formatting::from_hex_formatted(black_box(&ugly))));
+        });
     }
 }
 
