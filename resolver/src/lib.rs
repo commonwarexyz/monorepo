@@ -27,9 +27,7 @@ commonware_macros::stability_scope!(BETA {
         /// The returned future may be dropped before completion if the
         /// application cancels the fetch via [`Resolver::cancel`],
         /// [`Resolver::clear`], or [`Resolver::retain`]. When this happens,
-        /// the resolver discards the validation result. If the response would
-        /// have returned `false`, the peer is not blocked for that response.
-        /// Implementations must make partial delivery progress cancel-safe.
+        /// the resolver discards the validation result.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
