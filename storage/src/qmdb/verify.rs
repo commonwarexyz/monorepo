@@ -111,9 +111,13 @@ where
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
 ///
-/// `peaks` must contain any peak digests that fall in the fold prefix of the original proof
-/// (peaks entirely before the original range's start location). If the original range started
-/// at location 0, pass an empty slice.
+/// `peaks` must contain any peak digests the source proof did not preserve individually:
+///
+/// - Fold-prefix peaks (peaks entirely before the original range's start location), when the
+///   original range did not start at 0.
+/// - For backward-folded proofs, the active suffix peaks that were collapsed into the source
+///   proof's synthetic accumulator. Use [`ProofStore::suffix_peak_positions`] to enumerate
+///   them; missing entries surface as [`Error::CompressedDigest`].
 pub fn create_multi_proof<F, D>(
     proof_store: &ProofStore<F, D>,
     locations: &[Location<F>],
