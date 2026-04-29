@@ -27,6 +27,12 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Returns `true` if the data is valid.
         ///
+        /// The returned future may be dropped before completion if the
+        /// application cancels the fetch via [`Resolver::cancel`],
+        /// [`Resolver::clear`], or [`Resolver::retain`]. Implementations must
+        /// make partial delivery progress cancel-safe and tolerate a later
+        /// [`Consumer::failed`] notification for the same key.
+        ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
         fn deliver(
@@ -37,7 +43,9 @@ commonware_macros::stability_scope!(BETA {
 
         /// Let the consumer know that the data is not being fetched anymore.
         ///
-        /// The failure is used to indicate why.
+        /// The failure is used to indicate why. Implementations must tolerate
+        /// this notification running out-of-band from the resolver event loop
+        /// and potentially after later resolver operations for other keys.
         fn failed(
             &mut self,
             key: Self::Key,

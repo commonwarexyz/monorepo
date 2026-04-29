@@ -19,7 +19,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
-    futures::Pool as FuturesPool,
+    futures::{AbortablePool, Aborter, Pool as FuturesPool},
     Span,
 };
 use futures::future::{self, Either};
@@ -33,6 +33,13 @@ struct Serve<E: Clock, P: PublicKey> {
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
+}
+
+/// Represents a pending delivery to the consumer.
+struct Delivery<P: PublicKey, Key: Span> {
+    peer: P,
+    key: Key,
+    valid: bool,
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
@@ -73,6 +80,15 @@ pub struct Engine<
 
     /// Track the start time of fetch operations
     fetch_timers: HashMap<Key, histogram::Timer<E>>,
+
+    /// Holds futures that resolve once the `Consumer` has validated fetched data.
+    deliveries: AbortablePool<Delivery<P, Key>>,
+
+    /// Holds futures that notify the consumer about canceled fetches.
+    failures: FuturesPool<()>,
+
+    /// Aborts pending deliveries when the corresponding fetch is canceled.
+    delivery_aborters: HashMap<Key, Aborter>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -130,6 +146,9 @@ impl<
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
+                deliveries: AbortablePool::default(),
+                failures: FuturesPool::default(),
+                delivery_aborters: HashMap::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -168,7 +187,10 @@ impl<
                     .metrics
                     .fetch_pending
                     .try_set(self.fetcher.len_pending());
-                let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
+                let _ = self
+                    .metrics
+                    .fetch_active
+                    .try_set(self.fetcher.len_active() + self.delivery_aborters.len());
                 let _ = self
                     .metrics
                     .peers_blocked
@@ -189,6 +211,8 @@ impl<
             },
             on_stopped => {
                 debug!("shutdown");
+                self.delivery_aborters.clear();
+                self.failures.cancel_all();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -252,10 +276,12 @@ impl<
                     Message::Cancel { key } => {
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
-                        if self.fetcher.cancel(&key) {
+                        let canceled_fetch = self.fetcher.cancel(&key);
+                        let canceled_delivery = self.cancel_delivery(&key);
+                        if canceled_fetch || canceled_delivery {
                             guard.set(Status::Success);
                             self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
-                            self.consumer.failed(key.clone(), ()).await;
+                            self.notify_failed(key.clone());
                         }
                     }
                     Message::Retain { predicate } => {
@@ -263,6 +289,9 @@ impl<
 
                         // Remove from fetcher
                         self.fetcher.retain(&predicate);
+                        self.delivery_aborters
+                            .extract_if(|k, _| !predicate(k))
+                            .count();
 
                         // Clean up timers and notify consumer
                         let before = self.fetch_timers.len();
@@ -272,7 +301,7 @@ impl<
                             .collect::<Vec<_>>();
                         for (key, timer) in removed {
                             timer.cancel();
-                            self.consumer.failed(key, ()).await;
+                            self.notify_failed(key);
                         }
 
                         // Metrics
@@ -288,12 +317,16 @@ impl<
 
                         // Clear fetcher
                         self.fetcher.clear();
+                        self.delivery_aborters.clear();
 
                         // Drain timers and notify consumer
                         let removed = self.fetch_timers.len() as u64;
                         for (key, timer) in self.fetch_timers.drain() {
                             timer.cancel();
-                            self.consumer.failed(key, ()).await;
+                            let mut consumer = self.consumer.clone();
+                            self.failures.push(async move {
+                                consumer.failed(key, ()).await;
+                            });
                         }
 
                         // Metrics
@@ -304,7 +337,21 @@ impl<
                         }
                     }
                 }
-                assert_eq!(self.fetcher.len(), self.fetch_timers.len());
+                self.assert_fetch_timers_consistent();
+            },
+            // Handle completed failure notifications
+            _ = self.failures.next_completed() => {},
+            // Handle completed consumer deliveries
+            delivery = self.deliveries.next_completed() => {
+                let Delivery { peer, key, valid } = match delivery {
+                    Ok(delivery) => delivery,
+                    Err(_) => continue,
+                };
+                if self.delivery_aborters.remove(&key).is_none() {
+                    continue;
+                }
+                self.handle_delivery(peer, key, valid).await;
+                self.assert_fetch_timers_consistent();
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -352,13 +399,30 @@ impl<
                 };
                 match msg.payload {
                     wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) => {
-                        self.handle_network_response(peer, msg.id, response).await
-                    }
+                    wire::Payload::Response(response) =>
+                        self.handle_network_response(peer, msg.id, response),
                     wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
         }
+    }
+
+    fn assert_fetch_timers_consistent(&self) {
+        assert_eq!(
+            self.fetcher.len() + self.delivery_aborters.len(),
+            self.fetch_timers.len()
+        );
+    }
+
+    fn cancel_delivery(&mut self, key: &Key) -> bool {
+        self.delivery_aborters.remove(key).is_some()
+    }
+
+    fn notify_failed(&mut self, key: Key) {
+        let mut consumer = self.consumer.clone();
+        self.failures.push(async move {
+            consumer.failed(key, ()).await;
+        });
     }
 
     /// Handles the case where the application responds to a request from an external peer.
@@ -409,7 +473,7 @@ impl<
     }
 
     /// Handle a network response from a peer.
-    async fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
+    fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
@@ -418,13 +482,25 @@ impl<
             return;
         };
 
-        // The peer had the data, so we can deliver it to the consumer
-        if self.consumer.deliver(key.clone(), response).await {
-            // Record metrics
+        // The peer had the data, so deliver it to the consumer without blocking the engine.
+        let delivery_key = key.clone();
+        let mut consumer = self.consumer.clone();
+        let aborter = self.deliveries.push(async move {
+            let valid = consumer.deliver(delivery_key.clone(), response).await;
+            Delivery {
+                peer,
+                key: delivery_key,
+                valid,
+            }
+        });
+        assert!(self.delivery_aborters.insert(key, aborter).is_none());
+    }
+
+    /// Handle completed delivery to the consumer.
+    async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
+        if valid {
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
-
-            // Clear all targets for this key
             self.fetcher.clear_targets(&key);
             return;
         }
