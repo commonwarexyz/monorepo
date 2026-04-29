@@ -12,7 +12,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
-use commonware_utils::{bitmap::Readable as _, Array};
+use commonware_utils::Array;
 
 // =============================================================================
 // Fixed variant test trait implementations
@@ -64,11 +64,11 @@ impl<
     > BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N>
 {
     fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+        self.any.bitmap.pruned_bits()
     }
 
     fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+        self.any.bitmap.get_bit(index)
     }
 
     async fn oldest_retained(&self) -> u64 {
@@ -89,11 +89,11 @@ where
     VariableOperation<F, K, V>: Read,
 {
     fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+        self.any.bitmap.pruned_bits()
     }
 
     fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+        self.any.bitmap.get_bit(index)
     }
 
     async fn oldest_retained(&self) -> u64 {
@@ -130,11 +130,11 @@ impl<
     > BitmapPrunedBits for fixed::partitioned::Db<F, E, K, V, H, T, P, N>
 {
     fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+        self.any.bitmap.pruned_bits()
     }
 
     fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+        self.any.bitmap.get_bit(index)
     }
 
     async fn oldest_retained(&self) -> u64 {
@@ -175,11 +175,11 @@ where
     VariableOperation<F, K, V>: Read,
 {
     fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+        self.any.bitmap.pruned_bits()
     }
 
     fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+        self.any.bitmap.get_bit(index)
     }
 
     async fn oldest_retained(&self) -> u64 {

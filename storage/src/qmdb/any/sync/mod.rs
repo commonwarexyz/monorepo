@@ -123,7 +123,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, Some(range.start()), |_, _| {}).await?;
+    let db = Db::init_from_log(index, log, None).await?;
 
     Ok(db)
 }

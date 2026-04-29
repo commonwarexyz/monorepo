@@ -26,7 +26,8 @@ impl<
         C: Contiguous<Item = Operation<F, K, V>>,
         I: Index<Value = Location<F>>,
         H: Hasher,
-    > Db<F, E, C, I, H, Update<K, V>>
+        const N: usize,
+    > Db<F, E, C, I, H, Update<K, V>, N>
 where
     Operation<F, K, V>: Codec,
 {
