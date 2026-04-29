@@ -9,11 +9,11 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Metrics, Storage,
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
+    Buf, BufMut, BufferPooler, Metrics, Storage,
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -202,30 +202,15 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
-        let indices_pruned = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
-        context.register(
-            "indices_pruned",
-            "Number of indices pruned",
-            indices_pruned.clone(),
-        );
-        context.register(
+        let items_tracked = context.gauge("items_tracked", "Number of items tracked");
+        let indices_pruned = context.counter("indices_pruned", "Number of indices pruned");
+        let unnecessary_reads = context.counter(
             "unnecessary_reads",
             "Number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
         );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let gets = context.counter("gets", "Number of gets performed");
+        let has = context.counter("has", "Number of has performed");
+        let syncs = context.counter("syncs", "Number of syncs called");
         let _ = items_tracked.try_set(indices.len());
 
         // Return populated archive
@@ -465,6 +450,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
     }
 
     fn first_index(&self) -> Option<u64> {

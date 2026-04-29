@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::mmr::{Location, StandardHasher},
+    merkle::{hasher::Standard as StandardHasher, Family, Location},
     qmdb::{
         self,
         sync::{
@@ -9,14 +9,17 @@ use crate::{
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, Error as SyncError, Journal, Target,
+            Database, DbResolver, Error as SyncError, Journal, Target,
         },
     },
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::Metrics as _;
+use commonware_runtime::{
+    telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
+    Metrics as _,
+};
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -36,7 +39,8 @@ use std::{
 };
 
 /// Type alias for sync engine errors
-type Error<DB, R> = qmdb::sync::Error<<R as Resolver>::Error, <DB as Database>::Digest>;
+type Error<DB, R> =
+    qmdb::sync::Error<<DB as Database>::Family, <R as Resolver>::Error, <DB as Database>::Digest>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -49,11 +53,11 @@ pub(crate) enum NextStep<C, D> {
 
 /// Events that can occur during synchronization
 #[derive(Debug)]
-enum Event<Op, D: Digest, E> {
+enum Event<F: Family, Op, D: Digest, E> {
     /// A target update was received
-    TargetUpdate(Target<D>),
+    TargetUpdate(Target<F, D>),
     /// A batch of operations was received
-    BatchReceived(IndexedFetchResult<Op, D, E>),
+    BatchReceived(IndexedFetchResult<F, Op, D, E>),
     /// The target update channel was closed
     UpdateChannelClosed,
     /// A finish signal was received
@@ -62,24 +66,48 @@ enum Event<Op, D: Digest, E> {
     FinishChannelClosed,
 }
 
+/// Progress gauges updated by the sync engine.
+struct ProgressMetrics {
+    journal_size: Gauge,
+    target_end: Gauge,
+}
+
+impl ProgressMetrics {
+    /// Register sync progress metrics on the provided context.
+    fn new(context: &impl commonware_runtime::Metrics) -> Self {
+        let journal_size =
+            context.gauge("journal_size", "Current journal size (operations applied)");
+        let target_end = context.gauge("target_end", "Target range end (operations needed)");
+
+        Self {
+            journal_size,
+            target_end,
+        }
+    }
+
+    /// Update progress gauges from the current engine snapshot.
+    fn record(&self, journal_size: u64, target_end: u64) {
+        let _ = self.journal_size.try_set(journal_size);
+        let _ = self.target_end.try_set(target_end);
+    }
+}
+
 /// Result from a fetch operation with its request ID and starting location.
 #[derive(Debug)]
-pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
+pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
     pub id: RequestId,
-    /// The location of the first operation in the batch.
-    pub start_loc: Location,
     /// The result of the fetch operation.
-    pub result: Result<FetchResult<Op, D>, E>,
+    pub result: Result<FetchResult<F, Op, D>, E>,
 }
 
 /// Wait for the next synchronization event.
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
-async fn wait_for_event<Op, D: Digest, E>(
-    update_rx: &mut Option<mpsc::Receiver<Target<D>>>,
+async fn wait_for_event<F: Family, Op, D: Digest, E>(
+    update_rx: &mut Option<mpsc::Receiver<Target<F, D>>>,
     finish_rx: &mut Option<mpsc::Receiver<()>>,
-    outstanding_requests: &mut Requests<Op, D, E>,
-) -> Option<Event<Op, D, E>> {
+    outstanding_requests: &mut Requests<F, Op, D, E>,
+) -> Option<Event<F, Op, D, E>> {
     if outstanding_requests.len() == 0 && update_rx.is_none() && finish_rx.is_none() {
         return None;
     }
@@ -115,7 +143,7 @@ async fn wait_for_event<Op, D: Digest, E>(
 pub struct Config<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    R: DbResolver<DB>,
     DB::Op: Encode,
 {
     /// Runtime context for creating database components
@@ -123,7 +151,7 @@ where
     /// Network resolver for fetching operations and proofs
     pub resolver: R,
     /// Sync target (root digest and operation bounds)
-    pub target: Target<DB::Digest>,
+    pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
     pub max_outstanding_requests: usize,
     /// Maximum operations to fetch per batch
@@ -133,7 +161,7 @@ where
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
-    pub update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
     /// When `None`, sync completes as soon as the target is reached.
@@ -144,7 +172,7 @@ where
     /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
-    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Digest>>>,
+    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
     /// Maximum number of previous roots to retain for verifying in-flight
     /// requests after target updates. Set to 0 to disable (all retained
     /// requests will be re-fetched).
@@ -154,38 +182,42 @@ where
 pub(crate) struct Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    R: DbResolver<DB>,
     DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
-    outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
+    outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log.
     ///
     /// # Invariant
     ///
     /// The vectors in the map are non-empty.
-    fetched_operations: BTreeMap<Location, Vec<DB::Op>>,
+    fetched_operations: BTreeMap<Location<DB::Family>, Vec<DB::Op>>,
 
-    /// Pinned MMR nodes extracted from proofs, used for database construction
+    /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
+
+    /// Whether persisted local state already matches the current target and can be
+    /// rebuilt without fetching fresh boundary pins.
+    local_target_state_available: bool,
 
     /// Historical roots from previous sync targets, keyed by tree size
     /// (target.range.end()). Each tree size maps to a unique root because
-    /// the MMR is append-only and validate_update rejects unchanged roots.
-    /// When a retained request completes, proof.leaves identifies which
-    /// historical root to verify against.
-    retained_roots: HashMap<Location, DB::Digest>,
+    /// the merkle tree is append-only and validate_update rejects unchanged
+    /// roots. When a retained request completes, proof.leaves identifies
+    /// which historical root to verify against.
+    retained_roots: HashMap<Location<DB::Family>, DB::Digest>,
 
     /// Tree sizes of retained roots in insertion order (oldest first),
     /// used for FIFO eviction when retained_roots exceeds capacity.
-    retained_roots_order: VecDeque<Location>,
+    retained_roots_order: VecDeque<Location<DB::Family>>,
 
     /// Maximum number of historical roots to retain
     max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
-    target: Target<DB::Digest>,
+    target: Target<DB::Family, DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
     max_outstanding_requests: usize,
@@ -212,7 +244,7 @@ where
     config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
 
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -225,7 +257,10 @@ where
     /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
-    reached_target_tx: Option<mpsc::Sender<Target<DB::Digest>>>,
+    reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
+
+    /// Progress gauges updated after target updates and batch application.
+    progress_metrics: ProgressMetrics,
 
     /// Whether explicit finish has been requested.
     finish_requested: bool,
@@ -238,7 +273,7 @@ where
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    R: DbResolver<DB>,
     DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
@@ -249,7 +284,7 @@ where
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    R: DbResolver<DB>,
     DB::Op: Encode,
 {
     /// Create a new sync engine with the given configuration
@@ -261,18 +296,33 @@ where
             }));
         }
 
+        // Probe for persisted local state matching the target before opening
+        // any engine-owned handles.
+        let local_target_state_available = if config.target.range.start() > Location::new(0) {
+            DB::has_local_target_state(
+                config.context.with_label("local_target_probe"),
+                &config.db_config,
+                &config.target,
+            )
+            .await
+        } else {
+            false
+        };
+
         // Create journal and verifier using the database's factory methods
-        let journal = <DB::Journal as Journal>::new(
+        let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.with_label("journal"),
             config.db_config.journal_config(),
-            config.target.range.clone().into(),
+            config.target.range.clone(),
         )
         .await?;
 
+        let progress_metrics = ProgressMetrics::new(&config.context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
+            local_target_state_available,
             retained_roots: HashMap::new(),
             retained_roots_order: VecDeque::new(),
             max_retained_roots: config.max_retained_roots,
@@ -290,8 +340,10 @@ where
             reached_target_tx: config.reached_target_tx,
             finish_requested: false,
             reached_current_target_reported: false,
+            progress_metrics,
         };
         engine.schedule_requests().await?;
+        engine.record_progress().await;
         Ok(engine)
     }
 
@@ -300,8 +352,8 @@ where
         let target_size = self.target.range.end();
 
         // Schedule a pinned-nodes request at the lower sync bound if we don't
-        // have pinned nodes yet and one isn't already in flight.
-        if self.pinned_nodes.is_none()
+        // have boundary state yet and one isn't already in flight.
+        if !self.has_boundary_state()
             && !self
                 .outstanding_requests
                 .contains(&self.target.range.start())
@@ -313,16 +365,13 @@ where
             self.outstanding_requests.insert(
                 id,
                 start_loc,
+                target_size,
                 cancel_tx,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1), true, cancel_rx)
                         .await;
-                    IndexedFetchResult {
-                        id,
-                        start_loc,
-                        result,
-                    }
+                    IndexedFetchResult { id, result }
                 }),
             );
         }
@@ -336,7 +385,7 @@ where
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
-            let operation_counts: BTreeMap<Location, u64> = self
+            let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
                 .fetched_operations
                 .iter()
                 .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
@@ -364,16 +413,13 @@ where
             self.outstanding_requests.insert(
                 id,
                 gap_range.start,
+                target_size,
                 cancel_tx,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, gap_range.start, batch_size, false, cancel_rx)
                         .await;
-                    IndexedFetchResult {
-                        id,
-                        start_loc: gap_range.start,
-                        result,
-                    }
+                    IndexedFetchResult { id, result }
                 }),
             );
         }
@@ -389,7 +435,7 @@ where
     /// `retained_roots`) so the fetched operations can still be used.
     pub async fn reset_for_target_update(
         mut self,
-        new_target: Target<DB::Digest>,
+        new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
         self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
@@ -398,6 +444,7 @@ where
             .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
+        self.local_target_state_available = false;
 
         // Save the current root keyed by its tree size for verifying
         // retained requests that were issued against this target.
@@ -471,8 +518,18 @@ where
         self.reached_current_target_reported = true;
     }
 
+    /// Record a progress snapshot in metrics.
+    async fn record_progress(&self) {
+        self.progress_metrics
+            .record(self.journal.size().await, *self.target.range.end());
+    }
+
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
-    pub(crate) fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
+    pub(crate) fn store_operations(
+        &mut self,
+        start_loc: Location<DB::Family>,
+        operations: Vec<DB::Op>,
+    ) {
         if operations.is_empty() {
             return;
         }
@@ -561,6 +618,23 @@ where
         Ok(false)
     }
 
+    /// Returns whether this target needs pinned boundary nodes to reconstruct pruned state.
+    fn needs_pinned_boundary(&self) -> bool {
+        self.target.range.start() > Location::new(0)
+    }
+
+    /// Returns whether the current target has the boundary state needed for completion.
+    fn has_boundary_state(&self) -> bool {
+        !self.needs_pinned_boundary()
+            || self.pinned_nodes.is_some()
+            || self.local_target_state_available
+    }
+
+    /// Returns whether the journal and boundary state are both ready for completion.
+    async fn is_ready_to_complete(&self) -> Result<bool, Error<DB, R>> {
+        Ok(self.is_at_target().await? && self.has_boundary_state())
+    }
+
     /// Handle the result of a fetch operation.
     ///
     /// Discards results for requests no longer tracked (removed by
@@ -569,16 +643,16 @@ where
     /// to a matching historical root from `retained_roots` if available.
     fn handle_fetch_result(
         &mut self,
-        fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
+        fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
         // Discard results for stale requests (removed by a target update).
         // Using the request ID prevents a stale future from consuming the
         // tracking entry of a fresh request at the same location.
-        if !self.outstanding_requests.remove(fetch_result.id) {
+        let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
             return Ok(());
-        }
+        };
 
-        let start_loc = fetch_result.start_loc;
+        let start_loc = request.start_loc;
         let FetchResult {
             proof,
             operations,
@@ -595,14 +669,19 @@ where
             return Ok(());
         }
 
-        // Look up the root to verify against using proof.leaves (the tree
-        // size the request was issued for). Fresh requests match the current
-        // target; retained requests match a historical root.
-        let is_current = proof.leaves == self.target.range.end();
-        let target_root = if is_current {
+        if proof.leaves != request.target_size {
+            success_tx.send_lossy(false);
+            return Ok(());
+        }
+
+        // Look up the root to verify against using the tree size the request
+        // asked for. Fresh requests match the current target; retained
+        // requests match a historical root that was explicitly retained.
+        let is_current_target = request.target_size == self.target.range.end();
+        let target_root = if is_current_target {
             &self.target.root
         } else {
-            let Some(root) = self.retained_roots.get(&proof.leaves) else {
+            let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
                 // penalizing the resolver — the data may be valid.
@@ -613,9 +692,16 @@ where
 
         // Verify the proof. Pinned nodes are only extracted from proofs
         // for the current root because the database needs them for the
-        // latest tree size.
-        let need_pinned =
-            is_current && self.pinned_nodes.is_none() && start_loc == self.target.range.start();
+        // latest tree size. When local state already satisfies the boundary
+        // (pins are available in on-disk metadata), we must not demand
+        // pinned nodes from the proof: an empty pinned set would fail
+        // `verify_proof_and_pinned_nodes` against the expected
+        // `nodes_to_pin(range.start)` count, causing an infinite retry loop
+        // whenever a gap request happens to land at `range.start`.
+        let need_pinned = is_current_target
+            && self.pinned_nodes.is_none()
+            && !self.local_target_state_available
+            && start_loc == self.target.range.start();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
             qmdb::verify_proof_and_pinned_nodes(
@@ -656,13 +742,14 @@ where
     /// Handle a sync event and return the next engine state.
     async fn handle_event(
         mut self,
-        event: Event<DB::Op, DB::Digest, R::Error>,
+        event: Event<DB::Family, DB::Op, DB::Digest, R::Error>,
     ) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         match event {
             Event::TargetUpdate(new_target) => {
                 validate_update(&self.target, &new_target)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
+                updated_self.record_progress().await;
                 updated_self.schedule_requests().await?;
                 Ok(NextStep::Continue(updated_self))
             }
@@ -679,6 +766,7 @@ where
                 self.handle_fetch_result(fetch_result)?;
                 self.schedule_requests().await?;
                 self.apply_operations().await?;
+                self.record_progress().await;
                 Ok(NextStep::Continue(self))
             }
         }
@@ -698,7 +786,7 @@ where
         self.drain_finish_requests()?;
 
         // Check if sync is complete
-        if self.is_at_target().await? {
+        if self.is_ready_to_complete().await? {
             self.report_reached_target().await;
 
             if self.finish_rx.is_some() && !self.finish_requested {
@@ -720,7 +808,7 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.range.clone().into(),
+                self.target.range.clone(),
                 self.apply_batch_size,
             )
             .await?;
@@ -767,20 +855,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::Proof;
+    use crate::{
+        merkle::mmr::{Family as MmrFamily, Proof},
+        qmdb::sync::requests::FetchFuture,
+    };
     use commonware_cryptography::sha256;
     use commonware_utils::channel::oneshot;
-    use std::{future::Future, pin::Pin};
 
     /// Create a no-op fetch result future for testing request tracking.
-    fn dummy_future(
-        id: RequestId,
-        loc: u64,
-    ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<i32, sha256::Digest, ()>> + Send>> {
+    fn dummy_future(id: RequestId) -> FetchFuture<MmrFamily, i32, sha256::Digest, ()> {
         Box::pin(async move {
             IndexedFetchResult {
                 id,
-                start_loc: Location::new(loc),
                 result: Ok(FetchResult {
                     proof: Proof {
                         leaves: Location::new(0),
@@ -795,34 +881,35 @@ mod tests {
     }
 
     /// Helper to add a request at a given location.
-    fn add(requests: &mut Requests<i32, sha256::Digest, ()>, loc: u64) -> RequestId {
+    fn add(requests: &mut Requests<MmrFamily, i32, sha256::Digest, ()>, loc: u64) -> RequestId {
         let id = requests.next_id();
         requests.insert(
             id,
             Location::new(loc),
+            Location::new(loc),
             oneshot::channel().0,
-            dummy_future(id, loc),
+            dummy_future(id),
         );
         id
     }
 
     #[test]
     fn test_add_and_remove() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
         assert_eq!(requests.len(), 0);
 
         let id = add(&mut requests, 10);
         assert_eq!(requests.len(), 1);
         assert!(requests.contains(&Location::new(10)));
 
-        assert!(requests.remove(id));
+        assert!(requests.remove(id).is_some());
         assert!(!requests.contains(&Location::new(10)));
-        assert!(!requests.remove(id));
+        assert!(requests.remove(id).is_none());
     }
 
     #[test]
     fn test_remove_before() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         add(&mut requests, 5);
         add(&mut requests, 10);
@@ -840,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_remove_before_all() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         add(&mut requests, 5);
         add(&mut requests, 10);
@@ -852,14 +939,14 @@ mod tests {
 
     #[test]
     fn test_remove_before_empty() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
         requests.remove_before(Location::new(10));
         assert_eq!(requests.len(), 0);
     }
 
     #[test]
     fn test_remove_before_none() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         add(&mut requests, 10);
         add(&mut requests, 20);
@@ -873,7 +960,7 @@ mod tests {
 
     #[test]
     fn test_superseded_request() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         // Old request at location 10
         let old_id = add(&mut requests, 10);
@@ -884,28 +971,28 @@ mod tests {
         assert_eq!(requests.len(), 1);
 
         // Old ID is no longer tracked (superseded by insert)
-        assert!(!requests.remove(old_id));
+        assert!(requests.remove(old_id).is_none());
 
         // New ID is still tracked and by_location is intact
         assert!(requests.contains(&Location::new(10)));
-        assert!(requests.remove(new_id));
+        assert!(requests.remove(new_id).is_some());
         assert!(!requests.contains(&Location::new(10)));
     }
 
     #[test]
     fn test_stale_id_after_remove_before() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         let old_id = add(&mut requests, 5);
         add(&mut requests, 15);
         requests.remove_before(Location::new(10));
 
         // Old ID at location 5 was discarded by remove_before
-        assert!(!requests.remove(old_id));
+        assert!(requests.remove(old_id).is_none());
 
         // New request at the same location gets a different ID
         let new_id = add(&mut requests, 5);
         assert_ne!(old_id, new_id);
-        assert!(requests.remove(new_id));
+        assert!(requests.remove(new_id).is_some());
     }
 }

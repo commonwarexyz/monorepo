@@ -1,10 +1,12 @@
-//! Waiter identity and lifecycle state for io_uring in-flight operations.
+//! Waiter identity and lifecycle state for tracked io_uring requests.
 //!
-//! This module manages waiter IDs and waiter lifecycle transitions.
-//! It is the source of truth for in-flight operation completion state.
+//! This module manages waiter IDs, request lifecycle transitions, and
+//! outstanding-operation tracking. It is the source of truth for which logical
+//! requests are still tracked and whether each currently has an operation SQE
+//! outstanding.
 
-use super::{OpBuffer, OpFd, OpIovecs, Tick, UserData};
-use commonware_utils::channel::oneshot;
+use super::{request::Request, Tick, UserData};
+use io_uring::squeue::Entry as SqueueEntry;
 use tracing::warn;
 
 /// Stable waiter identity packed into SQE/CQE `user_data`.
@@ -90,70 +92,71 @@ impl WaiterId {
     }
 }
 
-/// Lifecycle state of an in-flight waiter across operation and cancellation handling.
-#[derive(Clone, Copy, Debug)]
-enum WaiterState {
-    /// Operation is active in the ring.
+/// Lifecycle state of a tracked request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaiterState {
+    /// Request is still tracked and has not transitioned to cancellation.
     Active {
-        /// Absolute wheel tick by which the operation must complete.
+        /// Absolute wheel tick by which the request must complete.
         ///
         /// If completion has not been observed by this tick, cancellation is
-        /// requested. `None` means this waiter has no timeout deadline.
+        /// requested. `None` means this request has no timeout deadline.
         target_tick: Option<Tick>,
     },
-    /// Cancellation was requested and cancel SQE was submitted.
+    /// Cancellation was requested.
+    ///
+    /// If the request still has an operation SQE in flight, the loop stages an
+    /// async cancel. If the request is only parked in the ready queue, the loop
+    /// completes it locally with timeout when that entry is revisited.
     CancelRequested,
 }
 
-/// State for one in-flight operation.
-///
-/// Holds the sender used for completion delivery and resources that must remain alive
-/// until CQE delivery.
+/// State for one tracked logical request.
 struct Waiter {
     /// Stable identity of this waiter slot instance.
     id: WaiterId,
-    /// The oneshot sender used to deliver the operation result and buffer back to the
-    /// caller.
-    sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// Waiter completion state.
+    /// Lifecycle state for the logical request stored in this slot.
     state: WaiterState,
-    /// The buffer associated with this operation, if any.
-    buffer: Option<OpBuffer>,
-    /// The file descriptor associated with this operation, if any. Used to keep the file
-    /// descriptor alive and prevent reuse while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep the FD alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    fd: Option<OpFd>,
-    /// The iovec array associated with this operation, if any. Used to keep iovec
-    /// storage alive and prevent use-after-free while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep iovecs alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    iovecs: Option<OpIovecs>,
+    /// Whether the logical request currently has an operation SQE in flight.
+    in_flight: bool,
+    /// The active request state machine.
+    request: Request,
 }
 
-/// Waiter resources and metadata returned when a waiter reaches terminal state.
-pub struct CompletedWaiter {
-    /// Sender used to deliver completion back to the original caller.
-    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// Buffer to return to the caller.
-    pub buffer: Option<OpBuffer>,
-    /// Operation result code.
-    pub result: i32,
-    /// True when completion happened through cancellation handling.
-    pub cancelled: bool,
-    /// Scheduled deadline tick, when known.
-    ///
-    /// `None` means there is no deadline to remove from timeout tracking (either no
-    /// deadline was set, or completion was observed after cancellation had already
-    /// been requested).
-    pub target_tick: Option<Tick>,
+/// Outcome produced when staging the next SQE for a waiter.
+pub enum StageOutcome {
+    /// The waiter was canceled while parked in the ready queue and should
+    /// complete locally with timeout rather than issuing another SQE.
+    Timeout(Request),
+    /// The original caller dropped its wait handle before this SQE could be
+    /// staged, so the waiter was retired locally.
+    Orphaned {
+        /// Active deadline tracking to remove from the timeout wheel, if any.
+        target_tick: Option<Tick>,
+    },
+    /// The waiter is still active and produced an SQE for submission.
+    Submit(SqueueEntry),
 }
 
-/// Tracks in-flight operations and the state needed to complete them.
+/// Outcome produced when handling an operation CQE for a waiter.
+#[allow(clippy::large_enum_variant)]
+pub enum CompletionOutcome {
+    /// The CQE belonged to an async cancel SQE and was handled internally.
+    Cancel,
+    /// The logical request needs another SQE and should be placed back in the
+    /// ready queue.
+    Requeue(WaiterId),
+    /// The logical request completed and was removed from the waiter table.
+    Complete {
+        /// The completed request, ready to deliver its cached result.
+        request: Request,
+        /// Active deadline tracking to remove from the timeout wheel, when
+        /// completion happened before cancellation was requested.
+        target_tick: Option<Tick>,
+    },
+}
+
+/// Tracks logical requests and the state needed to complete them.
 pub struct Waiters {
     /// Waiters indexed by slot index.
     ///
@@ -161,13 +164,13 @@ pub struct Waiters {
     entries: Vec<Option<Waiter>>,
     /// Stack of reusable waiter ids.
     free: Vec<WaiterId>,
-    /// Number of active waiters currently stored in `entries`.
+    /// Number of tracked waiters currently stored in `entries`.
     len: usize,
 }
 
 impl Waiters {
-    /// Create an empty waiter set that can track at most `capacity` in-flight operations
-    /// at once.
+    /// Create an empty waiter set that can track at most `capacity` logical
+    /// requests at once.
     pub fn new(capacity: usize) -> Self {
         let mut entries = Vec::with_capacity(capacity);
         entries.resize_with(capacity, || None);
@@ -185,27 +188,25 @@ impl Waiters {
         }
     }
 
-    /// Return the number of currently in-flight waiters.
+    /// Return the number of currently tracked waiters.
     pub const fn len(&self) -> usize {
         self.len
     }
 
-    /// Return whether there are no in-flight waiters.
+    /// Return whether there are no tracked waiters.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Insert a waiter and return its assigned id.
+    /// Return whether all waiter slots are currently occupied.
+    pub const fn is_full(&self) -> bool {
+        self.len == self.entries.len()
+    }
+
+    /// Insert a request and return its assigned id.
     ///
     /// Panics if no free slot is available.
-    pub fn insert(
-        &mut self,
-        sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-        buffer: Option<OpBuffer>,
-        fd: Option<OpFd>,
-        iovecs: Option<OpIovecs>,
-        target_tick: Option<Tick>,
-    ) -> WaiterId {
+    pub fn insert(&mut self, request: Request, target_tick: Option<Tick>) -> WaiterId {
         let id = self
             .free
             .pop()
@@ -213,57 +214,119 @@ impl Waiters {
         let index = id.index() as usize;
         let replaced = self.entries[index].replace(Waiter {
             id,
-            sender,
             state: WaiterState::Active { target_tick },
-            buffer,
-            fd,
-            iovecs,
+            in_flight: false,
+            request,
         });
         assert!(replaced.is_none(), "free slot should not contain waiter");
         self.len += 1;
         id
     }
 
+    /// Remove the waiter stored at `index`, returning its owned request.
+    ///
+    /// Panics if `index` is out of bounds or the slot is empty. Callers must
+    /// already have validated that the slot still belongs to the expected
+    /// waiter.
+    fn take(&mut self, index: usize) -> Request {
+        let slot = self.entries[index].take().expect("tracked waiter missing");
+        self.free.push(slot.id.next_generation());
+        self.len -= 1;
+        slot.request
+    }
+
     /// Request cancellation for an active waiter.
     ///
-    /// Returns cancellation `user_data` when the waiter exists and is active.
-    /// Returns `None` when the waiter id is stale, not present, or already
-    /// cancel-requested.
-    ///
-    /// Panics if `waiter_id` encodes a slot index outside this waiters set capacity.
-    pub fn cancel(&mut self, waiter_id: WaiterId) -> Option<UserData> {
-        let index = waiter_id.index() as usize;
-        let waiter = self.entries[index].as_mut()?;
-        if waiter.id != waiter_id {
-            return None;
+    /// Returns `true` when the waiter was successfully transitioned to
+    /// cancel-requested. Returns `false` when the waiter id is stale, not
+    /// present, or already cancel-requested.
+    pub fn cancel(&mut self, waiter_id: WaiterId) -> bool {
+        let Some(slot) = self.entries.get_mut(waiter_id.index() as usize) else {
+            return false;
+        };
+        let Some(slot) = slot.as_mut() else {
+            return false;
+        };
+        if slot.id != waiter_id {
+            // Slot was reused, this CQE belongs to an older waiter generation.
+            return false;
         }
-        match waiter.state {
+        match slot.state {
             WaiterState::Active { .. } => {
-                waiter.state = WaiterState::CancelRequested;
-                Some(waiter_id.cancel_user_data())
+                slot.state = WaiterState::CancelRequested;
+                true
             }
-            WaiterState::CancelRequested => None,
+            WaiterState::CancelRequested => false,
         }
     }
 
-    /// Process one completion to waiter state.
+    /// Stage the next SQE for a waiter.
     ///
-    /// Returns a completed waiter when this completion reaches terminal state for
-    /// the waiter id, otherwise returns `None`.
+    /// This either returns the next SQE to issue, or removes the waiter from
+    /// the table and returns the local action that should happen instead.
     ///
-    /// `None` includes stale waiter ids (for example, the slot was reused with a
-    /// newer generation).
+    /// - [`StageOutcome::Submit`] leaves the waiter tracked and yields the next SQE.
+    /// - [`StageOutcome::Timeout`] removes the waiter and completes it locally with
+    ///   timeout.
+    /// - [`StageOutcome::Orphaned`] removes the waiter because the caller dropped its
+    ///   wait handle before restaging.
     ///
-    /// Panics if `user_data` decodes to a slot index outside this waiters set
-    /// capacity.
-    pub fn on_completion(&mut self, user_data: UserData, result: i32) -> Option<CompletedWaiter> {
+    /// When this returns [`StageOutcome::Submit`], the waiter is marked as having an
+    /// operation SQE outstanding immediately, so [`Waiters::is_in_flight`] will return
+    /// `true` for that waiter.
+    ///
+    /// Panics if `waiter_id` does not refer to a currently tracked waiter or if
+    /// the waiter already has an operation SQE outstanding.
+    pub fn stage(&mut self, waiter_id: WaiterId) -> StageOutcome {
+        let index = waiter_id.index() as usize;
+        let slot = self
+            .entries
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .expect("stage called for untracked waiter");
+        assert_eq!(slot.id, waiter_id, "stage called with stale waiter id");
+
+        match slot.state {
+            WaiterState::CancelRequested => StageOutcome::Timeout(self.take(index)),
+            WaiterState::Active { target_tick } if slot.request.is_orphaned() => {
+                // The current request still owns all resources, but there is no
+                // caller left to observe more progress, so retire it locally
+                // instead of issuing another SQE.
+                let _ = self.take(index);
+                StageOutcome::Orphaned { target_tick }
+            }
+            WaiterState::Active { .. } => {
+                assert!(
+                    !slot.in_flight,
+                    "stage called for waiter with op already in flight"
+                );
+                slot.in_flight = true;
+                StageOutcome::Submit(slot.request.build_sqe(waiter_id))
+            }
+        }
+    }
+
+    /// Process one CQE for a waiter.
+    ///
+    /// Cancel CQEs are handled internally. Operation CQEs drive the request
+    /// state machine and return a high-level loop action. If the current SQE
+    /// completed but the original caller already dropped its wait handle, the
+    /// waiter is retired locally instead of requeueing another SQE.
+    ///
+    /// Panics if a non-cancel CQE does not refer to a currently tracked waiter,
+    /// if it uses a stale waiter generation, or if the waiter has no operation
+    /// SQE outstanding.
+    pub fn on_completion(&mut self, user_data: UserData, result: i32) -> CompletionOutcome {
         let (waiter_id, is_cancel) = WaiterId::from_user_data(user_data);
         let index = waiter_id.index() as usize;
 
-        let waiter = self.entries[index].as_mut()?;
-        if waiter.id != waiter_id {
-            // Slot was reused, this CQE belongs to an older waiter generation.
-            return None;
+        let Some(slot) = self.entries.get_mut(index).and_then(Option::as_mut) else {
+            assert!(is_cancel, "operation CQE for untracked waiter");
+            return CompletionOutcome::Cancel;
+        };
+        if slot.id != waiter_id {
+            assert!(is_cancel, "operation CQE for stale waiter generation");
+            return CompletionOutcome::Cancel;
         }
 
         if is_cancel {
@@ -282,48 +345,101 @@ impl Waiters {
             }
 
             // Cancel CQEs acknowledge cancel requests but do not complete waiters.
-            return None;
+            return CompletionOutcome::Cancel;
         }
 
-        let (cancelled, target_tick) = match waiter.state {
-            WaiterState::Active { target_tick } => (false, target_tick),
-            WaiterState::CancelRequested => (true, None),
-        };
+        // The operation CQE retires the currently in-flight SQE, regardless of
+        // whether the request completes or is requeued for another one.
+        assert!(slot.in_flight);
+        slot.in_flight = false;
 
-        let Waiter {
-            id, sender, buffer, ..
-        } = self.entries[index].take().expect("missing waiter");
+        let state = slot.state;
+        let completed = slot.request.on_cqe(slot.state, result);
+        if completed || slot.request.is_orphaned() {
+            // Either the request reached a terminal state, or the current SQE
+            // made non-terminal progress for a caller that is already gone. In
+            // both cases, remove the waiter now instead of requeueing another SQE.
+            let target_tick = match state {
+                WaiterState::Active { target_tick } => target_tick,
+                WaiterState::CancelRequested => None,
+            };
 
-        self.free.push(id.next_generation());
-        self.len -= 1;
+            CompletionOutcome::Complete {
+                request: self.take(index),
+                target_tick,
+            }
+        } else {
+            CompletionOutcome::Requeue(waiter_id)
+        }
+    }
 
-        Some(CompletedWaiter {
-            sender,
-            buffer,
-            result,
-            cancelled,
-            target_tick,
-        })
+    /// Return whether a waiter currently has an operation SQE in flight.
+    pub fn is_in_flight(&self, waiter_id: WaiterId) -> bool {
+        let index = waiter_id.index() as usize;
+        self.entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| slot.id == waiter_id && slot.in_flight)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::{IoBuf, IoBufs};
+    use crate::{
+        iouring::request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
+        IoBuf, IoBufMut, IoBufs,
+    };
+    use commonware_utils::channel::oneshot;
     use std::{
-        os::unix::net::UnixStream,
+        os::fd::{FromRawFd, IntoRawFd},
         panic::{catch_unwind, AssertUnwindSafe},
         sync::Arc,
     };
 
+    /// Build a `Sync` request backed by a socket fd so waiter tests can
+    /// exercise slot lifecycle without touching the filesystem.
+    fn make_sync_request() -> (Request, oneshot::Receiver<std::io::Result<()>>) {
+        let (sock_left, _sock_right) =
+            std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Sync(SyncRequest {
+            file: Arc::new(file),
+            result: None,
+            sender: tx,
+        });
+        (request, rx)
+    }
+
+    fn waiter_state(waiters: &Waiters, waiter_id: WaiterId) -> Option<WaiterState> {
+        let index = waiter_id.index() as usize;
+        let slot = waiters.entries.get(index)?.as_ref()?;
+        (slot.id == waiter_id).then_some(slot.state)
+    }
+
+    fn remove_waiter(waiters: &mut Waiters, waiter_id: WaiterId) -> Request {
+        let index = waiter_id.index() as usize;
+        let slot = waiters
+            .entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .expect("remove_waiter called for untracked waiter");
+        assert_eq!(
+            slot.id, waiter_id,
+            "remove_waiter called with stale waiter id"
+        );
+        waiters.take(index)
+    }
+
     #[test]
     fn test_waiter_id_encoding_and_generation_wrap() {
-        // Generation bits are masked to the representable range.
+        // Verify waiter ids round-trip through user_data encoding and wrap their generation field
+        // without corrupting the slot index bits.
         let wrapped = WaiterId::new(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
         assert_eq!(wrapped.generation(), 4);
 
-        // Generation wraps after reaching the max encoded value.
         let max = WaiterId::new(7, WaiterId::GENERATION_MASK as u32);
         assert_eq!(max.next_generation().generation(), 0);
 
@@ -331,7 +447,6 @@ mod tests {
         assert_eq!(waiter_id.index(), 7);
         assert_eq!(waiter_id.generation(), 3);
 
-        // Encoding/decoding must preserve id and tag semantics.
         let (decoded_op, is_cancel_op) = WaiterId::from_user_data(waiter_id.user_data());
         assert_eq!(decoded_op, waiter_id);
         assert!(!is_cancel_op);
@@ -343,136 +458,515 @@ mod tests {
 
     #[test]
     fn test_waiters_lifecycle_and_slot_reuse() {
+        // Verify waiter insertion, completion, removal, and slot reuse all preserve generations.
         let mut waiters = Waiters::new(3);
         assert_eq!(waiters.entries.len(), 3);
         assert_eq!(waiters.len(), 0);
         assert!(waiters.is_empty());
 
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-        let id0 = waiters.insert(tx0, Some(IoBuf::from(b"hello").into()), None, None, Some(5));
-        let id1 = waiters.insert(tx1, Some(IoBuf::from(b"world").into()), None, None, Some(9));
+        // Populate two slots so the test can later free and reuse one of them.
+        let (req0, _rx0) = make_sync_request();
+        let (req1, _rx1) = make_sync_request();
+        let id0 = waiters.insert(req0, Some(5));
+        let id1 = waiters.insert(req1, Some(9));
         assert_eq!((id0.index(), id1.index()), (0, 1));
         assert_eq!(waiters.len(), 2);
+        assert!(!waiters.is_full());
 
-        // Completion for a stale generation must be ignored.
+        // A stale operation CQE should panic because only cancel CQEs are
+        // expected to arrive after slot reuse.
         let stale = WaiterId::new(id1.index(), id1.generation().wrapping_add(1));
-        assert!(waiters.on_completion(stale.user_data(), 0).is_none());
+        let stale_completion = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.on_completion(stale.user_data(), 0);
+        }));
+        assert!(stale_completion.is_err());
 
-        let completed1 = waiters
-            .on_completion(id1.user_data(), 7)
-            .expect("missing waiter completion");
-        assert_eq!(completed1.result, 7);
-        assert!(!completed1.cancelled);
-        assert_eq!(completed1.target_tick, Some(9));
+        // Complete id1.
+        assert!(matches!(waiters.stage(id1), StageOutcome::Submit(_)));
         assert!(matches!(
-            completed1.buffer.as_ref(),
-            Some(OpBuffer::Write(buf)) if buf.as_ref() == b"world"
+            waiters.on_completion(id1.user_data(), 0),
+            CompletionOutcome::Complete {
+                target_tick: Some(9),
+                ..
+            }
         ));
         assert_eq!(waiters.len(), 1);
 
         // Next allocation reuses the freed slot with incremented generation.
-        let (tx2, _rx2) = oneshot::channel();
-        let id2 = waiters.insert(tx2, None, None, None, Some(11));
+        let (req2, _rx2) = make_sync_request();
+        let id2 = waiters.insert(req2, Some(11));
         assert_eq!(id2.index(), id1.index());
         assert_eq!(
             id2.generation(),
             id1.generation().wrapping_add(1) & (WaiterId::GENERATION_MASK as u32)
         );
 
-        let _ = waiters.on_completion(id0.user_data(), 1);
-        let _ = waiters.on_completion(id2.user_data(), 2);
-
-        // Cover vectored buffers plus fd/iovec keepalive storage.
-        let (tx3, _rx3) = oneshot::channel();
-        let vectored = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
-        let iovecs = OpIovecs::new(
-            vec![libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            }]
-            .into_boxed_slice(),
-        );
-        assert!(!iovecs.as_ptr().is_null());
-        let (sock_left, _sock_right) =
-            UnixStream::pair().expect("failed to create unix socket pair");
-        let id3 = waiters.insert(
-            tx3,
-            Some(vectored.into()),
-            Some(OpFd::Fd(Arc::new(sock_left.into()))),
-            Some(iovecs),
-            None,
-        );
-        let completed3 = waiters
-            .on_completion(id3.user_data(), 9)
-            .expect("missing vectored completion");
-        assert!(matches!(
-            completed3.buffer,
-            Some(OpBuffer::WriteVectored(_))
-        ));
+        // All live waiters should still complete and remove cleanly after slot reuse.
+        assert!(matches!(waiters.stage(id0), StageOutcome::Submit(_)));
+        let _ = waiters.on_completion(id0.user_data(), 0);
+        assert!(matches!(waiters.stage(id2), StageOutcome::Submit(_)));
+        let _ = waiters.on_completion(id2.user_data(), 0);
         assert!(waiters.is_empty());
     }
 
     #[test]
     fn test_waiters_cancel_paths() {
+        // Verify cancel requests transition waiter state, ignore cancel CQEs for completion, and
+        // discard late cancel CQEs once the original operation has already completed.
         let mut waiters = Waiters::new(3);
 
-        let (tx, _rx) = oneshot::channel();
-        let waiter_id = waiters.insert(tx, None, None, None, Some(2));
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2));
 
         let stale = WaiterId::new(waiter_id.index(), waiter_id.generation().wrapping_add(1));
-        assert!(waiters.cancel(stale).is_none());
+        assert!(!waiters.cancel(stale));
 
-        let cancel = waiters
-            .cancel(waiter_id)
-            .expect("cancel should transition active waiter");
-        assert_eq!(cancel, waiter_id.cancel_user_data());
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(
+            waiters.cancel(waiter_id),
+            "cancel should transition active waiter"
+        );
 
-        // Cancel CQE does not complete the waiter. The op CQE delivers the result.
-        assert!(waiters.on_completion(cancel, -libc::ECANCELED).is_none());
-        let completed = waiters
-            .on_completion(waiter_id.user_data(), 123)
-            .expect("missing completion");
-        assert_eq!(completed.result, 123);
-        assert!(completed.cancelled);
-        assert_eq!(completed.target_tick, None);
+        // Cancel CQE does not complete the waiter.
+        assert!(matches!(
+            waiters.on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Cancel
+        ));
+
+        // Op CQE completes the waiter.
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), 0),
+            CompletionOutcome::Complete {
+                target_tick: None,
+                ..
+            }
+        ));
         assert!(waiters.is_empty());
 
         // Late cancel CQE for the already-completed waiter should be ignored.
-        assert!(waiters
-            .on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED)
-            .is_none());
-        assert!(waiters.on_completion(0, 1).is_none());
+        assert!(matches!(
+            waiters.on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Cancel
+        ));
+        let missing_op_cqe = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.on_completion(0, 1);
+        }));
+        assert!(missing_op_cqe.is_err());
+    }
+
+    #[test]
+    fn test_waiters_track_in_flight_state() {
+        // Verify `stage` tracks a staged operation and that the bit is
+        // cleared again when the matching op CQE is processed.
+        let mut waiters = Waiters::new(1);
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(4));
+
+        assert!(waiters.is_full());
+        assert!(!waiters.is_in_flight(waiter_id));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(waiters.is_in_flight(waiter_id));
+
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), 0),
+            CompletionOutcome::Complete { .. }
+        ));
+        assert!(!waiters.is_in_flight(waiter_id));
+    }
+
+    #[test]
+    fn test_waiters_reject_stale_in_flight_queries() {
+        // Verify stale waiter ids cannot observe in-flight state after
+        // their slot has been recycled to a new generation.
+        let mut waiters = Waiters::new(1);
+        let (req0, _rx0) = make_sync_request();
+        let stale_id = waiters.insert(req0, Some(1));
+        let _ = remove_waiter(&mut waiters, stale_id);
+
+        let (req1, _rx1) = make_sync_request();
+        let active_id = waiters.insert(req1, Some(2));
+        assert_ne!(active_id, stale_id);
+
+        assert!(!waiters.is_in_flight(stale_id));
+        assert!(matches!(waiters.stage(active_id), StageOutcome::Submit(_)));
+        assert!(waiters.is_in_flight(active_id));
+    }
+
+    #[test]
+    fn test_waiters_stage_panics_for_out_of_range_and_empty_slots() {
+        // Verify `stage` treats impossible waiter ids as invariant failures,
+        // while the tolerant query/cancel paths still reject them cleanly.
+        let mut waiters = Waiters::new(1);
+        let out_of_range = WaiterId::new(7, 0);
+        assert!(!waiters.cancel(out_of_range));
+        let out_of_range_stage = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.stage(out_of_range);
+        }));
+        assert!(out_of_range_stage.is_err());
+
+        let empty_slot = WaiterId::new(0, 0);
+        assert!(!waiters.cancel(empty_slot));
+        let empty_slot_stage = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.stage(empty_slot);
+        }));
+        assert!(empty_slot_stage.is_err());
+    }
+
+    #[test]
+    fn test_waiters_cancel_and_in_flight_reject_out_of_range_and_empty_slots() {
+        // Verify cancel and in-flight tracking reject waiter ids that point
+        // outside the table or at currently empty slots.
+        let mut waiters = Waiters::new(1);
+        let out_of_range = WaiterId::new(7, 0);
+        assert!(!waiters.cancel(out_of_range));
+        assert!(!waiters.is_in_flight(out_of_range));
+
+        let empty_slot = WaiterId::new(0, 0);
+        assert!(!waiters.cancel(empty_slot));
+        assert!(!waiters.is_in_flight(empty_slot));
+    }
+
+    #[test]
+    fn test_waiters_cancel_stage_only_when_in_flight() {
+        // Verify timeout processing can distinguish between:
+        // - a waiter whose current SQE is still in flight
+        // - a waiter that is only parked in the ready queue
+        let mut waiters = Waiters::new(2);
+
+        // First build a waiter that still has an operation SQE outstanding.
+        let (active_req, _active_rx) = make_sync_request();
+        let active = waiters.insert(active_req, Some(2));
+        assert!(matches!(waiters.stage(active), StageOutcome::Submit(_)));
+        assert!(waiters.cancel(active));
+        assert!(waiters.is_in_flight(active));
+        let active_state = waiter_state(&waiters, active).expect("active waiter missing");
+        assert!(matches!(active_state, WaiterState::CancelRequested));
+
+        // Then build a waiter that has been canceled before any SQE was staged.
+        let (ready_req, _ready_rx) = make_sync_request();
+        let ready = waiters.insert(ready_req, Some(3));
+        assert!(waiters.cancel(ready));
+        assert!(!waiters.is_in_flight(ready));
+        let ready_state = waiter_state(&waiters, ready).expect("ready waiter missing");
+        assert!(matches!(ready_state, WaiterState::CancelRequested));
+    }
+
+    #[test]
+    fn test_waiters_stage_orphans_closed_requests() {
+        // Verify closed send and read-at requests are removed locally before
+        // their first SQE is ever staged.
+        {
+            // Send request orphaned before first submit.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            let waiter_id = waiters.insert(
+                Request::Send(SendRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(7),
+            );
+
+            match waiters.stage(waiter_id) {
+                StageOutcome::Orphaned {
+                    target_tick: Some(7),
+                } => {}
+                _ => panic!("closed send waiter should be orphaned before staging"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Read-at request orphaned before first submit.
+            let mut waiters = Waiters::new(1);
+            let (sock_left, _sock_right) =
+                std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            let waiter_id = waiters.insert(
+                Request::ReadAt(ReadAtRequest {
+                    file: Arc::new(file),
+                    offset: 0,
+                    len: 8,
+                    read: 0,
+                    buf: IoBufMut::with_capacity(8),
+                    result: None,
+                    sender: tx,
+                }),
+                Some(8),
+            );
+
+            match waiters.stage(waiter_id) {
+                StageOutcome::Orphaned {
+                    target_tick: Some(8),
+                } => {}
+                _ => panic!("closed read waiter should be orphaned before staging"),
+            }
+            assert!(waiters.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_waiters_orphan_closed_requests_after_nonterminal_completion() {
+        // Verify retryable and partial-progress send, recv, and read-at CQEs
+        // remove the waiter instead of requeueing once the caller is gone.
+        {
+            // Send request orphaned after a retryable CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Send(SendRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(5),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), -libc::EAGAIN) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(5),
+                } => request.complete(),
+                _ => panic!("closed send waiter should be orphaned after retry CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Send request orphaned after a partial-progress CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Send(SendRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(5),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), 2) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(5),
+                } => request.complete(),
+                _ => panic!("closed send waiter should be orphaned after partial CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Exact recv orphaned after a retryable CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Recv(RecvRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    buf: IoBufMut::with_capacity(5),
+                    offset: 0,
+                    len: 5,
+                    exact: true,
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(6),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), -libc::EAGAIN) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(6),
+                } => request.complete(),
+                _ => panic!("closed recv waiter should be orphaned after retry CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Exact recv orphaned after a partial-progress CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Recv(RecvRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    buf: IoBufMut::with_capacity(5),
+                    offset: 0,
+                    len: 5,
+                    exact: true,
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(6),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), 3) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(6),
+                } => request.complete(),
+                _ => panic!("closed recv waiter should be orphaned after partial CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Read-at request orphaned after a partial-progress CQE.
+            let mut waiters = Waiters::new(1);
+            let (sock_left, _sock_right) =
+                std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::ReadAt(ReadAtRequest {
+                    file: Arc::new(file),
+                    offset: 0,
+                    len: 8,
+                    read: 0,
+                    buf: IoBufMut::with_capacity(8),
+                    result: None,
+                    sender: tx,
+                }),
+                Some(9),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), 3) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(9),
+                } => request.complete(),
+                _ => panic!("closed read waiter should be orphaned after partial CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_waiters_accept_expected_cancel_cqe_results() {
+        // Verify the expected kernel cancel CQE results leave the waiter alive
+        // for the original operation CQE to finish it later.
+        for result in [0, -libc::EALREADY, -libc::ENOENT] {
+            let mut waiters = Waiters::new(1);
+            let (req, _rx) = make_sync_request();
+            let waiter_id = waiters.insert(req, Some(2));
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            assert!(waiters.cancel(waiter_id));
+
+            assert!(matches!(
+                waiters.on_completion(waiter_id.cancel_user_data(), result),
+                CompletionOutcome::Cancel
+            ));
+            let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
+            assert!(matches!(state, WaiterState::CancelRequested));
+        }
+    }
+
+    #[test]
+    fn test_waiters_tolerate_unexpected_negative_cancel_result() {
+        // Verify unexpected negative cancel CQEs are ignored rather than
+        // corrupting waiter state.
+        let mut waiters = Waiters::new(1);
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(waiters.cancel(waiter_id));
+
+        assert!(matches!(
+            waiters.on_completion(waiter_id.cancel_user_data(), -libc::EPERM),
+            CompletionOutcome::Cancel
+        ));
+        let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
+        assert!(matches!(state, WaiterState::CancelRequested));
+    }
+
+    #[test]
+    fn test_waiters_cancel_cqe_einval_panics() {
+        // Verify `EINVAL` remains a hard invariant failure because the kernel
+        // rejected our async cancel SQE.
+        let mut waiters = Waiters::new(1);
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(waiters.cancel(waiter_id));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.on_completion(waiter_id.cancel_user_data(), -libc::EINVAL);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_waiters_stale_ids_cannot_remove_reused_slots() {
+        // Verify stale waiter ids cannot observe state or remove a reused slot.
+        let mut waiters = Waiters::new(1);
+        let (req0, _rx0) = make_sync_request();
+        let waiter_id = waiters.insert(req0, Some(1));
+        let _ = remove_waiter(&mut waiters, waiter_id);
+
+        let (req1, _rx1) = make_sync_request();
+        let reused_id = waiters.insert(req1, Some(2));
+        assert_ne!(reused_id, waiter_id);
+        assert!(waiter_state(&waiters, waiter_id).is_none());
+        let stale_remove = catch_unwind(AssertUnwindSafe(|| {
+            let _ = remove_waiter(&mut waiters, waiter_id);
+        }));
+        assert!(stale_remove.is_err());
     }
 
     #[test]
     fn test_waiters_insert_and_cancel_invariants() {
+        // Verify waiter capacity is enforced and that cancel remains valid even for waiters that
+        // were inserted without a deadline.
         let mut waiters = Waiters::new(2);
 
         // Inserting beyond configured capacity should panic.
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-        let _ = waiters.insert(tx0, None, None, None, None);
-        let _ = waiters.insert(tx1, None, None, None, None);
+        let (req0, _rx0) = make_sync_request();
+        let (req1, _rx1) = make_sync_request();
+        let _ = waiters.insert(req0, None);
+        let _ = waiters.insert(req1, None);
+        assert!(waiters.is_full());
         let insert_overflow = catch_unwind(AssertUnwindSafe(|| {
-            let (tx2, _rx2) = oneshot::channel();
-            let _ = waiters.insert(tx2, None, None, None, None);
+            let (req2, _rx2) = make_sync_request();
+            let _ = waiters.insert(req2, None);
         }));
         assert!(insert_overflow.is_err());
 
         // Cancellation is allowed even when no deadline is tracked.
         let mut waiters = Waiters::new(2);
-        let (tx, _rx) = oneshot::channel();
-        let no_deadline = waiters.insert(tx, None, None, None, None);
-        let cancel = waiters
-            .cancel(no_deadline)
-            .expect("cancel should support active waiter without deadline");
-        assert_eq!(cancel, no_deadline.cancel_user_data());
+        let (req, _rx) = make_sync_request();
+        let no_deadline = waiters.insert(req, None);
+        assert!(
+            waiters.cancel(no_deadline),
+            "cancel should support active waiter without deadline"
+        );
 
         // Repeated cancel on the same waiter must be ignored.
-        let (tx, _rx) = oneshot::channel();
-        let active = waiters.insert(tx, None, None, None, Some(3));
-        let _ = waiters.cancel(active);
-        assert!(waiters.cancel(active).is_none());
+        let (req, _rx) = make_sync_request();
+        let active = waiters.insert(req, Some(3));
+        assert!(waiters.cancel(active));
+        assert!(!waiters.cancel(active));
     }
 }

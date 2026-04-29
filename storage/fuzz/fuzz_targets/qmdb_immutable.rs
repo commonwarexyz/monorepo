@@ -7,7 +7,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, R
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
-    mmr::journaled::Config as MerkleConfig,
+    mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
         verify_proof,
@@ -40,6 +40,7 @@ enum ImmutableOperation {
     Commit {
         has_metadata: bool,
         metadata_size: usize,
+        advance_floor: bool,
     },
     Prune {
         loc: u64,
@@ -179,6 +180,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     ImmutableOperation::Commit {
                         has_metadata,
                         metadata_size,
+                        advance_floor,
                     } => {
                         let metadata = if has_metadata {
                             Some(generate_value(&mut rng, metadata_size))
@@ -186,20 +188,28 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             None
                         };
 
+                        let end = db.bounds().await.end;
+                        let pending_count = pending_sets.len() as u64;
                         assign_pending_locations(
                             &pending_sets,
-                            db.bounds().await.end,
+                            end,
                             &mut keys_set,
                             &mut set_locations,
                         );
-                        let finalized = {
-                            let mut batch = db.new_batch();
-                            for (k, v) in pending_sets.drain(..) {
-                                batch = batch.set(k, v);
-                            }
-                            batch.merkleize(metadata).finalize()
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_sets.drain(..) {
+                            batch = batch.set(k, v);
+                        }
+                        let floor = if advance_floor {
+                            // Advance floor to the commit location (end of this batch).
+                            // total_size = end + pending_count + 1 (commit op).
+                            // Floor at the commit op is the maximum valid value.
+                            Location::new(*end + pending_count)
+                        } else {
+                            db.inactivity_floor_loc()
                         };
-                        db.apply_batch(finalized).await.unwrap();
+                        let merkleized = batch.merkleize(&db, metadata, floor);
+                        db.apply_batch(merkleized).await.unwrap();
                         db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().await.end - 1);
                     }
@@ -214,14 +224,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 &mut keys_set,
                                 &mut set_locations,
                             );
-                            let finalized = {
-                                let mut batch = db.new_batch();
-                                for (k, v) in pending_sets.drain(..) {
-                                    batch = batch.set(k, v);
-                                }
-                                batch.merkleize(None).finalize()
-                            };
-                            db.apply_batch(finalized).await.unwrap();
+                            let mut batch = db.new_batch();
+                            for (k, v) in pending_sets.drain(..) {
+                                batch = batch.set(k, v);
+                            }
+                            // Set the floor to at least safe_loc so the prune succeeds,
+                            // but never below the current floor (monotonicity).
+                            let floor = safe_loc.max(db.inactivity_floor_loc());
+                            let merkleized = batch.merkleize(&db, None, floor);
+                            db.apply_batch(merkleized).await.unwrap();
                             db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().await.end - 1);
                             db.prune(safe_loc).await.expect("prune should not fail");
@@ -247,14 +258,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 &mut keys_set,
                                 &mut set_locations,
                             );
-                            let finalized = {
-                                let mut batch = db.new_batch();
-                                for (k, v) in pending_sets.drain(..) {
-                                    batch = batch.set(k, v);
-                                }
-                                batch.merkleize(None).finalize()
-                            };
-                            db.apply_batch(finalized).await.unwrap();
+                            let mut batch = db.new_batch();
+                            for (k, v) in pending_sets.drain(..) {
+                                batch = batch.set(k, v);
+                            }
+                            let floor = db.inactivity_floor_loc();
+                            let merkleized = batch.merkleize(&db, None, floor);
+                            db.apply_batch(merkleized).await.unwrap();
                             db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().await.end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
@@ -278,8 +288,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let safe_max_ops =
                                 NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                            let finalized = db.new_batch().merkleize(None).finalize();
-                            db.apply_batch(finalized).await.unwrap();
+                            let floor = db.inactivity_floor_loc();
+                            let batch = db.new_batch().merkleize(&db, None, floor);
+                            db.apply_batch(batch).await.unwrap();
                             db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().await.end - 1);
                             if safe_start >= db.bounds().await.start {
@@ -309,14 +320,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             &mut keys_set,
                             &mut set_locations,
                         );
-                        let finalized = {
-                            let mut batch = db.new_batch();
-                            for (k, v) in pending_sets.drain(..) {
-                                batch = batch.set(k, v);
-                            }
-                            batch.merkleize(None).finalize()
-                        };
-                        db.apply_batch(finalized).await.unwrap();
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_sets.drain(..) {
+                            batch = batch.set(k, v);
+                        }
+                        let floor = db.inactivity_floor_loc();
+                        let merkleized = batch.merkleize(&db, None, floor);
+                        db.apply_batch(merkleized).await.unwrap();
                         db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().await.end - 1);
                         let _ = db.root();
@@ -330,14 +340,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 &mut keys_set,
                 &mut set_locations,
             );
-            let finalized = {
-                let mut batch = db.new_batch();
-                for (k, v) in pending_sets.drain(..) {
-                    batch = batch.set(k, v);
-                }
-                batch.merkleize(None).finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
+            let mut batch = db.new_batch();
+            for (k, v) in pending_sets.drain(..) {
+                batch = batch.set(k, v);
+            }
+            let floor = db.inactivity_floor_loc();
+            let merkleized = batch.merkleize(&db, None, floor);
+            db.apply_batch(merkleized).await.unwrap();
             db.destroy().await.unwrap();
         }
     });

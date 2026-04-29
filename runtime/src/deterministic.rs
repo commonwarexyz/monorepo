@@ -22,7 +22,7 @@
 //!
 //! This runtime enforces metrics are unique and well-formed:
 //! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
-//! - Metric names must be unique (panics on duplicate registration)
+//! - Re-registering the same metric key reuses the existing metric handle when the type matches
 //!
 //! # Example
 //!
@@ -44,23 +44,27 @@
 
 pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
+    child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
     },
+    prefixed_name,
     storage::{
         audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
         memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
-    telemetry::metrics::task::Label,
+    telemetry::metrics::{
+        add_attribute, raw, task::Label, validate_label, Counter, CounterFamily, GaugeFamily,
+        Metric, Register, Registered, Registry,
+    },
     utils::{
-        add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, ScopeGuard,
+        Panicker,
     },
-    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
-    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
+    Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -83,17 +87,12 @@ use futures::{
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry as PrometheusRegistry},
-};
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -109,48 +108,35 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 #[derive(Debug)]
 struct Metrics {
     iterations: Counter,
-    tasks_spawned: Family<Label, Counter>,
-    tasks_running: Family<Label, Gauge>,
-    task_polls: Family<Label, Counter>,
-
-    network_bandwidth: Counter,
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
+    task_polls: CounterFamily<Label>,
 }
 
 impl Metrics {
-    pub fn init(registry: &mut PrometheusRegistry) -> Self {
-        let metrics = Self {
-            iterations: Counter::default(),
-            task_polls: Family::default(),
-            tasks_spawned: Family::default(),
-            tasks_running: Family::default(),
-            network_bandwidth: Counter::default(),
-        };
-        registry.register(
-            "iterations",
-            "Total number of iterations",
-            metrics.iterations.clone(),
-        );
-        registry.register(
-            "tasks_spawned",
-            "Total number of tasks spawned",
-            metrics.tasks_spawned.clone(),
-        );
-        registry.register(
-            "tasks_running",
-            "Number of tasks currently running",
-            metrics.tasks_running.clone(),
-        );
-        registry.register(
-            "task_polls",
-            "Total number of task polls",
-            metrics.task_polls.clone(),
-        );
-        registry.register(
-            "bandwidth",
-            "Total amount of data sent over network",
-            metrics.network_bandwidth.clone(),
-        );
-        metrics
+    pub fn init(registry: &mut impl Register) -> Self {
+        Self {
+            iterations: registry.register(
+                "iterations",
+                "Total number of iterations",
+                raw::Counter::default(),
+            ),
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+            task_polls: registry.register(
+                "task_polls",
+                "Total number of task polls",
+                raw::Family::default(),
+            ),
+        }
     }
 }
 
@@ -237,10 +223,10 @@ impl Config {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under Miri
                 let network_buffer_pool_cfg = BufferPoolConfig::for_network()
-                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_max_per_class(commonware_utils::NZU32!(32))
                     .with_thread_cache_disabled();
                 let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
-                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_max_per_class(commonware_utils::NZU32!(32))
                     .with_thread_cache_disabled();
             } else {
                 let network_buffer_pool_cfg =
@@ -368,13 +354,9 @@ impl Default for Config {
     }
 }
 
-/// A (prefixed_name, attributes) pair identifying a unique metric registration.
-type MetricKey = (String, Vec<(String, String)>);
-
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<MetricKey>>,
+    registry: Registry,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -891,7 +873,6 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -899,7 +880,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -908,7 +889,6 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -917,7 +897,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -926,10 +906,10 @@ impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let start_time = cfg.start_time;
         let deadline = cfg
             .timeout
@@ -942,11 +922,11 @@ impl Context {
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             cfg.network_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             cfg.storage_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Create storage fault config (default to disabled if None)
@@ -960,19 +940,18 @@ impl Context {
                 ),
                 auditor.clone(),
             ),
-            runtime_registry,
+            &mut runtime_registry,
         );
 
         // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
+        let network = MeteredNetwork::new(network, &mut runtime_registry);
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            registry,
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -990,7 +969,6 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
-                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -998,7 +976,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1019,22 +997,22 @@ impl Context {
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
 
         // Copy state
         let network =
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
+        let network = MeteredNetwork::new(network, &mut runtime_registry);
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             checkpoint.network_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             checkpoint.storage_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Initialize panicker
@@ -1050,8 +1028,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            registry,
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1062,7 +1039,6 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
-                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1070,7 +1046,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1143,11 +1119,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -1159,9 +1130,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1170,7 +1141,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = if is_instrumented {
+        let future = if traced {
             let span = info_span!(parent: None, "task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
@@ -1251,25 +1222,13 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
-    fn with_label(&self, label: &str) -> Self {
-        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
-        validate_label(label);
+    fn label(&self) -> String {
+        self.name.clone()
+    }
 
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
-        assert!(
-            !name.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
+    fn with_label(&self, label: &str) -> Self {
         Self {
-            name,
+            name: child_label(&self.name, label),
             ..self.clone()
         }
     }
@@ -1290,16 +1249,21 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn label(&self) -> String {
-        self.name.clone()
+    fn with_span(&self) -> Self {
+        Self {
+            traced: true,
+            ..self.clone()
+        }
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        // Prepare args
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
         let name = name.into();
         let help = help.into();
-
-        // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
@@ -1309,64 +1273,19 @@ impl crate::Metrics for Context {
                 hasher.update(v.as_bytes());
             }
         });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Check for duplicate registration (O(1) lookup)
-        let metric_key = (prefixed_name.clone(), self.attributes.clone());
-        let is_new = executor.registered_metrics.lock().insert(metric_key);
-        assert!(
-            is_new,
-            "duplicate metric: {} with attributes {:?}",
-            prefixed_name, self.attributes
-        );
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
+        let metric = Arc::new(metric);
+        executor.registry.register(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let encoded = executor.registry.lock().encode();
-        encoded
-    }
-
-    fn with_scope(&self) -> Self {
-        let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
-
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        let weak = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            if let Some(exec) = weak.upgrade() {
-                exec.registry.lock().remove_scope(id);
-            }
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
+        executor.registry.encode()
     }
 }
 

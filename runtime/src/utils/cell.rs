@@ -1,6 +1,9 @@
-use crate::{signal, Error, Handle};
+use crate::{
+    signal,
+    telemetry::metrics::{Metric, Registered},
+    Error, Handle,
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
 use std::{
     future::Future,
@@ -13,8 +16,8 @@ use std::{
 const MISSING_CONTEXT: &str = "runtime context missing";
 const DUPLICATE_CONTEXT: &str = "runtime context already present";
 
-/// Spawn a task using a [`Cell`] by taking its context, executing the provided
-/// async block, and restoring the context before the block completes.
+/// Spawn a task using a [`Cell`] by taking its context, restoring the context synchronously
+/// in the spawned closure, and returning the provided future directly to the runtime.
 ///
 /// The macro uses the context's default spawn configuration (supervised, shared executor with
 /// `blocking == false`). If you need to mark the task as blocking or request a dedicated thread,
@@ -23,7 +26,7 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 macro_rules! spawn_cell {
     ($cell:expr, $body:expr $(,)?) => {{
         let __commonware_context = $cell.take();
-        __commonware_context.spawn(move |context| async move {
+        __commonware_context.spawn(move |context| {
             $cell.restore(context);
             $body
         })
@@ -114,10 +117,6 @@ where
         Self::Present(self.into_present().shared(blocking))
     }
 
-    fn instrumented(self) -> Self {
-        Self::Present(self.into_present().instrumented())
-    }
-
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -153,20 +152,25 @@ where
         Self::Present(self.as_present().with_label(label))
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        Self::Present(self.as_present().with_attribute(key, value))
+    }
+
+    fn with_span(&self) -> Self {
+        Self::Present(self.as_present().with_span())
+    }
+
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
         self.as_present().register(name, help, metric)
     }
 
     fn encode(&self) -> String {
         self.as_present().encode()
-    }
-
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        Self::Present(self.as_present().with_attribute(key, value))
-    }
-
-    fn with_scope(&self) -> Self {
-        Self::Present(self.as_present().with_scope())
     }
 }
 

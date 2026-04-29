@@ -1,18 +1,49 @@
+//! End-to-end `BufferPool` allocation benchmarks.
+//!
+//! This module compares pooled allocation against direct aligned allocation for
+//! the steady-state hot path we care about here: allocate, touch the requested
+//! bytes at page granularity, and drop.
+//!
+//! # Metrics
+//!
+//! - **raw**: end-to-end time for allocate + page-touch + drop.
+//! - **adjusted**: raw time minus the cost of repeatedly touching pages on an
+//!   already-materialized buffer. This isolates allocator overhead. The
+//!   baseline is always measured single-threaded because each thread writes to
+//!   private memory, so the touch cost is the same per iteration regardless of
+//!   thread count, and single-threaded measurement avoids scheduling noise that
+//!   would swamp the subtraction signal.
+//!
+//! # Thread Configurations
+//!
+//! For each buffer size, the benchmark runs:
+//!
+//! - one single-threaded case
+//! - one multi-threaded lockstep case
+//! - one multi-threaded staggered case
+//!
+//! The shared [`Threading`] presets and timing harness come from [`super::utils`].
+//!
+//! # Why Touch Pages?
+//!
+//! Large allocations may be backed by lazily materialized virtual memory once
+//! the allocator starts using `mmap`, so timing allocation alone can undercount
+//! the real cost of actually using the buffer. Touching each page forces
+//! materialization and makes the comparison between direct aligned allocation
+//! and pooled reuse fairer.
+//!
+//! For large sizes this means much of the raw benchmark measures page writes
+//! rather than allocator bookkeeping. That is acceptable because both
+//! implementations pay the same page-touch cost, so the relative comparison
+//! still isolates the allocation strategy.
+
+use super::utils::{measure, Threading};
 use commonware_runtime::{
     tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU32};
 use criterion::Criterion;
-use std::{
-    hint::{black_box, spin_loop},
-    num::NonZeroUsize,
-    sync::{Arc, Barrier},
-    thread,
-    time::{Duration, Instant},
-};
-
-const MIN_BENCH_THREADS: usize = 2;
-const MAX_BENCH_THREADS: usize = 8;
+use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
 
 #[derive(Clone, Copy)]
@@ -45,58 +76,20 @@ impl Mode {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Pattern {
-    Lockstep,
-    Staggered,
-}
-
-impl Pattern {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Lockstep => "lockstep",
-            Self::Staggered => "staggered",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Threading {
-    Single,
-    Multi { threads: usize, pattern: Pattern },
-}
-
-impl Threading {
-    const fn threads(self) -> usize {
-        match self {
-            Self::Single => 1,
-            Self::Multi { threads, .. } => threads,
-        }
-    }
-}
-
 pub fn bench(c: &mut Criterion) {
     let page_size = page_size();
-    let threads = std::thread::available_parallelism().map_or(MIN_BENCH_THREADS, |n| {
-        n.get().clamp(MIN_BENCH_THREADS, MAX_BENCH_THREADS)
-    });
-    let threadings: &[Threading] = &[
-        Threading::Single,
-        Threading::Multi {
-            threads,
-            pattern: Pattern::Lockstep,
-        },
-        Threading::Multi {
-            threads,
-            pattern: Pattern::Staggered,
-        },
-    ];
+    let threadings = Threading::standard();
+    let threads = threadings
+        .iter()
+        .map(|threading| threading.threads())
+        .max()
+        .unwrap_or(1);
 
     for &size in SIZES {
         let pool = build_pool(size, threads);
         let alignment = pool.config().alignment.get();
 
-        for &threading in threadings {
+        for threading in threadings {
             for metric in [Metric::Raw, Metric::Adjusted] {
                 bench_case(
                     c,
@@ -175,70 +168,6 @@ fn bench_case(
     });
 }
 
-/// Measure `iters` repetitions of `step`.
-///
-/// `setup` runs per-worker before timing starts and returns state passed to
-/// each `step` invocation. For multi-threaded runs, all workers synchronize
-/// via a barrier after setup so timing captures concurrent execution only.
-fn measure<T>(
-    iters: u64,
-    threading: Threading,
-    setup: impl Fn() -> T + Sync,
-    step: impl Fn(&mut T) + Sync,
-) -> Duration {
-    let Threading::Multi { threads, pattern } = threading else {
-        let mut state = setup();
-        let start = Instant::now();
-        for _ in 0..iters {
-            step(&mut state);
-        }
-        return start.elapsed();
-    };
-
-    let start = thread::scope(|scope| {
-        let ready = Arc::new(Barrier::new(threads + 1));
-        let launch = Arc::new(Barrier::new(threads + 1));
-
-        for thread_id in 0..threads {
-            let ready = ready.clone();
-            let launch = launch.clone();
-            let setup = &setup;
-            let step = &step;
-            scope.spawn(move || {
-                let mut state = setup();
-                ready.wait();
-                launch.wait();
-                for iter in 0..iters {
-                    step(&mut state);
-
-                    if matches!(pattern, Pattern::Staggered) {
-                        // Desynchronize threads so they don't all hit the
-                        // allocator at once. This spreads access times apart
-                        // without adding enough delay to dominate the
-                        // measurement.
-                        let spins = (iter as usize).wrapping_add(1).wrapping_mul(
-                            thread_id
-                                .wrapping_mul(MAX_BENCH_THREADS - 1)
-                                .wrapping_add(1),
-                        ) & 0xF;
-
-                        for _ in 0..spins {
-                            spin_loop();
-                        }
-                    }
-                }
-            });
-        }
-
-        ready.wait();
-        let start = Instant::now();
-        launch.wait();
-        start
-    });
-
-    start.elapsed()
-}
-
 #[inline]
 fn touch_pages(ptr: *mut u8, size: usize, page_size: usize) {
     if size == 0 {
@@ -283,12 +212,14 @@ fn bench_name(mode: Mode, metric: Metric, size: usize, threading: Threading) -> 
 }
 
 fn build_pool(size: usize, threads: usize) -> BufferPool {
+    let max_per_class =
+        u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(1024)
         .with_min_size(NZUsize!(size.max(1024)))
         .with_max_size(NZUsize!(size.max(1024)))
-        .with_max_per_class(NZUsize!(threads * 4))
-        .with_thread_cache_for_parallelism(NZUsize!(threads))
+        .with_max_per_class(NZU32!(max_per_class))
+        .with_parallelism(NZUsize!(threads))
         .with_prefill(true);
 
     let runner_cfg = tokio::Config::default()

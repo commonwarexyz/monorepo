@@ -118,6 +118,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "current_mmb_prune_grow"
+path = "fuzz_targets/current_mmb_prune_grow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "current_unordered_batch_root"
 path = "fuzz_targets/current_unordered_batch_root.rs"
 test = false
@@ -167,8 +174,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "merkle_journaled"
-path = "fuzz_targets/merkle_journaled.rs"
+name = "merkle_full"
+path = "fuzz_targets/merkle_full.rs"
 test = false
 doc = false
 bench = false
@@ -251,8 +258,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "merkle_journaled_crash_recovery"
-path = "fuzz_targets/merkle_journaled_crash_recovery.rs"
+name = "merkle_full_crash_recovery"
+path = "fuzz_targets/merkle_full_crash_recovery.rs"
 test = false
 doc = false
 bench = false

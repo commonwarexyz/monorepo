@@ -44,7 +44,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                         module_path!(),
                     ),
                     |b| {
-                        b.to_async(runner).iter_custom(|_iters| async move {
+                        b.to_async(runner).iter_custom(|iters| async move {
                             let pool = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
@@ -59,7 +59,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let h = StandardHasher::<Sha256>::new();
 
                             let mut mem = Mem::<F, _>::new(&h);
-                            let changeset = {
+                            let batch = {
                                 let mut batch = mem.new_batch();
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
@@ -68,48 +68,51 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     leaf_locations.push(loc);
                                     batch = batch.add(&h, &digest);
                                 }
-                                batch.merkleize(&h).finalize()
+                                batch.merkleize(&mem, &h)
                             };
-                            mem.apply(changeset).unwrap();
+                            mem.apply_batch(&batch).unwrap();
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
+                            for _ in 0..iters {
+                                // Simulate leaf-batching being the responsibility of the caller.
+                                let mut leaf_map = HashMap::new();
+                                for _ in 0..updates {
+                                    let rand_leaf_num = sampler.gen_range(0..leaves);
+                                    let rand_leaf_loc = leaf_locations[rand_leaf_num];
+                                    let rand_leaf_swap = sampler.gen_range(0..elements.len());
+                                    let new_element = &elements[rand_leaf_swap];
+                                    leaf_map.insert(rand_leaf_loc, *new_element);
+                                }
 
-                            // Simulate leaf-batching being the responsibility of the caller.
-                            let mut leaf_map = HashMap::new();
-                            for _ in 0..updates {
-                                let rand_leaf_num = sampler.gen_range(0..leaves);
-                                let rand_leaf_loc = leaf_locations[rand_leaf_num];
-                                let rand_leaf_swap = sampler.gen_range(0..elements.len());
-                                let new_element = &elements[rand_leaf_swap];
-                                leaf_map.insert(rand_leaf_loc, *new_element);
-                            }
-
-                            match strategy {
-                                Strategy::NoBatching => {
-                                    for (loc, element) in &leaf_map {
-                                        let batch =
-                                            mem.new_batch().update_leaf(&h, *loc, element).unwrap();
-                                        mem.apply(batch.merkleize(&h).finalize()).unwrap();
+                                match strategy {
+                                    Strategy::NoBatching => {
+                                        for (loc, element) in &leaf_map {
+                                            let batch = mem
+                                                .new_batch()
+                                                .update_leaf(&h, *loc, element)
+                                                .unwrap();
+                                            let batch = batch.merkleize(&mem, &h);
+                                            mem.apply_batch(&batch).unwrap();
+                                        }
+                                    }
+                                    _ => {
+                                        let updates: Vec<(
+                                            Location<F>,
+                                            commonware_cryptography::sha256::Digest,
+                                        )> = leaf_map.into_iter().collect();
+                                        let batch = {
+                                            let mut batch = mem.new_batch();
+                                            if let Some(ref p) = pool {
+                                                batch = batch.with_pool(Some(p.clone()));
+                                            }
+                                            batch = batch.update_leaf_batched(&updates).unwrap();
+                                            batch.merkleize(&mem, &h)
+                                        };
+                                        mem.apply_batch(&batch).unwrap();
                                     }
                                 }
-                                _ => {
-                                    let updates: Vec<(
-                                        Location<F>,
-                                        commonware_cryptography::sha256::Digest,
-                                    )> = leaf_map.into_iter().collect();
-                                    let changeset = {
-                                        let mut batch = mem.new_batch();
-                                        if let Some(ref p) = pool {
-                                            batch = batch.with_pool(Some(p.clone()));
-                                        }
-                                        batch = batch.update_leaf_batched(&updates).unwrap();
-                                        batch.merkleize(&h).finalize()
-                                    };
-                                    mem.apply(changeset).unwrap();
-                                }
                             }
-
                             start.elapsed()
                         });
                     },

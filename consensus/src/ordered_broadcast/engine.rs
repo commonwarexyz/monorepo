@@ -33,10 +33,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{
-        histogram,
-        status::{CounterExt, GaugeExt, Status},
-    },
+    telemetry::metrics::{histogram, status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
@@ -194,7 +191,7 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // Metrics
-    metrics: metrics::Metrics<E>,
+    metrics: metrics::Metrics<E, C::PublicKey>,
 
     // The timer of my last new proposal
     propose_timer: Option<histogram::Timer<E>>,
@@ -272,7 +269,7 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(chunk_network, ack_network).await)
+        spawn_cell!(self.context, self.run(chunk_network, ack_network))
     }
 
     /// Inner run loop called by `start`.
@@ -653,7 +650,7 @@ impl<
             let _ = self
                 .metrics
                 .sequencer_heights
-                .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
+                .get_or_create_by(&node.chunk.sequencer)
                 .try_set(node.chunk.height.get());
 
             // Append to journal if the `Node` is new, making sure to sync the journal

@@ -64,10 +64,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
         vote_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
         certificate_network: (impl Sender, impl Receiver),
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(vote_network, certificate_network).await
-        )
+        spawn_cell!(self.context, self.run(vote_network, certificate_network))
     }
 
     async fn run(

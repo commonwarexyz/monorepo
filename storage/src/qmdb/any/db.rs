@@ -100,7 +100,14 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+    #[cfg(any(test, feature = "test-traits"))]
+    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
+        self.inactivity_floor_loc
+    }
+
+    /// Return the most recent location from which this database can safely be synced, and the
+    /// upper bound on [`Self::prune`]'s `loc`. For `any`, this equals the inactivity floor.
+    pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -136,6 +143,65 @@ where
             }
         }
         Ok(None)
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(
+        &self,
+        keys: &[&U::Key],
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 1: Collect candidate locations from the in-memory index.
+        // Each key may map to multiple locations due to hash collisions.
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        let mut results: Vec<Option<U::Value>> = vec![None; keys.len()];
+
+        for (key_idx, key) in keys.iter().enumerate() {
+            for &loc in self.snapshot.get(key) {
+                candidates.push((key_idx, *loc));
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(results);
+        }
+
+        // Phase 2: Sort by position for batched journal reads, then deduplicate.
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+
+        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
+        for &(_, pos) in &candidates {
+            if positions.last() != Some(&pos) {
+                positions.push(pos);
+            }
+        }
+
+        // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
+        let reader = self.log.reader().await;
+        let ops = reader.read_many(&positions).await?;
+
+        // Phase 4: Match operations back to keys via binary search (no HashMap).
+        for &(key_idx, pos) in &candidates {
+            if results[key_idx].is_some() {
+                continue;
+            }
+            let op_idx = positions
+                .binary_search(&pos)
+                .expect("position was deduped from candidates");
+            let Operation::Update(data) = &ops[op_idx] else {
+                panic!("location does not reference update operation. loc={pos}");
+            };
+            if data.key() == keys[key_idx] {
+                results[key_idx] = Some(data.value().clone());
+            }
+        }
+
+        Ok(results)
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest

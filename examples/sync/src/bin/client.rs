@@ -8,10 +8,16 @@ use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::qmdb::sync;
+use commonware_storage::{
+    mmr,
+    qmdb::sync::{self, compact},
+};
 use commonware_sync::{
-    any, crate_version, current, databases::DatabaseType, immutable, net::Resolver, Digest, Error,
-    Key,
+    any, crate_version, current,
+    databases::{DatabaseType, SyncMode},
+    immutable, immutable_compact, keyless, keyless_compact,
+    net::{ErrorCode, Resolver},
+    Error, Key,
 };
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
@@ -19,6 +25,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
+    future::Future,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     time::Duration,
@@ -35,10 +42,12 @@ const DEFAULT_CLIENT_DIR_PREFIX: &str = "/tmp/commonware-sync/client";
 const UPDATE_CHANNEL_SIZE: usize = 16;
 
 /// Client configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Config {
-    /// Database type to use.
-    database_type: DatabaseType,
+    /// Sync mode to use.
+    sync_mode: SyncMode,
+    /// Database family to use.
+    family: DatabaseType,
     /// Server address to connect to.
     server: SocketAddr,
     /// Batch size for fetching operations.
@@ -55,14 +64,14 @@ struct Config {
     max_outstanding_requests: usize,
 }
 
-/// Every `interval_duration`, use `resolver` to request an updated sync target and send it on
-/// `update_tx`.
+/// Every `interval_duration`, request an updated full-sync target from `resolver` and send any
+/// changes on `update_tx`.
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,
-    update_tx: mpsc::Sender<sync::Target<D>>,
+    update_tx: mpsc::Sender<sync::Target<mmr::Family, D>>,
     interval_duration: Duration,
-    initial_target: sync::Target<D>,
+    initial_target: sync::Target<mmr::Family, D>,
 ) -> Result<(), Error>
 where
     E: Clock,
@@ -78,7 +87,7 @@ where
         match resolver.get_sync_target().await {
             Ok(new_target) => {
                 // Check if target has changed
-                if new_target.root != current_target.root {
+                if current_target != new_target {
                     // Send new target to the sync client
                     match update_tx.clone().try_send(new_target.clone()) {
                         Ok(()) => {
@@ -107,23 +116,34 @@ where
     }
 }
 
-/// Repeatedly sync an Any database to the server's state.
-async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Repeatedly sync a full database to the server's state.
+async fn run_full_sync<DB, Op, E, SyncOnce, SyncFut>(
+    context: E,
+    config: Config,
+    sync_once: SyncOnce,
+    label: &'static str,
+) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    Op: Clone + Read + EncodeShared + 'static,
+    Op::Cfg: commonware_codec::IsUnit,
+    SyncOnce: Fn(
+        E,
+        Config,
+        Resolver<Op, Key>,
+        sync::Target<mmr::Family, Key>,
+        mpsc::Receiver<sync::Target<mmr::Family, Key>>,
+        u32,
+    ) -> SyncFut,
+    SyncFut: Future<Output = Result<DB, Box<dyn std::error::Error>>>,
 {
-    info!("starting Any database sync process");
+    info!("starting {label} sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver = Resolver::<any::Operation, Digest>::connect(
-            context.with_label("resolver"),
-            config.server,
-        )
-        .await?;
+        let resolver =
+            Resolver::<Op, Key>::connect(context.with_label("resolver"), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
-
-        let db_config = any::create_config(&context);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -141,33 +161,57 @@ where
             })
         };
 
-        let sync_config =
-            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
-                context: context.with_label("sync"),
-                db_config,
-                fetch_batch_size: config.batch_size,
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_rx: Some(update_receiver),
-                finish_rx: None,
-                reached_target_tx: None,
-                max_retained_roots: 8,
-            };
-
-        let database: any::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root();
-        info!(
-            sync_iteration = iteration,
-            root = %got_root,
-            sync_interval = ?config.sync_interval,
-            "✅ Any sync completed successfully"
-        );
+        sync_once(
+            context.with_label("sync"),
+            config.clone(),
+            resolver,
+            initial_target,
+            update_receiver,
+            iteration,
+        )
+        .await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;
     }
+}
+
+/// Repeatedly sync an Any database to the server's state.
+async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+{
+    run_full_sync::<any::Database<_>, any::Operation, _, _, _>(
+        context,
+        config,
+        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+            let db_config = any::create_config(&context);
+            let sync_config =
+                sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Key>> {
+                    context,
+                    db_config,
+                    fetch_batch_size: config.batch_size,
+                    target: initial_target,
+                    resolver,
+                    apply_batch_size: 1024,
+                    max_outstanding_requests: config.max_outstanding_requests,
+                    update_rx: Some(update_receiver),
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 8,
+                };
+            let database: any::Database<_> = sync::sync(sync_config).await?;
+            info!(
+                sync_iteration = iteration,
+                root = %database.root(),
+                sync_interval = ?config.sync_interval,
+                "Any sync completed successfully"
+            );
+            Ok(database)
+        },
+        "Any database",
+    )
+    .await
 }
 
 /// Repeatedly sync a Current database to the server's state.
@@ -176,103 +220,57 @@ where
 /// the bitmap and grafted MMR are reconstructed from the synced operations.
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
 {
-    info!("starting Current database sync process");
-    let mut iteration = 0u32;
-    loop {
-        let resolver = Resolver::<current::Operation, Digest>::connect(
-            context.with_label("resolver"),
-            config.server,
-        )
-        .await?;
-
-        let initial_target = resolver.get_sync_target().await?;
-
-        let db_config = current::create_config(&context);
-        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
-
-        let target_update_handle = {
-            let resolver = resolver.clone();
-            let initial_target_clone = initial_target.clone();
-            let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
-                target_update_task(
+    run_full_sync::<current::Database<_>, current::Operation, _, _, _>(
+        context,
+        config,
+        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+            let db_config = current::create_config(&context);
+            let sync_config =
+                sync::engine::Config::<current::Database<_>, Resolver<current::Operation, Key>> {
                     context,
+                    db_config,
+                    fetch_batch_size: config.batch_size,
+                    target: initial_target,
                     resolver,
-                    update_sender,
-                    target_update_interval,
-                    initial_target_clone,
-                )
-            })
-        };
-
-        let engine_config =
-            sync::engine::Config::<current::Database<_>, Resolver<current::Operation, Digest>> {
-                context: context.with_label("sync"),
-                db_config,
-                fetch_batch_size: config.batch_size,
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_rx: Some(update_receiver),
-                finish_rx: None,
-                reached_target_tx: None,
-                max_retained_roots: 8,
-            };
-
-        let database: current::Database<_> = sync::sync(engine_config).await?;
-        info!(
-            sync_iteration = iteration,
-            canonical_root = %database.root(),
-            ops_root = %database.ops_root(),
-            sync_interval = ?config.sync_interval,
-            "✅ Current sync completed successfully"
-        );
-        target_update_handle.abort();
-        context.sleep(config.sync_interval).await;
-        iteration += 1;
-    }
+                    apply_batch_size: 1024,
+                    max_outstanding_requests: config.max_outstanding_requests,
+                    update_rx: Some(update_receiver),
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 8,
+                };
+            let database: current::Database<_> = sync::sync(sync_config).await?;
+            info!(
+                sync_iteration = iteration,
+                canonical_root = %database.root(),
+                ops_root = %database.ops_root(),
+                sync_interval = ?config.sync_interval,
+                "Current sync completed successfully"
+            );
+            Ok(database)
+        },
+        "Current database",
+    )
+    .await
 }
 
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
 {
-    info!("starting Immutable database sync process");
-    let mut iteration = 0u32;
-    loop {
-        let resolver = Resolver::<immutable::Operation, Key>::connect(
-            context.with_label("resolver"),
-            config.server,
-        )
-        .await?;
-
-        let initial_target = resolver.get_sync_target().await?;
-
-        let db_config = immutable::create_config(&context);
-        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
-
-        let target_update_handle = {
-            let resolver = resolver.clone();
-            let initial_target_clone = initial_target.clone();
-            let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
-                target_update_task(
-                    context,
-                    resolver,
-                    update_sender,
-                    target_update_interval,
-                    initial_target_clone,
-                )
-            })
-        };
-
-        let sync_config =
-            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
-                context: context.with_label("sync"),
+    run_full_sync::<immutable::Database<_>, immutable::Operation, _, _, _>(
+        context,
+        config,
+        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+            let db_config = immutable::create_config(&context);
+            let sync_config = sync::engine::Config::<
+                immutable::Database<_>,
+                Resolver<immutable::Operation, Key>,
+            > {
+                context,
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -284,19 +282,139 @@ where
                 reached_target_tx: None,
                 max_retained_roots: 8,
             };
+            let database: immutable::Database<_> = sync::sync(sync_config).await?;
+            info!(
+                sync_iteration = iteration,
+                root = %database.root(),
+                sync_interval = ?config.sync_interval,
+                "Immutable sync completed successfully"
+            );
+            Ok(database)
+        },
+        "Immutable database",
+    )
+    .await
+}
 
-        let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root();
+/// Repeatedly sync a Keyless database to the server's state.
+async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+{
+    run_full_sync::<keyless::Database<_>, keyless::Operation, _, _, _>(
+        context,
+        config,
+        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+            let db_config = keyless::create_config(&context);
+            let sync_config =
+                sync::engine::Config::<keyless::Database<_>, Resolver<keyless::Operation, Key>> {
+                    context,
+                    db_config,
+                    fetch_batch_size: config.batch_size,
+                    target: initial_target,
+                    resolver,
+                    apply_batch_size: 1024,
+                    max_outstanding_requests: config.max_outstanding_requests,
+                    update_rx: Some(update_receiver),
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 8,
+                };
+            let database: keyless::Database<_> = sync::sync(sync_config).await?;
+            info!(
+                sync_iteration = iteration,
+                root = %database.root(),
+                sync_interval = ?config.sync_interval,
+                "Keyless sync completed successfully"
+            );
+            Ok(database)
+        },
+        "Keyless database",
+    )
+    .await
+}
+
+/// Repeatedly sync a compact-storage database via compact state transfer.
+async fn run_compact_sync<DB, Op, E, MakeConfig>(
+    context: E,
+    config: Config,
+    make_db_config: MakeConfig,
+    label: &'static str,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+    DB: compact::Database<Family = mmr::Family, Context = E, Digest = Key, Op = Op>,
+    Op: Clone + Read + EncodeShared + 'static,
+    Op::Cfg: commonware_codec::IsUnit,
+    MakeConfig: Fn(&E) -> DB::Config,
+{
+    info!("starting {label} compact sync process");
+    let mut iteration = 0u32;
+    loop {
+        let resolver =
+            Resolver::<Op, Key>::connect(context.with_label("resolver"), config.server).await?;
+        let target = resolver.get_compact_target().await?;
+        let sync_config = compact::Config::<DB, Resolver<Op, Key>> {
+            context: context.with_label("sync"),
+            resolver,
+            target,
+            db_config: make_db_config(&context),
+        };
+        let database: DB = match compact::sync(sync_config).await {
+            Ok(database) => database,
+            Err(sync::Error::Resolver(Error::Server {
+                code: ErrorCode::StaleTarget,
+                message,
+            })) => {
+                warn!(
+                    sync_iteration = iteration,
+                    "{label} target went stale before state fetch: {message}; retrying"
+                );
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
         info!(
             sync_iteration = iteration,
-            root = %got_root,
+            root = %database.root(),
             sync_interval = ?config.sync_interval,
-            "✅ Immutable sync completed successfully"
+            "{label} sync completed successfully"
         );
-        target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;
     }
+}
+
+async fn run_immutable_compact<E>(
+    context: E,
+    config: Config,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+{
+    run_compact_sync::<immutable_compact::Database<_>, immutable_compact::Operation, _, _>(
+        context,
+        config,
+        |ctx| immutable_compact::create_config(ctx),
+        "Immutable compact",
+    )
+    .await
+}
+
+async fn run_keyless_compact<E>(
+    context: E,
+    config: Config,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Clone,
+{
+    run_compact_sync::<keyless_compact::Database<_>, keyless_compact::Operation, _, _>(
+        context,
+        config,
+        |ctx| keyless_compact::create_config(ctx),
+        "Keyless compact",
+    )
+    .await
 }
 
 fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
@@ -305,10 +423,17 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .version(crate_version())
         .about("Continuously syncs a database to a server's database state")
         .arg(
-            Arg::new("db")
-                .long("db")
-                .value_name("any|current|immutable")
-                .help("Database type to use. Must be `any`, `current`, or `immutable`.")
+            Arg::new("mode")
+                .long("mode")
+                .value_name("full|compact")
+                .help("Sync mode to demonstrate. Use `full` for operation replay or `compact` for compact state transfer.")
+                .default_value("full"),
+        )
+        .arg(
+            Arg::new("family")
+                .long("family")
+                .value_name("any|current|immutable|keyless")
+                .help("Database family to use for the selected mode.")
                 .default_value("any"),
         )
         .arg(
@@ -324,7 +449,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('b')
                 .long("batch-size")
                 .value_name("SIZE")
-                .help("Batch size for fetching operations")
+                .help("Batch size for fetching operations in full mode")
                 .default_value("50"),
         )
         .arg(
@@ -348,7 +473,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('t')
                 .long("target-update-interval")
                 .value_name("DURATION")
-                .help("Interval for requesting target updates ('ms', 's', 'm', 'h')")
+                .help("Interval for requesting target updates in full mode ('ms', 's', 'm', 'h')")
                 .default_value("1s"),
         )
         .arg(
@@ -364,16 +489,29 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('r')
                 .long("max-outstanding-requests")
                 .value_name("COUNT")
-                .help("Maximum number of outstanding sync requests")
+                .help("Maximum number of outstanding sync requests in full mode")
                 .default_value("1"),
         )
         .get_matches();
 
-    let database_type = matches
-        .get_one::<String>("db")
+    let sync_mode = matches
+        .get_one::<String>("mode")
+        .unwrap()
+        .parse::<SyncMode>()
+        .map_err(|e| format!("Invalid sync mode: {e}"))?;
+    let family = matches
+        .get_one::<String>("family")
         .unwrap()
         .parse::<DatabaseType>()
-        .map_err(|e| format!("Invalid database type: {e}"))?;
+        .map_err(|e| format!("Invalid database family: {e}"))?;
+    if !family.supports_client_mode(sync_mode) {
+        return Err(format!(
+            "Database family '{}' is not supported in '{}' mode",
+            family.as_str(),
+            sync_mode.as_str()
+        )
+        .into());
+    }
 
     let server = matches
         .get_one::<String>("server")
@@ -421,7 +559,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid max outstanding requests: {e}"))?;
 
     Ok(Config {
-        database_type,
+        sync_mode,
+        family,
         server,
         batch_size,
         storage_dir,
@@ -434,9 +573,13 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
 
 fn main() {
     let config = parse_config().unwrap_or_else(|e| {
-        eprintln!("❌ Configuration error: {e}");
+        eprintln!("Configuration error: {e}");
         std::process::exit(1);
     });
+    let materialized_storage = match config.sync_mode {
+        SyncMode::Full => "full",
+        SyncMode::Compact => "compact",
+    };
 
     let executor_config =
         tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
@@ -452,7 +595,9 @@ fn main() {
             None,
         );
         info!(
-            database_type = %config.database_type.as_str(),
+            sync_mode = %config.sync_mode.as_str(),
+            family = %config.family.as_str(),
+            materialized_storage,
             server = %config.server,
             batch_size = config.batch_size,
             storage_dir = %config.storage_dir,
@@ -463,15 +608,35 @@ fn main() {
             "client starting with configuration"
         );
 
-        // Dispatch based on database type
-        let result = match config.database_type {
-            DatabaseType::Any => run_any(context.with_label("sync"), config).await,
-            DatabaseType::Current => run_current(context.with_label("sync"), config).await,
-            DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
+        // Dispatch based on sync mode and database family.
+        let result = match (config.sync_mode, config.family) {
+            (SyncMode::Full, DatabaseType::Any) => {
+                run_any(context.with_label("sync"), config).await
+            }
+            (SyncMode::Full, DatabaseType::Current) => {
+                run_current(context.with_label("sync"), config).await
+            }
+            (SyncMode::Full, DatabaseType::Immutable) => {
+                run_immutable(context.with_label("sync"), config).await
+            }
+            (SyncMode::Full, DatabaseType::Keyless) => {
+                run_keyless(context.with_label("sync"), config).await
+            }
+            (SyncMode::Compact, DatabaseType::Immutable) => {
+                run_immutable_compact(context.with_label("sync"), config).await
+            }
+            (SyncMode::Compact, DatabaseType::Keyless) => {
+                run_keyless_compact(context.with_label("sync"), config).await
+            }
+            _ => Err(Box::<dyn std::error::Error>::from(format!(
+                "unsupported combination: mode={} family={}",
+                config.sync_mode.as_str(),
+                config.family.as_str()
+            ))),
         };
 
         if let Err(err) = result {
-            error!(?err, "❌ continuous sync failed");
+            error!(?err, "continuous sync failed");
             std::process::exit(1);
         }
     });

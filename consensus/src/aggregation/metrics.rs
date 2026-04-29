@@ -1,8 +1,7 @@
 use commonware_runtime::{
-    telemetry::metrics::{histogram, status},
+    telemetry::metrics::{histogram, status, Counter, Gauge, MetricsExt as _},
     Clock, Metrics as RuntimeMetrics,
 };
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
 
 /// Metrics for the [super::Engine].
@@ -22,37 +21,17 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let tip = Gauge::default();
-        context.register("tip", "Lowest height without a certificate", tip.clone());
-        let digest = status::Counter::default();
-        context.register(
+        let tip = context.gauge("tip", "Lowest height without a certificate");
+        let digest = context.family(
             "digest",
             "Number of digests returned by the automaton by status",
-            digest.clone(),
         );
-        let acks = status::Counter::default();
-        context.register(
-            "acks",
-            "Number of Ack messages processed by status",
-            acks.clone(),
-        );
-        let certificates = Counter::default();
-        context.register(
-            "certificates",
-            "Number of certificates produced",
-            certificates.clone(),
-        );
-        let rebroadcast = status::Counter::default();
-        context.register(
-            "rebroadcast",
-            "Number of rebroadcast attempts by status",
-            rebroadcast,
-        );
-        let digest_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+        let acks = context.family("acks", "Number of Ack messages processed by status");
+        let certificates = context.counter("certificates", "Number of certificates produced");
+        let digest_duration = context.histogram(
             "digest_duration",
             "Histogram of application digest durations",
-            digest_duration.clone(),
+            histogram::Buckets::LOCAL,
         );
         let clock = Arc::new(context);
 

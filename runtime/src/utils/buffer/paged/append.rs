@@ -24,6 +24,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -394,6 +395,40 @@ impl<B: Blob> Append<B> {
         buffer.size()
     }
 
+    /// Returns the logical size of the blob if it can be observed without waiting.
+    ///
+    /// This is useful for opportunistic fast paths that should fall back rather than contend with
+    /// concurrent writers.
+    pub fn try_size(&self) -> Option<u64> {
+        let buffer = self.buffer.try_read().ok()?;
+        Some(buffer.size())
+    }
+
+    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false` otherwise.
+    ///
+    /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
+    /// already validated that `offset + buf.len()` is within the blob's logical size.
+    ///
+    /// The page cache is consulted first to minimize the risk of writer starvation from a
+    /// burst of buffer reads (which jump ahead of queued writers on the buffer lock).
+    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+        if self.cache_ref.read_cached(self.id, buf, offset) == buf.len() {
+            return true;
+        }
+        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
+            return false;
+        };
+        let Ok(buffer) = self.buffer.try_read() else {
+            return false;
+        };
+        if offset < buffer.offset || end_offset > buffer.size() {
+            return false;
+        }
+        let src_start = (offset - buffer.offset) as usize;
+        buf.copy_from_slice(&buffer.as_ref()[src_start..src_start + buf.len()]);
+        true
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Read into a temporary contiguous buffer and copy back to preserve structure.
@@ -432,6 +467,95 @@ impl<B: Blob> Append<B> {
         self.read_into(bufs.as_mut(), logical_offset).await?;
 
         Ok((bufs, available))
+    }
+
+    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    ///
+    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
+    /// non-overlapping, and within bounds. This amortizes lock acquisition and avoids
+    /// per-item buffer allocation compared to calling [`read_at`](Self::read_at) in a loop.
+    pub async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: usize,
+    ) -> Result<(), Error> {
+        assert_eq!(
+            buf.len(),
+            offsets
+                .len()
+                .checked_mul(item_size)
+                .expect("read_many_into buffer length overflow"),
+            "read_many_into requires buf.len() == offsets.len() * item_size"
+        );
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        let last_end = offsets[offsets.len() - 1]
+            .checked_add(item_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Acquire the buffer lock once for all items.
+        let buffer = self.buffer.read().await;
+        if last_end > buffer.size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Iterate over fixed-size output slots and copy items that overlap with the
+        // tip buffer directly into place. Items fully or partially below the tip
+        // need cache/blob reads and are recorded as (slice, offset) pairs.
+        // `chunks_exact_mut` yields disjoint per-item slots, so we never have to
+        // reborrow the parent buffer while cache/blob destinations remain live.
+        if item_size == 0 {
+            return Ok(());
+        }
+        let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
+        for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
+            let end = offset + item_size as u64;
+
+            if end <= buffer.offset {
+                // Entirely below tip -- needs cache read.
+                cache_ranges.push((item_buf, offset));
+            } else if offset >= buffer.offset {
+                // Entirely in tip buffer.
+                let src = (offset - buffer.offset) as usize;
+                item_buf.copy_from_slice(&buffer.as_ref()[src..src + item_size]);
+            } else {
+                // Straddles tip boundary: copy suffix from tip, record prefix for cache.
+                let prefix_len = (buffer.offset - offset) as usize;
+                item_buf[prefix_len..].copy_from_slice(&buffer.as_ref()[..item_size - prefix_len]);
+                cache_ranges.push((&mut item_buf[..prefix_len], offset));
+            }
+        }
+
+        drop(buffer);
+
+        if cache_ranges.is_empty() {
+            return Ok(());
+        }
+
+        // Fast path: try page cache for all ranges in a single lock acquisition.
+        // Fully-cached ranges are removed from cache_ranges; only misses remain.
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        if cache_ranges.is_empty() {
+            return Ok(());
+        }
+
+        // Slow path: read only the ranges that had cache misses, concurrently.
+        let blob_guard = self.blob_state.read().await;
+        let mut reads = cache_ranges
+            .iter_mut()
+            .map(|(item_buf, offset)| {
+                self.cache_ref
+                    .read(&blob_guard.blob, self.id, item_buf, *offset)
+            })
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = reads.next().await {
+            result?;
+        }
+
+        Ok(())
     }
 
     /// Reads bytes starting at `logical_offset` into `buf`.
@@ -750,12 +874,6 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Implementation note: rewinding the blob across a page boundary potentially results in
-        // stale data remaining in the page cache. We don't proactively purge the data
-        // within this function since it would be inaccessible anyway. Instead we ensure it is
-        // always updated should the blob grow back to the point where we have new data for the same
-        // page, if any old data hasn't expired naturally by then.
-
         let logical_page_size = self.cache_ref.page_size();
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
@@ -781,6 +899,12 @@ impl<B: Blob> Append<B> {
         // Resize the underlying blob.
         blob_guard.blob.resize(new_physical_size).await?;
         blob_guard.partial_page_state = None;
+
+        // Evict cached pages at or beyond the new full-page boundary. The page at `full_pages` (if
+        // partial) is now owned by the tip buffer, and anything above is beyond the new logical
+        // size. Leaving their pre-resize contents in the cache lets `try_read_sync` (which bypasses
+        // the tip buffer) observe stale bytes once the tip is repopulated.
+        self.cache_ref.invalidate_from(self.id, full_pages);
 
         // Update blob state and buffer based on the desired logical size. The partial page data is
         // read with CRC validation; the validated length may exceed partial_bytes (reflecting the
@@ -819,15 +943,350 @@ impl<B: Blob> Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, BufferPool, BufferPoolConfig, Runner as _, Storage as _};
+    use crate::{
+        deterministic, telemetry::metrics::Registry, BufferPool, BufferPoolConfig, Metrics as _,
+        Runner as _, Storage as _,
+    };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
-    use prometheus_client::registry::Registry;
+    use commonware_utils::{NZUsize, NZU16, NZU32};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(&[0u8; 8]).await.unwrap();
+            assert_eq!(append.size().await, 8);
+
+            // Empty offsets should succeed immediately.
+            let mut buf = [];
+            append.read_many_into(&mut buf, &[], 4).await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_all_in_tip() {
+        // All items reside in the unflushed tip buffer.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..20).collect();
+            append.append(&data).await.unwrap();
+            assert_eq!(append.size().await, 20);
+
+            // Read 4-byte items at offsets 0, 4, 8, 12, 16.
+            let offsets = [0u64, 4, 8, 12, 16];
+            let mut buf = vec![0u8; 5 * 4];
+            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * 4..(i + 1) * 4],
+                    &data[off as usize..off as usize + 4],
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_read_sync_all_in_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"try_read_sync_tip")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..20).collect();
+            append.append(&data).await.unwrap();
+
+            let mut buf = vec![0u8; data.len()];
+            assert!(append.try_read_sync(0, &mut buf));
+            assert_eq!(buf, data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_all_from_cache() {
+        // Sync data to disk so tip buffer is empty; reads go through page cache / blob.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..20).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            assert_eq!(append.size().await, 20);
+
+            let offsets = [0u64, 8, 16];
+            let mut buf = vec![0u8; 3 * 4];
+            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * 4..(i + 1) * 4],
+                    &data[off as usize..off as usize + 4],
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_mixed_tip_and_cache() {
+        // First chunk synced to disk, second chunk still in tip buffer.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let first: Vec<u8> = (0..16).collect();
+            append.append(&first).await.unwrap();
+            append.sync().await.unwrap();
+
+            let second: Vec<u8> = (16..32).collect();
+            append.append(&second).await.unwrap();
+            assert_eq!(append.size().await, 32);
+
+            // Offsets span both synced and unsynced regions.
+            let offsets = [0u64, 4, 16, 24];
+            let mut buf = vec![0u8; 4 * 4];
+            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+
+            let all: Vec<u8> = (0..32).collect();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * 4..(i + 1) * 4],
+                    &all[off as usize..off as usize + 4],
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(&[0u8; 8]).await.unwrap();
+            assert_eq!(append.size().await, 8);
+
+            // Last offset's end (8 + 4 = 12) exceeds size (8).
+            let mut buf = vec![0u8; 4];
+            let err = append.read_many_into(&mut buf, &[8], 4).await.unwrap_err();
+            assert!(matches!(err, Error::BlobInsufficientLength));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_single_item() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data = vec![0xAA; 8];
+            append.append(&data).await.unwrap();
+            assert_eq!(append.size().await, 8);
+
+            let mut buf = vec![0u8; 8];
+            append.read_many_into(&mut buf, &[0], 8).await.unwrap();
+            assert_eq!(&buf, &data);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
+    fn test_read_many_into_short_buffer_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..16).collect();
+            append.append(&data).await.unwrap();
+
+            let offsets = [0u64, 4];
+            let mut buf = vec![0u8; 7];
+            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_matches_read_at() {
+        // Verify read_many_into returns the same bytes as individual read_at calls.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write enough data to span multiple pages (PAGE_SIZE=103).
+            let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            // Add more in tip buffer.
+            let more: Vec<u8> = (0u8..50).collect();
+            append.append(&more).await.unwrap();
+            assert_eq!(append.size().await, 350);
+
+            let item_size = 10;
+            let offsets: Vec<u64> = (0..35).map(|i| i * item_size as u64).collect();
+            let mut batch_buf = vec![0u8; offsets.len() * item_size];
+            append
+                .read_many_into(&mut batch_buf, &offsets, item_size)
+                .await
+                .unwrap();
+
+            // Compare each item against individual read_at.
+            for (i, &off) in offsets.iter().enumerate() {
+                let single = append.read_at(off, item_size).await.unwrap().coalesce();
+                assert_eq!(
+                    &batch_buf[i * item_size..(i + 1) * item_size],
+                    single.as_ref(),
+                    "mismatch at offset {off}",
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_scattered_cache_misses() {
+        // Exercises all three source paths in a single read_many_into call:
+        // tip buffer, page cache hit, and page cache miss (blob I/O).
+        // The tip holds a partial page so one item straddles the tip boundary.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            // Small cache: only 2 pages, so we can force eviction.
+            let cache_ref =
+                CacheRef::from_pooler(&context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write 3 pages of data and sync to disk.
+            let synced: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize * 3)
+                .collect();
+            append.append(&synced).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Write a partial page that stays in the tip buffer. The item_size
+            // is chosen so the last item straddles the synced/tip boundary.
+            let item_size = 10;
+            let tip_len = PAGE_SIZE.get() as usize / 2;
+            let tip: Vec<u8> = (100u8..=255).cycle().take(tip_len).collect();
+            append.append(&tip).await.unwrap();
+
+            // Prime pages 0 and 2 into cache, leaving page 1 uncached.
+            let _ = append.read_at(0, item_size).await.unwrap();
+            let _ = append
+                .read_at(PAGE_SIZE.get() as u64 * 2, item_size)
+                .await
+                .unwrap();
+
+            // Offset that straddles the synced/tip boundary: starts in the last
+            // synced page, ends in the tip buffer.
+            let straddle_off = synced.len() as u64 - (item_size as u64 / 2);
+            let tip_off = synced.len() as u64 + item_size as u64;
+            let offsets = [
+                0u64,                       // page 0 (cached)
+                PAGE_SIZE.get() as u64,     // page 1 (not cached - blob I/O)
+                PAGE_SIZE.get() as u64 * 2, // page 2 (cached)
+                straddle_off,               // straddles synced/tip boundary
+                tip_off,                    // entirely in tip buffer
+            ];
+            let mut buf = vec![0u8; offsets.len() * item_size];
+            append
+                .read_many_into(&mut buf, &offsets, item_size)
+                .await
+                .unwrap();
+
+            let read: Vec<u8> = synced.iter().chain(tip.iter()).copied().collect();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * item_size..(i + 1) * item_size],
+                    &read[off as usize..off as usize + item_size],
+                );
+            }
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_append_crc_empty() {
@@ -988,7 +1447,7 @@ mod tests {
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
-                    .with_max_per_class(NZUsize!(2)),
+                    .with_max_per_class(NZU32!(2)),
                 &mut registry,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
@@ -2036,6 +2495,54 @@ mod tests {
                 matches!(result, Err(crate::Error::InvalidChecksum)),
                 "Expected InvalidChecksum when shrinking to corrupted page, got: {:?}",
                 result
+            );
+        });
+    }
+
+    #[test]
+    fn test_resize_invalidates_cache() {
+        // Regression: shrinking a blob across a page boundary must drop cached pages for the
+        // truncated region. Before the fix, `try_read_sync` (which bypasses the tip buffer)
+        // would observe pre-resize bytes at offsets later reclaimed by new appends.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let (blob, blob_size) = context
+                .open("test_partition", b"resize_invalidates_cache")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write + sync a full page so it lands in the page cache. Use a distinct byte
+            // pattern so a stale cache read would be obvious.
+            let page_size = PAGE_SIZE.get() as usize;
+            let old_bytes = vec![0xAAu8; page_size];
+            append.append(&old_bytes).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Confirm page 0 is reachable via the cache-only fast path.
+            let mut probe = vec![0u8; 16];
+            assert!(append.try_read_sync(0, &mut probe));
+            assert_eq!(probe, vec![0xAAu8; 16]);
+
+            // Rewind to 0 (crossing the page boundary) and append a new, distinct pattern.
+            append.resize(0).await.unwrap();
+            let new_bytes = vec![0xBBu8; 16];
+            append.append(&new_bytes).await.unwrap();
+
+            // The cache must not serve pre-resize bytes. Either try_read_sync misses (cache
+            // was invalidated) or it returns the new pattern; it must never return 0xAA.
+            let mut probe = vec![0u8; 16];
+            let hit = append.try_read_sync(0, &mut probe);
+            assert!(
+                !hit || probe == new_bytes,
+                "try_read_sync served stale pre-resize bytes: {probe:?}"
             );
         });
     }

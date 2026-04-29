@@ -95,12 +95,12 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
             // Start from the stored fold accumulator (which does not include the leaf count).
             let mut acc = self.fold_acc;
             // Fold in peaks beyond those already covered by the stored accumulator.
-            for &pos in bp.fold_prefix.iter().skip(self.num_fold_peaks) {
-                match self.digests.get(&pos) {
+            for sub in bp.fold_prefix.iter().skip(self.num_fold_peaks) {
+                match self.digests.get(&sub.pos) {
                     Some(d) => {
                         acc = Some(acc.map_or(*d, |a| hasher.fold(&a, d)));
                     }
-                    None => return Err(Error::ElementPruned(pos)),
+                    None => return Err(Error::ElementPruned(sub.pos)),
                 }
             }
             digests.push(acc.expect("fold_prefix is non-empty so acc must be set"));
@@ -198,11 +198,11 @@ pub async fn historical_range_proof<
 
     let mut digests: Vec<D> = Vec::new();
     if !bp.fold_prefix.is_empty() {
-        let node_futures = bp.fold_prefix.iter().map(|&pos| merkle.get_node(pos));
+        let node_futures = bp.fold_prefix.iter().map(|sub| merkle.get_node(sub.pos));
         let results = try_join_all(node_futures).await?;
-        let mut acc = results[0].ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
+        let mut acc = results[0].ok_or(Error::ElementPruned(bp.fold_prefix[0].pos))?;
         for (i, &result) in results.iter().enumerate().skip(1) {
-            let d = result.ok_or(Error::ElementPruned(bp.fold_prefix[i]))?;
+            let d = result.ok_or(Error::ElementPruned(bp.fold_prefix[i].pos))?;
             acc = hasher.fold(&acc, &d);
         }
         digests.push(acc);
@@ -289,14 +289,14 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mmr, &hasher)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
@@ -349,14 +349,14 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mmr, &hasher)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             // Proof for range 32..49 has a non-empty fold prefix (the 32-leaf peak).
@@ -399,14 +399,14 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
             let mut mmb = Mmb::new(&hasher);
             let elements: Vec<_> = (0..8).map(test_digest).collect();
-            let changeset = {
+            let batch = {
                 let mut batch = mmb.new_batch();
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mmb, &hasher)
             };
-            mmb.apply(changeset).unwrap();
+            mmb.apply_batch(&batch).unwrap();
             let root = mmb.root();
 
             // With 8 leaves, the oldest MMB peak covers locations 0..4 but sits at position 7,

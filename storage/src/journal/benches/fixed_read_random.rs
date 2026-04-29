@@ -53,23 +53,31 @@ async fn bench_run_concurrent(
     try_join_all(futures).await.expect("failed to read data");
 }
 
+/// Batch-read `items_to_read` random items via `read_many`.
+async fn bench_run_read_many(
+    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
+    items_to_read: usize,
+) {
+    let reader = journal.reader().await;
+    let mut rng = StdRng::seed_from_u64(0);
+    let mut positions: Vec<u64> = (0..items_to_read)
+        .map(|_| rng.gen_range(0..ITEMS_TO_WRITE))
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    black_box(
+        reader
+            .read_many(&positions)
+            .await
+            .expect("failed to read data"),
+    );
+}
+
 fn bench_fixed_read_random(c: &mut Criterion) {
-    // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
-    // same test file to be re-used.
     let cfg = Config::default();
-
-    // Generate a large temp journal with random data.
-    let runner = Runner::new(cfg.clone());
-    runner.start(|ctx| async move {
-        // Create a large temp journal with random data.
-        let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-        append_fixed_random_data::<_, ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
-        j.sync().await.unwrap();
-    });
-
-    // Run the benchmarks
+    let mut initialized = false;
     let runner = tokio::Runner::new(cfg.clone());
-    for mode in ["serial", "concurrent"] {
+    for mode in ["serial", "concurrent", "read_many"] {
         for items_to_read in [100, 1_000, 10_000, 100_000] {
             c.bench_function(
                 &format!(
@@ -80,6 +88,17 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                     ITEM_SIZE
                 ),
                 |b| {
+                    // Setup: populate journal (once, on first sample).
+                    if !initialized {
+                        Runner::new(cfg.clone()).start(|ctx| async move {
+                            let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
+                            j.sync().await.unwrap();
+                        });
+                        initialized = true;
+                    }
+
+                    // Benchmark: measure read time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let j = get_fixed_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
@@ -89,6 +108,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                             match mode {
                                 "serial" => bench_run_serial(&j, items_to_read).await,
                                 "concurrent" => bench_run_concurrent(&j, items_to_read).await,
+                                "read_many" => bench_run_read_many(&j, items_to_read).await,
                                 _ => unreachable!(),
                             }
                             duration += start.elapsed();
@@ -100,12 +120,13 @@ fn bench_fixed_read_random(c: &mut Criterion) {
         }
     }
 
-    // Clean up the temp journal
-    let runner = Runner::new(cfg);
-    runner.start(|context| async move {
-        let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
-        j.destroy().await.unwrap();
-    });
+    // Cleanup: destroy journal.
+    if initialized {
+        Runner::new(cfg).start(|context| async move {
+            let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+            j.destroy().await.unwrap();
+        });
+    }
 }
 
 criterion_group! {

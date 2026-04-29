@@ -10,7 +10,7 @@ use crate::{
     journal::{
         contiguous::{
             fixed::{Config as JConfig, Journal},
-            Reader,
+            Many, Reader,
         },
         Error as JError,
     },
@@ -27,57 +27,72 @@ use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
+    range::NonEmptyRange,
     sequence::prefixed_u64::U64,
     sync::{AsyncMutex, RwLock},
 };
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
 use tracing::{debug, error, warn};
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
-/// The journaled Merkle structure's [`Journaled::sync`] only persists *appended* nodes
+/// The full Merkle structure's [`Merkle::sync`] only persists *appended* nodes
 /// (positions in `[journal_size, state.size())`). Overwrites to existing positions are stored in
 /// the in-memory layer but never flushed, so they would be silently lost on crash recovery. This
 /// wrapper prevents that by exposing only append and merkleize operations, hiding `update_leaf*`
 /// at compile time.
-pub struct UnmerkleizedBatch<F: Family, D: Digest>(batch::UnmerkleizedBatch<F, D>);
+pub struct UnmerkleizedBatch<F: Family, D: Digest> {
+    inner: batch::UnmerkleizedBatch<F, D>,
+}
 
 impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Hash `element` and add it as a leaf.
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
-        Self(self.0.add(hasher, element))
+        Self {
+            inner: self.inner.add(hasher, element),
+        }
     }
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(self, digest: D) -> Self {
-        Self(self.0.add_leaf_digest(digest))
+        Self {
+            inner: self.inner.add_leaf_digest(digest),
+        }
     }
 
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location<F> {
-        self.0.leaves()
+        self.inner.leaves()
     }
 
     /// Set a thread pool for parallel merkleization.
     #[cfg(feature = "std")]
     pub fn with_pool(self, pool: Option<ThreadPool>) -> Self {
-        Self(self.0.with_pool(pool))
+        Self {
+            inner: self.inner.with_pool(pool),
+        }
     }
 
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] with computed root.
-    pub fn merkleize(self, hasher: &impl Hasher<F, Digest = D>) -> batch::MerkleizedBatch<F, D> {
-        self.0.merkleize(hasher)
+    /// `base` provides committed node data as fallback during hash computation.
+    pub fn merkleize(
+        self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+    ) -> Arc<batch::MerkleizedBatch<F, D>> {
+        self.inner.merkleize(base, hasher)
     }
 }
 
-/// Fields of [Journaled] that are protected by an [RwLock] for interior mutability.
+/// Fields of [Merkle] that are protected by an [RwLock] for interior mutability.
 pub(crate) struct Inner<F: Family, D: Digest> {
     /// A memory resident Merkle structure used to build the structure and cache updates. It caches
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
-    /// and the journaled structure's pruning boundary.
+    /// and the full structure's pruning boundary.
     pub(crate) mem: Mem<F, D>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
@@ -110,7 +125,7 @@ pub struct Config {
     pub page_cache: CacheRef,
 }
 
-/// Configuration for initializing a journaled Merkle structure for synchronization.
+/// Configuration for initializing a full Merkle structure for synchronization.
 ///
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start -> discard and start fresh
@@ -121,7 +136,7 @@ pub struct SyncConfig<F: Family, D: Digest> {
     pub config: Config,
 
     /// Sync range expressed as leaf-aligned bounds.
-    pub range: std::ops::Range<Location<F>>,
+    pub range: NonEmptyRange<Location<F>>,
 
     /// The pinned nodes the structure needs at the pruning boundary (range start), in the order
     /// specified by `Family::nodes_to_pin`. If `None`, the pinned nodes are expected to already be
@@ -130,16 +145,16 @@ pub struct SyncConfig<F: Family, D: Digest> {
 }
 
 /// A Merkle structure backed by a fixed-item-length journal.
-pub struct Journaled<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
+pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
     /// Lock-protected mutable state.
     pub(crate) inner: RwLock<Inner<F, D>>,
 
     /// Stores all unpruned nodes.
     pub(crate) journal: Journal<E, D>,
 
-    /// Stores all "pinned nodes" (pruned nodes required for proving & root generation), and the
-    /// corresponding pruning boundary used to generate them. The metadata remains empty until
-    /// pruning is invoked, and its contents change only when the pruning boundary moves.
+    /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
+    /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
+    /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Serializes concurrent sync calls.
@@ -155,7 +170,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
 pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     /// Return the total number of nodes in the structure, irrespective of any pruning. The next
     /// added element's position will have this value.
     pub fn size(&self) -> Position<F> {
@@ -229,7 +244,87 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         Ok(())
     }
 
-    /// Initialize a new `Journaled` instance.
+    /// Read-only peek at the persisted structure's root and boundaries.
+    ///
+    /// Returns `Ok(None)` when:
+    /// - Journal size is structurally invalid and would require a rewind (i.e.
+    ///   a crash left the structure in an unrecoverable state for a read-only
+    ///   probe).
+    pub async fn peek_root(
+        context: E,
+        cfg: Config,
+        hasher: &impl Hasher<F, Digest = D>,
+    ) -> Result<Option<(Location<F>, Location<F>, D)>, Error<F>> {
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition,
+            items_per_blob: cfg.items_per_blob,
+            write_buffer: cfg.write_buffer,
+            page_cache: cfg.page_cache,
+        };
+        let journal: Journal<E, D> =
+            Journal::init(context.with_label("merkle_journal_peek"), journal_cfg).await?;
+        let journal_size = Position::<F>::new(journal.size().await);
+
+        if journal_size == 0 {
+            let empty_root = *Mem::new(hasher).root();
+            return Ok(Some((Location::new(0), Location::new(0), empty_root)));
+        }
+
+        // Bail if the journal would require a rewind to reach a valid size.
+        // Probe is read-only; the caller will handle recovery via `init`.
+        let last_valid_size = F::to_nearest_size(journal_size);
+        if last_valid_size != journal_size {
+            return Ok(None);
+        }
+
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.with_label("merkle_metadata_peek"),
+            metadata_cfg,
+        )
+        .await?;
+
+        let prune_loc = metadata
+            .get(&U64::new(PRUNED_TO_PREFIX, 0))
+            .map(|bytes| -> Result<Location<F>, Error<F>> {
+                let raw: [u8; 8] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::DataCorrupted("metadata pruned_to is not 8 bytes"))?;
+                Ok(Location::<F>::new(u64::from_be_bytes(raw)))
+            })
+            .transpose()?
+            .unwrap_or_else(|| Location::<F>::new(0));
+        let prune_pos = Position::try_from(prune_loc)?;
+
+        let journal_leaves = Location::try_from(journal_size)?;
+        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
+        let mut mem_pinned_nodes = Vec::new();
+        for pos in nodes_to_pin_mem {
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            mem_pinned_nodes.push(digest);
+        }
+        let mut mem = Mem::init(
+            MemConfig {
+                nodes: vec![],
+                pruning_boundary: journal_leaves,
+                pinned_nodes: mem_pinned_nodes,
+            },
+            hasher,
+        )?;
+
+        if prune_pos < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+        }
+
+        let root = *mem.root();
+        Ok(Some((prune_loc, journal_leaves, root)))
+    }
+
+    /// Initialize a new `Merkle` instance.
     pub async fn init(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
@@ -368,12 +463,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
             // Recover the orphaned leaf and any missing parents.
             let pos = mem.size();
             warn!(?pos, "recovering orphaned leaf");
-            let changeset = mem
+            let batch = mem
                 .new_batch()
                 .add_leaf_digest(leaf)
-                .merkleize(hasher)
-                .finalize();
-            mem.apply(changeset)?;
+                .merkleize(&mem, hasher);
+            mem.apply_batch(&batch)?;
             assert_eq!(pos, journal_size);
 
             // Inline sync: flush recovered nodes to journal.
@@ -428,8 +522,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         cfg: SyncConfig<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Self, Error<F>> {
-        let prune_pos = Position::try_from(cfg.range.start)?;
-        let end_pos = Position::try_from(cfg.range.end)?;
+        let prune_pos = Position::try_from(cfg.range.start())?;
+        let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
@@ -456,7 +550,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         }
 
         // Handle existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
         if journal_size > *end_pos {
             return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
         }
@@ -477,7 +570,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            cfg.range.start.as_u64().to_be_bytes().into(),
+            cfg.range.start().as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
@@ -626,9 +719,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         };
 
         // Append missing nodes to the journal without holding the mem read lock.
-        for node in missing_nodes {
-            self.journal.append(&node).await?;
-        }
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
 
         // Sync the journal while still holding the sync_lock to ensure durability before returning.
         self.journal.sync().await?;
@@ -753,29 +844,47 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         Ok(())
     }
 
-    /// Apply a changeset to the structure.
+    /// Apply a merkleized batch to the structure.
     ///
-    /// A changeset is only valid if the structure has not been modified since the
-    /// batch that produced it was created. Multiple batches can be forked from
-    /// the same parent for speculative execution, but only one may be applied.
-    /// Applying a stale changeset returns [`Error::StaleChangeset`].
-    pub fn apply(&mut self, changeset: batch::Changeset<F, D>) -> Result<(), Error<F>> {
-        self.inner.get_mut().mem.apply(changeset)?;
+    /// A batch is valid if the structure has not been modified since the batch
+    /// chain was created, or if only ancestors of this batch have been applied.
+    /// Already-committed ancestors are skipped automatically.
+    /// Applying a batch from a different fork returns [`Error::StaleBatch`].
+    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
+        self.inner.get_mut().mem.apply_batch(batch)?;
         Ok(())
     }
 
     /// Create an owned [`batch::MerkleizedBatch`] representing the current committed state.
     ///
-    /// The batch has no items (the committed items are on disk, not in memory).
+    /// The batch has no data (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_batch(&self) -> batch::MerkleizedBatch<F, D> {
+    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D>> {
         let inner = self.inner.read();
-        batch::MerkleizedBatch::Base(inner.mem.clone())
+        let mut batch = batch::MerkleizedBatch::from_mem(&inner.mem);
+        #[cfg(feature = "std")]
+        if let Some(pool) = &self.pool {
+            Arc::get_mut(&mut batch).expect("just created").pool = Some(pool.clone());
+        }
+        batch
+    }
+
+    /// Borrow the committed Mem through the read lock. Holds the lock for
+    /// the duration of the closure.
+    pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
+        let inner = self.inner.read();
+        f(&inner.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D> {
-        UnmerkleizedBatch(batch::UnmerkleizedBatch::new(self.to_batch())).with_pool(self.pool())
+        let inner = self.inner.read();
+        let root = batch::MerkleizedBatch::from_mem(&inner.mem);
+        drop(inner);
+        UnmerkleizedBatch {
+            inner: root.new_batch(),
+        }
+        .with_pool(self.pool())
     }
 
     /// Return the thread pool, if any.
@@ -785,11 +894,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
 
     /// Rewind the structure by the given number of leaves.
     ///
-    /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply`]), but removing
-    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to
-    /// O(log n) pinned peaks. A batch pop would expose new peaks that are not in memory, and
-    /// `merkleize` cannot load them because [`Readable::get_node`] is synchronous. `rewind`
-    /// performs async journal I/O to rebuild state at the target position.
+    /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
+    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to O(log
+    /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
+    /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
+    /// journal I/O to rebuild state at the target position.
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,
@@ -855,14 +964,14 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     }
 }
 
-/// The [`Readable`] implementation for the journaled structure operates only on the in-memory
-/// portion. After [`Journaled::sync`], nodes that have been flushed to the journal are no longer
+/// The [`Readable`] implementation for the full structure operates only on the in-memory
+/// portion. After [`Merkle::sync`], nodes that have been flushed to the journal are no longer
 /// accessible through this interface. In particular, [`Readable::get_node`] returns `None` for
 /// flushed positions, and [`Readable::pruning_boundary`] reflects the in-memory boundary (which may
-/// be tighter than the journal's prune boundary reported by [`Journaled::bounds`]). This means
+/// be tighter than the journal's prune boundary reported by [`Merkle::bounds`]). This means
 /// batch operations like `update_leaf` will correctly reject leaves that have been synced out of
 /// memory with [`Error::ElementPruned`].
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Journaled<F, E, D> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Merkle<F, E, D> {
     type Family = F;
     type Digest = D;
     type Error = Error<F>;
@@ -920,7 +1029,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Journaled
 }
 
 impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::storage::Storage<F>
-    for Journaled<F, E, D>
+    for Merkle<F, E, D>
 {
     type Digest = D;
 
@@ -933,7 +1042,7 @@ impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///
@@ -1040,7 +1149,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
-    use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -1064,9 +1173,9 @@ mod tests {
         }
     }
 
-    async fn journaled_empty_inner<F: Family>(context: deterministic::Context) {
+    async fn full_empty_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("first"),
             &hasher,
             test_config(&context),
@@ -1083,12 +1192,9 @@ mod tests {
         assert!(mmr.sync().await.is_ok());
         assert!(matches!(mmr.rewind(1, &hasher).await, Err(Error::Empty)));
 
-        let changeset = mmr
-            .new_batch()
-            .add(&hasher, &test_digest(0))
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
+        let batch = mmr.new_batch().add(&hasher, &test_digest(0));
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         assert_eq!(mmr.size(), 1);
         mmr.sync().await.unwrap();
         assert!(mmr.get_node(Position::<F>::new(0)).await.is_ok());
@@ -1096,7 +1202,7 @@ mod tests {
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("second"),
             &hasher,
             test_config(&context),
@@ -1121,12 +1227,9 @@ mod tests {
         ));
 
         // Confirm empty proof no longer verifies after adding an element.
-        let changeset = mmr
-            .new_batch()
-            .add(&hasher, &test_digest(0))
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
+        let batch = mmr.new_batch().add(&hasher, &test_digest(0));
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
         assert!(!empty_proof.verify_range_inclusion(
             &hasher,
@@ -1144,22 +1247,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_empty_mmr() {
+    fn test_full_empty_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_empty_inner::<mmr::Family>);
+        executor.start(full_empty_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_empty_mmb() {
+    fn test_full_empty_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_empty_inner::<mmb::Family>);
+        executor.start(full_empty_inner::<mmb::Family>);
     }
 
-    async fn journaled_prune_out_of_bounds_returns_error_inner<F: Family>(
+    async fn full_prune_out_of_bounds_returns_error_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("oob_prune"),
             &hasher,
             test_config(&context),
@@ -1167,12 +1270,9 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = mmr
-            .new_batch()
-            .add(&hasher, &test_digest(0))
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
+        let batch = mmr.new_batch().add(&hasher, &test_digest(0));
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         assert!(matches!(
             mmr.prune(Location::<F>::new(2)).await,
@@ -1183,39 +1283,37 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_prune_out_of_bounds_returns_error_mmr() {
+    fn test_full_prune_out_of_bounds_returns_error_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_prune_out_of_bounds_returns_error_inner::<mmr::Family>);
+        executor.start(full_prune_out_of_bounds_returns_error_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_prune_out_of_bounds_returns_error_mmb() {
+    fn test_full_prune_out_of_bounds_returns_error_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_prune_out_of_bounds_returns_error_inner::<mmb::Family>);
+        executor.start(full_prune_out_of_bounds_returns_error_inner::<mmb::Family>);
     }
 
-    async fn journaled_rewind_error_leaves_valid_state_inner<F: Family>(
+    async fn full_rewind_error_leaves_valid_state_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher: Standard<Sha256> = Standard::new();
 
         // Case 1: rewind partially succeeds, then returns ElementPruned.
         let element_pruned_context = context.with_label("element_pruned_case");
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             element_pruned_context.clone(),
             &hasher,
             test_config(&element_pruned_context),
         )
         .await
         .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0u64..32 {
-                batch = batch.add(&hasher, &i.to_be_bytes());
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0u64..32 {
+            batch = batch.add(&hasher, &i.to_be_bytes());
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.prune(Location::<F>::new(8)).await.unwrap();
         let leaves_before = mmr.leaves();
         assert!(matches!(
@@ -1229,17 +1327,15 @@ mod tests {
         // Case 2: rewind partially succeeds, then returns Empty.
         let empty_context = context.with_label("empty_case");
         let cfg = test_config(&empty_context);
-        let mut mmr = Journaled::<F, _, Digest>::init(empty_context, &hasher, cfg)
+        let mut mmr = Merkle::<F, _, Digest>::init(empty_context, &hasher, cfg)
             .await
             .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0u64..8 {
-                batch = batch.add(&hasher, &i.to_be_bytes());
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0u64..8 {
+            batch = batch.add(&hasher, &i.to_be_bytes());
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let leaves_before = mmr.leaves();
         assert!(matches!(mmr.rewind(9, &hasher).await, Err(Error::Empty)));
         // Rewind returns error without partial modification.
@@ -1248,21 +1344,21 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_rewind_error_leaves_valid_state_mmr() {
+    fn test_full_rewind_error_leaves_valid_state_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_rewind_error_leaves_valid_state_inner::<mmr::Family>);
+        executor.start(full_rewind_error_leaves_valid_state_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_rewind_error_leaves_valid_state_mmb() {
+    fn test_full_rewind_error_leaves_valid_state_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_rewind_error_leaves_valid_state_inner::<mmb::Family>);
+        executor.start(full_rewind_error_leaves_valid_state_inner::<mmb::Family>);
     }
 
-    async fn journaled_basic_inner<F: Family>(context: deterministic::Context) {
+    async fn full_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
         let cfg = test_config(&context);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mut mmr = Merkle::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
         // Build a test structure with 255 leaves
@@ -1271,14 +1367,12 @@ mod tests {
         for i in 0..LEAF_COUNT {
             leaves.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for leaf in &leaves {
-                batch = batch.add(&hasher, leaf);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for leaf in &leaves {
+            batch = batch.add(&hasher, leaf);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
 
@@ -1317,24 +1411,24 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_basic_mmr() {
+    fn test_full_basic_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_basic_inner::<mmr::Family>);
+        executor.start(full_basic_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_basic_mmb() {
+    fn test_full_basic_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_basic_inner::<mmb::Family>);
+        executor.start(full_basic_inner::<mmb::Family>);
     }
 
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent
     /// nodes, and confirms we appropriately recover to a valid state.
-    async fn journaled_recovery_inner<F: Family>(context: deterministic::Context) {
+    async fn full_recovery_inner<F: Family>(context: deterministic::Context) {
         use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
 
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("first"),
             &hasher,
             test_config(&context),
@@ -1349,14 +1443,12 @@ mod tests {
         for i in 0..LEAF_COUNT {
             leaves.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for leaf in &leaves {
-                batch = batch.add(&hasher, leaf);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for leaf in &leaves {
+            batch = batch.add(&hasher, leaf);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
         mmr.sync().await.unwrap();
@@ -1382,7 +1474,7 @@ mod tests {
             assert_eq!(journal.size().await, expected_size + 1);
         }
 
-        let mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Merkle::<F, _, Digest>::init(
             context.with_label("second"),
             &hasher,
             test_config(&context),
@@ -1397,7 +1489,7 @@ mod tests {
 
         // Make sure dropping it and re-opening it persists the recovered state.
         drop(mmr);
-        let mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Merkle::<F, _, Digest>::init(
             context.with_label("third"),
             &hasher,
             test_config(&context),
@@ -1410,29 +1502,26 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_recovery_mmr() {
+    fn test_full_recovery_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_recovery_inner::<mmr::Family>);
+        executor.start(full_recovery_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_recovery_mmb() {
+    fn test_full_recovery_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_recovery_inner::<mmb::Family>);
+        executor.start(full_recovery_inner::<mmb::Family>);
     }
 
-    async fn journaled_pruning_inner<F: Family>(context: deterministic::Context) {
+    async fn full_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
         // make sure pruning doesn't break root computation, adding of new nodes, etc.
         const LEAF_COUNT: usize = 2000;
         let cfg_pruned = test_config(&context);
-        let mut pruned_mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("pruned"),
-            &hasher,
-            cfg_pruned.clone(),
-        )
-        .await
-        .unwrap();
+        let mut pruned_mmr =
+            Merkle::<F, _, Digest>::init(context.with_label("pruned"), &hasher, cfg_pruned.clone())
+                .await
+                .unwrap();
         let cfg_unpruned = Config {
             journal_partition: "unpruned-journal-partition".into(),
             metadata_partition: "unpruned-metadata-partition".into(),
@@ -1442,29 +1531,25 @@ mod tests {
             page_cache: cfg_pruned.page_cache.clone(),
         };
         let mut mmr =
-            Journaled::<F, _, Digest>::init(context.with_label("unpruned"), &hasher, cfg_unpruned)
+            Merkle::<F, _, Digest>::init(context.with_label("unpruned"), &hasher, cfg_unpruned)
                 .await
                 .unwrap();
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
         for i in 0..LEAF_COUNT {
             leaves.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for leaf in &leaves {
-                batch = batch.add(&hasher, leaf);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
-        let changeset = {
-            let mut batch = pruned_mmr.new_batch();
-            for leaf in &leaves {
-                batch = batch.add(&hasher, leaf);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        pruned_mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for leaf in &leaves {
+            batch = batch.add(&hasher, leaf);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+        let mut batch = pruned_mmr.new_batch();
+        for leaf in &leaves {
+            batch = batch.add(&hasher, leaf);
+        }
+        let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        pruned_mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
         assert_eq!(pruned_mmr.size(), expected_size);
@@ -1479,18 +1564,12 @@ mod tests {
             let digest = test_digest(LEAF_COUNT + i);
             leaves.push(digest);
             let last_leaf = leaves.last().unwrap();
-            let changeset = {
-                let mut batch = pruned_mmr.new_batch();
-                batch = batch.add(&hasher, last_leaf);
-                batch.merkleize(&hasher).finalize()
-            };
-            pruned_mmr.apply(changeset).unwrap();
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&hasher, last_leaf);
-                batch.merkleize(&hasher).finalize()
-            };
-            mmr.apply(changeset).unwrap();
+            let batch = pruned_mmr.new_batch().add(&hasher, last_leaf);
+            let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            pruned_mmr.apply_batch(&batch).unwrap();
+            let batch = mmr.new_batch().add(&hasher, last_leaf);
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap();
             assert_eq!(pruned_mmr.root(), mmr.root());
         }
 
@@ -1501,7 +1580,7 @@ mod tests {
         // Sync the structure & reopen.
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
-        let mut pruned_mmr = Journaled::<F, _, Digest>::init(
+        let mut pruned_mmr = Merkle::<F, _, Digest>::init(
             context.with_label("pruned_reopen"),
             &hasher,
             cfg_pruned.clone(),
@@ -1520,22 +1599,18 @@ mod tests {
 
         // Close structure after adding a new node without syncing and make sure state is as
         // expected on reopening.
-        let changeset = mmr
+        let batch = mmr.new_batch().add(&hasher, &test_digest(LEAF_COUNT));
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+        let batch = pruned_mmr
             .new_batch()
-            .add(&hasher, &test_digest(LEAF_COUNT))
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
-        let changeset = pruned_mmr
-            .new_batch()
-            .add(&hasher, &test_digest(LEAF_COUNT))
-            .merkleize(&hasher)
-            .finalize();
-        pruned_mmr.apply(changeset).unwrap();
+            .add(&hasher, &test_digest(LEAF_COUNT));
+        let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        pruned_mmr.apply_batch(&batch).unwrap();
         assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
-        let mut pruned_mmr = Journaled::<F, _, Digest>::init(
+        let mut pruned_mmr = Merkle::<F, _, Digest>::init(
             context.with_label("pruned_reopen2"),
             &hasher,
             cfg_pruned.clone(),
@@ -1560,12 +1635,11 @@ mod tests {
         // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
         // retained nodes.
         while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
-            let changeset = {
-                let mut batch = pruned_mmr.new_batch();
-                batch = batch.add(&hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&hasher).finalize()
-            };
-            pruned_mmr.apply(changeset).unwrap();
+            let batch = pruned_mmr
+                .new_batch()
+                .add(&hasher, &test_digest(LEAF_COUNT));
+            let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            pruned_mmr.apply_batch(&batch).unwrap();
         }
         pruned_mmr.prune_all().await.unwrap();
         assert!(pruned_mmr.bounds().is_empty());
@@ -1575,24 +1649,24 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_pruning_mmr() {
+    fn test_full_pruning_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_pruning_inner::<mmr::Family>);
+        executor.start(full_pruning_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_pruning_mmb() {
+    fn test_full_pruning_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_pruning_inner::<mmb::Family>);
+        executor.start(full_pruning_inner::<mmb::Family>);
     }
 
     /// Simulate partial writes after pruning, making sure we recover to a valid state.
-    async fn journaled_recovery_with_pruning_inner<F: Family>(context: deterministic::Context) {
+    async fn full_recovery_with_pruning_inner<F: Family>(context: deterministic::Context) {
         // Build structure with 2000 leaves.
         let hasher: Standard<Sha256> = Standard::new();
         const LEAF_COUNT: usize = 2000;
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -1602,14 +1676,12 @@ mod tests {
         for i in 0..LEAF_COUNT {
             leaves.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for leaf in &leaves {
-                batch = batch.add(&hasher, leaf);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for leaf in &leaves {
+            batch = batch.add(&hasher, leaf);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
         mmr.sync().await.unwrap();
@@ -1618,7 +1690,7 @@ mod tests {
         // Prune the structure in increments of 50, simulating a partial write after each prune.
         for i in 0usize..200 {
             let label = format!("iter_{i}");
-            let mut mmr = Journaled::<F, _, Digest>::init(
+            let mut mmr = Merkle::<F, _, Digest>::init(
                 context.with_label(&label),
                 &hasher,
                 test_config(&context),
@@ -1638,22 +1710,20 @@ mod tests {
             for j in 0..10 {
                 let digest = test_digest(100 * (i + 1) + j);
                 leaves.push(digest);
-                let changeset = {
-                    let mut batch = mmr.new_batch();
-                    batch = batch.add(&hasher, leaves.last().unwrap());
-                    batch = batch.add(&hasher, leaves.last().unwrap());
-                    batch.merkleize(&hasher).finalize()
-                };
-                mmr.apply(changeset).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .add(&hasher, leaves.last().unwrap())
+                    .add(&hasher, leaves.last().unwrap());
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                mmr.apply_batch(&batch).unwrap();
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
-                let changeset = {
-                    let mut batch = mmr.new_batch();
-                    batch = batch.add(&hasher, leaves.last().unwrap());
-                    batch = batch.add(&hasher, leaves.last().unwrap());
-                    batch.merkleize(&hasher).finalize()
-                };
-                mmr.apply(changeset).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .add(&hasher, leaves.last().unwrap())
+                    .add(&hasher, leaves.last().unwrap());
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                mmr.apply_batch(&batch).unwrap();
             }
             let end_size = mmr.size();
             let total_to_write = (*end_size - *start_size) as usize;
@@ -1663,7 +1733,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Merkle::<F, _, Digest>::init(
             context.with_label("final"),
             &hasher,
             test_config(&context),
@@ -1674,36 +1744,34 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_journaled_recovery_with_pruning_mmr() {
+    fn test_full_recovery_with_pruning_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_recovery_with_pruning_inner::<mmr::Family>);
+        executor.start(full_recovery_with_pruning_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
-    fn test_journaled_recovery_with_pruning_mmb() {
+    fn test_full_recovery_with_pruning_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_recovery_with_pruning_inner::<mmb::Family>);
+        executor.start(full_recovery_with_pruning_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
+    async fn full_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
         // Create structure with 10 elements
         let hasher = Standard::<Sha256>::new();
         let cfg = test_config(&context);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mut mmr = Merkle::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
         let mut elements = Vec::new();
         for i in 0..10 {
             elements.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for elt in &elements {
-                batch = batch.add(&hasher, elt);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for elt in &elements {
+            batch = batch.add(&hasher, elt);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let original_leaves = mmr.leaves();
 
         // Historical proof should match "regular" proof when historical size == current database size
@@ -1734,14 +1802,12 @@ mod tests {
         for i in 10..20 {
             elements.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for elt in &elements[10..20] {
-                batch = batch.add(&hasher, elt);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for elt in &elements[10..20] {
+            batch = batch.add(&hasher, elt);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let new_historical_proof = mmr
             .historical_range_proof(
                 &hasher,
@@ -1757,22 +1823,20 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_basic_mmr() {
+    fn test_full_historical_proof_basic_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_basic_inner::<mmr::Family>);
+        executor.start(full_historical_proof_basic_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_basic_mmb() {
+    fn test_full_historical_proof_basic_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_basic_inner::<mmb::Family>);
+        executor.start(full_historical_proof_basic_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_with_pruning_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    async fn full_historical_proof_with_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("main"),
             &hasher,
             test_config(&context),
@@ -1785,21 +1849,19 @@ mod tests {
         for i in 0..50 {
             elements.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for elt in &elements {
-                batch = batch.add(&hasher, elt);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for elt in &elements {
+            batch = batch.add(&hasher, elt);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         // Prune to leaf 16 (position 30)
         let prune_loc = Location::<F>::new(16);
         mmr.prune(prune_loc).await.unwrap();
 
         // Create reference structure for verification to get correct size
-        let mut ref_mmr = Journaled::<F, _, Digest>::init(
+        let mut ref_mmr = Merkle::<F, _, Digest>::init(
             context.with_label("ref"),
             &hasher,
             Config {
@@ -1814,14 +1876,12 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = ref_mmr.new_batch();
-            for elt in elements.iter().take(41) {
-                batch = batch.add(&hasher, elt);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        ref_mmr.apply(changeset).unwrap();
+        let mut batch = ref_mmr.new_batch();
+        for elt in elements.iter().take(41) {
+            batch = batch.add(&hasher, elt);
+        }
+        let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
         let historical_root = ref_mmr.root();
 
@@ -1850,21 +1910,21 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_with_pruning_mmr() {
+    fn test_full_historical_proof_with_pruning_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_with_pruning_inner::<mmr::Family>);
+        executor.start(full_historical_proof_with_pruning_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_with_pruning_mmb() {
+    fn test_full_historical_proof_with_pruning_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_with_pruning_inner::<mmb::Family>);
+        executor.start(full_historical_proof_with_pruning_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_large_inner<F: Family>(context: deterministic::Context) {
+    async fn full_historical_proof_large_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("server"),
             &hasher,
             Config {
@@ -1883,19 +1943,17 @@ mod tests {
         for i in 0..100 {
             elements.push(test_digest(i));
         }
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for elt in &elements {
-                batch = batch.add(&hasher, elt);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for elt in &elements {
+            batch = batch.add(&hasher, elt);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let range = Location::<F>::new(30)..Location::<F>::new(61);
 
         // Only apply elements up to end_loc to the reference structure.
-        let mut ref_mmr = Journaled::<F, _, Digest>::init(
+        let mut ref_mmr = Merkle::<F, _, Digest>::init(
             context.with_label("client"),
             &hasher,
             Config {
@@ -1911,14 +1969,12 @@ mod tests {
         .unwrap();
 
         // Add elements up to the end of the range to verify historical root
-        let changeset = {
-            let mut batch = ref_mmr.new_batch();
-            for elt in elements.iter().take(*range.end as usize) {
-                batch = batch.add(&hasher, elt);
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        ref_mmr.apply(changeset).unwrap();
+        let mut batch = ref_mmr.new_batch();
+        for elt in elements.iter().take(*range.end as usize) {
+            batch = batch.add(&hasher, elt);
+        }
+        let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
         let expected_root = ref_mmr.root();
 
@@ -1940,33 +1996,28 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_large_mmr() {
+    fn test_full_historical_proof_large_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_large_inner::<mmr::Family>);
+        executor.start(full_historical_proof_large_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_large_mmb() {
+    fn test_full_historical_proof_large_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_large_inner::<mmb::Family>);
+        executor.start(full_historical_proof_large_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_singleton_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    async fn full_historical_proof_singleton_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
         let cfg = test_config(&context);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mut mmr = Merkle::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
 
         let element = test_digest(0);
-        let changeset = mmr
-            .new_batch()
-            .add(&hasher, &element)
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
+        let batch = mmr.new_batch().add(&hasher, &element);
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         // Test single element proof at historical position
         let single_proof = mmr
@@ -1990,29 +2041,29 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_singleton_mmr() {
+    fn test_full_historical_proof_singleton_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_singleton_inner::<mmr::Family>);
+        executor.start(full_historical_proof_singleton_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_singleton_mmb() {
+    fn test_full_historical_proof_singleton_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_singleton_inner::<mmb::Family>);
+        executor.start(full_historical_proof_singleton_inner::<mmb::Family>);
     }
 
     // Test `init_sync` when there is no persisted data.
-    async fn journaled_init_sync_empty_inner<F: Family>(context: deterministic::Context) {
+    async fn full_init_sync_empty_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
         // Test fresh start scenario with completely new structure (no existing data)
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(0)..Location::<F>::new(52),
+            range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(52)),
             pinned_nodes: None,
         };
 
-        let mut sync_mmr = Journaled::<F, _, Digest>::init_sync(context.clone(), sync_cfg, &hasher)
+        let mut sync_mmr = Merkle::<F, _, Digest>::init_sync(context.clone(), sync_cfg, &hasher)
             .await
             .unwrap();
 
@@ -2024,12 +2075,9 @@ mod tests {
 
         // Should be able to add new elements
         let new_element = test_digest(999);
-        let changeset = sync_mmr
-            .new_batch()
-            .add(&hasher, &new_element)
-            .merkleize(&hasher)
-            .finalize();
-        sync_mmr.apply(changeset).unwrap();
+        let batch = sync_mmr.new_batch().add(&hasher, &new_element);
+        let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        sync_mmr.apply_batch(&batch).unwrap();
 
         // Root should be computable
         let _root = sync_mmr.root();
@@ -2038,39 +2086,35 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_empty_mmr() {
+    fn test_full_init_sync_empty_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_empty_inner::<mmr::Family>);
+        executor.start(full_init_sync_empty_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_empty_mmb() {
+    fn test_full_init_sync_empty_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_empty_inner::<mmb::Family>);
+        executor.start(full_init_sync_empty_inner::<mmb::Family>);
     }
 
     // Test `init_sync` where the persisted structure's persisted nodes match the sync boundaries.
-    async fn journaled_init_sync_nonempty_exact_match_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    async fn full_init_sync_nonempty_exact_match_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
         // Create initial structure with elements.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
         )
         .await
         .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..50 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
         let original_size = mmr.size();
         let original_leaves = mmr.leaves();
@@ -2090,7 +2134,7 @@ mod tests {
         }
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: lower_bound_loc..upper_bound_loc,
+            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
 
@@ -2098,7 +2142,7 @@ mod tests {
         drop(mmr);
 
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            Merkle::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2121,38 +2165,36 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_nonempty_exact_match_mmr() {
+    fn test_full_init_sync_nonempty_exact_match_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_nonempty_exact_match_inner::<mmr::Family>);
+        executor.start(full_init_sync_nonempty_exact_match_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_nonempty_exact_match_mmb() {
+    fn test_full_init_sync_nonempty_exact_match_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_nonempty_exact_match_inner::<mmb::Family>);
+        executor.start(full_init_sync_nonempty_exact_match_inner::<mmb::Family>);
     }
 
     // Test `init_sync` where the persisted structure's data partially overlaps with the sync
     // boundaries.
-    async fn journaled_init_sync_partial_overlap_inner<F: Family>(context: deterministic::Context) {
+    async fn full_init_sync_partial_overlap_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
         // Create initial structure with elements.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
         )
         .await
         .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..30 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..30 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
         mmr.prune(Location::<F>::new(6)).await.unwrap();
 
@@ -2174,7 +2216,7 @@ mod tests {
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: lower_bound_loc..upper_bound_loc,
+            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
 
@@ -2182,7 +2224,7 @@ mod tests {
         drop(mmr);
 
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            Merkle::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2206,56 +2248,55 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_partial_overlap_mmr() {
+    fn test_full_init_sync_partial_overlap_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_partial_overlap_inner::<mmr::Family>);
+        executor.start(full_init_sync_partial_overlap_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_partial_overlap_mmb() {
+    fn test_full_init_sync_partial_overlap_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_partial_overlap_inner::<mmb::Family>);
+        executor.start(full_init_sync_partial_overlap_inner::<mmb::Family>);
     }
 
-    async fn journaled_init_sync_rejects_extra_pinned_nodes_inner<F: Family>(
+    async fn full_init_sync_rejects_extra_pinned_nodes_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(6)..Location::<F>::new(20),
+            range: non_empty_range!(Location::<F>::new(6), Location::<F>::new(20)),
             pinned_nodes: Some(vec![test_digest(1), test_digest(2), test_digest(3)]),
         };
 
         let result =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
-                .await;
+            Merkle::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher).await;
         assert!(matches!(result, Err(Error::InvalidPinnedNodes)));
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_rejects_extra_pinned_nodes_mmr() {
+    fn test_full_init_sync_rejects_extra_pinned_nodes_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_rejects_extra_pinned_nodes_inner::<mmr::Family>);
+        executor.start(full_init_sync_rejects_extra_pinned_nodes_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_rejects_extra_pinned_nodes_mmb() {
+    fn test_full_init_sync_rejects_extra_pinned_nodes_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_rejects_extra_pinned_nodes_inner::<mmb::Family>);
+        executor.start(full_init_sync_rejects_extra_pinned_nodes_inner::<mmb::Family>);
     }
 
     // Regression test that init() handles stale metadata (lower pruning boundary than journal).
     // Before the fix, this would panic with an assertion failure. After the fix, it returns a
     // MissingNode error (which is expected when metadata is corrupted and pinned nodes are lost).
-    async fn journaled_init_stale_metadata_returns_error_inner<F: Family>(
+    async fn full_init_stale_metadata_returns_error_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
 
         // Create a structure with some data and prune it
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2264,14 +2305,12 @@ mod tests {
         .unwrap();
 
         // Add 50 elements
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..50 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
 
         // Prune enough that the journal boundary's pinned nodes span pruned blobs.
@@ -2299,7 +2338,7 @@ mod tests {
         // After the fix, it returns MissingNode error (pinned nodes for the lower
         // boundary don't exist since they were pruned from journal and weren't
         // stored in metadata at the lower position)
-        let result = Journaled::<F, _, Digest>::init(
+        let result = Merkle::<F, _, Digest>::init(
             context.with_label("reopened"),
             &hasher,
             test_config(&context),
@@ -2314,25 +2353,25 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_journaled_init_stale_metadata_returns_error_mmr() {
+    fn test_full_init_stale_metadata_returns_error_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_stale_metadata_returns_error_inner::<mmr::Family>);
+        executor.start(full_init_stale_metadata_returns_error_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
-    fn test_journaled_init_stale_metadata_returns_error_mmb() {
+    fn test_full_init_stale_metadata_returns_error_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_stale_metadata_returns_error_inner::<mmb::Family>);
+        executor.start(full_init_stale_metadata_returns_error_inner::<mmb::Family>);
     }
 
     // Test that init() handles the case where metadata pruning boundary is ahead
     // of journal (crashed before journal prune completed). This should successfully
     // prune the journal to match metadata.
-    async fn journaled_init_metadata_ahead_inner<F: Family>(context: deterministic::Context) {
+    async fn full_init_metadata_ahead_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
         // Create a structure with some data
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2341,14 +2380,12 @@ mod tests {
         .unwrap();
 
         // Add 50 elements
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..50 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
 
         // Prune to position 30 (this stores pinned nodes and updates metadata)
@@ -2360,7 +2397,7 @@ mod tests {
 
         // Reopen the structure - should recover correctly with metadata ahead of
         // journal boundary (metadata says 30, journal is section-aligned to 28)
-        let mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Merkle::<F, _, Digest>::init(
             context.with_label("reopened"),
             &hasher,
             test_config(&context),
@@ -2376,15 +2413,15 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_journaled_init_metadata_ahead_mmr() {
+    fn test_full_init_metadata_ahead_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_metadata_ahead_inner::<mmr::Family>);
+        executor.start(full_init_metadata_ahead_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
-    fn test_journaled_init_metadata_ahead_mmb() {
+    fn test_full_init_metadata_ahead_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_metadata_ahead_inner::<mmb::Family>);
+        executor.start(full_init_metadata_ahead_inner::<mmb::Family>);
     }
 
     // Regression test: init_sync must compute pinned nodes BEFORE pruning the journal. Previously,
@@ -2393,7 +2430,7 @@ mod tests {
     //
     // Key setup: We create a structure with data but DON'T prune it, so the metadata has no pinned
     // nodes. Then init_sync must read pinned nodes from the journal before pruning it.
-    async fn journaled_init_sync_computes_pinned_nodes_before_pruning_inner<F: Family>(
+    async fn full_init_sync_computes_pinned_nodes_before_pruning_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
@@ -2410,17 +2447,15 @@ mod tests {
 
         // Create structure with enough elements to span multiple sections.
         let mut mmr =
-            Journaled::<F, _, Digest>::init(context.with_label("init"), &hasher, cfg.clone())
+            Merkle::<F, _, Digest>::init(context.with_label("init"), &hasher, cfg.clone())
                 .await
                 .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..100 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..100 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
 
         // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
@@ -2434,12 +2469,12 @@ mod tests {
         let prune_loc = Location::<F>::new(32);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: cfg,
-            range: prune_loc..Location::<F>::new(128),
+            range: non_empty_range!(prune_loc, Location::<F>::new(128)),
             pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
         };
 
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            Merkle::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2452,25 +2487,23 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_computes_pinned_nodes_before_pruning_mmr() {
+    fn test_full_init_sync_computes_pinned_nodes_before_pruning_mmr() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(journaled_init_sync_computes_pinned_nodes_before_pruning_inner::<mmr::Family>);
+        executor.start(full_init_sync_computes_pinned_nodes_before_pruning_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_init_sync_computes_pinned_nodes_before_pruning_mmb() {
+    fn test_full_init_sync_computes_pinned_nodes_before_pruning_mmb() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(journaled_init_sync_computes_pinned_nodes_before_pruning_inner::<mmb::Family>);
+        executor.start(full_init_sync_computes_pinned_nodes_before_pruning_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_pruned_elements_inner<F: Family>(
+    async fn full_historical_proof_pruned_elements_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
 
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2478,14 +2511,12 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..64 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..64 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(16);
         mmr.prune(prune_loc).await.unwrap();
@@ -2505,14 +2536,12 @@ mod tests {
         let pruned_loc = pruned_loc.expect("expected at least one pruned location");
 
         // Add more elements and verify pruned elements still return ElementPruned.
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..8 {
-                batch = batch.add(&hasher, &test_digest(10_000 + i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..8 {
+            batch = batch.add(&hasher, &test_digest(10_000 + i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let requested = mmr.leaves();
         let result = mmr
@@ -2524,22 +2553,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_pruned_elements_mmr() {
+    fn test_full_historical_proof_pruned_elements_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_pruned_elements_inner::<mmr::Family>);
+        executor.start(full_historical_proof_pruned_elements_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_pruned_elements_mmb() {
+    fn test_full_historical_proof_pruned_elements_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_pruned_elements_inner::<mmb::Family>);
+        executor.start(full_historical_proof_pruned_elements_inner::<mmb::Family>);
     }
 
-    async fn journaled_append_while_historical_proof_is_available_inner<F: Family>(
+    async fn full_append_while_historical_proof_is_available_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2547,26 +2576,23 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..20 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..20 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let historical_leaves = Location::<F>::new(10);
         let range = Location::<F>::new(2)..Location::<F>::new(8);
 
         // Appends should remain allowed while historical proofs are available.
-        let changeset = mmr
+        let batch = mmr
             .new_batch()
             .add(&hasher, &test_digest(100))
-            .add(&hasher, &test_digest(101))
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
+            .add(&hasher, &test_digest(101));
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let proof = mmr
             .historical_range_proof(&hasher, historical_leaves, range.clone())
@@ -2583,22 +2609,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_append_while_historical_proof_is_available_mmr() {
+    fn test_full_append_while_historical_proof_is_available_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_append_while_historical_proof_is_available_inner::<mmr::Family>);
+        executor.start(full_append_while_historical_proof_is_available_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_append_while_historical_proof_is_available_mmb() {
+    fn test_full_append_while_historical_proof_is_available_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_append_while_historical_proof_is_available_inner::<mmb::Family>);
+        executor.start(full_append_while_historical_proof_is_available_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_after_sync_reads_from_journal_inner<F: Family>(
+    async fn full_historical_proof_after_sync_reads_from_journal_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2606,14 +2632,12 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..64 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..64 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
 
         let historical_leaves = Location::<F>::new(20);
@@ -2633,24 +2657,20 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_after_sync_reads_from_journal_mmr() {
+    fn test_full_historical_proof_after_sync_reads_from_journal_mmr() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(journaled_historical_proof_after_sync_reads_from_journal_inner::<mmr::Family>);
+        executor.start(full_historical_proof_after_sync_reads_from_journal_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_after_sync_reads_from_journal_mmb() {
+    fn test_full_historical_proof_after_sync_reads_from_journal_mmb() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(journaled_historical_proof_after_sync_reads_from_journal_inner::<mmb::Family>);
+        executor.start(full_historical_proof_after_sync_reads_from_journal_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_after_pruning_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    async fn full_historical_proof_after_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2658,14 +2678,12 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..30 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..30 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(10);
         mmr.prune(prune_loc).await.unwrap();
@@ -2682,24 +2700,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_after_pruning_mmr() {
+    fn test_full_historical_proof_after_pruning_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_after_pruning_inner::<mmr::Family>);
+        executor.start(full_historical_proof_after_pruning_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_after_pruning_mmb() {
+    fn test_full_historical_proof_after_pruning_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_after_pruning_inner::<mmb::Family>);
+        executor.start(full_historical_proof_after_pruning_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_edge_cases_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    async fn full_historical_proof_edge_cases_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
         // Case 1: Empty structure.
-        let mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Merkle::<F, _, Digest>::init(
             context.with_label("empty"),
             &hasher,
             test_config(&context),
@@ -2721,21 +2737,19 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 2: Structure has nodes but is fully pruned.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("fully_pruned"),
             &hasher,
             test_config(&context),
         )
         .await
         .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..20 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..20 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
         mmr.prune_all().await.unwrap();
         assert!(mmr.bounds().is_empty());
@@ -2751,21 +2765,19 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 3: All nodes but one (single leaf) are pruned.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("single_leaf"),
             &hasher,
             test_config(&context),
         )
         .await
         .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..11 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..11 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
         let keep_loc = end - 1;
         mmr.prune(keep_loc).await.unwrap();
@@ -2788,37 +2800,30 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_edge_cases_mmr() {
+    fn test_full_historical_proof_edge_cases_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_edge_cases_inner::<mmr::Family>);
+        executor.start(full_historical_proof_edge_cases_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_edge_cases_mmb() {
+    fn test_full_historical_proof_edge_cases_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_edge_cases_inner::<mmb::Family>);
+        executor.start(full_historical_proof_edge_cases_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_out_of_bounds_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    async fn full_historical_proof_out_of_bounds_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("oob"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest>::init(context.with_label("oob"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..8 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..8 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let requested = mmr.leaves() + 1;
 
         let result = mmr
@@ -2833,22 +2838,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_out_of_bounds_mmr() {
+    fn test_full_historical_proof_out_of_bounds_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_out_of_bounds_inner::<mmr::Family>);
+        executor.start(full_historical_proof_out_of_bounds_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_out_of_bounds_mmb() {
+    fn test_full_historical_proof_out_of_bounds_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_out_of_bounds_inner::<mmb::Family>);
+        executor.start(full_historical_proof_out_of_bounds_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_range_validation_inner<F: Family>(
+    async fn full_historical_proof_range_validation_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("range_validation"),
             &hasher,
             test_config(&context),
@@ -2856,14 +2861,12 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..32 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..32 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let valid_range = Location::<F>::new(0)..Location::<F>::new(1);
 
@@ -2924,22 +2927,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_range_validation_mmr() {
+    fn test_full_historical_proof_range_validation_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_range_validation_inner::<mmr::Family>);
+        executor.start(full_historical_proof_range_validation_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_range_validation_mmb() {
+    fn test_full_historical_proof_range_validation_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_historical_proof_range_validation_inner::<mmb::Family>);
+        executor.start(full_historical_proof_range_validation_inner::<mmb::Family>);
     }
 
-    async fn journaled_historical_proof_non_size_prune_excludes_pruned_leaves_inner<F: Family>(
+    async fn full_historical_proof_non_size_prune_excludes_pruned_leaves_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("non_size_prune"),
             &hasher,
             test_config(&context),
@@ -2947,14 +2950,12 @@ mod tests {
         .await
         .unwrap();
 
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..16 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..16 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
 
         let end = mmr.leaves();
         let mut failures = Vec::new();
@@ -2985,44 +2986,42 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_non_size_prune_excludes_pruned_leaves_mmr() {
+    fn test_full_historical_proof_non_size_prune_excludes_pruned_leaves_mmr() {
         let executor = deterministic::Runner::default();
         executor.start(
-            journaled_historical_proof_non_size_prune_excludes_pruned_leaves_inner::<mmr::Family>,
+            full_historical_proof_non_size_prune_excludes_pruned_leaves_inner::<mmr::Family>,
         );
     }
 
     #[test_traced]
-    fn test_journaled_historical_proof_non_size_prune_excludes_pruned_leaves_mmb() {
+    fn test_full_historical_proof_non_size_prune_excludes_pruned_leaves_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(
-            journaled_historical_proof_non_size_prune_excludes_pruned_leaves_inner::<mmb::Family>,
+            full_historical_proof_non_size_prune_excludes_pruned_leaves_inner::<mmb::Family>,
         );
     }
 
     /// Regression: init_sync must recover from a journal left at an invalid size
     /// (e.g., a crash wrote a leaf but not its parent nodes).
-    async fn journaled_init_sync_recovers_from_invalid_journal_size_inner<F: Family>(
+    async fn full_init_sync_recovers_from_invalid_journal_size_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
 
         // Build a structure with 3 leaves, sync, and drop.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
         )
         .await
         .unwrap();
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..3 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..3 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         let valid_size = mmr.size();
         let valid_root = mmr.root();
         mmr.sync().await.unwrap();
@@ -3052,11 +3051,11 @@ mod tests {
         // init_sync should recover by rewinding to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(0)..Location::<F>::new(100),
+            range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),
             pinned_nodes: None,
         };
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            Merkle::<F, _, Digest>::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -3069,18 +3068,18 @@ mod tests {
     #[test_traced]
     fn test_init_sync_recovers_from_invalid_journal_size_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_recovers_from_invalid_journal_size_inner::<mmr::Family>);
+        executor.start(full_init_sync_recovers_from_invalid_journal_size_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_init_sync_recovers_from_invalid_journal_size_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_init_sync_recovers_from_invalid_journal_size_inner::<mmb::Family>);
+        executor.start(full_init_sync_recovers_from_invalid_journal_size_inner::<mmb::Family>);
     }
 
-    async fn journaled_stale_changeset_inner<F: Family>(context: deterministic::Context) {
+    async fn full_stale_batch_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mut mmr = Merkle::<F, _, Digest>::init(
             context.clone(),
             &Standard::<Sha256>::new(),
             test_config(&context),
@@ -3089,48 +3088,42 @@ mod tests {
         .unwrap();
 
         // Create two batches from the same base.
-        let changeset_a = mmr
-            .new_batch()
-            .add(&hasher, b"leaf-a")
-            .merkleize(&hasher)
-            .finalize();
-        let changeset_b = mmr
-            .new_batch()
-            .add(&hasher, b"leaf-b")
-            .merkleize(&hasher)
-            .finalize();
+        let batch_a = mmr.new_batch().add(&hasher, b"leaf-a");
+        let batch_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &hasher));
+        let batch_b = mmr.new_batch().add(&hasher, b"leaf-b");
+        let batch_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
 
         // Apply A -- should succeed.
-        mmr.apply(changeset_a).unwrap();
+        mmr.apply_batch(&batch_a).unwrap();
 
         // Apply B -- should fail (stale).
-        let result = mmr.apply(changeset_b);
+        let result = mmr.apply_batch(&batch_b);
         assert!(
-            matches!(result, Err(Error::StaleChangeset { .. })),
-            "expected StaleChangeset, got {result:?}"
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch, got {result:?}"
         );
 
         mmr.destroy().await.unwrap();
     }
 
     #[test]
-    fn test_stale_changeset_mmr() {
+    fn test_stale_batch_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_stale_changeset_inner::<mmr::Family>);
+        executor.start(full_stale_batch_inner::<mmr::Family>);
     }
 
     #[test]
-    fn test_stale_changeset_mmb() {
+    fn test_stale_batch_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_stale_changeset_inner::<mmb::Family>);
+        executor.start(full_stale_batch_inner::<mmb::Family>);
     }
 
-    /// Regression: `new_batch` must return the append-only journaled wrapper.
-    async fn journaled_new_batch_returns_append_only_wrapper_inner<F: Family>(
+    /// Regression: `new_batch` must return the append-only full wrapper.
+    async fn full_new_batch_returns_append_only_wrapper_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mmr = Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
+        let mmr = Merkle::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
             .await
             .unwrap();
 
@@ -3142,41 +3135,38 @@ mod tests {
     #[test_traced]
     fn test_new_batch_returns_append_only_wrapper_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_new_batch_returns_append_only_wrapper_inner::<mmr::Family>);
+        executor.start(full_new_batch_returns_append_only_wrapper_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_new_batch_returns_append_only_wrapper_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_new_batch_returns_append_only_wrapper_inner::<mmb::Family>);
+        executor.start(full_new_batch_returns_append_only_wrapper_inner::<mmb::Family>);
     }
 
     /// Regression: update_leaf on a synced-out leaf must return ElementPruned, not panic.
     /// Before the fix, `Readable::pruning_boundary` returned the journal's prune boundary
     /// (which could be 0), so the batch accepted the update. During merkleize, get_node
     /// returned None for the synced-out sibling and hit an expect panic.
-    async fn journaled_update_leaf_after_sync_returns_pruned_inner<F: Family>(
+    async fn full_update_leaf_after_sync_returns_pruned_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr =
-            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
-                .await
-                .unwrap();
+        let mut mmr = Merkle::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
+            .await
+            .unwrap();
 
         // Add 50 elements and sync (flushes all nodes to journal, prunes mem).
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..50 {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            batch.merkleize(&hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
 
         // Attempt to update leaf 0 which has been synced out of memory.
-        // Use the inner batch type directly since the journaled wrapper
+        // Use the inner batch type directly since the full wrapper
         // intentionally hides update_leaf.
         let batch = mmr.to_batch().new_batch();
         let result = batch.update_leaf(&hasher, Location::<F>::new(0), b"updated");
@@ -3188,12 +3178,12 @@ mod tests {
     #[test_traced]
     fn test_update_leaf_after_sync_returns_pruned_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_update_leaf_after_sync_returns_pruned_inner::<mmr::Family>);
+        executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_update_leaf_after_sync_returns_pruned_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
+        executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
     }
 }

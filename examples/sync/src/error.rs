@@ -22,6 +22,10 @@ pub enum Error {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    /// Compact target changed between target discovery and state fetch.
+    #[error("stale compact target: {0}")]
+    StaleTarget(String),
+
     /// Database operation failed
     #[error("database operation failed")]
     Database(#[from] commonware_storage::qmdb::Error<commonware_storage::mmr::Family>),
@@ -33,6 +37,10 @@ pub enum Error {
     /// Response channel closed before receiving response
     #[error("response channel closed for request {request_id}")]
     ResponseChannelClosed { request_id: u64 },
+
+    /// Received a malformed response that could not be decoded.
+    #[error("invalid response from server")]
+    InvalidResponse,
 
     /// Target update channel error
     #[error("target update channel error: {reason}")]
@@ -48,11 +56,9 @@ impl Error {
     pub const fn to_error_code(&self) -> ErrorCode {
         match self {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
+            Self::StaleTarget(_) => ErrorCode::StaleTarget,
             Self::Database(_) => ErrorCode::DatabaseError,
             Self::Network(_) => ErrorCode::NetworkError,
-            Self::RequestChannelClosed | Self::ResponseChannelClosed { .. } => {
-                ErrorCode::InternalError
-            }
             _ => ErrorCode::InternalError,
         }
     }

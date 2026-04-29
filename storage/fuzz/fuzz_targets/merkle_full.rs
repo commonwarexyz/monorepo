@@ -4,10 +4,10 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::merkle::{
-    hasher::Standard, journaled::Config, mem::Mem, mmb, mmr, Error, Family as MerkleFamily,
-    Location, LocationRangeExt as _, Position,
+    full::Config, hasher::Standard, mem::Mem, mmb, mmr, Error, Family as MerkleFamily, Location,
+    LocationRangeExt as _, Position,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -18,7 +18,7 @@ const PAGE_CACHE_SIZE: usize = 5;
 const ITEMS_PER_BLOB: u64 = 7;
 
 #[derive(Arbitrary, Debug, Clone)]
-enum MerkleJournaledOperation {
+enum Operation {
     Add {
         data: Vec<u8>,
     },
@@ -59,7 +59,7 @@ enum MerkleJournaledOperation {
 #[derive(Debug)]
 struct FuzzInput {
     seed: u64,
-    operations: Vec<MerkleJournaledOperation>,
+    operations: Vec<Operation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -93,20 +93,20 @@ fn historical_root<F: MerkleFamily>(
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let hasher = Standard::<Sha256>::new();
     let mut mem = Mem::<F, _>::new(&hasher);
-    let changeset = {
+    let batch = {
         let mut batch = mem.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
             batch = batch.add(&hasher, element);
         }
-        batch.merkleize(&hasher).finalize()
+        batch.merkleize(&mem, &hasher)
     };
-    mem.apply(changeset).unwrap();
+    mem.apply_batch(&batch).unwrap();
     *mem.root()
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    type Journaled<F, E, D> = commonware_storage::merkle::journaled::Journaled<F, E, D>;
-    type SyncConfig<F, D> = commonware_storage::merkle::journaled::SyncConfig<F, D>;
+    type Merkle<F, E, D> = commonware_storage::merkle::full::Merkle<F, E, D>;
+    type SyncConfig<F, D> = commonware_storage::merkle::full::SyncConfig<F, D>;
 
     let runner = deterministic::Runner::seeded(input.seed);
 
@@ -116,7 +116,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut leaves = Vec::new();
             let hasher = Standard::<Sha256>::new();
             let mut merkle =
-                Journaled::<F, _, _>::init(context.clone(), &hasher, test_config(suffix, &context))
+                Merkle::<F, _, _>::init(context.clone(), &hasher, test_config(suffix, &context))
                     .await
                     .unwrap();
 
@@ -126,7 +126,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
             for op in operations {
                 match op {
-                    MerkleJournaledOperation::Add { data } => {
+                    Operation::Add { data } => {
                         let limited_data = if data.len() > MAX_DATA_SIZE {
                             &data[0..MAX_DATA_SIZE]
                         } else {
@@ -140,18 +140,17 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let size_before = merkle.size();
                         let batch = merkle.new_batch();
                         let loc = batch.leaves();
-                        let changeset = batch
-                            .add(&hasher, limited_data)
-                            .merkleize(&hasher)
-                            .finalize();
-                        merkle.apply(changeset).unwrap();
+                        let batch = merkle.with_mem(|mem| {
+                            batch.add(&hasher, limited_data).merkleize(mem, &hasher)
+                        });
+                        merkle.apply_batch(&batch).unwrap();
                         leaves.push(limited_data.to_vec());
                         historical_sizes.push(merkle.leaves());
                         assert!(merkle.size() > size_before);
                         assert_eq!(merkle.leaves() - 1, loc);
                     }
 
-                    MerkleJournaledOperation::AddBatched { items } => {
+                    Operation::AddBatched { items } => {
                         let items: Vec<&[u8]> = items
                             .iter()
                             .map(|d| {
@@ -169,16 +168,19 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
 
                         let size_before = merkle.size();
-                        let (locations, changeset) = {
+                        let (locations, batch) = {
                             let mut batch = merkle.new_batch();
                             let mut locations = Vec::with_capacity(items.len());
                             for item in &items {
                                 locations.push(batch.leaves());
                                 batch = batch.add(&hasher, item);
                             }
-                            (locations, batch.merkleize(&hasher).finalize())
+                            (
+                                locations,
+                                merkle.with_mem(|mem| batch.merkleize(mem, &hasher)),
+                            )
                         };
-                        merkle.apply(changeset).unwrap();
+                        merkle.apply_batch(&batch).unwrap();
                         assert!(merkle.size() > size_before);
 
                         for (item, loc) in items.iter().zip(&locations) {
@@ -189,11 +191,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         assert_eq!(merkle.leaves() - 1, *locations.last().unwrap());
                     }
 
-                    MerkleJournaledOperation::GetNode { pos } => {
+                    Operation::GetNode { pos } => {
                         let _ = merkle.get_node(Position::<F>::new(pos)).await;
                     }
 
-                    MerkleJournaledOperation::Proof { location } => {
+                    Operation::Proof { location } => {
                         if merkle.leaves() > 0 {
                             let location = location % merkle.leaves().as_u64();
                             let location = Location::<F>::new(location);
@@ -211,7 +213,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
                     }
 
-                    MerkleJournaledOperation::RangeProof { start_loc, end_loc } => {
+                    Operation::RangeProof { start_loc, end_loc } => {
                         let start_loc = start_loc.clamp(0, u8::MAX - 1);
                         let end_loc = end_loc.clamp(start_loc + 1, u8::MAX) as u64;
                         let start_loc = start_loc as u64;
@@ -236,7 +238,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
                     }
 
-                    MerkleJournaledOperation::HistoricalRangeProof { start_loc, end_loc } => {
+                    Operation::HistoricalRangeProof { start_loc, end_loc } => {
                         let start_loc = start_loc as u64;
                         let end_loc = (end_loc as u64).clamp(start_loc, u8::MAX as u64);
                         let range = Location::<F>::new(start_loc)..Location::<F>::new(end_loc);
@@ -277,15 +279,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
                     }
 
-                    MerkleJournaledOperation::Sync => {
+                    Operation::Sync => {
                         merkle.sync().await.unwrap();
                     }
 
-                    MerkleJournaledOperation::PruneAll => {
+                    Operation::PruneAll => {
                         merkle.prune_all().await.unwrap();
                     }
 
-                    MerkleJournaledOperation::PruneToPos { pos } => {
+                    Operation::PruneToPos { pos } => {
                         if merkle.size() > 0 {
                             let safe_loc = Location::<F>::new(pos % (*merkle.leaves() + 1));
                             merkle.prune(safe_loc).await.unwrap();
@@ -293,35 +295,35 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
                     }
 
-                    MerkleJournaledOperation::GetRoot => {
+                    Operation::GetRoot => {
                         let _ = merkle.root();
                     }
 
-                    MerkleJournaledOperation::GetSize => {
+                    Operation::GetSize => {
                         let _ = merkle.size();
                     }
 
-                    MerkleJournaledOperation::GetLeaves => {
+                    Operation::GetLeaves => {
                         let (leaf_count, size) = (merkle.leaves().as_u64(), merkle.size().as_u64());
                         assert!(leaf_count <= size);
                     }
 
-                    MerkleJournaledOperation::GetPrunedToPos => {
+                    Operation::GetPrunedToPos => {
                         let pruned_loc = merkle.bounds().start;
                         assert!(pruned_loc <= merkle.leaves());
                     }
 
-                    MerkleJournaledOperation::GetOldestRetainedPos => {
+                    Operation::GetOldestRetainedPos => {
                         let bounds = merkle.bounds();
                         if !bounds.is_empty() {
                             assert!(bounds.start < merkle.leaves());
                         }
                     }
 
-                    MerkleJournaledOperation::Reinit => {
+                    Operation::Reinit => {
                         // Init a new merkle structure.
                         drop(merkle);
-                        merkle = Journaled::<F, _, _>::init(
+                        merkle = Merkle::<F, _, _>::init(
                             context
                                 .with_label("merkle")
                                 .with_attribute("instance", restarts),
@@ -338,7 +340,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         historical_sizes.truncate(recovered_leaves);
                     }
 
-                    MerkleJournaledOperation::InitSync {
+                    Operation::InitSync {
                         lower_bound_seed,
                         upper_bound_seed,
                     } => {
@@ -354,11 +356,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let sync_suffix = format!("{suffix}-sync");
                         let sync_config = SyncConfig::<F, _> {
                             config: test_config(&sync_suffix, &context),
-                            range: lower_bound_loc..upper_bound_loc,
+                            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
                             pinned_nodes: None,
                         };
 
-                        if let Ok(sync_merkle) = Journaled::<F, _, _>::init_sync(
+                        if let Ok(sync_merkle) = Merkle::<F, _, _>::init_sync(
                             context
                                 .with_label("sync")
                                 .with_attribute("instance", restarts),

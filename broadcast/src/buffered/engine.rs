@@ -1,5 +1,4 @@
 use super::{metrics, Config, Mailbox, Message};
-use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
@@ -9,7 +8,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::status::{CounterExt, GaugeExt, Status},
+    telemetry::metrics::{status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
@@ -23,6 +22,13 @@ use tracing::{debug, error, trace, warn};
 struct Waiter<M> {
     /// The responder to send the message to.
     responder: oneshot::Sender<M>,
+}
+
+/// Result of buffering an incoming or locally sent digest (inserted, duplicate, or ineligible).
+enum InsertMessageResult {
+    Inserted,
+    Duplicate,
+    Ineligible,
 }
 
 /// Instance of the main engine for the module.
@@ -90,11 +96,14 @@ where
     /// the message once.
     counts: BTreeMap<M::Digest, usize>,
 
+    /// Latest primary peer set allowed to keep buffered messages resident.
+    latest_primary_peers: Set<P>,
+
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
     /// Metrics
-    metrics: metrics::Metrics,
+    metrics: metrics::Metrics<P>,
 }
 
 impl<E, P, M, D> Engine<E, P, M, D>
@@ -124,6 +133,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
+            latest_primary_peers: Set::default(),
             peer_provider: cfg.peer_provider,
             metrics,
         };
@@ -136,7 +146,7 @@ where
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.
@@ -158,6 +168,14 @@ where
             },
             on_stopped => {
                 debug!("shutdown");
+            },
+            // Handle peer set subscription messages
+            Some(update) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                // Evict by latest primary only; see buffered module docs.
+                self.update_latest_primary_peers(update.latest.primary);
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox_receiver.recv() else {
@@ -204,17 +222,8 @@ where
                 };
 
                 trace!(?peer, "network");
-                self.metrics
-                    .peer
-                    .get_or_create(&SequencerLabel::from(&peer))
-                    .inc();
+                self.metrics.peer.get_or_create_by(&peer).inc();
                 self.handle_network(peer, msg);
-            },
-            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
-                debug!("peer set subscription closed");
-                break;
-            } => {
-                self.evict_untracked_peers(&tracked_peers);
             },
         }
     }
@@ -232,7 +241,8 @@ where
         responder: oneshot::Sender<Vec<P>>,
     ) {
         // Store the message, continue even if it was already stored
-        let _ = self.insert_message(self.public_key.clone(), msg.clone());
+        let digest = msg.digest();
+        let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
         let sent_to = sender
@@ -271,13 +281,20 @@ where
 
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
-        if !self.insert_message(peer.clone(), msg) {
-            debug!(?peer, "message already stored");
-            self.metrics.receive.inc(Status::Dropped);
-            return;
+        let digest = msg.digest();
+        match self.insert_message(peer.clone(), digest, msg) {
+            InsertMessageResult::Inserted => {
+                self.metrics.receive.inc(Status::Success);
+            }
+            InsertMessageResult::Duplicate => {
+                debug!(?peer, "message already stored");
+                self.metrics.receive.inc(Status::Dropped);
+            }
+            InsertMessageResult::Ineligible => {
+                debug!(?peer, "message from peer outside latest.primary not cached");
+                self.metrics.receive.inc(Status::Dropped);
+            }
         }
-
-        self.metrics.receive.inc(Status::Success);
     }
 
     ////////////////////////////////////////
@@ -286,16 +303,19 @@ where
 
     /// Inserts a message into the cache.
     ///
-    /// Returns `true` if the message was inserted, `false` if it was already present.
-    /// Updates the deque, item count, and message cache, potentially evicting an old message.
-    fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        let digest = msg.digest();
-
+    /// Waiters are notified even when a sender is not eligible to keep a
+    /// buffered cache entry resident.
+    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
         // Send the message to the waiters, if any
         if let Some(waiters) = self.waiters.remove(&digest) {
             for waiter in waiters {
                 self.respond_subscribe(waiter.responder, msg.clone());
             }
+        }
+
+        // Only peers listed in `latest.primary` may buffer
+        if self.latest_primary_peers.position(&peer).is_none() {
+            return InsertMessageResult::Ineligible;
         }
 
         // Get the relevant deque for the peer
@@ -310,7 +330,7 @@ where
                 let v = deque.remove(i).unwrap(); // Must exist
                 deque.push_front(v);
             }
-            return false;
+            return InsertMessageResult::Duplicate;
         };
 
         // - Insert the digest into the peer cache
@@ -336,20 +356,20 @@ where
             decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
-        true
+        InsertMessageResult::Inserted
     }
 
-    fn evict_untracked_peers(&mut self, tracked_peers: &Set<P>) {
-        let tracked = tracked_peers.as_ref();
+    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
         for (peer, deque) in self
             .deques
-            .extract_if(.., |peer, _| !tracked.contains(peer))
+            .extract_if(.., |peer, _| peers.position(peer).is_none())
         {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
                 decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
             }
         }
+        self.latest_primary_peers = peers;
     }
 
     ////////////////////////////////////////

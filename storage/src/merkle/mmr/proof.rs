@@ -23,14 +23,14 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mmr.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmr, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
@@ -288,14 +288,14 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         let mut mmr = Mmr::new(&hasher);
         let elements: Vec<Digest> = (0..3).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mmr.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmr, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
 
         // Proof for range [1, 3) -- fold prefix is empty, pinned node at position 0 is a sibling.
@@ -354,14 +354,14 @@ mod tests {
         // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
         // start_loc=8 puts the first peak entirely in the fold prefix.
         let elements: Vec<Digest> = (0..10).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mmr.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmr, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
 
         let start_loc = Location::new(8);

@@ -47,7 +47,6 @@ stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
     use iobuf::PoolError;
-    use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
     use std::{
         future::Future,
@@ -58,8 +57,7 @@ stability_scope!(BETA {
     };
     use thiserror::Error;
 
-    /// Prefix for runtime metrics.
-    pub(crate) const METRICS_PREFIX: &str = "runtime";
+    pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
 
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
@@ -179,9 +177,6 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         fn dedicated(self) -> Self;
 
-        /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
-        fn instrumented(self) -> Self;
-
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -288,6 +283,33 @@ stability_scope!(BETA {
     }
 
     /// Interface to register and encode metrics.
+    ///
+    /// # Mental Model: Metrics vs Tracing
+    ///
+    /// A context carries multiple pieces of observability state, each
+    /// applied via a different builder. They compose freely, but they do
+    /// not all feed into the same sinks:
+    ///
+    /// - `name` (set by [`Metrics::with_label`]): prefix applied to metrics
+    ///   you [`register`](Metrics::register) on this context. It also populates
+    ///   the `name` field of runtime-internal task metrics
+    ///   (`runtime_tasks_spawned`, `runtime_tasks_running`).
+    /// - `attributes` (set by [`Metrics::with_attribute`]): Prometheus label
+    ///   dimensions on metrics you `register` on this context. They are also
+    ///   emitted as OpenTelemetry attributes on the per-task tracing span when,
+    ///   and only when, [`Metrics::with_span`] is set on the spawn. Runtime
+    ///   task metrics intentionally ignore attributes to keep their
+    ///   cardinality bounded.
+    /// - `span` (set by [`Metrics::with_span`]): wraps the next spawned task
+    ///   in a `tracing` span populated from the current `name` and `attributes`.
+    ///   It never touches metrics. The flag is consumed by the next `spawn` and
+    ///   is not inherited by child contexts.
+    ///
+    /// | Builder                 | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span                     |
+    /// | ----------------------- | :--------------------: | :----------------------: | :------------------: | :------------------------------: |
+    /// | `with_label`            | prefix                 | -                        | `name`               | `name` field when `with_span`    |
+    /// | `with_attribute`        | -                      | label dimension          | -                    | OTel attribute when `with_span`  |
+    /// | `with_span`             | -                      | -                        | -                    | enables span creation            |
     pub trait Metrics: Clone + Send + Sync + 'static {
         /// Get the current label of the context.
         fn label(&self) -> String;
@@ -378,9 +400,8 @@ stability_scope!(BETA {
         ///
         /// To query the latest attribute value dynamically, create a gauge to track the current value:
         /// ```ignore
-        /// // Create a gauge to track the current epoch
-        /// let latest_epoch = Gauge::<i64>::default();
-        /// context.with_label("orchestrator").register("latest_epoch", "current epoch", latest_epoch.clone());
+        /// // Create a gauge to track the current epoch. Hold the handle on `self`.
+        /// let latest_epoch = context.with_label("orchestrator").gauge("latest_epoch", "current epoch");
         /// latest_epoch.set(current_epoch);
         /// // Produces: orchestrator_latest_epoch 5
         /// ```
@@ -389,52 +410,43 @@ stability_scope!(BETA {
         /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
         fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
+        /// Return a new context that wraps the next task spawned from it in a `tracing`
+        /// span whose `name` field and OpenTelemetry attributes are derived from the
+        /// context's label and attributes.
+        ///
+        /// The flag is consumed by the next [`Spawner::spawn`] call on the returned
+        /// context (and on any clone of it). It is not inherited by child contexts
+        /// produced via [`Metrics::with_label`], [`Metrics::with_attribute`],
+        /// or any of the `Spawner` builders: each such builder
+        /// resets the flag so the caller must opt in again for the next spawn.
+        ///
+        /// Enabling the span only affects tracing. It does not change which metrics
+        /// are registered, nor does it widen the cardinality of runtime task metrics.
+        fn with_span(&self) -> Self;
+
         /// Register a metric with the runtime.
         ///
         /// Any registered metric will include (as a prefix) the label of the current context.
         ///
+        /// The returned [`telemetry::metrics::Registered`] value must be retained for as long as the
+        /// metric should remain exposed. Dropping the returned handle unregisters
+        /// the metric immediately.
+        ///
+        /// Re-registering the same metric key (same prefixed name and attributes)
+        /// returns another handle to the existing metric when the concrete metric
+        /// type matches. Registering the same key with a different metric type
+        /// panics.
+        ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-        fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+        fn register<N: Into<String>, H: Into<String>, M: telemetry::metrics::Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> telemetry::metrics::Registered<M>;
 
         /// Encode all metrics into a buffer.
-        ///
-        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-        /// (via the concatenation of nested `with_label` and `register` calls). This can be
-        /// avoided by using `with_label` and `with_attribute` to create new context instances
-        /// (ensures all context instances are namespaced).
         fn encode(&self) -> String;
-
-        /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
-        /// consensus engines). All metrics registered through the returned context (and
-        /// child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into
-        /// a separate registry that is automatically removed when all clones of the scoped
-        /// context are dropped.
-        ///
-        /// If the context is already scoped, returns a clone with the same scope (scopes
-        /// nest by inheritance, not by creating new independent scopes).
-        ///
-        /// # Uniqueness
-        ///
-        /// Scoped metrics share the same global uniqueness constraint as
-        /// [`Metrics::register`]: each (prefixed_name, attributes) pair must be unique.
-        /// Callers should use [`Metrics::with_attribute`] to distinguish metrics across
-        /// scopes (e.g., an "epoch" attribute) rather than re-registering identical keys.
-        ///
-        /// # Example
-        ///
-        /// ```ignore
-        /// let scoped = context
-        ///     .with_label("engine")
-        ///     .with_attribute("epoch", epoch)
-        ///     .with_scope();
-        ///
-        /// // Register metrics into the scoped registry
-        /// let counter = Counter::default();
-        /// scoped.register("votes", "vote count", counter.clone());
-        ///
-        /// // Metrics are removed when all clones of `scoped` are dropped.
-        /// ```
-        fn with_scope(&self) -> Self;
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -829,21 +841,25 @@ stability_scope!(BETA, cfg(feature = "external") {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::traces::collector::TraceStorage;
+    use crate::telemetry::{
+        metrics::{
+            count_running_tasks,
+            raw::{Counter, Family},
+            EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
+            EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
+        },
+        traces::collector::TraceStorage,
+    };
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
-        NZUsize, SystemTimeExt,
+        NZUsize, SystemTimeExt, NZU32,
     };
     use futures::{
         future::{pending, ready},
         join, pin_mut, FutureExt,
-    };
-    use prometheus_client::{
-        encoding::{EncodeLabelKey, EncodeLabelSet, EncodeLabelValue},
-        metrics::{counter::Counter, family::Family},
     };
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
@@ -2211,7 +2227,7 @@ mod tests {
 
             // Register a metric
             let counter = Counter::<u64>::default();
-            context.register("test", "test", counter.clone());
+            let _registered = context.register("test", "test", counter.clone());
 
             // Increment the counter
             counter.inc();
@@ -2223,7 +2239,7 @@ mod tests {
             // Nested context
             let context = context.with_label("nested");
             let nested_counter = Counter::<u64>::default();
-            context.register("test", "test", nested_counter.clone());
+            let _nested_registered = context.register("test", "test", nested_counter.clone());
 
             // Increment the counter
             nested_counter.inc();
@@ -2247,7 +2263,7 @@ mod tests {
 
             // Register a metric with the attribute
             let counter = Counter::<u64>::default();
-            ctx_epoch5.register("votes", "vote count", counter.clone());
+            let _epoch5 = ctx_epoch5.register("votes", "vote count", counter.clone());
             counter.inc();
 
             // Encode and verify the attribute appears as a label
@@ -2263,7 +2279,7 @@ mod tests {
                 .with_label("consensus")
                 .with_attribute("epoch", "e6");
             let counter2 = Counter::<u64>::default();
-            ctx_epoch6.register("votes", "vote count", counter2.clone());
+            let _epoch6 = ctx_epoch6.register("votes", "vote count", counter2.clone());
             counter2.inc();
             counter2.inc();
 
@@ -2300,7 +2316,7 @@ mod tests {
                 .with_attribute("region", "us")
                 .with_attribute("instance", "i1");
             let counter3 = Counter::<u64>::default();
-            ctx_multi.register("requests", "request count", counter3.clone());
+            let _multi = ctx_multi.register("requests", "request count", counter3.clone());
             counter3.inc();
 
             let buffer = context.encode();
@@ -2337,7 +2353,7 @@ mod tests {
 
             // Register a metric
             let counter = Counter::<u64>::default();
-            ctx.register("votes", "vote count", counter.clone());
+            let _registered = ctx.register("votes", "vote count", counter.clone());
             counter.inc();
 
             // Verify the attribute is preserved through the nested label
@@ -2357,7 +2373,7 @@ mod tests {
                 .with_label("inner");
 
             let counter2 = Counter::<u64>::default();
-            ctx2.register("requests", "request count", counter2.clone());
+            let _registered2 = ctx2.register("requests", "request count", counter2.clone());
             counter2.inc();
             counter2.inc();
 
@@ -2393,15 +2409,15 @@ mod tests {
 
             // Register metrics in ctx_a
             let c1 = Counter::<u64>::default();
-            ctx_a.register("requests", "help", c1);
+            let _ctx_a_requests = ctx_a.register("requests", "help", c1);
 
             // Register metrics in ctx_b
             let c2 = Counter::<u64>::default();
-            ctx_b.register("requests", "help", c2);
+            let _ctx_b_requests = ctx_b.register("requests", "help", c2);
 
             // Register another metric in ctx_a AFTER ctx_b was used
             let c3 = Counter::<u64>::default();
-            ctx_a.register("errors", "help", c3);
+            let _ctx_a_errors = ctx_a.register("errors", "help", c3);
 
             let output = context.encode();
 
@@ -2443,6 +2459,103 @@ mod tests {
         test_metrics_attributes_isolated_between_contexts(runner);
     }
 
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
+    ///
+    /// Verifies the documented guarantee that runtime task metrics ignore context
+    /// attributes: spawning with a varying `with_attribute` (as the marshaled
+    /// consensus code does for each round) must not create per-value entries in
+    /// `runtime_tasks_spawned` / `runtime_tasks_running`.
+    fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        runner.start(|context| async move {
+            const ROUNDS: u64 = 128;
+
+            let mut handles = Vec::with_capacity(ROUNDS as usize);
+            for round in 0..ROUNDS {
+                let handle = context
+                    .with_label("deferred_verify")
+                    .with_attribute("round", round)
+                    .spawn(move |_| async move { round });
+                handles.push(handle);
+            }
+            for (expected, handle) in handles.into_iter().enumerate() {
+                assert_eq!(handle.await.expect("task failed"), expected as u64);
+            }
+
+            // handle.await resolves when the task's output is ready, but
+            // the running-gauge decrement fires on task-struct drop which
+            // may lag slightly. Yield to the executor so it can run cleanup.
+            while count_running_tasks(&context, "deferred_verify") > 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let buffer = context.encode();
+
+            // Count occurrences of each runtime task metric for our label. If
+            // attributes were incorrectly folded into the task family key, we
+            // would see ROUNDS distinct time series instead of one.
+            let spawned_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_spawned_total{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            let running_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            assert_eq!(
+                spawned_lines, 1,
+                "expected exactly 1 runtime_tasks_spawned entry for deferred_verify, got {spawned_lines}: {buffer}",
+            );
+            assert_eq!(
+                running_lines, 1,
+                "expected exactly 1 runtime_tasks_running entry for deferred_verify, got {running_lines}: {buffer}",
+            );
+
+            // The single spawned-counter entry should reflect every round.
+            let spawned_value = format!(
+                "runtime_tasks_spawned_total{{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}} {ROUNDS}"
+            );
+            assert!(
+                buffer.contains(&spawned_value),
+                "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
+            );
+
+            // The per-round attribute must not surface on task metrics (the
+            // task `Label` does not include context attributes).
+            assert!(
+                !buffer
+                    .lines()
+                    .any(|line| line.starts_with("runtime_tasks_")
+                        && line.contains("round=")),
+                "task metrics must not carry `round` attribute: {buffer}",
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_spawn_attribute_cardinality() {
+        let executor = deterministic::Runner::default();
+        test_metrics_spawn_attribute_cardinality(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_spawn_attribute_cardinality() {
+        let runner = tokio::Runner::default();
+        test_metrics_spawn_attribute_cardinality(runner);
+    }
+
     fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -2461,12 +2574,12 @@ mod tests {
 
             // Register via first context
             let c1 = Counter::<u64>::default();
-            ctx_ab.register("requests", "help", c1.clone());
+            let _requests = ctx_ab.register("requests", "help", c1.clone());
             c1.inc();
 
             // Register via second context - same attributes, different metric
             let c2 = Counter::<u64>::default();
-            ctx_ba.register("errors", "help", c2.clone());
+            let _errors = ctx_ba.register("errors", "help", c2.clone());
             c2.inc();
             c2.inc();
 
@@ -2530,22 +2643,22 @@ mod tests {
 
             // Register metrics in all contexts
             let c1 = Counter::<u64>::default();
-            svc_a.register("requests", "help", c1);
+            let _svc_a = svc_a.register("requests", "help", c1);
 
             let c2 = Counter::<u64>::default();
-            svc_a_v2.register("requests", "help", c2);
+            let _svc_a_v2 = svc_a_v2.register("requests", "help", c2);
 
             let c3 = Counter::<u64>::default();
-            svc_b_worker.register("tasks", "help", c3);
+            let _svc_b_worker = svc_b_worker.register("tasks", "help", c3);
 
             let c4 = Counter::<u64>::default();
-            svc_b_worker_shard.register("tasks", "help", c4);
+            let _svc_b_worker_shard = svc_b_worker_shard.register("tasks", "help", c4);
 
             let c5 = Counter::<u64>::default();
-            svc_b_manager.register("decisions", "help", c5);
+            let _svc_b_manager = svc_b_manager.register("decisions", "help", c5);
 
             let c6 = Counter::<u64>::default();
-            svc_c.register("requests", "help", c6);
+            let _svc_c = svc_c.register("requests", "help", c6);
 
             let output = context.encode();
 
@@ -2636,7 +2749,7 @@ mod tests {
 
             // Register a Family metric
             let requests: Family<RequestLabels, Counter<u64>> = Family::default();
-            ctx.register("requests", "HTTP requests", requests.clone());
+            let _requests = ctx.register("requests", "HTTP requests", requests.clone());
 
             // Increment counters for different label combinations
             requests
@@ -2685,7 +2798,8 @@ mod tests {
             // Create another context WITHOUT attributes to verify isolation
             let ctx_plain = context.with_label("api_plain");
             let plain_requests: Family<RequestLabels, Counter<u64>> = Family::default();
-            ctx_plain.register("requests", "HTTP requests", plain_requests.clone());
+            let _plain_requests =
+                ctx_plain.register("requests", "HTTP requests", plain_requests.clone());
 
             plain_requests
                 .get_or_create(&RequestLabels {
@@ -2724,118 +2838,109 @@ mod tests {
         test_metrics_family_with_attributes(runner);
     }
 
-    fn test_with_scope_register_and_encode<R: Runner>(runner: R)
+    fn test_register_and_encode<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").with_scope();
-            let counter = Counter::<u64>::default();
-            scoped.register("votes", "vote count", counter.clone());
+            let counter = context.with_label("engine").register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             counter.inc();
 
             let buffer = context.encode();
             assert!(
                 buffer.contains("engine_votes_total 1"),
-                "scoped metric should appear in encode: {buffer}"
+                "registered metric should appear in encode: {buffer}"
             );
         });
     }
 
     #[test]
-    fn test_deterministic_with_scope_register_and_encode() {
+    fn test_deterministic_register_and_encode() {
         let executor = deterministic::Runner::default();
-        test_with_scope_register_and_encode(executor);
+        test_register_and_encode(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_register_and_encode() {
+    fn test_tokio_register_and_encode() {
         let runner = tokio::Runner::default();
-        test_with_scope_register_and_encode(runner);
+        test_register_and_encode(runner);
     }
 
-    fn test_with_scope_drop_removes_metrics<R: Runner>(runner: R)
+    fn test_register_drop_removes_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            // Register a permanent metric
-            let permanent = Counter::<u64>::default();
-            context.with_label("permanent").register(
+            let permanent = context.with_label("permanent").register(
                 "counter",
                 "permanent counter",
-                permanent.clone(),
+                Counter::<u64>::default(),
             );
             permanent.inc();
 
-            // Register a scoped metric
-            let scoped = context.with_label("engine").with_scope();
-            let counter = Counter::<u64>::default();
-            scoped.register("votes", "vote count", counter.clone());
+            let counter = context.with_label("engine").register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             counter.inc();
 
-            // Both should appear
             let buffer = context.encode();
             assert!(buffer.contains("permanent_counter_total 1"));
             assert!(buffer.contains("engine_votes_total 1"));
 
-            // Drop the scoped context
-            drop(scoped);
+            drop(counter);
 
-            // Only permanent metric should remain
             let buffer = context.encode();
             assert!(
                 buffer.contains("permanent_counter_total 1"),
-                "permanent metric should survive scope drop: {buffer}"
+                "other registered metrics should survive handle drop: {buffer}"
             );
             assert!(
                 !buffer.contains("engine_votes"),
-                "scoped metric should be removed after scope drop: {buffer}"
+                "metric should be removed after handle drop: {buffer}"
             );
         });
     }
 
     #[test]
-    fn test_deterministic_with_scope_drop_removes_metrics() {
+    fn test_deterministic_register_drop_removes_metrics() {
         let executor = deterministic::Runner::default();
-        test_with_scope_drop_removes_metrics(executor);
+        test_register_drop_removes_metrics(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_drop_removes_metrics() {
+    fn test_tokio_register_drop_removes_metrics() {
         let runner = tokio::Runner::default();
-        test_with_scope_drop_removes_metrics(runner);
+        test_register_drop_removes_metrics(runner);
     }
 
-    fn test_with_scope_attributes<R: Runner>(runner: R)
+    fn test_register_with_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            // Simulate epoch lifecycle
             let epoch1 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .with_scope();
-            let c1 = Counter::<u64>::default();
-            epoch1.register("votes", "vote count", c1.clone());
-            c1.inc();
+                .register("votes", "vote count", Counter::<u64>::default());
+            epoch1.inc();
 
             let epoch2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 2)
-                .with_scope();
-            let c2 = Counter::<u64>::default();
-            epoch2.register("votes", "vote count", c2.clone());
-            c2.inc();
-            c2.inc();
+                .register("votes", "vote count", Counter::<u64>::default());
+            epoch2.inc();
+            epoch2.inc();
 
-            // Both epochs visible
             let buffer = context.encode();
             assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
-            // HELP/TYPE lines should be deduplicated across scopes
             assert_eq!(
                 buffer.matches("# HELP engine_votes").count(),
                 1,
@@ -2847,7 +2952,6 @@ mod tests {
                 "TYPE should appear once: {buffer}"
             );
 
-            // Drop epoch 1 context
             drop(epoch1);
             let buffer = context.encode();
             assert!(
@@ -2856,7 +2960,6 @@ mod tests {
             );
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
-            // Drop epoch 2 context
             drop(epoch2);
             let buffer = context.encode();
             assert!(
@@ -2867,100 +2970,93 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_attributes() {
+    fn test_deterministic_register_with_attributes() {
         let executor = deterministic::Runner::default();
-        test_with_scope_attributes(executor);
+        test_register_with_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_attributes() {
+    fn test_tokio_register_with_attributes() {
         let runner = tokio::Runner::default();
-        test_with_scope_attributes(runner);
+        test_register_with_attributes(runner);
     }
 
-    fn test_with_scope_inherits_on_with_label<R: Runner>(runner: R)
+    fn test_reregister_after_drop<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").with_scope();
+            let votes = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .register("votes", "vote count", Counter::<u64>::default());
+            drop(votes);
 
-            // Child context inherits scope
-            let child = scoped.with_label("batcher");
-            let counter = Counter::<u64>::default();
-            child.register("msgs", "message count", counter.clone());
-            counter.inc();
+            let replacement = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .register("votes", "vote count", Counter::<u64>::default());
+            drop(replacement);
+        });
+    }
 
-            let buffer = context.encode();
-            assert!(buffer.contains("engine_batcher_msgs_total 1"));
+    #[test]
+    fn test_deterministic_reregister_after_drop() {
+        let executor = deterministic::Runner::default();
+        test_reregister_after_drop(executor);
+    }
 
-            // Dropping all scoped contexts removes all metrics in the scope
-            drop(child);
-            drop(scoped);
+    #[test]
+    fn test_tokio_reregister_after_drop() {
+        let runner = tokio::Runner::default();
+        test_reregister_after_drop(runner);
+    }
+
+    fn test_register_clone_keeps_metric_alive<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let registered = context.with_label("engine").register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
+            registered.inc();
+            let clone = registered.clone();
+
             let buffer = context.encode();
             assert!(
-                !buffer.contains("engine_batcher_msgs"),
-                "child metric should be removed with scope: {buffer}"
+                buffer.contains("engine_votes_total 1"),
+                "metric should remain registered while any handle exists: {buffer}"
+            );
+
+            drop(registered);
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "metric should survive while clone is retained: {buffer}"
+            );
+
+            drop(clone);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_votes"),
+                "metric should be removed when all handle clones are dropped: {buffer}"
             );
         });
     }
 
     #[test]
-    fn test_deterministic_with_scope_inherits_on_with_label() {
+    fn test_deterministic_register_clone_keeps_metric_alive() {
         let executor = deterministic::Runner::default();
-        test_with_scope_inherits_on_with_label(executor);
+        test_register_clone_keeps_metric_alive(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_inherits_on_with_label() {
+    fn test_tokio_register_clone_keeps_metric_alive() {
         let runner = tokio::Runner::default();
-        test_with_scope_inherits_on_with_label(runner);
-    }
-
-    fn test_multiple_scopes<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            let ctx_a = context.with_label("a").with_scope();
-            let ctx_b = context.with_label("b").with_scope();
-
-            let ca = Counter::<u64>::default();
-            ctx_a.register("counter", "a counter", ca.clone());
-            ca.inc();
-
-            let cb = Counter::<u64>::default();
-            ctx_b.register("counter", "b counter", cb.clone());
-            cb.inc();
-            cb.inc();
-
-            let buffer = context.encode();
-            assert!(buffer.contains("a_counter_total 1"));
-            assert!(buffer.contains("b_counter_total 2"));
-
-            // Drop only scope a
-            drop(ctx_a);
-            let buffer = context.encode();
-            assert!(!buffer.contains("a_counter"));
-            assert!(buffer.contains("b_counter_total 2"));
-
-            // Drop scope b
-            drop(ctx_b);
-            let buffer = context.encode();
-            assert!(!buffer.contains("b_counter"));
-        });
-    }
-
-    #[test]
-    fn test_deterministic_multiple_scopes() {
-        let executor = deterministic::Runner::default();
-        test_multiple_scopes(executor);
-    }
-
-    #[test]
-    fn test_tokio_multiple_scopes() {
-        let runner = tokio::Runner::default();
-        test_multiple_scopes(runner);
+        test_register_clone_keeps_metric_alive(runner);
     }
 
     fn test_encode_single_eof<R: Runner>(runner: R)
@@ -2968,14 +3064,15 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let root_counter = Counter::<u64>::default();
-            context.register("root", "root metric", root_counter.clone());
+            let root_counter = context.register("root", "root metric", Counter::<u64>::default());
             root_counter.inc();
 
-            let scoped = context.with_label("engine").with_scope();
-            let scoped_counter = Counter::<u64>::default();
-            scoped.register("ops", "scoped metric", scoped_counter.clone());
-            scoped_counter.inc();
+            let child = context.with_label("engine").register(
+                "ops",
+                "child metric",
+                Counter::<u64>::default(),
+            );
+            child.inc();
 
             let buffer = context.encode();
             assert!(
@@ -2984,7 +3081,7 @@ mod tests {
             );
             assert!(
                 buffer.contains("engine_ops_total 1"),
-                "scoped metric missing: {buffer}"
+                "child metric missing: {buffer}"
             );
             assert_eq!(
                 buffer.matches("# EOF").count(),
@@ -3010,80 +3107,7 @@ mod tests {
         test_encode_single_eof(runner);
     }
 
-    fn test_with_scope_nested_inherits<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            let scoped = context.with_label("engine").with_scope();
-
-            // Calling with_scope() on an already-scoped context inherits the scope
-            let nested = scoped.with_scope();
-            let counter = Counter::<u64>::default();
-            nested.register("votes", "vote count", counter.clone());
-            counter.inc();
-
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("engine_votes_total 1"),
-                "nested scope should inherit parent scope: {buffer}"
-            );
-
-            // Dropping the nested context alone should NOT clean up metrics
-            // because the parent scoped context still holds the Arc
-            drop(nested);
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("engine_votes_total 1"),
-                "metrics should survive as long as any scope clone exists: {buffer}"
-            );
-
-            // Dropping the parent scoped context cleans up
-            drop(scoped);
-            let buffer = context.encode();
-            assert!(
-                !buffer.contains("engine_votes"),
-                "metrics should be removed when all scope clones are dropped: {buffer}"
-            );
-        });
-    }
-
-    #[test]
-    fn test_deterministic_with_scope_nested_inherits() {
-        let executor = deterministic::Runner::default();
-        test_with_scope_nested_inherits(executor);
-    }
-
-    #[test]
-    fn test_tokio_with_scope_nested_inherits() {
-        let runner = tokio::Runner::default();
-        test_with_scope_nested_inherits(runner);
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate metric:")]
-    fn test_deterministic_reregister_after_scope_drop() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let scoped = context
-                .with_label("engine")
-                .with_attribute("epoch", 1)
-                .with_scope();
-            let c1 = Counter::<u64>::default();
-            scoped.register("votes", "vote count", c1);
-            drop(scoped);
-
-            // Re-registering the same key after scope drop is not allowed
-            let scoped2 = context
-                .with_label("engine")
-                .with_attribute("epoch", 1)
-                .with_scope();
-            let c2 = Counter::<u64>::default();
-            scoped2.register("votes", "vote count", c2);
-        });
-    }
-
-    fn test_with_scope_family_with_attributes<R: Runner>(runner: R)
+    fn test_family_with_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -3092,10 +3116,7 @@ mod tests {
             name: String,
         }
         impl EncodeLabelSet for Peer {
-            fn encode(
-                &self,
-                encoder: &mut prometheus_client::encoding::LabelSetEncoder<'_>,
-            ) -> Result<(), std::fmt::Error> {
+            fn encode(&self, encoder: &mut LabelSetEncoder<'_>) -> Result<(), std::fmt::Error> {
                 let mut label = encoder.encode_label();
                 let mut key = label.encode_label_key()?;
                 EncodeLabelKey::encode(&"peer", &mut key)?;
@@ -3106,13 +3127,14 @@ mod tests {
         }
 
         runner.start(|context| async move {
-            let scoped = context
+            let family = context
                 .with_label("batcher")
                 .with_attribute("epoch", 1)
-                .with_scope();
-
-            let family: Family<Peer, Counter> = Family::default();
-            scoped.register("votes", "votes per peer", family.clone());
+                .register(
+                    "votes",
+                    "votes per peer",
+                    Family::<Peer, Counter>::default(),
+                );
             family
                 .get_or_create(&Peer {
                     name: "alice".into(),
@@ -3130,7 +3152,7 @@ mod tests {
                 "family with attributes should combine labels: {buffer}"
             );
 
-            drop(scoped);
+            drop(family);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("batcher_votes"),
@@ -3140,15 +3162,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_family_with_attributes() {
+    fn test_deterministic_family_with_attributes() {
         let executor = deterministic::Runner::default();
-        test_with_scope_family_with_attributes(executor);
+        test_family_with_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_family_with_attributes() {
+    fn test_tokio_family_with_attributes() {
         let runner = tokio::Runner::default();
-        test_with_scope_family_with_attributes(runner);
+        test_family_with_attributes(runner);
     }
 
     #[test]
@@ -3427,13 +3449,13 @@ mod tests {
         executor.start(|context| async move {
             context
                 .with_label("test")
-                .instrumented()
+                .with_span()
                 .spawn(|context| async move {
                     tracing::info!(field = "test field", "test log");
 
                     context
                         .with_label("inner")
-                        .instrumented()
+                        .with_span()
                         .spawn(|_| async move {
                             tracing::info!("inner log");
                         })
@@ -3821,7 +3843,7 @@ mod tests {
 
             // Register a test metric
             let counter: Counter<u64> = Counter::default();
-            context.register("test_counter", "Test counter", counter.clone());
+            let _registered = context.register("test_counter", "Test counter", counter.clone());
             counter.inc();
 
             // Helper functions to parse HTTP response
@@ -3967,8 +3989,8 @@ mod tests {
 
     fn test_buffer_pooler<R: Runner>(
         runner: R,
-        expected_network_max_per_class: usize,
-        expected_storage_max_per_class: usize,
+        expected_network_max_per_class: u32,
+        expected_storage_max_per_class: u32,
     ) where
         R::Context: BufferPooler,
     {
@@ -4000,10 +4022,10 @@ mod tests {
         let runner = deterministic::Runner::new(
             deterministic::Config::default()
                 .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
                 )
                 .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
                 ),
         );
         test_buffer_pooler(runner, 64, 8);
@@ -4016,10 +4038,10 @@ mod tests {
         let runner = tokio::Runner::new(
             tokio::Config::default()
                 .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
                 )
                 .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
                 ),
         );
         test_buffer_pooler(runner, 64, 8);

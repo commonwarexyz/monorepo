@@ -266,8 +266,8 @@ pub(crate) mod test {
                 }
             }
         }
-        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
     }
 
     #[test_traced("WARN")]
@@ -290,15 +290,14 @@ pub(crate) mod test {
             let late_key = FixedBytes::<2>::new([3u8, 0u8]);
             let middle_key = FixedBytes::<2>::new([1u8, 2u8]);
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(1))
                 .write(key2.clone(), Some(2))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
@@ -307,28 +306,26 @@ pub(crate) mod test {
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key2.clone());
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key2.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
 
@@ -336,15 +333,14 @@ pub(crate) mod test {
 
             // Update the keys in opposite order from earlier.
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key2.clone(), Some(2))
                 .write(key1.clone(), Some(1))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
@@ -355,28 +351,26 @@ pub(crate) mod test {
 
             // Delete the keys in opposite order from earlier.
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key2.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
 
@@ -425,15 +419,15 @@ pub(crate) mod test {
                     map.remove(&k);
                 }
 
-                let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
             }
 
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that apply_batch + sync w/ pruning will raise the activity floor.
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             assert_eq!(db.snapshot.items(), 857);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -464,13 +458,8 @@ pub(crate) mod test {
             let start_loc = db.log.merkle.bounds().start;
             // Raise the inactivity floor via an empty batch and make sure historical inactive
             // operations are still provable.
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc());
 
@@ -501,11 +490,11 @@ pub(crate) mod test {
                     let v = Sha256::hash(&(i * 1000).to_be_bytes());
                     batch = batch.write(k, Some(v));
                 }
-                let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
             }
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
             let inactivity_floor_loc = db.inactivity_floor_loc();
@@ -523,7 +512,7 @@ pub(crate) mod test {
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                     batch = batch.write(k, Some(v));
                 }
-                // Don't merkleize/finalize/apply -- simulates uncommitted writes
+                // Don't merkleize/apply -- simulates uncommitted writes
             }
 
             // Insert operations without applying, then drop without cleanup.
@@ -561,8 +550,8 @@ pub(crate) mod test {
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                     batch = batch.write(k, Some(v));
                 }
-                let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
             }
             let db = open_db(context.with_label("sixth")).await;
@@ -596,7 +585,7 @@ pub(crate) mod test {
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                     batch = batch.write(k, Some(v));
                 }
-                // Don't merkleize/finalize/apply -- simulates uncommitted writes
+                // Don't merkleize/apply -- simulates uncommitted writes
             }
 
             // Insert operations without applying then drop without cleanup.
@@ -633,8 +622,8 @@ pub(crate) mod test {
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                     batch = batch.write(k, Some(v));
                 }
-                let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
             }
             let db = open_db(context.with_label("sixth")).await;
@@ -663,12 +652,8 @@ pub(crate) mod test {
                     batch = batch.write(k, Some(v));
                     map.insert(k, v);
                 }
-                let finalized = batch
-                    .merkleize(Some(metadata), &db)
-                    .await
-                    .unwrap()
-                    .finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(&db, Some(metadata)).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
             }
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -676,26 +661,20 @@ pub(crate) mod test {
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k, None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Drop & reopen the db, making sure the re-opened db has exactly the same state.
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             let root = db.root();
             drop(db);
@@ -879,8 +858,8 @@ pub(crate) mod test {
                         keys.insert(key, i);
                         batch = batch.write(key, Some(i));
                     }
-                    let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                    db.apply_batch(finalized).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
                 }
 
                 // Make sure the db and ordered map agree on contents & key order.
@@ -903,8 +882,8 @@ pub(crate) mod test {
                         keys.remove(&key);
                         batch = batch.write(key, None);
                     }
-                    let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                    db.apply_batch(finalized).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
                 }
 
                 let mut iter = keys.iter();
@@ -926,8 +905,8 @@ pub(crate) mod test {
                         keys.remove(&key);
                         batch = batch.write(key, None);
                     }
-                    let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                    db.apply_batch(finalized).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
                 }
                 assert_eq!(keys.len(), 0);
                 assert!(db.is_empty());
@@ -1011,26 +990,24 @@ pub(crate) mod test {
 
             let mid_key = FixedBytes::from([0xAAu8; 4]);
             let val = Sha256::fill(1u8);
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(mid_key.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Batch-insert a preceeding non-translated-colliding key.
             let preceeding_key = FixedBytes::from([0x55u8; 4]);
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(preceeding_key.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&preceeding_key).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&mid_key).await.unwrap().unwrap(), val);
@@ -1058,16 +1035,15 @@ pub(crate) mod test {
             let val = Sha256::fill(1u8);
 
             // Create three keys in order: A -> B -> C -> A (circular)
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key_a.clone(), Some(val))
                 .write(key_b.clone(), Some(val))
                 .write(key_c.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Verify initial spans
             let span_a = db.get_span(&key_a).await.unwrap().unwrap();
@@ -1078,14 +1054,13 @@ pub(crate) mod test {
             assert_eq!(span_c.1.next_key, key_a);
 
             // Batch-delete the middle key B
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key_b.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Verify B is deleted
             assert!(db.get(&key_b).await.unwrap().is_none());
@@ -1112,14 +1087,13 @@ pub(crate) mod test {
             let val = Sha256::fill(1u8);
 
             // Test the single-bucket case.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Start key is in the DB.
             {
@@ -1163,16 +1137,15 @@ pub(crate) mod test {
             let key2_2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x11]);
             let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key2_1.clone(), Some(val))
                 .write(key2_2.clone(), Some(val))
                 .write(key3.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Start key is in the DB.
             {
@@ -1250,8 +1223,8 @@ pub(crate) mod test {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let finalized = batch.merkleize(metadata, db).await.unwrap().finalize();
-        let range = db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(db, metadata).await.unwrap();
+        let range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         range
     }
@@ -1262,13 +1235,8 @@ pub(crate) mod test {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let root_before = db.root();
 
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root_before);
 
         commit_writes_generic(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1284,13 +1252,8 @@ pub(crate) mod test {
         commit_writes_generic(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         db.destroy().await.unwrap();
@@ -1344,7 +1307,7 @@ pub(crate) mod test {
         batch = batch.write(ka, Some(va2));
         batch = batch.write(kb, None);
         batch = batch.write(kc, Some(vc));
-        let merkleized = batch.merkleize(None, &db).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
 
         assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
         assert_eq!(merkleized.get(&kb, &db).await.unwrap(), None);
@@ -1362,7 +1325,7 @@ pub(crate) mod test {
 
         let mut batch = db.new_batch();
         batch = batch.write(ka, Some(val(0)));
-        let merkleized = batch.merkleize(None, &db).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
 
         let mut child = merkleized.new_batch::<Sha256>();
         assert_eq!(child.get(&ka, &db).await.unwrap(), Some(val(0)));
@@ -1392,7 +1355,7 @@ pub(crate) mod test {
         let parent_m = db
             .new_batch()
             .write(ka, None)
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
@@ -1400,13 +1363,12 @@ pub(crate) mod test {
         let child_m = parent_m
             .new_batch::<Sha256>()
             .write(ka, Some(val(200)))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
-        let finalized = child_m.finalize();
-        db.apply_batch(finalized).await.unwrap();
+        db.apply_batch(child_m).await.unwrap();
         assert_eq!(db.get(&ka).await.unwrap(), Some(val(200)));
 
         db.destroy().await.unwrap();
@@ -1439,11 +1401,10 @@ pub(crate) mod test {
         for i in 0..10 {
             batch = batch.write(key(i), Some(val(i)));
         }
-        let merkleized = batch.merkleize(None, &db).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
         let speculative_root = merkleized.root();
 
-        let finalized = merkleized.finalize();
-        db.apply_batch(finalized).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.root(), speculative_root);
 
         db.destroy().await.unwrap();
@@ -1457,14 +1418,13 @@ pub(crate) mod test {
         let k = Sha256::hash(&UPDATES.to_be_bytes());
         for i in 0u64..UPDATES {
             let v = Sha256::hash(&(i * 1000).to_be_bytes());
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k, Some(v))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
         let root = db.root();
@@ -1542,15 +1502,15 @@ pub(crate) mod test {
             // Parent batch: update K's value (K enters base_diff).
             let mut parent = db.new_batch();
             parent = parent.write(key_k, Some(val(4)));
-            let parent_m = parent.merkleize(None, &db).await.unwrap();
+            let parent_m = parent.merkleize(&db, None).await.unwrap();
 
             // Child batch: delete K.
             let mut child = parent_m.new_batch::<Sha256>();
             child = child.write(key_k, None);
-            let child_m = child.merkleize(None, &db).await.unwrap();
+            let child_m = child.merkleize(&db, None).await.unwrap();
 
             // Apply and commit.
-            db.apply_batch(child_m.finalize()).await.unwrap();
+            db.apply_batch(child_m).await.unwrap();
             db.commit().await.unwrap();
 
             // K should be deleted.
@@ -1659,17 +1619,13 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_stacked_delete_recreate_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_stacked_delete_recreate_inner::<crate::merkle::mmb::Family>(context)
-        });
+        executor.start(batch_stacked_delete_recreate_inner::<crate::merkle::mmb::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_apply_returns_range_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_apply_returns_range_inner::<crate::merkle::mmb::Family>(context)
-        });
+        executor.start(batch_apply_returns_range_inner::<crate::merkle::mmb::Family>);
     }
 
     #[test_traced("INFO")]
@@ -1700,7 +1656,7 @@ pub(crate) mod test {
         use super::*;
         use crate::{
             merkle::{
-                mmr::{self, journaled::Mmr},
+                mmr::{self, full::Mmr},
                 Family as _,
             },
             qmdb::any::sync::tests::FromSyncTestable,
@@ -1710,9 +1666,9 @@ pub(crate) mod test {
         type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
-            type Mmr = TestMmr;
+            type Merkle = TestMmr;
 
-            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
                 (self.log.merkle, self.log.journal)
             }
 

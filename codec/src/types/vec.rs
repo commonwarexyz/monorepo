@@ -36,33 +36,25 @@ impl<T: Write> Write for &[T] {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
-        for item in self.iter() {
-            item.write(buf);
-        }
+        T::write_slice(self, buf);
     }
 
     #[inline]
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         self.len().write(buf);
-        for item in self.iter() {
-            item.write_bufs(buf);
-        }
+        T::write_slice_bufs(self, buf);
     }
 }
 
 impl<T: EncodeSize> EncodeSize for &[T] {
     #[inline]
     fn encode_size(&self) -> usize {
-        self.len().encode_size() + self.iter().map(EncodeSize::encode_size).sum::<usize>()
+        self.len().encode_size() + T::encode_size_slice(self)
     }
 
     #[inline]
     fn encode_inline_size(&self) -> usize {
-        self.len().encode_size()
-            + self
-                .iter()
-                .map(EncodeSize::encode_inline_size)
-                .sum::<usize>()
+        self.len().encode_size() + T::encode_inline_size_slice(self)
     }
 }
 
@@ -72,18 +64,18 @@ impl<T: Read> Read for Vec<T> {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
-        let mut vec = Self::with_capacity(len);
-        for _ in 0..len {
-            vec.push(T::read_cfg(buf, cfg)?);
-        }
-        Ok(vec)
+        T::read_vec(buf, len, cfg)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeRangeExt, Encode};
+    use crate::{
+        types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
+        DecodeRangeExt, Encode,
+    };
+    use bytes::{Bytes, BytesMut};
 
     #[test]
     fn test_vec() {
@@ -109,6 +101,27 @@ mod tests {
                 Err(Error::InvalidLength(_))
             ));
         }
+
+        // The length prefix advertises two payload bytes, but only one byte follows.
+        assert!(matches!(
+            Vec::<u8>::decode_range([0x02, 0x01].as_slice(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            Vec::<Byte>::decode_range([0x02, 0x01].as_slice(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+
+        // The length prefix advertises two payload bytes, and one extra byte remains after
+        // those two payload bytes are consumed.
+        assert!(matches!(
+            Vec::<u8>::decode_range([0x02, 0x01, 0x02, 0x03].as_slice(), ..),
+            Err(Error::ExtraData(1))
+        ));
+        assert!(matches!(
+            Vec::<Byte>::decode_range([0x02, 0x01, 0x02, 0x03].as_slice(), ..),
+            Err(Error::ExtraData(1))
+        ));
     }
 
     #[test]
@@ -136,6 +149,97 @@ mod tests {
                 Err(Error::InvalidLength(_))
             ));
         }
+    }
+
+    #[test]
+    fn test_specialization_selection() {
+        // `Vec<u8>` writes the length prefix, then the payload in one bulk write.
+        let mut buf = TrackingWriteBuf::new();
+        vec![1u8, 2, 3].write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 1);
+
+        // Other one-byte element types keep the generic per-element path.
+        let mut buf = TrackingWriteBuf::new();
+        vec![Byte(1), Byte(2), Byte(3)].write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 4);
+
+        // Slices use the same bulk payload path as vectors.
+        let values = [1u8, 2, 3];
+        let mut buf = TrackingWriteBuf::new();
+        values.as_slice().write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 1);
+
+        // Non-`u8` slices keep the generic per-element path.
+        let values = [Byte(1), Byte(2), Byte(3)];
+        let mut buf = TrackingWriteBuf::new();
+        values.as_slice().write(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 4);
+
+        // `write_bufs` mirrors `write` for byte vectors.
+        let mut buf = TrackingWriteBuf::new();
+        vec![1u8, 2, 3].write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 1);
+        assert_eq!(buf.put_u8_calls, 1);
+
+        // The `write_bufs` fallback remains element-by-element.
+        let mut buf = TrackingWriteBuf::new();
+        vec![Byte(1), Byte(2), Byte(3)].write_bufs(&mut buf);
+        assert_eq!(buf.put_slice_calls, 0);
+        assert_eq!(buf.put_u8_calls, 4);
+
+        // `Vec<u8>` reads the length prefix, then bulk-copies the payload.
+        let mut buf = TrackingReadBuf::new(&[0x03, 0x01, 0x02, 0x03]);
+        let value = Vec::<u8>::read_cfg(&mut buf, &((..).into(), ())).unwrap();
+        assert_eq!(value, vec![1, 2, 3]);
+        assert_eq!(buf.copy_to_slice_calls, 1);
+        assert_eq!(buf.get_u8_calls, 1);
+
+        // Other element types still read one element at a time.
+        let mut buf = TrackingReadBuf::new(&[0x03, 0x01, 0x02, 0x03]);
+        let value = Vec::<Byte>::read_cfg(&mut buf, &((..).into(), ())).unwrap();
+        assert_eq!(value, vec![Byte(1), Byte(2), Byte(3)]);
+        assert_eq!(buf.copy_to_slice_calls, 0);
+        assert_eq!(buf.get_u8_calls, 4);
+    }
+
+    #[test]
+    fn test_write_bufs_equivalence() {
+        fn assert_equivalent<T: Write>(value: &T) {
+            let mut write = BytesMut::new();
+            value.write(&mut write);
+
+            let mut write_bufs = TrackingWriteBuf::new();
+            value.write_bufs(&mut write_bufs);
+
+            assert_eq!(write.freeze(), write_bufs.freeze());
+        }
+
+        assert_equivalent(&vec![1u8, 2, 3]);
+        assert_equivalent(&vec![0x0102u16, 0x0304, 0x0506]);
+        assert_equivalent(&vec![Byte(1), Byte(2), Byte(3)]);
+        assert_equivalent(&vec![
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ]);
+
+        let values = [1u8, 2, 3];
+        assert_equivalent(&values.as_slice());
+
+        let values = [0x0102u16, 0x0304, 0x0506];
+        assert_equivalent(&values.as_slice());
+
+        let values = [Byte(1), Byte(2), Byte(3)];
+        assert_equivalent(&values.as_slice());
+
+        let values = [
+            Bytes::from_static(&[1u8, 2, 3]),
+            Bytes::from_static(&[4u8, 5, 6]),
+        ];
+        assert_equivalent(&values.as_slice());
     }
 
     #[test]

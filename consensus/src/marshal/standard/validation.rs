@@ -2,7 +2,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::validation::{
-            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
+            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
         core::Mailbox,
         standard::Standard,
@@ -72,7 +72,7 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
     block: B,
-) -> Decision<B>
+) -> Option<Decision<B>>
 where
     ES: Epocher,
     S: Scheme,
@@ -84,7 +84,7 @@ where
             height = %block.height(),
             "block height not in expected epoch"
         );
-        return Decision::Complete(false);
+        return Some(Decision::Complete(false));
     }
 
     // Re-proposals are signaled by `digest == context.parent.1`.
@@ -97,14 +97,16 @@ where
                 height = %block.height(),
                 "re-proposal is not at epoch boundary"
             );
-            return Decision::Complete(false);
+            return Some(Decision::Complete(false));
         }
 
-        marshal.verified(context.round, block).await;
-        return Decision::Complete(true);
+        if !marshal.verified(context.round, block).await {
+            return None;
+        }
+        return Some(Decision::Complete(true));
     }
 
-    Decision::Continue(block)
+    Some(Decision::Continue(block))
 }
 
 /// Runs the shared non-reproposal verification flow.
@@ -123,6 +125,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
+    stage: Stage,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -199,8 +202,9 @@ where
         valid = validity_request => valid,
     };
 
-    if application_valid {
-        marshal.verified(context.round, block).await;
+    if application_valid && !stage.store(marshal, context.round, block).await {
+        debug!(round = ?context.round, "marshal unable to accept block");
+        return None;
     }
     Some(application_valid)
 }

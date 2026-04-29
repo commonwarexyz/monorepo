@@ -8,11 +8,12 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::mmr::{self, journaled, Location, StandardHasher},
+    merkle::{self, full, hasher::Standard as StandardHasher, Location},
     qmdb::{
         self,
         any::{
             db::Db,
+            operation::{update::Update, Operation},
             ordered::{
                 fixed::{
                     Db as OrderedFixedDb, Operation as OrderedFixedOp, Update as OrderedFixedUpdate,
@@ -34,44 +35,78 @@ use crate::{
             },
             FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
-        operation::{Committable, Key, Operation},
+        operation::{Committable, Key},
     },
     translator::Translator,
-    Context,
+    Context, Persistable,
 };
-use commonware_codec::{CodecShared, Read as CodecRead};
+use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_utils::Array;
-use std::ops::Range;
+use commonware_utils::{range::NonEmptyRange, Array};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// Shared helper to build a [Db] from sync components.
-async fn build_db<E, O, I, H, U, C, T>(
+/// Returns whether persisted local state already matches the requested sync target.
+///
+/// Shared helper for [crate::qmdb::any] sync implementations, which can reuse persisted
+/// state by checking only the operations-tree size and root.
+///
+/// [crate::qmdb::current] performs an additional lower-bound check because its grafted-state
+/// reconstruction depends on the persisted pruning point remaining at or below
+/// `target.range.start()`.
+pub async fn has_local_target_state<F, E, H>(
     context: E,
-    mmr_config: journaled::Config,
+    merkle_config: full::Config,
+    target: &qmdb::sync::Target<F, H::Digest>,
+) -> bool
+where
+    F: merkle::Family,
+    E: Context,
+    H: Hasher,
+{
+    let hasher = StandardHasher::<H>::new();
+    let peek = full::Merkle::<F, _, _>::peek_root(
+        context.with_label("local_target_probe"),
+        merkle_config,
+        &hasher,
+    )
+    .await;
+    // Size + root identify a unique state, so if they match the target's we can reuse
+    // the persisted DB without fetching boundary pins.
+    matches!(
+        peek,
+        Ok(Some((_, journal_leaves, root)))
+            if journal_leaves == target.range.end() && root == target.root
+    )
+}
+
+/// Shared helper to build a [Db] from sync components.
+async fn build_db<F, E, U, I, H, C, T>(
+    context: E,
+    merkle_config: full::Config,
     log: C,
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
-    range: Range<Location>,
+    range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
-) -> Result<Db<mmr::Family, E, C, I, H, U>, qmdb::Error<mmr::Family>>
+) -> Result<Db<F, E, C, I, H, U>, qmdb::Error<F>>
 where
+    F: merkle::Family,
     E: Context,
-    O: Operation<mmr::Family> + Committable + CodecShared + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location>,
+    U: Update + Send + Sync + 'static,
+    I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
-    U: Send + Sync + 'static,
     T: Translator,
-    C: Mutable<Item = O>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = crate::journal::Error>,
+    Operation<F, U>: Codec + Committable + CodecShared,
 {
     let hasher = StandardHasher::<H>::new();
 
-    let mmr = crate::mmr::journaled::Mmr::init_sync(
-        context.with_label("mmr"),
-        crate::mmr::journaled::SyncConfig {
-            config: mmr_config,
+    let merkle = full::Merkle::<F, _, _>::init_sync(
+        context.with_label("merkle"),
+        full::SyncConfig {
+            config: merkle_config,
             range: range.clone(),
             pinned_nodes,
         },
@@ -81,14 +116,14 @@ where
 
     let index = I::new(context.with_label("index"), translator);
 
-    let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
-        mmr,
+    let log = authenticated::Journal::<F, _, _, _>::from_components(
+        merkle,
         log,
         hasher,
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::from_components(range.start, log, index).await?;
+    let db = Db::init_from_log(index, log, Some(range.start()), |_, _| {}).await?;
 
     Ok(db)
 }
@@ -98,8 +133,9 @@ macro_rules! impl_sync_database {
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
-        impl<E, K, V, H, T> qmdb::sync::Database for $db<mmr::Family, E, K, V, H, T>
+        impl<F, E, K, V, H, T> qmdb::sync::Database for $db<F, E, K, V, H, T>
         where
+            F: merkle::Family,
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
@@ -107,8 +143,9 @@ macro_rules! impl_sync_database {
             T: Translator,
             $($($where_extra)+)?
         {
+            type Family = F;
             type Context = E;
-            type Op = $op<mmr::Family, K, V>;
+            type Op = $op<F, K, V>;
             type Journal = $journal;
             type Hasher = H;
             type Config = $config;
@@ -119,19 +156,32 @@ macro_rules! impl_sync_database {
                 config: Self::Config,
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
-                range: Range<Location>,
+                range: NonEmptyRange<Location<F>>,
                 apply_batch_size: usize,
-            ) -> Result<Self, qmdb::Error<mmr::Family>> {
-                let mmr_config = config.merkle_config.clone();
+            ) -> Result<Self, qmdb::Error<F>> {
+                let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
-                build_db::<_, Self::Op, _, H, $update<K, V>, _, T>(
+                build_db::<F, _, $update<K, V>, _, H, _, T>(
                     context,
-                    mmr_config,
+                    merkle_config,
                     log,
                     translator,
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                )
+                .await
+            }
+
+            async fn has_local_target_state(
+                context: Self::Context,
+                config: &Self::Config,
+                target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+            ) -> bool {
+                qmdb::any::sync::has_local_target_state::<F, _, H>(
+                    context,
+                    config.merkle_config.clone(),
+                    target,
                 )
                 .await
             }
@@ -152,9 +202,9 @@ impl_sync_database!(
 impl_sync_database!(
     UnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg>,
     Key, VariableValue;
-    UnorderedVariableOp<mmr::Family, K, V>: CodecShared
+    UnorderedVariableOp<F, K, V>: CodecShared
 );
 
 impl_sync_database!(
@@ -166,7 +216,7 @@ impl_sync_database!(
 impl_sync_database!(
     OrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg>,
     Key, VariableValue;
-    OrderedVariableOp<mmr::Family, K, V>: CodecShared
+    OrderedVariableOp<F, K, V>: CodecShared
 );

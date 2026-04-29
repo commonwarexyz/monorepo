@@ -6,11 +6,11 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
+    telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
 use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
-use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
@@ -232,16 +232,11 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             .collect();
 
         // Initialize metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        let pruned = Counter::default();
-        context.register("puts", "Number of put calls", puts.clone());
-        context.register("gets", "Number of get calls", gets.clone());
-        context.register("has", "Number of has calls", has.clone());
-        context.register("syncs", "Number of sync calls", syncs.clone());
-        context.register("pruned", "Number of pruned blobs", pruned.clone());
+        let puts = context.counter("puts", "Number of put calls");
+        let gets = context.counter("gets", "Number of get calls");
+        let has = context.counter("has", "Number of has calls");
+        let syncs = context.counter("syncs", "Number of sync calls");
+        let pruned = context.counter("pruned", "Number of pruned blobs");
 
         Ok(Self {
             context,
@@ -332,6 +327,11 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Get an iterator over all ranges in the [Ordinal].
     pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
+    /// Get an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
     }
 
     /// Retrieve the first index in the [Ordinal].
