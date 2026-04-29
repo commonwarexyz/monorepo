@@ -1,17 +1,17 @@
-//! Commit-pointer state shared by QMDb apply paths.
+//! Commit bounds shared by QMDB apply paths.
 //!
 //! Applying a batch has two phases:
-//! 1. validate that the batch can be applied to the current committed chain, and
-//! 2. after variant-specific effects have succeeded, advance the committed chain.
+//! 1. validate that the batch can extend the current commit bounds, and
+//! 2. after variant-specific effects have succeeded, advance those bounds.
 //!
 //! [`ValidatedApply`] is the typestate connecting those phases. Callers can only obtain it from
-//! [`CommitState::validate`], and its fields are private, so commit pointers cannot be advanced
-//! through this API without first running validation.
+//! [`CommitBounds::validate`], and its fields are private, so the bounds cannot be advanced through
+//! this API without first running validation.
 
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        batch_core::{AppendBatchCore, BatchSpan, HasCore},
+        append_batch::{AppendBatchView, BatchSpan},
         Error,
     },
 };
@@ -19,14 +19,14 @@ use commonware_cryptography::Digest;
 use core::ops::Range;
 use std::sync::Arc;
 
-/// Shared commit-pointer state.
-pub(crate) struct CommitState<F: Family> {
+/// Committed bounds of a QMDB operation chain.
+pub(crate) struct CommitBounds<F: Family> {
     last_commit_loc: Location<F>,
     inactivity_floor_loc: Location<F>,
 }
 
-impl<F: Family> CommitState<F> {
-    /// Create commit state from already-validated commit pointers.
+impl<F: Family> CommitBounds<F> {
+    /// Create commit bounds from already-validated locations.
     pub(crate) const fn new(
         last_commit_loc: Location<F>,
         inactivity_floor_loc: Location<F>,
@@ -52,41 +52,27 @@ impl<F: Family> CommitState<F> {
         Location::new(*self.last_commit_loc + 1)
     }
 
-    /// Restore commit pointers after a rewind/reload path has already validated its target.
-    ///
-    /// This bypasses the normal `validate -> ValidatedApply -> commit` apply path. Use it only
-    /// after a separate authenticated or journal-backed recovery path has selected the target.
-    /// Adjacent effects, such as resetting a compact metadata cache, remain the caller's
-    /// responsibility.
-    pub(crate) const fn restore(
-        &mut self,
-        last_commit_loc: Location<F>,
-        inactivity_floor_loc: Location<F>,
-    ) {
-        self.last_commit_loc = last_commit_loc;
-        self.inactivity_floor_loc = inactivity_floor_loc;
-    }
-
-    /// Validate that `core` can be applied to this state.
-    pub(crate) fn validate<D, W>(
+    /// Validate that `batch` can extend these bounds.
+    pub(crate) fn validate<D, B, W>(
         &self,
-        core: &AppendBatchCore<F, D>,
+        batch: &B,
         ancestors: &[Arc<W>],
     ) -> Result<ValidatedApply<F>, Error<F>>
     where
         D: Digest,
-        W: HasCore<F, D>,
+        B: AppendBatchView<F, D>,
+        W: AppendBatchView<F, D>,
     {
-        core.validate_apply(self.inactivity_floor_loc, *self.size(), ancestors)?;
+        batch.validate_apply(self.inactivity_floor_loc, *self.size(), ancestors)?;
         Ok(ValidatedApply {
             start_loc: self.last_commit_loc + 1,
-            last_commit_loc: core.commit_loc(),
-            inactivity_floor_loc: core.commit_floor(),
+            last_commit_loc: batch.commit_loc(),
+            inactivity_floor_loc: batch.commit_floor(),
         })
     }
 }
 
-/// Validated commit-pointer transition for a batch apply.
+/// Validated commit-bound transition for a batch apply.
 ///
 /// This is not a transaction boundary. Database-specific effects run after validation and before
 /// `commit`; those effects may still fail according to each database's existing fatal-error
@@ -108,10 +94,10 @@ impl<F: Family> ValidatedApply<F> {
         span.is_unapplied(self.committed_size())
     }
 
-    /// Advance `state` and return the range written by the validated batch.
-    pub(crate) fn commit(self, state: &mut CommitState<F>) -> Range<Location<F>> {
-        state.last_commit_loc = self.last_commit_loc;
-        state.inactivity_floor_loc = self.inactivity_floor_loc;
+    /// Advance `bounds` and return the range written by the validated batch.
+    pub(crate) fn commit(self, bounds: &mut CommitBounds<F>) -> Range<Location<F>> {
+        bounds.last_commit_loc = self.last_commit_loc;
+        bounds.inactivity_floor_loc = self.inactivity_floor_loc;
         self.start_loc..(self.last_commit_loc + 1)
     }
 }
@@ -124,19 +110,19 @@ mod tests {
     type F = mmr::Family;
 
     #[test]
-    fn validated_apply_commits_pointer_transition() {
-        let mut state = CommitState::<F>::new(Location::new(0), Location::new(0));
+    fn validated_apply_commits_bound_transition() {
+        let mut bounds = CommitBounds::<F>::new(Location::new(0), Location::new(0));
         let validated = ValidatedApply {
             start_loc: Location::new(1),
             last_commit_loc: Location::new(3),
             inactivity_floor_loc: Location::new(2),
         };
 
-        let range = validated.commit(&mut state);
+        let range = validated.commit(&mut bounds);
 
         assert_eq!(range, Location::new(1)..Location::new(4));
-        assert_eq!(state.last_commit_loc(), Location::new(3));
-        assert_eq!(state.inactivity_floor_loc(), Location::new(2));
+        assert_eq!(bounds.last_commit_loc(), Location::new(3));
+        assert_eq!(bounds.inactivity_floor_loc(), Location::new(2));
     }
 
     #[test]

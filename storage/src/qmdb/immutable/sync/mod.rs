@@ -124,7 +124,7 @@ where
         let db = Self {
             journal,
             snapshot,
-            state: crate::qmdb::commit_state::CommitState::new(
+            commit_bounds: crate::qmdb::commit_bounds::CommitBounds::new(
                 last_commit_loc,
                 inactivity_floor_loc,
             ),

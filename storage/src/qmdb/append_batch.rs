@@ -1,4 +1,4 @@
-//! Shared append-batch machinery for QMDb variants.
+//! Shared append-batch machinery for QMDB variants.
 
 use crate::{
     merkle::{self, batch, hasher::Hasher as MerkleHasher, Family, Location, Position},
@@ -49,15 +49,62 @@ pub(crate) struct BatchSpan<F: Family> {
     new_floor: Location<F>,
 }
 
-/// Lets per-variant `MerkleizedBatch` wrappers expose their shared [`AppendBatchCore`] for
-/// shared validation and chain advance.
-pub(crate) trait HasCore<F: Family, D: Digest> {
-    fn core(&self) -> &AppendBatchCore<F, D>;
+/// View of a merkleized append batch used by shared chain validation and child-batch creation.
+pub(crate) trait AppendBatchView<F: Family, D: Digest> {
+    /// Speculative Merkle batch built from this chain's leaves.
+    fn merkle(&self) -> &Arc<batch::MerkleizedBatch<F, D>>;
+
+    /// Position bookkeeping plus the floor declared by this batch's commit.
+    fn span(&self) -> &BatchSpan<F>;
+
+    /// Return the location of the commit operation ending this batch.
+    fn commit_loc(&self) -> Location<F> {
+        self.span().commit_loc()
+    }
+
+    /// Return the inactivity floor declared by this batch's commit operation.
+    fn commit_floor(&self) -> Location<F> {
+        self.span().commit_floor()
+    }
+
+    /// Return the speculative root.
+    fn root(&self) -> D {
+        self.merkle().root()
+    }
+
+    /// Validate whether this batch can be applied on top of the current database state.
+    fn validate_apply<W>(
+        &self,
+        starting_floor: Location<F>,
+        current_db_size: u64,
+        ancestors: &[Arc<W>],
+    ) -> Result<(), Error<F>>
+    where
+        W: AppendBatchView<F, D>,
+    {
+        self.span().validate_stale(
+            current_db_size,
+            ancestors
+                .iter()
+                .map(|ancestor| ancestor.span().total_size()),
+        )?;
+        self.span().validate_floors(
+            starting_floor,
+            current_db_size,
+            ancestors
+                .iter()
+                .map(|ancestor| (ancestor.span().total_size(), ancestor.commit_floor())),
+        )
+    }
 }
 
-/// Adds access to the wrapper's uncommitted ancestor chain. Required by [`BatchBase::resolve`]
-/// so child batches can collect their parent chain through wrapper-specific storage.
-pub(crate) trait HasAncestors<F: Family, D: Digest>: HasCore<F, D> + Sized {
+/// A merkleized append batch plus its speculative ancestor chain.
+///
+/// Used by [`BatchBase::resolve`] so child batches can recover their parent Merkle state and the
+/// chain of uncommitted ancestors through wrapper-specific storage.
+pub(crate) trait AppendBatchChain<F: Family, D: Digest>:
+    AppendBatchView<F, D> + Sized
+{
     /// Uncommitted ancestors, newest-to-oldest. Excludes `self`.
     fn ancestors(&self) -> &[Arc<Self>];
 
@@ -74,7 +121,7 @@ impl<F, D, W> BatchBase<F, D, W>
 where
     F: Family,
     D: Digest,
-    W: HasAncestors<F, D>,
+    W: AppendBatchChain<F, D>,
 {
     /// Resolve this base into merkle parent state and newest-to-oldest ancestors.
     pub(crate) fn resolve(self) -> ResolvedBase<F, D, W> {
@@ -89,9 +136,9 @@ where
                 ancestors: Vec::new(),
             },
             Self::Child(parent) => ResolvedBase {
-                base_size: parent.core().span.total_size(),
-                db_size: parent.core().span.db_size(),
-                merkle_parent: Arc::clone(&parent.core().merkle),
+                base_size: parent.span().total_size(),
+                db_size: parent.span().db_size(),
+                merkle_parent: Arc::clone(parent.merkle()),
                 ancestors: W::ancestor_chain(&parent),
             },
         }
@@ -211,13 +258,25 @@ impl<F: Family> BatchSpan<F> {
     }
 }
 
-/// Merkleized batch state shared by compact and full variants. Per-variant wrappers carry this
-/// alongside their own per-variant payload (journal items, key diffs, etc.).
+/// Concrete append-batch view for compact variants.
+///
+/// Full variants derive their Merkle view from the authenticated journal batch. Compact variants
+/// do not carry a journal batch, so they store this Merkle state and span directly.
 pub(crate) struct AppendBatchCore<F: Family, D: Digest> {
     /// Speculative Merkle batch built from this chain's leaves.
     pub(crate) merkle: Arc<batch::MerkleizedBatch<F, D>>,
     /// Position bookkeeping plus the floor declared by this batch's commit.
     pub(crate) span: BatchSpan<F>,
+}
+
+impl<F: Family, D: Digest> AppendBatchView<F, D> for AppendBatchCore<F, D> {
+    fn merkle(&self) -> &Arc<batch::MerkleizedBatch<F, D>> {
+        &self.merkle
+    }
+
+    fn span(&self) -> &BatchSpan<F> {
+        &self.span
+    }
 }
 
 impl<F: Family, D: Digest> AppendBatchCore<F, D> {
@@ -269,52 +328,9 @@ impl<F: Family, D: Digest> AppendBatchCore<F, D> {
         Self::from_leaf_digests(parent, mem, hasher, &leaves, span)
     }
 
-    /// Return the location of the commit operation ending this batch.
-    pub(crate) fn commit_loc(&self) -> Location<F> {
-        self.span.commit_loc()
-    }
-
-    /// Return the inactivity floor declared by this batch's commit operation.
-    pub(crate) const fn commit_floor(&self) -> Location<F> {
-        self.span.commit_floor()
-    }
-
-    /// Return the span covered by this batch.
-    pub(crate) const fn span(&self) -> &BatchSpan<F> {
-        &self.span
-    }
-
     /// Return the speculative root.
     pub(crate) fn root(&self) -> D {
         self.merkle.root()
-    }
-
-    /// Validate whether this batch can be applied on top of the current database state.
-    pub(crate) fn validate_apply<W>(
-        &self,
-        starting_floor: Location<F>,
-        current_db_size: u64,
-        ancestors: &[Arc<W>],
-    ) -> Result<(), Error<F>>
-    where
-        W: HasCore<F, D>,
-    {
-        self.span.validate_stale(
-            current_db_size,
-            ancestors
-                .iter()
-                .map(|ancestor| ancestor.core().span.total_size()),
-        )?;
-        self.span.validate_floors(
-            starting_floor,
-            current_db_size,
-            ancestors.iter().map(|ancestor| {
-                (
-                    ancestor.core().span.total_size(),
-                    ancestor.core().commit_floor(),
-                )
-            }),
-        )
     }
 }
 

@@ -25,7 +25,9 @@ use crate::{
     },
     qmdb::{
         any::value::ValueEncoding,
-        batch_core::{AppendBatchCore, BatchBase, BatchSpan, HasAncestors, HasCore, ResolvedBase},
+        append_batch::{
+            AppendBatchChain, AppendBatchCore, AppendBatchView, BatchBase, BatchSpan, ResolvedBase,
+        },
         compact_db::CompactDbInner,
         compact_witness::CompactCommit,
         operation::Key,
@@ -120,16 +122,21 @@ where
     pub(super) _key: PhantomData<K>,
 }
 
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> HasCore<F, D> for MerkleizedBatch<F, D, K, V>
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding> AppendBatchView<F, D>
+    for MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
 {
-    fn core(&self) -> &AppendBatchCore<F, D> {
-        &self.core
+    fn merkle(&self) -> &Arc<crate::merkle::batch::MerkleizedBatch<F, D>> {
+        &self.core.merkle
+    }
+
+    fn span(&self) -> &BatchSpan<F> {
+        &self.core.span
     }
 }
 
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> HasAncestors<F, D>
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding> AppendBatchChain<F, D>
     for MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
@@ -321,7 +328,7 @@ where
 
     /// Return the latest compact-sync target this compact db can currently serve.
     ///
-    /// This reflects the last state for which both frontier and witness were durably captured,
+    /// This reflects the last state for which both commit_bounds and witness were durably captured,
     /// which may lag behind live in-memory mutations until [`Self::sync`] is called.
     pub fn current_target(&self) -> compact_sync::Target<F, H::Digest> {
         self.inner.current_target()
@@ -380,10 +387,13 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let validated = self.inner.state.validate(&batch.core, &batch.ancestors)?;
+        let validated = self
+            .inner
+            .commit_bounds
+            .validate(&batch.core, &batch.ancestors)?;
         self.inner.merkle.apply_batch(&batch.core.merkle)?;
         self.inner.last_commit_metadata = batch.commit_metadata.clone();
-        Ok(validated.commit(&mut self.inner.state))
+        Ok(validated.commit(&mut self.inner.commit_bounds))
     }
 
     /// Durably persist the current db state to disk.

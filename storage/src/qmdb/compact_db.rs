@@ -19,7 +19,7 @@ use crate::{
         compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location, Proof,
     },
     qmdb::{
-        commit_state::CommitState,
+        commit_bounds::CommitBounds,
         compact_witness::{self, CompactCommit, Witness, WitnessSource},
         sync::compact as compact_sync,
         Error,
@@ -30,7 +30,7 @@ use commonware_codec::{Decode as _, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_utils::sync::RwLock;
 
-/// Shared inner state for compact QMDb variants. See module docs.
+/// Shared inner state for compact QMDB variants. See module docs.
 pub(crate) struct CompactDbInner<F, E, H, Op, C>
 where
     F: Family,
@@ -40,7 +40,7 @@ where
     C: Clone + Send + Sync + 'static,
 {
     pub(crate) merkle: compact_merkle::Merkle<F, E, H::Digest>,
-    pub(crate) state: CommitState<F>,
+    pub(crate) commit_bounds: CommitBounds<F>,
     pub(crate) last_commit_metadata: Option<Op::Metadata>,
     pub(crate) commit_codec_config: C,
     /// Cache of the last durably servable compact state. Rebuilt from persisted witness bytes
@@ -83,7 +83,7 @@ where
 
         Ok(Self {
             merkle,
-            state: CommitState::new(last_commit_loc, inactivity_floor_loc),
+            commit_bounds: CommitBounds::new(last_commit_loc, inactivity_floor_loc),
             last_commit_metadata,
             commit_codec_config,
             witness: RwLock::new(witness),
@@ -103,7 +103,7 @@ where
         let last_commit_loc = Location::new(*witness.leaf_count - 1);
         Ok(Self {
             merkle,
-            state: CommitState::new(last_commit_loc, inactivity_floor_loc),
+            commit_bounds: CommitBounds::new(last_commit_loc, inactivity_floor_loc),
             last_commit_metadata,
             commit_codec_config,
             witness: RwLock::new(witness),
@@ -115,15 +115,15 @@ where
     }
 
     pub(crate) const fn last_commit_loc(&self) -> Location<F> {
-        self.state.last_commit_loc()
+        self.commit_bounds.last_commit_loc()
     }
 
     pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.state.inactivity_floor_loc()
+        self.commit_bounds.inactivity_floor_loc()
     }
 
     pub(crate) fn size(&self) -> Location<F> {
-        self.state.size()
+        self.commit_bounds.size()
     }
 
     pub(crate) fn get_metadata(&self) -> Option<Op::Metadata> {
@@ -186,8 +186,8 @@ where
             )
             .await?;
         self.last_commit_metadata = last_commit_metadata;
-        self.state
-            .restore(Location::new(*witness.leaf_count - 1), inactivity_floor_loc);
+        self.commit_bounds =
+            CommitBounds::new(Location::new(*witness.leaf_count - 1), inactivity_floor_loc);
         self.store_witness(witness);
         Ok(())
     }
@@ -210,13 +210,13 @@ where
     }
 
     fn last_commit_loc(&self) -> Location<F> {
-        self.state.last_commit_loc()
+        self.commit_bounds.last_commit_loc()
     }
 
     fn encode_current_commit_op(&self) -> Vec<u8> {
         Op::build_commit(
             self.last_commit_metadata.clone(),
-            self.state.inactivity_floor_loc(),
+            self.commit_bounds.inactivity_floor_loc(),
         )
         .encode()
         .to_vec()

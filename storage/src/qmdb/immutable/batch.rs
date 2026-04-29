@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
-        batch_core::{AppendBatchCore, BatchSpan, HasAncestors, HasCore},
+        append_batch::{AppendBatchChain, AppendBatchView, BatchSpan},
         immutable::operation::Operation,
         operation::Key,
         Error,
@@ -61,13 +61,11 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
-    /// Shared append core (Merkle state + chain metadata).
-    ///
-    /// Invariant: `core.merkle` is `Arc::clone(&journal_batch.inner)`.
-    pub(super) core: AppendBatchCore<F, D>,
-
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<JournalBatch<F, D, K, V>>,
+
+    /// Position bookkeeping plus the floor declared by this batch's commit.
+    pub(super) span: BatchSpan<F>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -80,9 +78,15 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     pub(super) ancestors: Vec<Arc<Self>>,
 }
 
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> HasCore<F, D> for MerkleizedBatch<F, D, K, V> {
-    fn core(&self) -> &AppendBatchCore<F, D> {
-        &self.core
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding> AppendBatchView<F, D>
+    for MerkleizedBatch<F, D, K, V>
+{
+    fn merkle(&self) -> &Arc<crate::merkle::batch::MerkleizedBatch<F, D>> {
+        &self.journal_batch.inner
+    }
+
+    fn span(&self) -> &BatchSpan<F> {
+        &self.span
     }
 }
 
@@ -262,21 +266,17 @@ where
             .unwrap_or_default();
         let span =
             BatchSpan::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
-        let core = AppendBatchCore {
-            merkle: Arc::clone(&journal_merkleized.inner),
-            span,
-        };
 
         Arc::new(MerkleizedBatch {
-            core,
             journal_batch: journal_merkleized,
+            span,
             diff: Arc::new(diff),
             ancestors,
         })
     }
 }
 
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> HasAncestors<F, D>
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding> AppendBatchChain<F, D>
     for MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
@@ -292,7 +292,7 @@ where
 {
     /// Return the speculative root.
     pub fn root(&self) -> D {
-        self.core.root()
+        <Self as AppendBatchView<F, D>>::root(self)
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
@@ -392,8 +392,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.core.span().total_size(),
-            db_size: self.core.span().db_size(),
+            base_size: self.span.total_size(),
+            db_size: self.span.db_size(),
         }
     }
 }
@@ -411,15 +411,12 @@ where
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
-        let journal_size = *self.state.size();
+        let journal_size = *self.commit_bounds.size();
         let journal_batch = self.journal.to_merkleized_batch();
-        let span = BatchSpan::quiescent(journal_size, self.state.inactivity_floor_loc());
+        let span = BatchSpan::quiescent(journal_size, self.commit_bounds.inactivity_floor_loc());
         Arc::new(MerkleizedBatch {
-            core: AppendBatchCore {
-                merkle: Arc::clone(&journal_batch.inner),
-                span,
-            },
             journal_batch,
+            span,
             diff: Arc::new(Vec::new()),
             ancestors: Vec::new(),
         })
