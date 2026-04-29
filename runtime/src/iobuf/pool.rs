@@ -305,6 +305,7 @@ impl BufferPoolConfig {
     }
 
     /// Returns true if thread-local caching is enabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn thread_cache_enabled(&self) -> bool {
         self.resolve_thread_cache_capacity() > 0
     }
