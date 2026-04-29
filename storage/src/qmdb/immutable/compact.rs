@@ -26,7 +26,7 @@ use crate::{
     qmdb::{
         any::value::ValueEncoding,
         batch_core::{AppendBatchCore, BatchBase, ChainMeta, HasAncestors, HasCore, ResolvedBase},
-        compact_witness::{self, CachedServeState, CompactCommit, WitnessSource},
+        compact_witness::{self, CompactCommit, Witness, WitnessSource},
         operation::Key,
         sync::compact as compact_sync,
         Error,
@@ -71,7 +71,7 @@ where
     /// This cache is rebuilt from persisted witness bytes on reopen/rewind and refreshed on
     /// [`Self::sync`]. It intentionally does not track unsynced in-memory mutations, so compact
     /// serving never advertises state that has not been durably persisted.
-    serve_state: RwLock<CachedServeState<F, H::Digest>>,
+    witness: RwLock<Witness<F, H::Digest>>,
     _key: PhantomData<K>,
 }
 
@@ -274,7 +274,7 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let (last_commit_loc, serve_state) = compact_witness::assemble_serve_state(
+        let (last_commit_loc, witness) = compact_witness::validate_witness(
             merkle.root(),
             merkle.leaves(),
             inactivity_floor_loc,
@@ -289,7 +289,7 @@ where
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
-            serve_state: RwLock::new(serve_state),
+            witness: RwLock::new(witness),
             _key: PhantomData,
         })
     }
@@ -305,20 +305,20 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        let (serve_state, last_commit_metadata, inactivity_floor_loc) =
+        let (witness, last_commit_metadata, inactivity_floor_loc) =
             compact_witness::init_compact_state::<F, E, H, Operation<F, K, V>>(
                 &mut merkle,
                 &commit_codec_config,
             )
             .await?;
-        let last_commit_loc = Location::new(*serve_state.leaf_count - 1);
+        let last_commit_loc = Location::new(*witness.leaf_count - 1);
         Ok(Self {
             merkle,
             last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
-            serve_state: RwLock::new(serve_state),
+            witness: RwLock::new(witness),
             _key: PhantomData,
         })
     }
@@ -353,7 +353,7 @@ where
     /// This reflects the last state for which both frontier and witness were durably captured,
     /// which may lag behind live in-memory mutations until [`Self::sync`] is called.
     pub fn current_target(&self) -> compact_sync::Target<F, H::Digest> {
-        self.cloned_serve_state().target()
+        self.cloned_witness().target()
     }
 
     /// Return the authenticated state this compact db can serve for `target`.
@@ -368,8 +368,8 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        let serve_state = self.cloned_serve_state();
-        let current = serve_state.target();
+        let witness = self.cloned_witness();
+        let current = witness.target();
         if target.root != current.root || target.leaf_count != current.leaf_count {
             return Err(compact_sync::ServeError::StaleTarget {
                 requested: target,
@@ -377,7 +377,7 @@ where
             });
         }
         let op = Operation::<F, K, V>::decode_cfg(
-            serve_state.commit_op_bytes.as_ref(),
+            witness.commit_op_bytes.as_ref(),
             &self.commit_codec_config,
         )
         .map_err(|_| {
@@ -391,10 +391,10 @@ where
             )));
         }
         Ok(compact_sync::State {
-            leaf_count: serve_state.leaf_count,
-            pinned_nodes: serve_state.pinned_nodes,
+            leaf_count: witness.leaf_count,
+            pinned_nodes: witness.pinned_nodes,
             last_commit_op: op,
-            last_commit_proof: serve_state.commit_proof,
+            last_commit_proof: witness.commit_proof,
         })
     }
 
@@ -490,16 +490,16 @@ where
         self.merkle.rewind(&hasher).await?;
         // Reload the witness from the reverted slot as well, so compact serving stays aligned with
         // the same frontier/root that `rewind` restored.
-        let (serve_state, last_commit_metadata, inactivity_floor_loc) =
-            compact_witness::load_active_serve_state::<F, E, H, Operation<F, K, V>>(
+        let (witness, last_commit_metadata, inactivity_floor_loc) =
+            compact_witness::load_active_witness::<F, E, H, Operation<F, K, V>>(
                 &self.merkle,
                 &self.commit_codec_config,
             )
             .await?;
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = Location::new(*serve_state.leaf_count - 1);
-        self.store_serve_state(serve_state);
+        self.last_commit_loc = Location::new(*witness.leaf_count - 1);
+        self.store_witness(witness);
         Ok(())
     }
 
@@ -534,8 +534,8 @@ where
             .to_vec()
     }
 
-    fn serve_state_cache(&self) -> &RwLock<CachedServeState<F, H::Digest>> {
-        &self.serve_state
+    fn witness_cache(&self) -> &RwLock<Witness<F, H::Digest>> {
+        &self.witness
     }
 }
 
@@ -1153,7 +1153,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.with_label("db"), "immutable-serve-corruption")
                 .await;
             let target = db.current_target();
-            db.serve_state.write().commit_op_bytes.clear();
+            db.witness.write().commit_op_bytes.clear();
 
             assert!(matches!(
                 db.compact_state(target),

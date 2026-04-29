@@ -199,7 +199,7 @@ where
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_cached_serve_state(self).await
+        compact_witness::persist_cached_witness(self).await
     }
 }
 

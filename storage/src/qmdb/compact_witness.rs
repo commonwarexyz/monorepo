@@ -14,7 +14,7 @@
 //!
 //! The lifecycle in this file is:
 //!
-//! 1. Build a [`CachedServeState`] from the current in-memory tip.
+//! 1. Build a [`Witness`] from the current in-memory tip.
 //! 2. Persist its witness bytes into the same active/inactive slot scheme used by the compact
 //!    Merkle frontier.
 //! 3. Reload that witness on reopen or rewind, re-verify it against the currently loaded root, and
@@ -79,7 +79,7 @@ pub(crate) const fn proof_key(slot: u8) -> U64 {
 /// coherent unit. Keeping them together here avoids repeated re-encoding and re-proofing during
 /// steady-state serving while still letting reopen/rewind rebuild the cache from persisted bytes.
 #[derive(Clone)]
-pub(crate) struct CachedServeState<F: Family, D: Digest> {
+pub(crate) struct Witness<F: Family, D: Digest> {
     /// Root committed by the current persisted frontier/witness pair.
     pub(crate) root: D,
     /// Total leaves in the committed Merkle, which also identifies the tip commit location.
@@ -92,7 +92,7 @@ pub(crate) struct CachedServeState<F: Family, D: Digest> {
     pub(crate) commit_proof: Proof<F, D>,
 }
 
-impl<F: Family, D: Digest> CachedServeState<F, D> {
+impl<F: Family, D: Digest> Witness<F, D> {
     /// Convert the cached witness into the compact-sync target this source can currently serve.
     ///
     /// Compact sources only serve their current committed tip, so the target is just the root plus
@@ -109,10 +109,10 @@ impl<F: Family, D: Digest> CachedServeState<F, D> {
 ///
 /// The compact Merkle layer persists the frontier itself. This helper persists the db-owned
 /// witness bytes that must move in lockstep with that frontier.
-pub(crate) fn write_serve_state_metadata<E, F, D>(
+pub(crate) fn write_witness_metadata<E, F, D>(
     metadata: &mut Metadata<E, U64, Vec<u8>>,
     slot: u8,
-    serve_state: &CachedServeState<F, D>,
+    serve_state: &Witness<F, D>,
 ) where
     E: Context,
     F: Family,
@@ -145,7 +145,7 @@ type CommitFields<Op> = (
 );
 
 /// `(serve cache, last commit metadata, inactivity floor)` rebuilt from a persisted witness.
-type LoadedServeState<F, D, M> = (CachedServeState<F, D>, Option<M>, Location<F>);
+type LoadedWitness<F, D, M> = (Witness<F, D>, Option<M>, Location<F>);
 
 /// Commit operation behavior needed by compact witnesses.
 pub(crate) trait CompactCommit: Sized {
@@ -173,10 +173,10 @@ pub(crate) trait CompactCommit: Sized {
 /// Any missing metadata, decode failure, or proof/root mismatch is treated as
 /// [`Error::DataCorrupted`], because the persisted frontier and witness no longer describe the same
 /// committed state.
-pub(crate) async fn load_active_serve_state<F, E, H, Op>(
+pub(crate) async fn load_active_witness<F, E, H, Op>(
     merkle: &compact::Merkle<F, E, H::Digest>,
     commit_codec_config: &Op::CommitCfg,
-) -> Result<LoadedServeState<F, H::Digest, Op::Metadata>, Error<F>>
+) -> Result<LoadedWitness<F, H::Digest, Op::Metadata>, Error<F>>
 where
     F: Family,
     E: Context,
@@ -224,7 +224,7 @@ where
         Error::DataCorrupted("persisted last operation was not a commit"),
     )?;
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-    let serve_state = CachedServeState {
+    let serve_state = Witness {
         root,
         leaf_count,
         pinned_nodes,
@@ -240,14 +240,14 @@ where
 /// commit proof against the requested target root, but the leaf count and floor still need to be
 /// checked locally. Returns `(last_commit_loc, cache)`.
 #[allow(clippy::type_complexity)]
-pub(crate) fn assemble_serve_state<F, D>(
+pub(crate) fn validate_witness<F, D>(
     root: D,
     leaf_count: Location<F>,
     inactivity_floor_loc: Location<F>,
     commit_op_bytes: Vec<u8>,
     commit_proof: Proof<F, D>,
     pinned_nodes: Vec<D>,
-) -> Result<(Location<F>, CachedServeState<F, D>), Error<F>>
+) -> Result<(Location<F>, Witness<F, D>), Error<F>>
 where
     F: Family,
     D: Digest,
@@ -257,7 +257,7 @@ where
     }
     let last_commit_loc = Location::<F>::new(*leaf_count - 1);
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-    let serve_state = CachedServeState {
+    let serve_state = Witness {
         root,
         leaf_count,
         pinned_nodes,
@@ -292,7 +292,7 @@ where
     merkle
         .sync_with_witness(
             |_| {
-                Ok(CachedServeState {
+                Ok(Witness {
                     root: batch.root(),
                     leaf_count: Location::new(1),
                     pinned_nodes: Vec::new(),
@@ -301,7 +301,7 @@ where
                 })
             },
             |metadata, slot, serve_state| {
-                write_serve_state_metadata(metadata, slot, &serve_state);
+                write_witness_metadata(metadata, slot, &serve_state);
                 Ok(())
             },
         )
@@ -317,7 +317,7 @@ where
 pub(crate) async fn init_compact_state<F, E, H, Op>(
     merkle: &mut compact::Merkle<F, E, H::Digest>,
     commit_codec_config: &Op::CommitCfg,
-) -> Result<LoadedServeState<F, H::Digest, Op::Metadata>, Error<F>>
+) -> Result<LoadedWitness<F, H::Digest, Op::Metadata>, Error<F>>
 where
     F: Family,
     E: Context,
@@ -329,7 +329,7 @@ where
         let commit_op_bytes = Op::build_commit(None, initial_floor).encode().to_vec();
         bootstrap_initial_commit::<F, E, H>(merkle, commit_op_bytes).await?;
     }
-    load_active_serve_state::<F, E, H, Op>(merkle, commit_codec_config).await
+    load_active_witness::<F, E, H, Op>(merkle, commit_codec_config).await
 }
 
 // Shared hook for persisting and reloading the current servable witness for compact immutable and
@@ -354,18 +354,18 @@ where
     fn encode_current_commit_op(&self) -> Vec<u8>;
 
     /// Return the in-memory cache for the currently servable witness.
-    fn serve_state_cache(&self) -> &RwLock<CachedServeState<F, H::Digest>>;
+    fn witness_cache(&self) -> &RwLock<Witness<F, H::Digest>>;
 
     /// Snapshot the current in-memory witness cache for use across async persistence paths.
-    fn cloned_serve_state(&self) -> CachedServeState<F, H::Digest> {
+    fn cloned_witness(&self) -> Witness<F, H::Digest> {
         // This cache lock is only held for a short synchronous clone/update and is never held
         // across `.await`.
-        self.serve_state_cache().read().clone()
+        self.witness_cache().read().clone()
     }
 
     /// Replace the in-memory witness cache after successful persistence or reload.
-    fn store_serve_state(&self, serve_state: CachedServeState<F, H::Digest>) {
-        *self.serve_state_cache().write() = serve_state;
+    fn store_witness(&self, serve_state: Witness<F, H::Digest>) {
+        *self.witness_cache().write() = serve_state;
     }
 }
 
@@ -388,7 +388,7 @@ where
         .merkle()
         .sync_with_witness(
             |mem| {
-                let cached = source.cloned_serve_state();
+                let cached = source.cloned_witness();
                 let mem_root = *mem.root();
                 let mem_leaves = mem.leaves();
                 if cached.root == mem_root && cached.leaf_count == mem_leaves {
@@ -398,7 +398,7 @@ where
                     .map(|pos| *mem.get_node_unchecked(pos))
                     .collect::<Vec<_>>();
                 let commit_proof = mem.proof(&hasher, last_commit_loc)?;
-                Ok(CachedServeState {
+                Ok(Witness {
                     root: mem_root,
                     leaf_count: mem_leaves,
                     pinned_nodes,
@@ -407,8 +407,8 @@ where
                 })
             },
             |metadata, slot, serve_state| {
-                write_serve_state_metadata(metadata, slot, &serve_state);
-                source.store_serve_state(serve_state.clone());
+                write_witness_metadata(metadata, slot, &serve_state);
+                source.store_witness(serve_state.clone());
                 Ok(())
             },
         )
@@ -421,7 +421,7 @@ where
 /// This is used when a compact db has reconstructed and verified state from persisted data and only
 /// needs to move that known-good witness into the Merkle's slot layout, without recomputing the
 /// proof from a fresh tip commit.
-pub(crate) async fn persist_cached_serve_state<S, F, E, H>(source: &S) -> Result<(), Error<F>>
+pub(crate) async fn persist_cached_witness<S, F, E, H>(source: &S) -> Result<(), Error<F>>
 where
     S: WitnessSource<F, E, H>,
     F: Family,
@@ -430,13 +430,13 @@ where
 {
     // Re-persist the already-verified cached witness after the Merkle slot changes (for example,
     // after root verification on compact sync initialization) without recomputing proofs.
-    let serve_state = source.cloned_serve_state();
+    let serve_state = source.cloned_witness();
     source
         .merkle()
         .sync_with_witness(
             |_| Ok(serve_state.clone()),
             |metadata, slot, serve_state| {
-                write_serve_state_metadata(metadata, slot, &serve_state);
+                write_witness_metadata(metadata, slot, &serve_state);
                 Ok(())
             },
         )
