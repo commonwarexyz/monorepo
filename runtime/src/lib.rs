@@ -858,7 +858,7 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            atomic::{AtomicU32, Ordering},
+            atomic::{AtomicBool, AtomicU32, Ordering},
             Arc,
         },
         task::{Context as TContext, Poll, Waker},
@@ -3984,26 +3984,32 @@ mod tests {
                 .create_thread_pool(NZUsize!(2))
                 .unwrap();
             let buffer_pool = context.network_buffer_pool().clone();
-            let flush_interval = tokio::RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL;
 
             // Ask each Rayon worker to allocate and then drop one tracked
             // buffer. Because TLS caching is enabled, each worker parks that
             // buffer in its thread-local cache instead of returning it to the
-            // shared freelist immediately.
+            // shared freelist immediately. Keep the workers occupied after
+            // parking so the background flush broadcast cannot run before the
+            // pre-flush exhaustion assertion.
             let parked = Arc::new(AtomicU32::new(0));
+            let release = Arc::new(AtomicBool::new(false));
             pool.spawn_broadcast({
                 let buffer_pool = buffer_pool.clone();
                 let parked = parked.clone();
+                let release = release.clone();
                 move |_| {
                     let buf = buffer_pool.try_alloc(1024).expect("tracked buffer");
                     drop(buf);
-                    parked.fetch_add(1, Ordering::Relaxed);
+                    parked.fetch_add(1, Ordering::Release);
+                    while !release.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
                 }
             });
 
             // Wait until both workers report that they have parked one
             // buffer in their TLS caches.
-            while parked.load(Ordering::Relaxed) != 2 {
+            while parked.load(Ordering::Acquire) != 2 {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -4014,18 +4020,31 @@ mod tests {
                 PoolError::Exhausted
             );
 
-            // Give the runtime's background flush loop time to inject its
-            // broadcast and let both idle workers flush their TLS caches.
-            context.sleep(flush_interval.saturating_mul(2)).await;
+            // Release the workers so they can observe the flush broadcast.
+            release.store(true, Ordering::Release);
 
             // After the flush loop runs, both buffers should be visible to the
             // main thread again via the shared freelist.
-            let _buf1 = buffer_pool
-                .try_alloc(1024)
-                .expect("first flushed buffer should be visible to the main thread");
-            let _buf2 = buffer_pool
-                .try_alloc(1024)
-                .expect("second flushed buffer should be visible to the main thread");
+            let wait_for_flush = {
+                let context = context.clone();
+                let buffer_pool = buffer_pool.clone();
+                async move {
+                    loop {
+                        if let Ok(buf1) = buffer_pool.try_alloc(1024) {
+                            if let Ok(buf2) = buffer_pool.try_alloc(1024) {
+                                break (buf1, buf2);
+                            }
+                        }
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            };
+
+            let (_buf1, _buf2) = context
+                .timeout(Duration::from_secs(5), wait_for_flush)
+                .await
+                .expect("workers should flush TLS caches before timeout");
+
             assert_eq!(
                 buffer_pool.try_alloc(1024).unwrap_err(),
                 PoolError::Exhausted
