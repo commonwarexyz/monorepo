@@ -949,7 +949,7 @@ mod tests {
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{NZUsize, NZU16, NZU32};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
@@ -1419,7 +1419,7 @@ mod tests {
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
-                    .with_max_per_class(NZUsize!(2)),
+                    .with_max_per_class(NZU32!(2)),
                 &mut registry,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));

@@ -14,13 +14,20 @@
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
 mod aligned;
+mod freelist;
 mod pool;
 
-use aligned::{AlignedBuf, AlignedBufMut, AlignedBuffer, PooledBuf, PooledBufMut};
+pub(crate) use aligned::AlignedBuffer;
+use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
+
+#[cfg(feature = "bench")]
+pub mod bench {
+    pub use super::{aligned::AlignedBuffer, freelist::Freelist};
+}
 
 /// Immutable byte buffer.
 ///
@@ -452,6 +459,7 @@ impl Default for IoBufMut {
 
 impl IoBufMut {
     /// Create a buffer with the given capacity.
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: IoBufMutInner::Bytes(BytesMut::with_capacity(capacity)),
@@ -497,6 +505,7 @@ impl IoBufMut {
     /// Unlike `with_capacity`, this sets both capacity and length to `len`,
     /// making the entire buffer immediately usable for read operations
     /// (e.g., `file.read_exact`).
+    #[inline]
     pub fn zeroed(len: usize) -> Self {
         Self {
             inner: IoBufMutInner::Bytes(BytesMut::zeroed(len)),
@@ -2359,7 +2368,7 @@ mod tests {
                 // Reduce max_per_class to avoid slow atomics under miri.
                 let pool_config = BufferPoolConfig {
                     pool_min_size: 0,
-                    max_per_class: commonware_utils::NZUsize!(32),
+                    max_per_class: commonware_utils::NZU32!(32),
                     ..BufferPoolConfig::for_network()
                 };
             } else {

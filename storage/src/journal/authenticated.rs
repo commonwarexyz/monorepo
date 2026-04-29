@@ -205,9 +205,8 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
 
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
+    /// fork has been applied.
     pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item>
     where
         Item: Encode,
@@ -2374,11 +2373,11 @@ mod tests {
         let child_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
         let batch_b = parent.new_batch::<Sha256>().add(create_operation::<F>(30));
         let child_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
-        drop(parent);
 
         // Apply child_a, then child_b should be stale.
         journal.apply_batch(&child_a).await.unwrap();
         let result = journal.apply_batch(&child_b).await;
+        drop(parent);
         assert!(
             matches!(
                 result,
