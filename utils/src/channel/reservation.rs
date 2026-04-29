@@ -27,9 +27,6 @@ impl<T> Reserved<T> {
 }
 
 /// A future that waits for a channel slot and keeps ownership of the value.
-///
-/// The lifetime tracks any borrows held by `T`; the reservation does not borrow
-/// the original sender.
 #[must_use = "await the reservation to acquire a channel slot"]
 pub struct Reservation<'a, T> {
     future: BoxFuture<'a, Result<OwnedPermit<T>, SendError<()>>>,
