@@ -87,9 +87,9 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding,
+        batch::{apply, Plan},
         build_snapshot_from_log,
         operation::{Key, Operation as _},
-        plan::{apply, Plan},
         Error,
     },
     translator::Translator,

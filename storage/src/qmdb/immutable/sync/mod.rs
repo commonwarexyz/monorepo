@@ -11,7 +11,7 @@ use crate::{
     },
     qmdb::{
         any::ValueEncoding,
-        build_snapshot_from_log, compact_witness,
+        build_snapshot_from_log, compact,
         immutable::{self, CompactDb, Operation},
         operation::{Key, Operation as _},
         sync::{self},
@@ -199,7 +199,7 @@ where
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_cached_witness(self.inner()).await
+        compact::persist_cached_witness(self.inner()).await
     }
 }
 

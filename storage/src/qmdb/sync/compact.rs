@@ -14,7 +14,7 @@
 //! A compact db persists two pieces of state that must always describe the same committed tip:
 //!
 //! 1. the compact Merkle frontier (persisted by [`crate::merkle::compact`]), and
-//! 2. a db-level witness for the last commit (persisted by `qmdb::compact_witness`).
+//! 2. a db-level witness for the last commit (persisted by `qmdb::compact`).
 //!
 //! The witness exists because only the db layer knows how to encode and decode the typed commit
 //! operation. Without it, a compact db could recover its root and continue appending, but it could

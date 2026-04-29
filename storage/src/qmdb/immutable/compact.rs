@@ -25,11 +25,9 @@ use crate::{
     },
     qmdb::{
         any::value::ValueEncoding,
-        append_batch::{AppendBatchView, BatchBounds, CompactBatch},
-        compact_db::CompactDbInner,
-        compact_witness::CompactCommit,
+        batch::{apply, AppendBatchView, BatchBounds, CompactBatch},
+        compact::{CompactCommit, CompactDbInner},
         operation::Key,
-        plan::apply,
         sync::compact as compact_sync,
         Error,
     },
@@ -799,7 +797,7 @@ mod tests {
             tamper_metadata_key(
                 context.with_label("tamper"),
                 partition,
-                crate::qmdb::compact_witness::proof_key(slot),
+                crate::qmdb::compact::proof_key(slot),
             )
             .await;
 
@@ -838,7 +836,7 @@ mod tests {
             overwrite_metadata_key(
                 context.with_label("tamper"),
                 partition,
-                crate::qmdb::compact_witness::commit_op_key(slot),
+                crate::qmdb::compact::commit_op_key(slot),
                 Operation::<mmr::Family, Digest, FixedEncoding<Digest>>::Commit(
                     Some(Sha256::fill(0xaa)),
                     oversized_floor,

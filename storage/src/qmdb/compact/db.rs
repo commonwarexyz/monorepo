@@ -19,7 +19,7 @@ use crate::{
         compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location, Proof,
     },
     qmdb::{
-        compact_witness::{self, CompactCommit, Witness, WitnessSource},
+        compact::{self, CompactCommit, Witness, WitnessSource},
         sync::compact as compact_sync,
         Error,
     },
@@ -72,7 +72,7 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let (last_commit_loc, witness) = compact_witness::validate_witness(
+        let (last_commit_loc, witness) = compact::validate_witness(
             merkle.root(),
             merkle.leaves(),
             inactivity_floor_loc,
@@ -99,8 +99,7 @@ where
         commit_codec_config: C,
     ) -> Result<Self, Error<F>> {
         let (witness, last_commit_metadata, inactivity_floor_loc) =
-            compact_witness::init_compact_witness::<F, E, H, Op>(&mut merkle, &commit_codec_config)
-                .await?;
+            compact::init_compact_witness::<F, E, H, Op>(&mut merkle, &commit_codec_config).await?;
         let last_commit_loc = Location::new(*witness.leaf_count - 1);
         Ok(Self {
             merkle,
@@ -173,7 +172,7 @@ where
     }
 
     pub(crate) async fn sync(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_witness(self).await
+        compact::persist_witness(self).await
     }
 
     /// Restore the state as of the sync before the most recent one. See the wrapper-level docs
@@ -182,11 +181,8 @@ where
         let hasher = StandardHasher::<H>::new();
         self.merkle.rewind(&hasher).await?;
         let (witness, last_commit_metadata, inactivity_floor_loc) =
-            compact_witness::load_active_witness::<F, E, H, Op>(
-                &self.merkle,
-                &self.commit_codec_config,
-            )
-            .await?;
+            compact::load_active_witness::<F, E, H, Op>(&self.merkle, &self.commit_codec_config)
+                .await?;
         self.last_commit_metadata = last_commit_metadata;
         self.last_commit_loc = witness.leaf_count - 1;
         self.inactivity_floor_loc = inactivity_floor_loc;

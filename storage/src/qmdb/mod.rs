@@ -54,17 +54,15 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
-pub(crate) mod append_batch;
+pub(crate) mod batch;
 pub(crate) mod bitmap;
-pub(crate) mod compact_db;
-pub(crate) mod compact_witness;
+pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod operation;
-pub(crate) mod plan;
 pub mod store;
 pub mod sync;
 pub mod verify;

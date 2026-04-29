@@ -1,4 +1,4 @@
-//! Shared append-batch algebra for QMDB variants.
+//! Shared batch algebra for QMDB variants.
 
 use crate::{
     merkle::{self, batch, hasher::Hasher as MerkleHasher, Family, Location, Position},
@@ -6,6 +6,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
+use core::ops::Range;
 use std::sync::Arc;
 
 /// Log bounds covered by a merkleized batch and the floor declared by its commit.
@@ -222,6 +223,96 @@ impl<F: Family, D: Digest> CompactBatch<F, D> {
     /// Return the speculative root.
     pub(crate) fn root(&self) -> D {
         self.merkle.root()
+    }
+}
+
+/// Validate that `batch` can extend the committed database state.
+pub(crate) fn apply<F, D, B, W>(
+    last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    batch: &B,
+    ancestors: &[Arc<W>],
+) -> Result<Plan<F>, Error<F>>
+where
+    F: Family,
+    D: Digest,
+    B: AppendBatchView<F, D>,
+    W: AppendBatchView<F, D>,
+{
+    let ancestor_bounds: Vec<_> = ancestors
+        .iter()
+        .map(|ancestor| *ancestor.bounds())
+        .collect();
+    Plan::new(
+        last_commit_loc,
+        inactivity_floor_loc,
+        batch.bounds(),
+        &ancestor_bounds,
+    )
+}
+
+/// Validated commit-location transition for a batch apply.
+///
+/// This is not a transaction boundary. Database-specific effects run after validation and before
+/// publishing the next commit locations; those effects may still fail according to each database's
+/// existing fatal-error rules.
+pub(crate) struct Plan<F: Family> {
+    range: Range<Location<F>>,
+    next_last_commit_loc: Location<F>,
+    next_inactivity_floor_loc: Location<F>,
+}
+
+impl<F: Family> Plan<F> {
+    /// Validate that `bounds` can extend the committed database state.
+    pub(crate) fn new(
+        last_commit_loc: Location<F>,
+        inactivity_floor_loc: Location<F>,
+        bounds: &BatchBounds<F>,
+        ancestors: &[BatchBounds<F>],
+    ) -> Result<Self, Error<F>> {
+        let committed_size = last_commit_loc + 1;
+        bounds.validate_stale(
+            *committed_size,
+            ancestors.iter().map(BatchBounds::total_size),
+        )?;
+        bounds.validate_floors(
+            inactivity_floor_loc,
+            *committed_size,
+            ancestors
+                .iter()
+                .map(|ancestor| (ancestor.total_size(), ancestor.commit_floor())),
+        )?;
+        let next_last_commit_loc = bounds.commit_loc();
+        Ok(Self {
+            range: committed_size..(next_last_commit_loc + 1),
+            next_last_commit_loc,
+            next_inactivity_floor_loc: bounds.commit_floor(),
+        })
+    }
+
+    /// Return the committed leaf count before this validated apply.
+    pub(crate) fn committed_size(&self) -> u64 {
+        *self.range.start
+    }
+
+    /// Return whether `bounds` has not yet been reflected in the validated source state.
+    pub(crate) fn is_unapplied(&self, bounds: &BatchBounds<F>) -> bool {
+        bounds.is_unapplied(self.committed_size())
+    }
+
+    /// Return the operation range written by the planned apply.
+    pub(crate) fn range(&self) -> Range<Location<F>> {
+        self.range.clone()
+    }
+
+    /// Return the commit location that becomes current after the planned apply succeeds.
+    pub(crate) const fn next_last_commit_loc(&self) -> Location<F> {
+        self.next_last_commit_loc
+    }
+
+    /// Return the inactivity floor that becomes current after the planned apply succeeds.
+    pub(crate) const fn next_inactivity_floor_loc(&self) -> Location<F> {
+        self.next_inactivity_floor_loc
     }
 }
 

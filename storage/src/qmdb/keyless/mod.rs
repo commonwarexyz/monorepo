@@ -50,7 +50,11 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, append_batch::BatchBounds, plan::apply, Error},
+    qmdb::{
+        any::value::ValueEncoding,
+        batch::{apply, BatchBounds},
+        Error,
+    },
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;

@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::value::ValueEncoding,
-        append_batch::{AppendBatchView, BatchBounds},
+        batch::{AppendBatchView, BatchBounds},
         Error,
     },
     Context, Persistable,
