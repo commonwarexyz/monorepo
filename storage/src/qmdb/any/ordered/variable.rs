@@ -39,22 +39,7 @@ where
         context: E,
         cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error<F>> {
-        Self::init_with_callback(context, cfg, None, |_, _| {}).await
-    }
-
-    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
-    ///
-    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
-    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the
-    /// snapshot is built from the log, `callback` is invoked for each operation with its activity
-    /// status and previous location (if any).
-    pub(crate) async fn init_with_callback(
-        context: E,
-        cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
-        known_inactivity_floor: Option<Location<F>>,
-        callback: impl FnMut(bool, Option<Location<F>>),
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
+        crate::qmdb::any::init(context, cfg).await
     }
 }
 
@@ -116,22 +101,7 @@ pub mod partitioned {
             context: E,
             cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
         ) -> Result<Self, Error<F>> {
-            Self::init_with_callback(context, cfg, None, |_, _| {}).await
-        }
-
-        /// Initialize the DB, invoking `callback` for each operation processed during recovery.
-        ///
-        /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
-        /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the
-        /// snapshot is built from the log, `callback` is invoked for each operation with its activity
-        /// status and previous location (if any).
-        pub(crate) async fn init_with_callback(
-            context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
-            known_inactivity_floor: Option<Location<F>>,
-            callback: impl FnMut(bool, Option<Location<F>>),
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
+            crate::qmdb::any::init(context, cfg).await
         }
     }
 
