@@ -291,6 +291,10 @@ impl<
             },
             // Handle completed consumer deliveries
             delivery = self.inflight.next_delivery() => {
+                // Err means the delivery was aborted because its inflight entry was
+                // dropped (via Cancel, Retain, Clear, or shutdown) before the consumer
+                // finished validating. The dropping side already cleaned up state, so
+                // it is safe to skip.
                 let Delivery { peer, key, valid } = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
