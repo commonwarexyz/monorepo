@@ -706,7 +706,8 @@ where
                     }
                     Message::SetFloor { anchor } => {
                         let height = anchor.height();
-                        if self.last_processed_height > height {
+                        let advanced = self.last_processed_height < height;
+                        if height < self.last_processed_height {
                             warn!(
                                 %height,
                                 existing = %self.last_processed_height,
@@ -725,13 +726,15 @@ where
                         }
                         self.notify_subscribers(&anchor);
 
-                        if self.last_processed_height < height {
-                            // Update the processed height
-                            self.update_processed_height(height, &mut resolver).await;
-                            if let Err(err) = self.application_metadata.sync().await {
-                                error!(?err, %height, "failed to update floor");
-                                return;
-                            }
+                        if !advanced {
+                            continue;
+                        }
+
+                        // Update the processed height.
+                        self.update_processed_height(height, &mut resolver).await;
+                        if let Err(err) = self.application_metadata.sync().await {
+                            error!(?err, %height, "failed to update floor");
+                            return;
                         }
 
                         // Drop all pending acknowledgements. We must do this to prevent

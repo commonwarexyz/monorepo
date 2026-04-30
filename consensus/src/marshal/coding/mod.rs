@@ -288,6 +288,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_set_floor_same_height_preserves_pending_acks() {
+        harness::set_floor_same_height_preserves_pending_acks::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<CodingHarness>();
     }

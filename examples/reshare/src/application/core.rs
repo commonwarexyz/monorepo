@@ -60,11 +60,11 @@ where
     type SigningScheme = S;
     type Block = Block<H, C, V>;
 
-    async fn genesis(&mut self) -> Self::Block {
-        // Create a genesis context with epoch 0, view 0, and empty parent.
+    async fn genesis(&mut self, epoch: Epoch) -> Self::Block {
+        // Create a genesis context with the requested epoch, view 0, and empty parent.
         // Use a deterministic leader from seed 0 so all validators agree on genesis.
         let genesis_context = Context {
-            round: Round::new(Epoch::zero(), View::zero()),
+            round: Round::new(epoch, View::zero()),
             leader: C::from_seed(0).public_key(),
             parent: (View::zero(), <H::Digest as Digest>::EMPTY),
         };

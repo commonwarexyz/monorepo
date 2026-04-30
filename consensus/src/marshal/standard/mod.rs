@@ -184,6 +184,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_set_floor_same_height_preserves_pending_acks() {
+        harness::set_floor_same_height_preserves_pending_acks::<InlineHarness>();
+        harness::set_floor_same_height_preserves_pending_acks::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<InlineHarness>();
         harness::ack_pipeline_backlog_persists_on_restart::<DeferredHarness>();
