@@ -26,10 +26,13 @@ commonware_macros::stability_scope!(BETA {
     /// optional `0x` / `0X` prefix. Commonly used in tests to encode external test
     /// vectors without modification.
     pub fn from_hex(s: &str) -> Option<Vec<u8>> {
-        // `const_hex::decode` already strips a leading `0x`/`0X` prefix, so we
-        // only need to remove ASCII whitespace ourselves.
         let s = s.replace(['\t', '\n', '\r', ' '], "");
-        const_hex::decode(s).ok()
+        // `const_hex::decode` only strips lowercase `0x`; handle uppercase ourselves.
+        let stripped = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(&s);
+        const_hex::decode(stripped).ok()
     }
 
     /// Display/Debug wrapper that renders bytes as lowercase hex without
@@ -117,8 +120,11 @@ mod tests {
         // Whitespace
         assert_eq!(from_hex("01 02 03").unwrap(), expected);
 
-        // 0x prefix
+        // 0x prefix (lowercase)
         assert_eq!(from_hex("0x010203").unwrap(), expected);
+
+        // 0X prefix (uppercase)
+        assert_eq!(from_hex("0X010203").unwrap(), expected);
 
         // 0x prefix + mixed whitespace (tabs, newlines, spaces, carriage returns)
         let h = "    \n\n0x\r\n01
