@@ -1132,13 +1132,17 @@ mod loom_tests {
 
     // These tests run the production `Freelist` implementation with loom's
     // atomics, thread local storage, and `UnsafeCell` substituted under
-    // `cfg(feature = "loom")`. The goal is to check the real memory-ordering boundaries,
-    // not a separate simplified model of the data structure.
-    fn freelist() -> Freelist {
-        // Keep the model small enough for exhaustive exploration while forcing
-        // both slots into the same bitmap word. That covers the RMW contention
-        // that makes this freelist subtle.
-        Freelist::new(NonZeroU32::new(2).unwrap(), NonZeroUsize::new(1).unwrap())
+    // `cfg(feature = "loom")`. They use two small bitmap geometries: a
+    // single-word freelist for same-word RMW races, and a striped freelist for
+    // cross-word publication and scan races.
+    fn single_word_freelist(capacity: u32) -> Freelist {
+        // Use one stripe so every slot in the model shares one bitmap word.
+        // This keeps the model small enough for exhaustive exploration while
+        // covering the RMW contention that makes this freelist subtle.
+        Freelist::new(
+            NonZeroU32::new(capacity).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        )
     }
 
     fn striped_freelist() -> Freelist {
@@ -1158,7 +1162,7 @@ mod loom_tests {
     #[test]
     fn put_publishes_before_take() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
 
             // `put` writes the parking cell before publishing the bit with a
             // Release RMW. The taker spins until it can clear that bit with an
@@ -1188,9 +1192,85 @@ mod loom_tests {
     }
 
     #[test]
+    fn concurrent_puts_merge_disjoint_bits() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(2));
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            // Two producers return different slots that live in the same bitmap
+            // word. Their Release `fetch_or` operations must merge the bits:
+            // neither producer may overwrite the other's publication.
+            //
+            // The consumer runs after both producers finish so this test
+            // isolates lost producer updates from consumer-side claim races.
+            let first = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(0, buffer()))
+            };
+
+            let second = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(1, buffer()))
+            };
+
+            first.join().unwrap();
+            second.join().unwrap();
+
+            assert_eq!(
+                set.take_batch(2, |slot, buffer| {
+                    drop(buffer);
+                    let mask = 1 << slot;
+                    let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                    assert_eq!(previous & mask, 0);
+                }),
+                2
+            );
+            assert_eq!(seen.load(Ordering::Relaxed), 0b11);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn concurrent_put_batches_merge_disjoint_bits() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(4));
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            // Each producer stages two slots and then publishes its per-word
+            // mask with one Release `fetch_or`. Because all four slots share a
+            // word, this specifically checks that two batch producers merge
+            // their masks instead of losing either batch.
+            let first = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put_batch([(0, buffer()), (1, buffer())]))
+            };
+
+            let second = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put_batch([(2, buffer()), (3, buffer())]))
+            };
+
+            first.join().unwrap();
+            second.join().unwrap();
+
+            assert_eq!(
+                set.take_batch(4, |slot, buffer| {
+                    drop(buffer);
+                    let mask = 1 << slot;
+                    let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                    assert_eq!(previous & mask, 0);
+                }),
+                4
+            );
+            assert_eq!(seen.load(Ordering::Relaxed), 0b1111);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
     fn two_takers_cannot_claim_one_slot() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             set.put(0, buffer());
 
             // Both takers may observe the same relaxed non-zero candidate
@@ -1225,7 +1305,7 @@ mod loom_tests {
     #[test]
     fn batch_claims_survive_intervening_rmw_sequence() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             set.put_batch([(0, buffer()), (1, buffer())]);
             let seen = Arc::new(AtomicUsize::new(0));
 
@@ -1263,7 +1343,7 @@ mod loom_tests {
     #[test]
     fn take_and_take_batch_do_not_duplicate_slots() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             set.put_batch([(0, buffer()), (1, buffer())]);
 
             // A single-slot claim and a multi-bit claim race on the same word.
@@ -1275,14 +1355,17 @@ mod loom_tests {
             // word value returned by `fetch_and`.
             let seen = Arc::new(AtomicUsize::new(0));
             let batch_count = Arc::new(AtomicUsize::new(0));
+            let batch_callbacks = Arc::new(AtomicUsize::new(0));
 
             let batch_taker = {
                 let set = Arc::clone(&set);
                 let seen = Arc::clone(&seen);
                 let batch_count = Arc::clone(&batch_count);
+                let batch_callbacks = Arc::clone(&batch_callbacks);
                 thread::spawn(move || {
                     let count = set.take_batch(2, |slot, buffer| {
                         drop(buffer);
+                        batch_callbacks.fetch_add(1, Ordering::Relaxed);
                         let mask = 1 << slot;
                         let previous = seen.fetch_or(mask, Ordering::Relaxed);
                         assert_eq!(previous & mask, 0);
@@ -1309,13 +1392,17 @@ mod loom_tests {
 
             assert_eq!(seen.load(Ordering::Relaxed), 0b11);
             assert!(batch_count.load(Ordering::Relaxed) <= 2);
+            assert_eq!(
+                batch_count.load(Ordering::Relaxed),
+                batch_callbacks.load(Ordering::Relaxed)
+            );
         });
     }
 
     #[test]
     fn two_take_batches_do_not_duplicate_slots() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             set.put_batch([(0, buffer()), (1, buffer())]);
 
             // Two batch refill paths can speculatively choose the same bits
@@ -1350,9 +1437,49 @@ mod loom_tests {
     }
 
     #[test]
+    fn two_take_batches_continue_after_losing_selected_bits() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(3));
+            set.put_batch([(0, buffer()), (1, buffer()), (2, buffer())]);
+
+            // Both batch takers can speculatively select the same first two
+            // bits from a stale relaxed word load. If one taker clears those
+            // bits first, the other must use the word value returned by
+            // `fetch_and` and continue on to the still-set third bit instead of
+            // stopping after a zero-sized successful claim.
+            let seen = Arc::new(AtomicUsize::new(0));
+            let total = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+
+            for _ in 0..2 {
+                let set = Arc::clone(&set);
+                let seen = Arc::clone(&seen);
+                let total = Arc::clone(&total);
+                handles.push(thread::spawn(move || {
+                    let count = set.take_batch(2, |slot, buffer| {
+                        drop(buffer);
+                        let mask = 1 << slot;
+                        let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                        assert_eq!(previous & mask, 0);
+                    });
+                    total.fetch_add(count, Ordering::Relaxed);
+                }));
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            assert_eq!(seen.load(Ordering::Relaxed), 0b111);
+            assert_eq!(total.load(Ordering::Relaxed), 3);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
     fn put_batch_publishes_to_take_batch() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             let seen = Arc::new(AtomicUsize::new(0));
 
             // This exercises the batch-specific publish and claim path end to
@@ -1396,7 +1523,7 @@ mod loom_tests {
     #[test]
     fn put_publishes_to_drain() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             let drained = Arc::new(AtomicUsize::new(0));
 
             // `drain` uses an Acquire whole-word swap. Run it concurrently with
@@ -1440,7 +1567,7 @@ mod loom_tests {
     #[test]
     fn put_batch_publishes_to_drain() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             let drained = Arc::new(AtomicUsize::new(0));
 
             // A batch publish parks multiple cells before one Release RMW. The
@@ -1465,6 +1592,7 @@ mod loom_tests {
                             // The drainer may run before the batch is published.
                             thread::yield_now();
                         } else {
+                            assert_eq!(count, 2);
                             let previous = drained.fetch_add(count, Ordering::Relaxed);
                             assert!(previous + count <= 2);
                         }
@@ -1530,9 +1658,52 @@ mod loom_tests {
     }
 
     #[test]
+    fn put_batch_publishes_to_drain_across_stripes() {
+        loom::model(|| {
+            let set = Arc::new(striped_freelist());
+            let drained = Arc::new(AtomicUsize::new(0));
+
+            // A striped batch publishes one Release `fetch_or` per touched word.
+            // The drainer may observe any subset of those per-word publications
+            // in one pass, then must keep scanning future passes until every
+            // published cell has been acquired and dropped exactly once.
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || {
+                    set.put_batch([(0, buffer()), (1, buffer()), (2, buffer()), (3, buffer())])
+                })
+            };
+
+            let drainer = {
+                let set = Arc::clone(&set);
+                let drained = Arc::clone(&drained);
+                thread::spawn(move || {
+                    while drained.load(Ordering::Relaxed) < 4 {
+                        let count = set.drain();
+                        if count == 0 {
+                            // The drainer may run before the writer has
+                            // published another stripe.
+                            thread::yield_now();
+                        } else {
+                            let previous = drained.fetch_add(count, Ordering::Relaxed);
+                            assert!(previous + count <= 4);
+                        }
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            drainer.join().unwrap();
+
+            assert_eq!(drained.load(Ordering::Relaxed), 4);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
     fn drain_and_take_do_not_duplicate_or_lose_slots() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             set.put_batch([(0, buffer()), (1, buffer())]);
 
             let drained = Arc::new(AtomicUsize::new(0));
@@ -1575,9 +1746,39 @@ mod loom_tests {
     }
 
     #[test]
+    fn two_drains_do_not_duplicate_or_lose_slots() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(2));
+            set.put_batch([(0, buffer()), (1, buffer())]);
+
+            let total = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+
+            // `drain` is a public whole-word `swap(0)` operation. Two drainers
+            // racing on the same word must split ownership according to the
+            // values returned by their swaps: one may drain both slots and the
+            // other none, but the total must be exactly the original occupancy.
+            for _ in 0..2 {
+                let set = Arc::clone(&set);
+                let total = Arc::clone(&total);
+                handles.push(thread::spawn(move || {
+                    total.fetch_add(set.drain(), Ordering::Relaxed);
+                }));
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            assert_eq!(total.load(Ordering::Relaxed), 2);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
     fn drain_and_take_batch_do_not_duplicate_or_lose_slots() {
         loom::model(|| {
-            let set = Arc::new(freelist());
+            let set = Arc::new(single_word_freelist(2));
             set.put_batch([(0, buffer()), (1, buffer())]);
 
             let drained = Arc::new(AtomicUsize::new(0));
