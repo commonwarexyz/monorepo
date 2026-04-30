@@ -187,6 +187,7 @@ mod tests {
             .commitment();
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
+            let genesis_calls = mock_app.genesis_calls();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -198,6 +199,8 @@ mod tests {
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
             assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_commitment);
+            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_commitment);
+            assert_eq!(&*genesis_calls.lock(), &[epoch]);
             let proposed = marshaled
                 .propose(child_ctx)
                 .await
@@ -205,6 +208,17 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, expected_commitment);
             assert!(marshal.get_block(&child_digest).await.is_some());
+            assert_eq!(&*genesis_calls.lock(), &[epoch]);
+
+            assert_eq!(
+                marshaled.genesis(epoch.next()).await,
+                epoch_genesis_commitment
+            );
+            assert_eq!(
+                marshaled.genesis(epoch.next()).await,
+                epoch_genesis_commitment
+            );
+            assert_eq!(&*genesis_calls.lock(), &[epoch, epoch.next()]);
         });
     }
 

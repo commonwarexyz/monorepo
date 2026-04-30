@@ -45,7 +45,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::Stage,
+        application::{genesis, validation::Stage},
         core::Mailbox,
         standard::{
             validation::{
@@ -144,6 +144,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
+    cached_genesis: genesis::Cache<B>,
     available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed<E>,
@@ -178,6 +179,7 @@ where
             application,
             marshal,
             epocher,
+            cached_genesis: genesis::Cache::new(),
             available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
         }
@@ -202,7 +204,10 @@ where
 
     /// Returns the genesis digest for `epoch`.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        self.application.genesis(epoch).await.digest()
+        self.cached_genesis
+            .get::<E, A>(&mut self.application, epoch)
+            .await
+            .digest()
     }
 
     /// Proposes a new block or re-proposes an epoch boundary block.
@@ -218,6 +223,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
+        let cached_genesis = self.cached_genesis.clone();
         let build_duration = self.build_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -257,6 +263,7 @@ where
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
+                    &cached_genesis,
                 )
                 .await;
 
@@ -369,6 +376,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
+        let cached_genesis = self.cached_genesis.clone();
         let available_blocks = self.available_blocks.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -421,6 +429,7 @@ where
                     block,
                     &mut application,
                     &mut marshal,
+                    &cached_genesis,
                     &mut tx,
                     Stage::Verified,
                 )
@@ -651,9 +660,12 @@ mod tests {
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
+            let genesis_calls = mock_app.genesis_calls();
             let mut inline = Inline::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             assert_eq!(inline.genesis(epoch).await, epoch_genesis_digest);
+            assert_eq!(inline.genesis(epoch).await, epoch_genesis_digest);
+            assert_eq!(&*genesis_calls.lock(), &[epoch]);
             let proposed = inline
                 .propose(child_ctx)
                 .await
@@ -661,6 +673,11 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, child_digest);
             assert!(marshal.get_block(&child_digest).await.is_some());
+            assert_eq!(&*genesis_calls.lock(), &[epoch]);
+
+            assert_eq!(inline.genesis(epoch.next()).await, epoch_genesis_digest);
+            assert_eq!(inline.genesis(epoch.next()).await, epoch_genesis_digest);
+            assert_eq!(&*genesis_calls.lock(), &[epoch, epoch.next()]);
         });
     }
 
