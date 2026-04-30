@@ -97,7 +97,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
 };
-use commonware_coding::Scheme as CodingScheme;
+use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher,
@@ -112,9 +112,12 @@ use commonware_runtime::{
     },
     Clock, Metrics, Spawner, Storage,
 };
-use commonware_utils::channel::{
-    fallible::OneshotExt,
-    oneshot::{self, error::RecvError},
+use commonware_utils::{
+    channel::{
+        fallible::OneshotExt,
+        oneshot::{self, error::RecvError},
+    },
+    NZU16,
 };
 use futures::future::{ready, try_join, Either, Ready};
 use rand::Rng;
@@ -123,10 +126,9 @@ use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
-#[cfg(test)]
-const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
-    minimum_shards: commonware_utils::NZU16!(1),
-    extra_shards: commonware_utils::NZU16!(1),
+const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
+    minimum_shards: NZU16!(1),
+    extra_shards: NZU16!(1),
 };
 
 /// Configuration for initializing [`Marshaled`].
@@ -194,7 +196,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = CodedBlock<B, C, H>,
         SigningScheme = Z::Scheme,
         Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
@@ -431,7 +432,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = CodedBlock<B, C, H>,
         SigningScheme = Z::Scheme,
         Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
@@ -447,7 +447,8 @@ where
 
     /// Returns the genesis commitment for a given epoch.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        self.application.genesis(epoch).await.commitment()
+        let genesis = self.application.genesis(epoch).await;
+        genesis_coding_commitment::<H, _>(&genesis)
     }
 
     /// Proposes a new block or re-proposes the epoch boundary block.
@@ -822,7 +823,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = CodedBlock<B, C, H>,
         SigningScheme = Z::Scheme,
         Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
@@ -1018,19 +1018,18 @@ async fn fetch_parent<E, S, A, B, C, H>(
 where
     E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
-    A: Application<
-        E,
-        Block = B,
-        Genesis = CodedBlock<B, C, H>,
-        Context = Context<Commitment, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
     B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
 {
     let genesis = application.genesis(epoch).await;
-    if parent_commitment == genesis.commitment() {
-        Either::Left(ready(Ok(genesis)))
+    let genesis_commitment = genesis_coding_commitment::<H, _>(&genesis);
+    if parent_commitment == genesis_commitment {
+        Either::Left(ready(Ok(CodedBlock::<B, C, H>::new_trusted(
+            genesis,
+            parent_commitment,
+        ))))
     } else {
         Either::Right(
             marshal
@@ -1041,7 +1040,6 @@ where
 }
 
 /// Constructs the [`Commitment`] for the genesis block.
-#[cfg(test)]
 pub(super) fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
     Commitment::from((
         block.digest(),

@@ -133,7 +133,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -232,7 +231,7 @@ pub(super) async fn fetch_parent<E, S, A, B>(
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Genesis = B, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
     let genesis = application.genesis(epoch).await;

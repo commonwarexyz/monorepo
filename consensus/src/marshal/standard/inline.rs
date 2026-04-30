@@ -156,7 +156,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -192,7 +191,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -448,7 +446,6 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
-        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -583,7 +580,6 @@ mod tests {
         A: VerifyingApplication<
             E,
             Block = B,
-            Genesis = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
         >,

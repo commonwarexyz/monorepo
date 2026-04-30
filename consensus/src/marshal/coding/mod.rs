@@ -97,14 +97,6 @@ mod tests {
     use commonware_utils::{NZUsize, NZU16};
     use std::time::Duration;
 
-    type CodingCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type CodingMockApp = MockVerifyingApp<CodingB, S, CodingCodedBlock>;
-
-    fn coded_genesis(genesis: CodingB) -> CodingCodedBlock {
-        let commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
-        CodedBlock::new_trusted(genesis, commitment)
-    }
-
     #[test_traced("INFO")]
     fn test_marshaled_propose_after_floor_uses_application_genesis_and_anchor_parent() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -141,15 +133,15 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let epoch_genesis_raw = make_coding_block(
+            let epoch_genesis = make_coding_block(
                 epoch_genesis_ctx,
                 Sha256::hash(b"epoch-genesis-parent"),
                 epoch_genesis_height,
                 epoch_genesis_height.get(),
             );
-            let epoch_genesis_digest = epoch_genesis_raw.digest();
-            let epoch_genesis = coded_genesis(epoch_genesis_raw);
-            let epoch_genesis_commitment = epoch_genesis.commitment();
+            let epoch_genesis_digest = epoch_genesis.digest();
+            let epoch_genesis_commitment =
+                genesis_coding_commitment::<Sha256, _>(&epoch_genesis);
 
             let anchor_ctx = CodingCtx {
                 round: Round::new(epoch, View::new(anchor_height.get())),
@@ -194,7 +186,7 @@ mod tests {
                 &Sequential,
             )
             .commitment();
-            let mock_app: CodingMockApp =
+            let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -532,7 +524,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -654,7 +646,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -870,7 +862,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -960,7 +952,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1037,7 +1029,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1225,7 +1217,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
@@ -1331,7 +1323,7 @@ mod tests {
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1497,7 +1489,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis.clone()));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1617,8 +1609,8 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
             // 2) Force application verification to fail in deferred verification.
-            let mock_app: CodingMockApp =
-                MockVerifyingApp::with_verify_result(coded_genesis(genesis.clone()), false);
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::with_verify_result(genesis.clone(), false);
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -1817,7 +1809,7 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -1923,7 +1915,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2040,8 +2032,8 @@ mod tests {
             )
             .commitment();
 
-            let mock_app: CodingMockApp =
-                MockVerifyingApp::new(coded_genesis(genesis)).with_propose_result(block_to_propose);
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new(genesis).with_propose_result(block_to_propose);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2154,8 +2146,8 @@ mod tests {
                 "test requires distinct commitments"
             );
 
-            let mock_app: CodingMockApp =
-                MockVerifyingApp::new(coded_genesis(genesis)).with_propose_result(block_b);
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new(genesis).with_propose_result(block_b);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2245,7 +2237,7 @@ mod tests {
                 parent: (View::new(1), new_parent_commitment),
             };
 
-            let mock_app: CodingMockApp = MockVerifyingApp::new(coded_genesis(genesis));
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
