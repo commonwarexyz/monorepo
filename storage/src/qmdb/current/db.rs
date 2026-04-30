@@ -828,7 +828,7 @@ pub(super) async fn compute_grafted_root<
 /// `chunk_ops_digest`, then combines with the bitmap chunk: `hash(chunk || chunk_ops_digest)`. For
 /// all-zero chunks the grafted leaf equals the `chunk_ops_digest` directly (zero-chunk identity).
 ///
-/// The provided strategy determines whether hashing runs sequentially or in parallel.
+/// The provided strategy determines if or how to parallelize merkleization.
 pub(super) async fn compute_grafted_leaves<
     F: merkle::Graftable,
     H: Hasher,
