@@ -4,12 +4,13 @@ use commonware_codec::{
     CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{crc32, Crc32};
+use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
-use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
+use commonware_utils::{bitmap::BitMap, sync::AsyncMutex};
 use futures::future::try_join_all;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},

@@ -1,9 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_formatting::{from_hex, hex};
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Faults, N3f1, NZDuration,
-    NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
+    modulo, union, union_unique, Faults, N3f1, NZDuration, NZUsize, NonZeroDuration, NZU16, NZU32,
+    NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -12,7 +13,6 @@ use std::time::Duration;
 enum FuzzInput {
     Hex { data: Vec<u8> },
     FromHex { hex_str: String },
-    FromHexFormatted { hex_str: String },
     MaxFaults { n: u32 },
     Quorum { n: u32 },
     Union { a: Vec<u8>, b: Vec<u8> },
@@ -90,24 +90,14 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::FromHex { hex_str } => {
-            if !hex_str.is_empty() && !hex_str.chars().any(|c| c.is_ascii_hexdigit()) {
-                assert_eq!(from_hex(&hex_str), None)
-            } else if let Some(decoded) = from_hex(&hex_str) {
+            if let Some(decoded) = from_hex(&hex_str) {
                 let re_encoded = hex(&decoded);
                 assert_eq!(from_hex(&re_encoded), Some(decoded));
             }
-        }
 
-        FuzzInput::FromHexFormatted { hex_str } => {
-            let result = from_hex_formatted(&hex_str);
-
-            if let Some(decoded) = result.clone() {
-                let clean_hex = hex(&decoded);
-                assert_eq!(from_hex(&clean_hex), Some(decoded));
-            }
-
+            // Prepending a `0x` prefix must not crash, regardless of input.
             let with_prefix = format!("0x{hex_str}");
-            from_hex_formatted(&with_prefix);
+            let _ = from_hex(&with_prefix);
         }
 
         FuzzInput::MaxFaults { n } => {

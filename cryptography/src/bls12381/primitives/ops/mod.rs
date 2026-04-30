@@ -134,9 +134,10 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
+    use commonware_formatting::from_hex;
     use commonware_math::algebra::CryptoGroup;
     use commonware_parallel::Sequential;
-    use commonware_utils::{from_hex_formatted, test_rng, union_unique};
+    use commonware_utils::{test_rng, union_unique};
     use rstest::rstest;
 
     fn codec<V: Variant>() {
@@ -291,10 +292,10 @@ mod tests {
         let mut signatures = Vec::new();
         for line in MIN_SIG_TESTS.lines() {
             let parts: Vec<_> = line.split(':').collect();
-            let private_bytes = from_hex_formatted(parts[0]).unwrap();
+            let private_bytes = from_hex(parts[0]).unwrap();
             let private = Private::read(&mut private_bytes.as_ref()).unwrap();
-            let message = from_hex_formatted(parts[1]).unwrap();
-            let signature = from_hex_formatted(parts[2]).unwrap();
+            let message = from_hex(parts[1]).unwrap();
+            let signature = from_hex(parts[2]).unwrap();
             let mut signature =
                 <MinSig as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
 
@@ -335,10 +336,10 @@ mod tests {
         let mut signatures = Vec::new();
         for line in MIN_PK_TESTS.lines() {
             let parts: Vec<_> = line.split(':').collect();
-            let private_bytes = from_hex_formatted(parts[0]).unwrap();
+            let private_bytes = from_hex(parts[0]).unwrap();
             let private = Private::read(&mut private_bytes.as_ref()).unwrap();
-            let message = from_hex_formatted(parts[1]).unwrap();
-            let signature = from_hex_formatted(parts[2]).unwrap();
+            let message = from_hex(parts[1]).unwrap();
+            let signature = from_hex(parts[2]).unwrap();
             let mut signature =
                 <MinPk as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
 
@@ -373,23 +374,23 @@ mod tests {
     ) -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         (
             parse_private_key(private_key).unwrap(),
-            commonware_utils::from_hex_formatted(msg).unwrap(),
+            commonware_formatting::from_hex(msg).unwrap(),
             parse_signature(signature).unwrap(),
         )
     }
 
     fn parse_private_key(private_key: &str) -> Result<Private, CodecError> {
-        let bytes = commonware_utils::from_hex_formatted(private_key).unwrap();
+        let bytes = commonware_formatting::from_hex(private_key).unwrap();
         Private::decode(bytes.as_ref())
     }
 
     fn parse_public_key(public_key: &str) -> Result<<MinPk as Variant>::Public, CodecError> {
-        let bytes = commonware_utils::from_hex_formatted(public_key).unwrap();
+        let bytes = commonware_formatting::from_hex(public_key).unwrap();
         <MinPk as Variant>::Public::decode(bytes.as_ref())
     }
 
     fn parse_signature(signature: &str) -> Result<<MinPk as Variant>::Signature, CodecError> {
-        let bytes = commonware_utils::from_hex_formatted(signature).unwrap();
+        let bytes = commonware_formatting::from_hex(signature).unwrap();
         <MinPk as Variant>::Signature::decode(bytes.as_ref())
     }
 
@@ -404,7 +405,7 @@ mod tests {
     ) {
         (
             parse_public_key(public_key),
-            commonware_utils::from_hex_formatted(msg).unwrap(),
+            commonware_formatting::from_hex(msg).unwrap(),
             parse_signature(signature),
         )
     }

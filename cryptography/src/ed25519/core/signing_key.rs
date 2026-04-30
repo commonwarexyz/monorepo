@@ -1,5 +1,5 @@
 use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
-use commonware_utils::hex;
+use commonware_formatting::Hex;
 use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
 use rand_core::{CryptoRng, RngCore};
@@ -38,9 +38,9 @@ impl SigningKey {
 impl core::fmt::Debug for SigningKey {
     fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fmt.debug_struct("SigningKey")
-            .field("seed", &hex(&self.seed))
+            .field("seed", &Hex(&self.seed))
             .field("s", &self.s)
-            .field("prefix", &hex(&self.prefix))
+            .field("prefix", &Hex(&self.prefix))
             .field("vk", &self.vk)
             .finish()
     }

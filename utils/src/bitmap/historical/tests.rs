@@ -1,5 +1,6 @@
 use super::*;
-use crate::{bitmap::Prunable, hex};
+use crate::bitmap::Prunable;
+use commonware_formatting::hex;
 
 /// Test basic dirty lifecycle: creation, operations, commit, and abort.
 #[test]

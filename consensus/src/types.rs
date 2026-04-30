@@ -848,13 +848,13 @@ commonware_macros::stability_scope!(ALPHA {
 
         impl core::fmt::Display for Commitment {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                write!(f, "{}", commonware_utils::hex(self.as_ref()))
+                write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
         impl core::fmt::Debug for Commitment {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                write!(f, "{}", commonware_utils::hex(self.as_ref()))
+                write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
@@ -1737,13 +1737,13 @@ mod tests {
 
         impl core::fmt::Display for Digest {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                write!(f, "{}", commonware_utils::hex(self.as_ref()))
+                write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
         impl core::fmt::Debug for Digest {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                write!(f, "Digest({})", commonware_utils::hex(self.as_ref()))
+                write!(f, "Digest({})", commonware_formatting::Hex(self.as_ref()))
             }
         }
 

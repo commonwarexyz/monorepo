@@ -97,21 +97,8 @@ macro_rules! hex {
     }};
 }
 
-/// Macro for converting sequence of string literals containing hex-encoded data
-/// into a [FixedBytes] type.
-///
-/// [FixedBytes]: crate::sequence::FixedBytes
-#[macro_export]
-macro_rules! fixed_bytes {
-    ($s:tt) => {
-        const { $crate::sequence::FixedBytes::new($crate::hex!($s)) }
-    };
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::sequence::FixedBytes;
-
     #[test]
     fn single_literal() {
         assert_eq!(hex!("ff e4"), [0xff, 0xe4]);
@@ -198,18 +185,6 @@ mod tests {
     #[test]
     const fn can_use_const() {
         const _: [u8; 4] = hex!("ff d3 01 7f");
-    }
-
-    #[test]
-    fn fixed_bytes() {
-        let bytes = fixed_bytes!("0x112233");
-        assert_eq!(bytes.as_ref(), &[0x11, 0x22, 0x33]);
-        assert_eq!(format!("{bytes}"), "112233");
-    }
-
-    #[test]
-    const fn const_fixed_bytes() {
-        const _: FixedBytes<4> = fixed_bytes!("0badc0de");
     }
 }
 

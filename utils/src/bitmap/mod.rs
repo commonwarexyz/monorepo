@@ -1063,9 +1063,9 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hex;
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
+    use commonware_formatting::hex;
 
     #[test]
     fn test_constructors() {

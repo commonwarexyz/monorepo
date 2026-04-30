@@ -15,12 +15,13 @@ use commonware_cryptography::{
     },
     ed25519, Sha256, Signer as _,
 };
+use commonware_formatting::from_hex;
 use commonware_p2p::{authenticated, Manager as _};
 use commonware_runtime::{
     buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,

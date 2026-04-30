@@ -1,6 +1,6 @@
 use super::Header;
 use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
-use commonware_utils::hex;
+use commonware_formatting::hex;
 use std::{
     fs::File,
     io::IoSlice,
