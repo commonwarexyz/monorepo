@@ -160,13 +160,12 @@ where
     Operation<F, U>: Committable + CodecShared,
 {
     let split_root = cfg.split_root;
-    let root_bagging = cfg.root_bagging;
     let mut log = J::init::<F, H, S>(
         context.with_label("log"),
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
-        root_bagging,
+        cfg.root_bagging,
     )
     .await?;
 
@@ -178,7 +177,7 @@ where
     }
 
     let index = I::new(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap, split_root, root_bagging).await
+    db::Db::init_from_log(index, log, bitmap, split_root).await
 }
 
 #[cfg(test)]
