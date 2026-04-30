@@ -58,7 +58,6 @@ impl<D: Digest> Handler<D> {
 impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
     type Value = Bytes;
-    type Failure = ();
 
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
         let (response, receiver) = oneshot::channel();
@@ -76,10 +75,6 @@ impl<D: Digest> Consumer for Handler<D> {
             return false;
         }
         receiver.await.unwrap_or(false)
-    }
-
-    async fn failed(&mut self, _: Self::Key, _: Self::Failure) {
-        // We don't need to do anything on failure, the resolver will retry.
     }
 }
 

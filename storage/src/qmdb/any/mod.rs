@@ -180,7 +180,9 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
     use std::{
@@ -2533,7 +2535,7 @@ mod bitmap_tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics, Runner as _,
+        Runner as _, Supervisor as _,
     };
     use commonware_utils::bitmap::Readable as _;
 
@@ -2584,7 +2586,7 @@ mod bitmap_tests {
     #[test_traced]
     fn current_commit_floor_bit_is_one_others_zero() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             // Apply three single-write batches; each produces one CommitFloor op.
             let mut commit_locs = Vec::new();
@@ -2631,7 +2633,7 @@ mod bitmap_tests {
     #[test_traced]
     fn rewind_restores_bitmap_to_target_commit() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
             let k1 = Sha256::hash(&[1]);
             let k2 = Sha256::hash(&[2]);
 
@@ -2693,7 +2695,7 @@ mod bitmap_tests {
     #[test_traced]
     fn floor_scan_falls_through_to_uncommitted_tail() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
             let anchor = Sha256::hash(&[0xAA]);
 
             // Commit one key.

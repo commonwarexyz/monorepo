@@ -534,6 +534,7 @@ where
     }
 
     /// Returns the number of fetches.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.pending.len() + self.requests.len()
     }

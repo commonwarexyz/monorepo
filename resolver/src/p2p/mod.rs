@@ -12,7 +12,9 @@
 //! fulfilled, delivering data to the `Consumer` for verification.
 //!
 //! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
-//! and returns `true` if valid, completing the fetch, or `false` to retry.
+//! and returns `true` if valid, completing the fetch, or `false` to retry. Canceling a fetch with
+//! in-progress response validation aborts that validation. If the aborted validation would have
+//! returned `false`, the peer is not blocked for that response.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -59,6 +61,7 @@ pub use config::Config;
 mod engine;
 pub use engine::Engine;
 mod fetcher;
+mod inflight;
 mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
@@ -79,7 +82,7 @@ pub trait Producer: Clone + Send + 'static {
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks::{Consumer, Event, Key, Producer},
+        mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
     use crate::Resolver;
@@ -97,8 +100,19 @@ mod tests {
         deterministic, telemetry::metrics::count_running_tasks, Clock, Observer as _, Quota,
         Runner, Supervisor as _,
     };
-    use commonware_utils::{non_empty_vec, ordered::Set, NZUsize, NZU32};
-    use std::{collections::HashMap, num::NonZeroU32, time::Duration};
+    use commonware_utils::{
+        channel::{fallible::FallibleExt, mpsc, oneshot},
+        non_empty_vec,
+        ordered::Set,
+        sync::Mutex,
+        NZUsize, NZU32,
+    };
+    use std::{
+        collections::{HashMap, VecDeque},
+        num::NonZeroU32,
+        sync::Arc,
+        time::Duration,
+    };
 
     const MAILBOX_SIZE: usize = 1024;
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
@@ -220,7 +234,7 @@ mod tests {
             Sender<PublicKey, deterministic::Context>,
             Receiver<PublicKey>,
         ),
-        consumer: Consumer<Key, Bytes>,
+        consumer: impl crate::Consumer<Key = Key, Value = Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
@@ -243,6 +257,92 @@ mod tests {
         engine.start(connection);
 
         mailbox
+    }
+
+    type DeliveryGate = (oneshot::Receiver<()>, bool);
+    type DeliveryGates = Arc<Mutex<VecDeque<DeliveryGate>>>;
+
+    #[derive(Clone)]
+    struct BlockingConsumer {
+        sender: mpsc::UnboundedSender<(Key, Bytes)>,
+        started: mpsc::UnboundedSender<Key>,
+        gates: DeliveryGates,
+    }
+
+    impl BlockingConsumer {
+        fn new(
+            gates: Vec<DeliveryGate>,
+        ) -> (
+            Self,
+            mpsc::UnboundedReceiver<(Key, Bytes)>,
+            mpsc::UnboundedReceiver<Key>,
+        ) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            let (started, started_receiver) = mpsc::unbounded_channel();
+            (
+                Self {
+                    sender,
+                    started,
+                    gates: Arc::new(Mutex::new(gates.into())),
+                },
+                receiver,
+                started_receiver,
+            )
+        }
+    }
+
+    impl crate::Consumer for BlockingConsumer {
+        type Key = Key;
+        type Value = Bytes;
+
+        async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+            self.started.send_lossy(key.clone());
+            let (gate, valid) = self
+                .gates
+                .lock()
+                .pop_front()
+                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
+            if let Some(gate) = gate {
+                if gate.await.is_err() {
+                    return false;
+                }
+            }
+            if valid {
+                self.sender.send_lossy((key, value));
+            }
+            valid
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum CancelAll {
+        Clear,
+        Retain,
+    }
+
+    async fn cancel_all(mailbox: &mut Mailbox<Key, PublicKey>, operation: CancelAll) {
+        match operation {
+            CancelAll::Clear => mailbox.clear().await,
+            CancelAll::Retain => mailbox.retain(|_| false).await,
+        }
+    }
+
+    async fn wait_for_blocked(
+        context: &deterministic::Context,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        blocker: &PublicKey,
+        blocked: &PublicKey,
+    ) {
+        loop {
+            let blocked_peers = oracle.blocked().await.unwrap();
+            if blocked_peers
+                .iter()
+                .any(|(a, b)| a == blocker && b == blocked)
+            {
+                return;
+            }
+            context.sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Tests that fetching a key from another peer succeeds when data is available.
@@ -287,20 +387,330 @@ mod tests {
 
             mailbox1.fetch(key.clone()).await;
 
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 2"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 2"));
         });
     }
 
-    /// Tests that canceling a fetch request results in a failure event.
-    /// This test initiates a fetch request and immediately cancels it,
-    /// verifying that the consumer receives a failure notification instead of data.
+    #[test_traced]
+    fn test_pending_delivery_does_not_block_engine() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key1 = Key(1);
+            let key2 = Key(2);
+            let data1 = Bytes::from("data for key 1");
+            let data2 = Bytes::from("data for key 2");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), data1.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key2.clone(), data2.clone());
+
+            let (gate_sender1, gate_receiver1) = oneshot::channel();
+            let (gate_sender2, gate_receiver2) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) =
+                BlockingConsumer::new(vec![(gate_receiver1, true), (gate_receiver2, true)]);
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            mailbox1.fetch(key1.clone()).await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key1);
+
+            mailbox1.fetch(key2.clone()).await;
+            select! {
+                started_key = started.recv() => {
+                    assert_eq!(started_key.expect("delivery did not start"), key2);
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("resolver engine blocked on pending delivery");
+                },
+            };
+
+            gate_sender2.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key2);
+            assert_eq!(value, data2);
+
+            gate_sender1.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key1);
+            assert_eq!(value, data1);
+        });
+    }
+
+    #[test_traced]
+    fn test_cancel_pending_delivery() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let (mut first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(vec![
+                (first_gate_receiver, true),
+                (second_gate_receiver, true),
+            ]);
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone()).await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key);
+
+            mailbox1.cancel(key.clone()).await;
+            mailbox1.fetch(key.clone()).await;
+
+            first_gate_sender.closed().await;
+            let started_key = started.recv().await.expect("second delivery did not start");
+            assert_eq!(started_key, key);
+
+            second_gate_sender.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
+
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected extra event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+        });
+    }
+
+    #[test_traced]
+    fn test_invalid_delivery_retries_and_rearms_slot() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(vec![
+                (first_gate_receiver, false),
+                (second_gate_receiver, true),
+            ]);
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            mailbox1
+                .fetch_targeted(
+                    key.clone(),
+                    non_empty_vec![peers[1].clone(), peers[2].clone()],
+                )
+                .await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key);
+
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            oracle
+                .manager()
+                .track(
+                    1,
+                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+                )
+                .await;
+
+            let started_key = started.recv().await.expect("retry delivery did not start");
+            assert_eq!(started_key, key);
+
+            second_gate_sender.send(()).unwrap();
+            let (key_actual, value) = cons_out1.recv().await.expect("consumer channel closed");
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
+        });
+    }
+
+    async fn run_pending_invalid_delivery_race(
+        context: &deterministic::Context,
+        operation: CancelAll,
+        validation_first: bool,
+    ) {
+        let (mut oracle, mut schemes, peers, mut connections) =
+            setup_network_and_peers(context, &[1, 2]).await;
+
+        add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+        let key = Key(1);
+        let mut prod2 = Producer::default();
+        prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+        let (mut gate_sender, gate_receiver) = oneshot::channel();
+        let (cons1, mut cons_out1, mut started) =
+            BlockingConsumer::new(vec![(gate_receiver, false)]);
+
+        let scheme = schemes.remove(0);
+        let mut mailbox1 = setup_and_spawn_actor(
+            context,
+            oracle.manager(),
+            oracle.control(scheme.public_key()),
+            scheme,
+            connections.remove(0),
+            cons1,
+            Producer::default(),
+        );
+
+        let scheme = schemes.remove(0);
+        let _mailbox2 = setup_and_spawn_actor(
+            context,
+            oracle.manager(),
+            oracle.control(scheme.public_key()),
+            scheme,
+            connections.remove(0),
+            Consumer::dummy(),
+            prod2,
+        );
+
+        mailbox1.fetch(key.clone()).await;
+        let started_key = started.recv().await.expect("delivery did not start");
+        assert_eq!(started_key, key);
+
+        if validation_first {
+            gate_sender.send(()).unwrap();
+            wait_for_blocked(context, &oracle, &peers[0], &peers[1]).await;
+            cancel_all(&mut mailbox1, operation).await;
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
+        } else {
+            cancel_all(&mut mailbox1, operation).await;
+            gate_sender.closed().await;
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        }
+
+        select! {
+            _ = cons_out1.recv() => panic!("unexpected event"),
+            _ = context.sleep(Duration::from_millis(100)) => {},
+        };
+    }
+
+    #[test_traced]
+    fn test_clear_or_retain_pending_invalid_delivery_race() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            run_pending_invalid_delivery_race(&context, CancelAll::Clear, false).await;
+            run_pending_invalid_delivery_race(&context, CancelAll::Retain, false).await;
+            run_pending_invalid_delivery_race(&context, CancelAll::Clear, true).await;
+            run_pending_invalid_delivery_race(&context, CancelAll::Retain, true).await;
+        });
+    }
+
+    /// Tests that canceling a fetch request leaves the consumer untouched.
+    /// This test initiates a fetch request and immediately cancels it, verifying
+    /// that the consumer does not receive any event.
     #[test_traced]
     fn test_cancel_fetch() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -326,13 +736,10 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             mailbox1.cancel(key.clone()).await;
 
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
         });
     }
 
@@ -393,14 +800,9 @@ mod tests {
 
             mailbox1.fetch(key.clone()).await;
 
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 3"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 3"));
         });
     }
 
@@ -429,20 +831,14 @@ mod tests {
                 prod1,
             );
 
-            let key = Key(4);
-            mailbox1.fetch(key.clone()).await;
+            mailbox1.fetch(Key(4)).await;
             context.sleep(Duration::from_secs(5)).await;
-            mailbox1.cancel(key.clone()).await;
 
-            let event = cons_out1.recv().await.expect("Consumer channel closed");
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => {
-                    panic!("Fetch should have failed due to no peers")
-                }
-            }
+            // With no peers, no event should arrive
+            select! {
+                _ = cons_out1.recv() => panic!("Fetch should have failed due to no peers"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
         });
     }
 
@@ -523,14 +919,9 @@ mod tests {
                 .track(0, Set::try_from(peers.clone()).unwrap())
                 .await;
 
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 2"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 2"));
         });
     }
 
@@ -604,20 +995,15 @@ mod tests {
                 // Check that both keys were successfully fetched
                 let mut found_key2 = false;
                 let mut found_key3 = false;
-                for event in events {
-                    match event {
-                        Event::Success(key_actual, value) => {
-                            if key_actual == key2 {
-                                assert_eq!(value, Bytes::from("data for key 2"));
-                                found_key2 = true;
-                            } else if key_actual == key3 {
-                                assert_eq!(value, Bytes::from("data for key 3"));
-                                found_key3 = true;
-                            } else {
-                                panic!("Unexpected key received");
-                            }
-                        }
-                        Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+                for (key_actual, value) in events {
+                    if key_actual == key2 {
+                        assert_eq!(value, Bytes::from("data for key 2"));
+                        found_key2 = true;
+                    } else if key_actual == key3 {
+                        assert_eq!(value, Bytes::from("data for key 3"));
+                        found_key3 = true;
+                    } else {
+                        panic!("Unexpected key received");
                     }
                 }
                 assert!(found_key2 && found_key3,);
@@ -675,14 +1061,9 @@ mod tests {
 
             // Initiate fetch and wait for data to be delivered
             mailbox1.fetch(key.clone()).await;
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 6"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 6"));
 
             // Attempt to cancel after data has been delivered, expecting no effect
             mailbox1.cancel(key.clone()).await;
@@ -698,14 +1079,11 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             mailbox1.cancel(key.clone()).await;
 
-            // Make sure we receive a failure event
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
+            // No event should arrive after cancel
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
         });
     }
 
@@ -781,14 +1159,9 @@ mod tests {
                 mailbox1.fetch(key_a.clone()).await;
 
                 // Wait for success event for keyA
-                let event = cons_out1.recv().await.unwrap();
-                match event {
-                    Event::Success(key_actual, value) => {
-                        assert_eq!(key_actual, key_a);
-                        assert_eq!(value, valid_data_a);
-                    }
-                    Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-                }
+                let (key_actual, value) = cons_out1.recv().await.unwrap();
+                assert_eq!(key_actual, key_a);
+                assert_eq!(value, valid_data_a);
             }
 
             // Fetch keyB
@@ -797,17 +1170,14 @@ mod tests {
             // Wait for some time (longer than retry timeout)
             context.sleep(Duration::from_secs(5)).await;
 
-            // Cancel the fetch for keyB
-            mailbox1.cancel(key_b.clone()).await;
+            // No success event should be received for keyB since the only peer with valid data is blocked
+            select! {
+                _ = cons_out1.recv() => panic!("unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
 
-            // Wait for failure event for keyB
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key_b);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been canceled"),
-            }
+            // Cancel the fetch for keyB
+            mailbox1.cancel(key_b).await;
 
             // Check oracle
             let blocked = oracle.blocked().await.unwrap();
@@ -862,14 +1232,9 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should receive the data only once
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 5"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 5"));
 
             // Make sure we don't receive a second event for the duplicate fetch
             select! {
@@ -933,14 +1298,9 @@ mod tests {
             mailbox1.fetch(key1.clone()).await;
 
             // Wait for successful fetch
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key1);
-                    assert_eq!(value, Bytes::from("data from peer 2"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key1);
+            assert_eq!(value, Bytes::from("data from peer 2"));
 
             // Change peer set to include peer 3
             let scheme = schemes.remove(0);
@@ -961,14 +1321,9 @@ mod tests {
             mailbox1.fetch(key2.clone()).await;
 
             // Wait for successful fetch
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key2);
-                    assert_eq!(value, Bytes::from("data from peer 3"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key2);
+            assert_eq!(value, Bytes::from("data from peer 3"));
         });
     }
 
@@ -1044,14 +1399,9 @@ mod tests {
                 .await;
 
             // Should eventually succeed from peer 3
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, valid_data);
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, valid_data);
 
             // Verify peer 2 was blocked (sent invalid data)
             let blocked = oracle.blocked().await.unwrap();
@@ -1251,13 +1601,8 @@ mod tests {
             // Collect all three events
             let mut results = HashMap::new();
             for _ in 0..3 {
-                let event = cons_out1.recv().await.unwrap();
-                match event {
-                    Event::Success(key, value) => {
-                        results.insert(key, value);
-                    }
-                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
-                }
+                let (key, value) = cons_out1.recv().await.unwrap();
+                results.insert(key, value);
             }
 
             // Verify all keys received correct data
@@ -1344,14 +1689,9 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should now succeed from peer 3 (who has data but wasn't originally targeted)
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, valid_data);
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, valid_data);
         });
     }
 
@@ -1424,14 +1764,9 @@ mod tests {
 
             // Should still succeed from peer 3 (who has data but wasn't in the targeted call)
             // because the original fetch was "all" and shouldn't be restricted
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, valid_data);
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, valid_data);
         });
     }
 
@@ -1479,39 +1814,25 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone()).await;
 
             // Retain with predicate that excludes the key
-            // This must clean up fetch timers entry for the key
+            // This must clean up the in-flight entry for the key
             let key_clone = key.clone();
             mailbox1.retain(move |k| k != &key_clone).await;
-
-            // Consumer should receive failed event
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been retained out"),
-            }
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            // Fetch same key again, if fetch timers wasn't cleaned up, this would
+            // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 5"));
-                }
-                Event::Failed(_) => unreachable!(),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 5"));
         });
     }
 
@@ -1560,37 +1881,23 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone()).await;
 
             // Clear all fetches
             mailbox1.clear().await;
 
-            // Consumer should receive failed event
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Failed(key_actual) => {
-                    assert_eq!(key_actual, key);
-                }
-                Event::Success(_, _) => panic!("Fetch should have been cleared"),
-            }
-
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            // Fetch same key again, if fetch_timers wasn't cleaned up, this would
+            // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data for key 6"));
-                }
-                Event::Failed(_) => unreachable!(),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 6"));
         });
     }
 
@@ -1673,13 +1980,8 @@ mod tests {
             // Collect results
             let mut results = HashMap::new();
             for _ in 0..2 {
-                let event = cons_out1.recv().await.unwrap();
-                match event {
-                    Event::Success(key, value) => {
-                        results.insert(key.clone(), value);
-                    }
-                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
-                }
+                let (key, value) = cons_out1.recv().await.unwrap();
+                results.insert(key.clone(), value);
             }
 
             // Verify both keys were fetched successfully
@@ -1764,13 +2066,8 @@ mod tests {
             // All 3 should eventually succeed (after rate limit resets)
             let mut results = HashMap::new();
             for _ in 0..3 {
-                let event = cons_out1.recv().await.unwrap();
-                match event {
-                    Event::Success(key, value) => {
-                        results.insert(key.clone(), value);
-                    }
-                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
-                }
+                let (key, value) = cons_out1.recv().await.unwrap();
+                results.insert(key.clone(), value);
             }
 
             assert_eq!(results.len(), 3);
@@ -1846,14 +2143,9 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed (from peer 2)
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, data);
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
         });
     }
 
@@ -2203,14 +2495,9 @@ mod tests {
 
             mailbox1.fetch(key.clone()).await;
 
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, valid_history);
-                }
-                Event::Failed(_) => panic!("fetch failed unexpectedly"),
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, valid_history);
 
             assert!(
                 oracle.blocked().await.unwrap().is_empty(),
@@ -2280,14 +2567,100 @@ mod tests {
                 .fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()])
                 .await;
 
-            let event = cons_out2.recv().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, data);
-                }
-                Event::Failed(_) => panic!("secondary peer request should have been served"),
-            }
+            let (key_actual, value) = cons_out2.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
+        });
+    }
+
+    #[test_traced]
+    fn test_shutdown_aborts_pending_delivery_without_leaked_tasks() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data);
+
+            let (mut gate_sender, gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) =
+                BlockingConsumer::new(vec![(gate_receiver, true)]);
+
+            let actor_context = context.child("actor");
+
+            let scheme = schemes.remove(0);
+            let public_key = scheme.public_key();
+            let (engine, mut mailbox1) = Engine::new(
+                actor_context.child("peer_0"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer: cons1,
+                    producer: Producer::<Key, Bytes>::default(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            let handle1 = engine.start(connections.remove(0));
+
+            let scheme = schemes.remove(0);
+            let public_key = scheme.public_key();
+            let (engine, _mailbox2) = Engine::new(
+                actor_context.child("peer_1"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer: Consumer::dummy(),
+                    producer: prod2,
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            let handle2 = engine.start(connections.remove(0));
+
+            mailbox1.fetch(key.clone()).await;
+            let started_key = started.recv().await.expect("delivery did not start");
+            assert_eq!(started_key, key);
+
+            assert!(count_running_tasks(&context, "actor") > 0);
+
+            handle1.abort();
+            handle2.abort();
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            select! {
+                _ = gate_sender.closed() => {},
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("pending delivery was not aborted");
+                },
+            };
+
+            select! {
+                event = cons_out1.recv() => assert!(event.is_none(), "unexpected event"),
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            let running_after = count_running_tasks(&context, "actor");
+            assert_eq!(
+                running_after, 0,
+                "all actor tasks should be stopped, but {running_after} still running"
+            );
         });
     }
 
@@ -2367,11 +2740,8 @@ mod tests {
 
             // Fetch to verify network is functional
             mailboxes[0].fetch(key.clone()).await;
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (_, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(value, Bytes::from("data for key 1"));
 
             // Abort all actors
             for handle in handles {
@@ -2439,11 +2809,8 @@ mod tests {
 
             // Verify network is functional
             mailboxes[0].fetch(key.clone()).await;
-            let event = cons_out1.recv().await.unwrap();
-            match event {
-                Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            let (_, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(value, Bytes::from("data for key 1"));
 
             // Abort all actors
             for handle in handles {
