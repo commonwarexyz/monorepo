@@ -8,7 +8,7 @@ use crate::{
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epocher, Round},
+    types::{Epoch, Epocher, Round},
     Application, Block, Epochable, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -133,6 +133,7 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
+        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -141,6 +142,7 @@ where
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
+        context.epoch(),
         // We are guaranteed that the parent round for any `context` is
         // in the same epoch (recall, the boundary block of the previous epoch
         // is the genesis block of the current epoch).
@@ -222,6 +224,7 @@ where
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
+    epoch: Epoch,
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
@@ -229,10 +232,10 @@ pub(super) async fn fetch_parent<E, S, A, B>(
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<E, Block = B, Genesis = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let genesis = application.genesis().await;
+    let genesis = application.genesis(epoch).await;
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {

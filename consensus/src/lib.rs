@@ -260,8 +260,14 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// The block type produced by the application's builder.
         type Block: Block;
 
-        /// Payload used to initialize the consensus engine in the first epoch.
-        fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+        /// The marshaled epoch genesis known by the application.
+        ///
+        /// Marshal wrappers constrain this to the block type they need to derive the consensus
+        /// payload and, when necessary, serve the genesis as a parent block.
+        type Genesis: Clone + Send + 'static;
+
+        /// Returns the genesis object used to initialize the consensus engine for `epoch`.
+        fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Genesis> + Send;
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].

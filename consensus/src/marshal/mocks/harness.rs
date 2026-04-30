@@ -197,7 +197,10 @@ pub trait TestHarness: 'static + Sized {
     >;
 
     /// The block type used in test operations.
-    type TestBlock: Heightable + Clone + Send;
+    type TestBlock: Heightable
+        + Clone
+        + Send
+        + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
     type ValidatorExtra: Clone + Send;
@@ -3192,7 +3195,8 @@ pub fn sync_height_floor<H: TestHarness>() {
             .await
             .unwrap();
 
-        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR)).await;
+        let anchor = blocks[(NEW_SYNC_FLOOR - 1) as usize].clone();
+        mailbox.set_floor(anchor.into()).await;
         H::report_finalization(&mut mailbox, latest_finalization).await;
 
         let mut finished = false;
@@ -3217,7 +3221,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             let block = mailbox
                 .get_block(Identifier::Height(Height::new(height)))
                 .await;
-            if height <= NEW_SYNC_FLOOR {
+            if height < NEW_SYNC_FLOOR {
                 assert!(block.is_none());
             } else {
                 assert_eq!(block.unwrap().height().get(), height);
@@ -3487,7 +3491,14 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
-        victim_mailbox.set_floor(floor).await;
+        let floor_anchor = H::make_test_block(
+            Sha256::hash(b"floor-parent"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            floor,
+            floor.get(),
+            NUM_VALIDATORS as u16,
+        );
+        victim_mailbox.set_floor(floor_anchor.into()).await;
         // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
         // has been processed before we re-enable the delayed delivery path.
         let _ = victim_mailbox.get_finalization(floor).await;

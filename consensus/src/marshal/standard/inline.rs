@@ -156,6 +156,7 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
+        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -191,6 +192,7 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
+        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -201,23 +203,8 @@ where
     type Context = Context<Self::Digest, S::PublicKey>;
 
     /// Returns the genesis digest for `epoch`.
-    ///
-    /// For epoch zero, returns the application genesis digest. For later epochs,
-    /// uses the previous epoch's terminal block from marshal storage.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch.is_zero() {
-            return self.application.genesis().await.digest();
-        }
-
-        let prev = epoch.previous().expect("checked to be non-zero above");
-        let last_height = self
-            .epocher
-            .last(prev)
-            .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
-            unreachable!("missing starting epoch block at height {}", last_height);
-        };
-        block.digest()
+        self.application.genesis(epoch).await.digest()
     }
 
     /// Proposes a new block or re-proposes an epoch boundary block.
@@ -265,6 +252,7 @@ where
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
+                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
@@ -460,6 +448,7 @@ where
     A: VerifyingApplication<
         E,
         Block = B,
+        Genesis = B,
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
@@ -570,7 +559,7 @@ mod tests {
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
-        types::{Epoch, FixedEpocher, Height, Round, View},
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
     use commonware_broadcast::Broadcaster;
@@ -594,6 +583,7 @@ mod tests {
         A: VerifyingApplication<
             E,
             Block = B,
+            Genesis = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
         >,
@@ -607,6 +597,75 @@ mod tests {
         assert_automaton::<Inline<E, S, A, B, ES>>();
         assert_certifiable::<Inline<E, S, A, B, ES>>();
         assert_relay::<Inline<E, S, A, B, ES>>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_propose_after_floor_uses_application_genesis_and_anchor_parent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let epoch = Epoch::new(2);
+            let epoch_genesis_height = epocher.last(epoch.previous().unwrap()).unwrap();
+            let anchor_height = Height::new(epoch_genesis_height.get() + 6);
+            let child_height = anchor_height.next();
+
+            let epoch_genesis = make_raw_block(
+                Sha256::hash(b"epoch-genesis-parent"),
+                epoch_genesis_height,
+                epoch_genesis_height.get(),
+            );
+            let epoch_genesis_digest = epoch_genesis.digest();
+
+            let anchor_ctx = Ctx {
+                round: Round::new(epoch, View::new(anchor_height.get())),
+                leader: default_leader(),
+                parent: (View::new(epoch_genesis_height.get()), epoch_genesis_digest),
+            };
+            let anchor = B::new::<Sha256>(anchor_ctx, epoch_genesis_digest, anchor_height, 4500);
+            let anchor_digest = anchor.digest();
+            marshal.set_floor(anchor).await;
+            assert!(marshal.get_block(&anchor_digest).await.is_some());
+
+            let child_round = Round::new(epoch, View::new(child_height.get()));
+            let child_ctx = Ctx {
+                round: child_round,
+                leader: me,
+                parent: (View::new(anchor_height.get()), anchor_digest),
+            };
+            let child = B::new::<Sha256>(child_ctx.clone(), anchor_digest, child_height, 4600);
+            let child_digest = child.digest();
+            let mock_app: MockVerifyingApp<B, S> =
+                MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
+            let mut inline = Inline::new(context.clone(), mock_app, marshal.clone(), epocher);
+
+            assert_eq!(inline.genesis(epoch).await, epoch_genesis_digest);
+            let proposed = inline
+                .propose(child_ctx)
+                .await
+                .await
+                .expect("propose should use the floor anchor as parent");
+            assert_eq!(proposed, child_digest);
+            assert!(marshal.get_block(&child_digest).await.is_some());
+        });
     }
 
     #[test_traced("INFO")]

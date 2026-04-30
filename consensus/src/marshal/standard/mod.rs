@@ -2393,7 +2393,8 @@ mod tests {
             .await;
 
             // Raise the floor above the hint we are about to send.
-            mailbox.set_floor(Height::new(10)).await;
+            let anchor = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(10), 10);
+            mailbox.set_floor(anchor).await;
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox
