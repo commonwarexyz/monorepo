@@ -6,7 +6,8 @@
 
 use crate::{
     marshal::ancestry::{AncestorStream, BlockProvider},
-    types::Epoch, CertifiableBlock, Epochable,
+    types::Epoch,
+    CertifiableBlock, Epochable,
 };
 use commonware_runtime::deterministic;
 use commonware_utils::{

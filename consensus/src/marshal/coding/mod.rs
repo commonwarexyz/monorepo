@@ -140,8 +140,7 @@ mod tests {
                 epoch_genesis_height.get(),
             );
             let epoch_genesis_digest = epoch_genesis.digest();
-            let epoch_genesis_commitment =
-                genesis_coding_commitment::<Sha256, _>(&epoch_genesis);
+            let epoch_genesis_commitment = genesis_coding_commitment::<Sha256, _>(&epoch_genesis);
 
             let anchor_ctx = CodingCtx {
                 round: Round::new(epoch, View::new(anchor_height.get())),

@@ -744,8 +744,7 @@ mod tests {
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
-            let mut marshaled =
-                Deferred::new(context.clone(), mock_app, marshal.clone(), epocher);
+            let mut marshaled = Deferred::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_digest);
             let proposed = marshaled
