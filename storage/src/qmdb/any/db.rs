@@ -13,7 +13,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{Bagging, Family, Location, Proof},
+    merkle::{Family, Location, Proof},
     qmdb::{
         bitmap::Shared, build_snapshot_from_log, delete_known_loc,
         operation::Operation as OperationTrait, update_known_loc, Error,
@@ -78,10 +78,6 @@ pub struct Db<
 
     /// Whether the operations root uses inactive-prefix split semantics.
     pub(crate) split_root: bool,
-
-    /// Bagging used by the operations root.
-    #[allow(dead_code)]
-    pub(crate) root_bagging: Bagging,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -573,7 +569,6 @@ where
         log: AuthenticatedLog<F, E, C, H>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         split_root: bool,
-        root_bagging: Bagging,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
@@ -666,7 +661,6 @@ where
             log,
             root,
             split_root,
-            root_bagging,
             inactivity_floor_loc,
             snapshot: index,
             last_commit_loc,

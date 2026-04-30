@@ -128,7 +128,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None, split_root, root_bagging).await?;
+    let db = Db::init_from_log(index, log, None, split_root).await?;
 
     Ok(db)
 }

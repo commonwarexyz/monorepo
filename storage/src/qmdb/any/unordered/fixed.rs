@@ -151,7 +151,7 @@ pub(crate) mod test {
     async fn open_db_generic<F: Family + Bagging>(
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
-        let cfg = fixed_db_config::<mmr::Family, TwoCap>("partition", &context);
+        let cfg = fixed_db_config::<F, TwoCap>("partition", &context);
         crate::qmdb::any::init(context, cfg).await.unwrap()
     }
 
