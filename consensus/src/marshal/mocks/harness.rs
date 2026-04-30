@@ -3041,13 +3041,11 @@ pub fn set_floor_same_height_preserves_pending_acks<H: TestHarness>() {
         );
 
         handle.mailbox.set_floor(anchor.into()).await;
-        assert!(
-            handle
-                .mailbox
-                .get_block(Identifier::Height(Height::zero()))
-                .await
-                .is_some()
-        );
+        assert!(handle
+            .mailbox
+            .get_block(Identifier::Height(Height::zero()))
+            .await
+            .is_some());
         assert_eq!(
             application.pending_ack_heights(),
             vec![Height::new(1), Height::new(2), Height::new(3)]
