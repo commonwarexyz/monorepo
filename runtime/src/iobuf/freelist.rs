@@ -102,26 +102,26 @@
 //! outside the freelist may access that slot's parking cell.
 use super::aligned::AlignedBuffer;
 use crossbeam_utils::CachePadded;
-// Build the same freelist code against loom primitives in model tests, so the
-// tests exercise the production ownership protocol instead of a mirror type.
-#[cfg(feature = "loom")]
-use loom::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU64, AtomicUsize},
-    thread_local,
-};
 use std::{
     cell::Cell,
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     sync::atomic::Ordering,
 };
-#[cfg(not(feature = "loom"))]
-use std::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU64, AtomicUsize},
-    thread_local,
-};
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::{
+            cell::UnsafeCell,
+            sync::atomic::{AtomicU64, AtomicUsize},
+        };
+    } else {
+        use std::{
+            cell::UnsafeCell,
+            sync::atomic::{AtomicU64, AtomicUsize},
+        };
+    }
+}
 
 /// Number of slot bits tracked in each bitmap word.
 const SLOT_BITMAP_WORD_BITS: usize = u64::BITS as usize;
@@ -526,34 +526,30 @@ impl Freelist {
     /// this write completes.
     #[inline(always)]
     fn park(&self, slot: u32, buffer: AlignedBuffer) {
-        #[cfg(not(feature = "loom"))]
-        {
-            // SAFETY: the caller owns this slot while it is outside the freelist, so no
-            // other thread can access the parking cell until the slot bit is set.
-            unsafe {
-                (*self
-                    .storage
-                    .get(slot as usize)
-                    .expect("slot id must refer to an allocated slot")
-                    .get())
-                .write(buffer);
-            }
-        }
+        let cell = self
+            .storage
+            .get(slot as usize)
+            .expect("slot id must refer to an allocated slot");
 
-        #[cfg(feature = "loom")]
-        {
-            // Use loom's tracked cell API so the model can detect a parking-cell
-            // access that is not synchronized by the bitmap bit transition.
-            let cell = self
-                .storage
-                .get(slot as usize)
-                .expect("slot id must refer to an allocated slot");
-            cell.with_mut(|ptr| {
+        cfg_if::cfg_if! {
+            if #[cfg(not(feature = "loom"))] {
                 // SAFETY: the caller owns this slot while it is outside the
-                // freelist, so no other thread can access the parking cell
-                // until the slot bit is set.
-                unsafe { (*ptr).write(buffer) };
-            });
+                // freelist, so no other thread can access the parking cell until
+                // the slot bit is set.
+                unsafe {
+                    (*cell.get()).write(buffer);
+                }
+            } else {
+                // Use loom's tracked cell API so the model can detect a
+                // parking-cell access that is not synchronized by the bitmap bit
+                // transition.
+                cell.with_mut(|ptr| {
+                    // SAFETY: the caller owns this slot while it is outside the
+                    // freelist, so no other thread can access the parking cell
+                    // until the slot bit is set.
+                    unsafe { (*ptr).write(buffer) };
+                });
+            }
         }
     }
 
@@ -562,35 +558,28 @@ impl Freelist {
     /// The caller must have cleared the slot's bit before reading the cell.
     #[inline(always)]
     fn unpark(&self, slot: u32) -> AlignedBuffer {
-        #[cfg(not(feature = "loom"))]
-        {
-            // SAFETY: a successful bit clear removes this slot from the free set,
-            // so we have exclusive access to the initialized buffer that was
-            // made available by the matching put.
-            unsafe {
-                (*self
-                    .storage
-                    .get(slot as usize)
-                    .expect("slot id must refer to an allocated slot")
-                    .get())
-                .assume_init_read()
-            }
-        }
+        let cell = self
+            .storage
+            .get(slot as usize)
+            .expect("slot id must refer to an allocated slot");
 
-        #[cfg(feature = "loom")]
-        {
-            // Use loom's tracked cell API so the model can detect a parking-cell
-            // access that is not synchronized by the bitmap bit transition.
-            let cell = self
-                .storage
-                .get(slot as usize)
-                .expect("slot id must refer to an allocated slot");
-            cell.with_mut(|ptr| {
-                // SAFETY: a successful bit clear removes this slot from the
-                // free set, so we have exclusive access to the initialized
-                // buffer that was made available by the matching put.
-                unsafe { (*ptr).assume_init_read() }
-            })
+        cfg_if::cfg_if! {
+            if #[cfg(not(feature = "loom"))] {
+                // SAFETY: a successful bit clear removes this slot from the free
+                // set, so we have exclusive access to the initialized buffer that
+                // was made available by the matching put.
+                unsafe { (*cell.get()).assume_init_read() }
+            } else {
+                // Use loom's tracked cell API so the model can detect a
+                // parking-cell access that is not synchronized by the bitmap bit
+                // transition.
+                cell.with_mut(|ptr| {
+                    // SAFETY: a successful bit clear removes this slot from the
+                    // free set, so we have exclusive access to the initialized
+                    // buffer that was made available by the matching put.
+                    unsafe { (*ptr).assume_init_read() }
+                })
+            }
         }
     }
 }
@@ -616,41 +605,58 @@ struct SlotBitmapProbe {
 }
 
 // Monotonic source for per-thread probe ids.
-#[cfg(not(feature = "loom"))]
-static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(feature = "loom")]
-loom::lazy_static! {
-    static ref NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+cfg_if::cfg_if! {
+    if #[cfg(not(feature = "loom"))] {
+        static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+    } else {
+        loom::lazy_static! {
+            // Loom's `AtomicUsize::new` is not const, so the modeled global
+            // counter has to be initialized through `lazy_static!`.
+            static ref NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+        }
+    }
 }
 
-#[cfg(feature = "loom")]
-thread_local! {
-    // Loom's `thread_local!` macro does not accept const initializers or
-    // associated static items. Keep this loom-only declaration separate from
-    // the production TLS declaration below.
-    static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = Cell::new(None);
+cfg_if::cfg_if! {
+    if #[cfg(not(feature = "loom"))] {
+        thread_local! {
+            // The per-thread probe id gives each thread a stable starting point for
+            // bitmap scans.
+            //
+            // Keep this const-initialized so the TLS value has no destructor. The
+            // cold path initializes the id explicitly instead of using a lazy TLS
+            // initializer.
+            static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
+        }
+    } else {
+        loom::thread_local! {
+            // Loom's `thread_local!` macro does not accept const initializers or
+            // associated static items.
+            static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = Cell::new(None);
+        }
+    }
 }
 
 impl SlotBitmapProbe {
-    #[cfg(not(feature = "loom"))]
-    thread_local! {
-        // The per-thread probe id gives each thread a stable starting point for
-        // bitmap scans.
-        //
-        // Keep this const-initialized so the TLS value has no destructor. The
-        // cold path initializes the id explicitly instead of using a lazy TLS
-        // initializer.
-        static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
-    }
-
     /// Builds probe state for the current thread and freelist layout.
     ///
     /// The thread's stable id chooses both its home word and its preferred bit
     /// offset inside each word.
     #[inline(always)]
     fn new(word_mask: usize, word_shift: u32) -> Self {
-        let thread_id = Self::thread_id();
+        let thread_id = TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| {
+            if let Some(id) = thread_id.get() {
+                return id;
+            }
+
+            // Relaxed ordering is enough because probe ids only spread starting
+            // points across bitmap words, they do not synchronize buffer
+            // ownership.
+            let id = NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+            thread_id.set(Some(id));
+            id
+        });
+
         Self {
             // Low id bits choose the first bitmap word this thread probes.
             // With a power-of-two word count, masking is equivalent to modulo
@@ -661,34 +667,6 @@ impl SlotBitmapProbe {
             // bits within that word.
             bit_offset: Self::bit_offset(thread_id, word_shift),
         }
-    }
-
-    /// Returns the stable probe id assigned to the current thread.
-    #[inline(always)]
-    fn thread_id() -> usize {
-        #[cfg(not(feature = "loom"))]
-        {
-            Self::TLS_SLOT_BITMAP_THREAD_ID.with(Self::thread_id_from_cell)
-        }
-
-        #[cfg(feature = "loom")]
-        {
-            TLS_SLOT_BITMAP_THREAD_ID.with(Self::thread_id_from_cell)
-        }
-    }
-
-    /// Initializes the thread-local probe id on first use.
-    #[inline(always)]
-    fn thread_id_from_cell(thread_id: &Cell<Option<usize>>) -> usize {
-        if let Some(id) = thread_id.get() {
-            return id;
-        }
-
-        // Relaxed ordering is enough because probe ids only spread starting
-        // points across bitmap words, they do not synchronize buffer ownership.
-        let id = NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
-        thread_id.set(Some(id));
-        id
     }
 
     /// Returns the bit offset for this thread's home-word collision group.
@@ -1164,6 +1142,13 @@ mod loom_tests {
         Freelist::new(NonZeroU32::new(2).unwrap(), NonZeroUsize::new(1).unwrap())
     }
 
+    fn striped_freelist() -> Freelist {
+        // Four slots with four stripes puts each modeled slot in a distinct
+        // bitmap word. This covers cross-word scan and batch publication without
+        // blowing up the model.
+        Freelist::new(NonZeroU32::new(4).unwrap(), NonZeroUsize::new(4).unwrap())
+    }
+
     fn buffer() -> AlignedBuffer {
         // The payload itself is not important to the model. The aligned
         // allocation is enough to exercise ownership transfer through the
@@ -1172,7 +1157,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_put_publishes_before_take() {
+    fn put_publishes_before_take() {
         loom::model(|| {
             let set = Arc::new(freelist());
 
@@ -1204,7 +1189,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_two_takers_cannot_claim_one_slot() {
+    fn two_takers_cannot_claim_one_slot() {
         loom::model(|| {
             let set = Arc::new(freelist());
             set.put(0, buffer());
@@ -1239,7 +1224,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_batch_claims_survive_intervening_rmw_sequence() {
+    fn batch_claims_survive_intervening_rmw_sequence() {
         loom::model(|| {
             let set = Arc::new(freelist());
             set.put_batch([(0, buffer()), (1, buffer())]);
@@ -1248,7 +1233,7 @@ mod loom_tests {
             // `put_batch` publishes both bits with one Release RMW. This model
             // starts takers after publication to keep the state space small;
             // the writer/reader visibility edge for batch publication is
-            // covered by `loom_put_batch_publishes_to_take_batch`.
+            // covered by `put_batch_publishes_to_take_batch`.
             //
             // What this case isolates is the two-taker claim sequence on the
             // same word: one taker may clear one bit, then the other taker
@@ -1277,7 +1262,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_take_and_take_batch_do_not_duplicate_slots() {
+    fn take_and_take_batch_do_not_duplicate_slots() {
         loom::model(|| {
             let set = Arc::new(freelist());
             set.put_batch([(0, buffer()), (1, buffer())]);
@@ -1329,7 +1314,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_two_take_batches_do_not_duplicate_slots() {
+    fn two_take_batches_do_not_duplicate_slots() {
         loom::model(|| {
             let set = Arc::new(freelist());
             set.put_batch([(0, buffer()), (1, buffer())]);
@@ -1366,7 +1351,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_put_batch_publishes_to_take_batch() {
+    fn put_batch_publishes_to_take_batch() {
         loom::model(|| {
             let set = Arc::new(freelist());
             let seen = Arc::new(AtomicUsize::new(0));
@@ -1410,7 +1395,143 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_drain_and_take_do_not_duplicate_or_lose_slots() {
+    fn put_publishes_to_drain() {
+        loom::model(|| {
+            let set = Arc::new(freelist());
+            let drained = Arc::new(AtomicUsize::new(0));
+
+            // `drain` uses an Acquire whole-word swap. Run it concurrently with
+            // publication so this model checks the put-side Release edge rather
+            // than relying on thread-spawn visibility from pre-populated state.
+            //
+            // If the swap does not synchronize with the successful put, loom's
+            // tracked parking cell can observe the drainer reading the buffer
+            // without seeing the writer's earlier cell initialization.
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(0, buffer()))
+            };
+
+            let drainer = {
+                let set = Arc::clone(&set);
+                let drained = Arc::clone(&drained);
+                thread::spawn(move || {
+                    while drained.load(Ordering::Relaxed) == 0 {
+                        let count = set.drain();
+                        if count == 0 {
+                            // The drainer may run before the writer publishes.
+                            // A zero drain is a retry, not a failed assertion.
+                            thread::yield_now();
+                        } else {
+                            assert_eq!(count, 1);
+                            drained.store(count, Ordering::Relaxed);
+                        }
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            drainer.join().unwrap();
+
+            assert_eq!(drained.load(Ordering::Relaxed), 1);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn put_batch_publishes_to_drain() {
+        loom::model(|| {
+            let set = Arc::new(freelist());
+            let drained = Arc::new(AtomicUsize::new(0));
+
+            // A batch publish parks multiple cells before one Release RMW. The
+            // drainer loops until its Acquire swap observes that publication and
+            // then drops every parked buffer it claimed.
+            //
+            // This is the drain analogue of `put_batch_publishes_to_take_batch`:
+            // the whole-word swap must make all cells represented by the returned
+            // word visible before they are dropped.
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put_batch([(0, buffer()), (1, buffer())]))
+            };
+
+            let drainer = {
+                let set = Arc::clone(&set);
+                let drained = Arc::clone(&drained);
+                thread::spawn(move || {
+                    while drained.load(Ordering::Relaxed) < 2 {
+                        let count = set.drain();
+                        if count == 0 {
+                            // The drainer may run before the batch is published.
+                            thread::yield_now();
+                        } else {
+                            let previous = drained.fetch_add(count, Ordering::Relaxed);
+                            assert!(previous + count <= 2);
+                        }
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            drainer.join().unwrap();
+
+            assert_eq!(drained.load(Ordering::Relaxed), 2);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn put_batch_and_take_batch_across_stripes() {
+        loom::model(|| {
+            let set = Arc::new(striped_freelist());
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            // Publish one slot per bitmap word. The reader may observe any
+            // prefix of the per-word Release operations and must keep scanning
+            // other stripes until it has claimed each slot exactly once.
+            //
+            // This complements the two-slot same-word models above: same-word
+            // tests cover RMW contention on one atomic word, while this checks
+            // that the striped scan does not stop after the first word and that
+            // each per-word batch publication independently synchronizes with a
+            // later claim.
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || {
+                    set.put_batch([(0, buffer()), (1, buffer()), (2, buffer()), (3, buffer())])
+                })
+            };
+
+            let reader = {
+                let set = Arc::clone(&set);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    while seen.load(Ordering::Relaxed) != 0b1111 {
+                        let claimed = set.take_batch(4, |slot, buffer| {
+                            drop(buffer);
+                            let mask = 1 << slot;
+                            let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                            assert_eq!(previous & mask, 0);
+                        });
+
+                        if claimed == 0 {
+                            thread::yield_now();
+                        }
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            reader.join().unwrap();
+
+            assert_eq!(seen.load(Ordering::Relaxed), 0b1111);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn drain_and_take_do_not_duplicate_or_lose_slots() {
         loom::model(|| {
             let set = Arc::new(freelist());
             set.put_batch([(0, buffer()), (1, buffer())]);
@@ -1455,7 +1576,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_drain_and_take_batch_do_not_duplicate_or_lose_slots() {
+    fn drain_and_take_batch_do_not_duplicate_or_lose_slots() {
         loom::model(|| {
             let set = Arc::new(freelist());
             set.put_batch([(0, buffer()), (1, buffer())]);
