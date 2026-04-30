@@ -21,9 +21,9 @@ use crate::{
 };
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+};
 use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
 use std::num::{NonZeroU16, NonZeroUsize};
 

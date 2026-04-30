@@ -67,8 +67,6 @@
 
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
@@ -135,7 +133,7 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 

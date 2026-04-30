@@ -31,8 +31,6 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
@@ -1013,7 +1011,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
     const N: usize = sha256::Digest::SIZE;

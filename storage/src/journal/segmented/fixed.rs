@@ -23,8 +23,6 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
     Blob, Buf, Metrics, Storage,
@@ -435,7 +433,9 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};

@@ -21,10 +21,8 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256, Sha256};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
 use rand::RngCore as _;

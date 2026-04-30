@@ -21,8 +21,6 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_utils::Array;
 
 pub type Db<F, E, K, V, H, T, const N: usize> = super::db::Db<
@@ -109,7 +107,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::{
         bitmap::{Prunable as BitMap, Readable as _},
         NZU64,

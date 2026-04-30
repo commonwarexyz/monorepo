@@ -9,8 +9,6 @@
 use super::{Config, Error, Queue};
 use crate::{Context, Persistable};
 use commonware_codec::CodecShared;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_utils::{channel::mpsc, sync::AsyncMutex};
 use std::{ops::Range, sync::Arc};
 use tracing::debug;
@@ -252,6 +250,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Runner, Spawner,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};

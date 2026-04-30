@@ -6,9 +6,9 @@ use crate::journal::{
 };
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::{conformance_tests, Conformance};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Buf, BufMut, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Buf, BufMut, Runner, Supervisor as _,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;

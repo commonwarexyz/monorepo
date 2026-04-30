@@ -30,8 +30,6 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_runtime::{BufMut, BufferPooler, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
@@ -233,7 +231,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::NZUsize;
 
     fn test_cfg() -> Config<()> {

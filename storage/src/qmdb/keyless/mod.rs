@@ -55,8 +55,6 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -502,7 +500,7 @@ pub(crate) mod tests {
         Persistable,
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
     use std::{future::Future, pin::Pin};
 

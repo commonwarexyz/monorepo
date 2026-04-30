@@ -168,8 +168,6 @@
 
 use crate::translator::Translator;
 use commonware_runtime::buffer::paged::CacheRef;
-#[cfg(test)]
-use commonware_runtime::{Observer as _, Supervisor as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
@@ -224,7 +222,7 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Observer as _, Runner, Supervisor as _};
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};

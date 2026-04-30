@@ -90,8 +90,6 @@ use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
     Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
 };
-#[cfg(test)]
-use commonware_runtime::{Observer as _, Supervisor as _};
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
@@ -734,7 +732,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, BufMut, Runner, Storage};
+    use commonware_runtime::{
+        deterministic, Blob, BufMut, Observer as _, Runner, Storage, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;

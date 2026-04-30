@@ -7,8 +7,6 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_runtime::{
     buffer,
     telemetry::metrics::{Counter, MetricsExt as _},
@@ -1163,6 +1161,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
+        Supervisor as _,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},

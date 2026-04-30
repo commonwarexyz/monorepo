@@ -2,9 +2,7 @@
 
 use crate::freezer::Config;
 use commonware_conformance::{conformance_tests, Conformance};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use core::num::{NonZeroU16, NonZeroUsize};
 use rand::Rng;

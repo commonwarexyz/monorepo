@@ -7,8 +7,6 @@
 //! return any of the associated values.
 
 use commonware_codec::Codec;
-#[cfg(test)]
-use commonware_runtime::{Observer as _, Supervisor as _};
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
@@ -174,7 +172,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Runner,
+        Observer as _, Runner, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 

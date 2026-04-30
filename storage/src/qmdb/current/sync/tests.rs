@@ -20,9 +20,9 @@ use crate::qmdb::{
 };
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
-use commonware_runtime::{deterministic, deterministic::Context, BufferPooler, Runner as _};
+use commonware_runtime::{
+    deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
+};
 use commonware_utils::non_empty_range;
 use rand::RngCore as _;
 

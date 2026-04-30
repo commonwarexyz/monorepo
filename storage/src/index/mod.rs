@@ -15,8 +15,6 @@
 
 use crate::translator::Translator;
 use commonware_runtime::Metrics;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 
 mod storage;
 
@@ -228,7 +226,7 @@ mod tests {
         translator::{OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::sync::Mutex;
     use rand::Rng;
     use std::{collections::HashMap, sync::Arc, thread};

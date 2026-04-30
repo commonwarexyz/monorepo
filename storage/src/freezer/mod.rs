@@ -206,8 +206,6 @@
 mod conformance;
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
-#[cfg(test)]
-use commonware_runtime::{Observer as _, Supervisor as _};
 use commonware_utils::Array;
 use std::num::NonZeroUsize;
 pub use storage::{Checkpoint, Cursor, Freezer};
@@ -279,7 +277,9 @@ mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Runner, Storage};
+    use commonware_runtime::{
+        deterministic, Blob, Observer as _, Runner, Storage, Supervisor as _,
+    };
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
     use std::num::NonZeroU16;

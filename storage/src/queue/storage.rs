@@ -8,8 +8,6 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt};
-#[cfg(test)]
-use commonware_runtime::{Observer as _, Supervisor as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -369,7 +367,10 @@ mod tests {
     use super::*;
     use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Observer as _, Runner,
+        Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 

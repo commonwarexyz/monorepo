@@ -46,8 +46,6 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_runtime::{BufferPooler, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
@@ -462,6 +460,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Runner,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16};
 

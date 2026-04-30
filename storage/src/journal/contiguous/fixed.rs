@@ -66,8 +66,6 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_utils::sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -1046,7 +1044,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, BufferPooler, Error as RuntimeError, Runner, Storage,
+        Blob, BufferPooler, Error as RuntimeError, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};

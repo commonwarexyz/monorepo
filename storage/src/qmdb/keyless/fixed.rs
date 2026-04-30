@@ -16,8 +16,6 @@ use crate::{
     },
 };
 use commonware_cryptography::Hasher;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for fixed-size values.
@@ -67,7 +65,9 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 

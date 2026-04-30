@@ -96,8 +96,6 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -661,7 +659,7 @@ pub(super) mod test {
     };
     use commonware_codec::EncodeShared;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
     use std::ops::Range;

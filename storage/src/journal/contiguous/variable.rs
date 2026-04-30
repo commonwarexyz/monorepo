@@ -14,8 +14,6 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::buffer::paged::CacheRef;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock},
     NZUsize,
@@ -1073,7 +1071,9 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Storage};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner, Storage, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;

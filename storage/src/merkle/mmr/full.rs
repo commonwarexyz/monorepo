@@ -14,8 +14,6 @@
 pub use crate::merkle::full::Config;
 pub use crate::merkle::full::UnmerkleizedBatch;
 use crate::merkle::mmr::Family;
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 
 /// Configuration for initializing a full MMR for synchronization.
 pub type SyncConfig<D> = crate::merkle::full::SyncConfig<Family, D>;
@@ -32,7 +30,9 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    };
     use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 

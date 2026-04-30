@@ -36,8 +36,6 @@ use crate::{
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
-#[cfg(test)]
-use commonware_runtime::Supervisor as _;
 use commonware_utils::sync::RwLock;
 use core::iter;
 use std::sync::{Arc, Weak};
@@ -605,7 +603,7 @@ mod tests {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::sequence::{prefixed_u64::U64 as MetadataKey, U64};
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256>;
