@@ -1291,12 +1291,11 @@ mod loom_tests {
                 let set = Arc::clone(&set);
                 let seen = Arc::clone(&seen);
                 thread::spawn(move || {
-                    if let Some((slot, buffer)) = set.take() {
-                        drop(buffer);
-                        let mask = 1 << slot;
-                        let previous = seen.fetch_or(mask, Ordering::Relaxed);
-                        assert_eq!(previous & mask, 0);
-                    }
+                    let (slot, buffer) = set.take().expect("slot 0 starts free");
+                    drop(buffer);
+                    let mask = 1 << slot;
+                    let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                    assert_eq!(previous & mask, 0);
                 })
             };
 
@@ -1346,7 +1345,7 @@ mod loom_tests {
                         let previous = seen.fetch_or(mask, Ordering::Relaxed);
                         assert_eq!(previous & mask, 0);
                     });
-                    assert!(count <= 2);
+                    assert!((1..=2).contains(&count));
                 })
             };
 
@@ -1390,7 +1389,7 @@ mod loom_tests {
                 let drained = Arc::clone(&drained);
                 thread::spawn(move || {
                     let count = set.drain();
-                    assert!(count <= 3);
+                    assert!(matches!(count, 1 | 3));
                     drained.store(count, Ordering::Relaxed);
                 })
             };
