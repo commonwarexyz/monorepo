@@ -99,6 +99,7 @@ jobs:
 
       - name: Comment on pull request
         if: always() && github.event_name == 'pull_request' && steps.run.outcome == 'success'
+        continue-on-error: true
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
