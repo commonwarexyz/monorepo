@@ -83,6 +83,9 @@ pub use prunable::Prunable;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+/// Maximum container key (high 48 bits of a u64).
+const MAX_KEY: u64 = (1u64 << 48) - 1;
+
 /// Extracts the high 48 bits (container key) from a 64-bit value.
 #[inline]
 const fn high_bits(value: u64) -> u64 {
@@ -272,10 +275,14 @@ impl Bitmap {
     /// Returns an iterator over the values in the range [start, end) in sorted order.
     pub fn iter_range(&self, start: u64, end: u64) -> impl Iterator<Item = u64> + '_ {
         let start_key = high_bits(start);
-        let end_key = if end == 0 { 0 } else { high_bits(end - 1) };
+        let end_key_exclusive = if start >= end {
+            start_key
+        } else {
+            high_bits(end - 1) + 1
+        };
 
         self.containers
-            .range(start_key..=end_key)
+            .range(start_key..end_key_exclusive)
             .flat_map(move |(&key, container)| {
                 container.iter().filter_map(move |index| {
                     let value = combine(key, index);
@@ -387,8 +394,18 @@ impl Read for Bitmap {
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        // Use BTreeMap's codec which validates sorted/unique keys and bounds count
+        // Use BTreeMap's codec which validates sorted/unique keys and bounds count.
         let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
+        // Reject keys outside the 48-bit container-key range. BTreeMap is sorted, so
+        // the last entry's key is the maximum; checking it covers all keys.
+        if let Some((&max_key, _)) = containers.iter().next_back() {
+            if max_key > MAX_KEY {
+                return Err(CodecError::Invalid(
+                    "Bitmap",
+                    "container key exceeds 48-bit range",
+                ));
+            }
+        }
         Ok(Self { containers })
     }
 }
@@ -396,9 +413,6 @@ impl Read for Bitmap {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Bitmap {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Maximum container key (high 48 bits of a u64).
-        const MAX_KEY: u64 = (1u64 << 48) - 1;
-
         let num_containers = u.int_in_range(0..=1000)?;
         let mut containers = BTreeMap::new();
         let mut prev_key = 0u64;
@@ -506,6 +520,16 @@ mod tests {
         assert_eq!(values.len(), 50);
         assert_eq!(values[0], 25);
         assert_eq!(values[49], 74);
+    }
+
+    #[test]
+    fn test_iter_range_reversed_cross_container_empty() {
+        let mut bitmap = Bitmap::new();
+        bitmap.insert(1);
+        bitmap.insert(70_000);
+
+        let values: Vec<_> = bitmap.iter_range(70_000, 10).collect();
+        assert!(values.is_empty());
     }
 
     #[test]
@@ -692,6 +716,28 @@ mod tests {
         // Should fail with limit < 3
         let result = Bitmap::decode_cfg(encoded, &(..=2).into());
         assert!(matches!(result, Err(Error::InvalidLength(3))));
+    }
+
+    #[test]
+    fn test_decode_rejects_out_of_range_key() {
+        use commonware_codec::{Decode, Encode, Error};
+
+        let mut malformed: BTreeMap<u64, Container> = BTreeMap::new();
+        let mut container = Container::new();
+        container.insert(0);
+        malformed.insert(1u64 << 48, container);
+
+        // BTreeMap shares its codec format with `Bitmap`, so we can encode directly.
+        let bytes = malformed.encode();
+
+        let result = Bitmap::decode_cfg(bytes, &(..=10usize).into());
+        assert!(
+            matches!(
+                result,
+                Err(Error::Invalid("Bitmap", msg)) if msg.contains("48-bit")
+            ),
+            "expected Invalid(\"Bitmap\", ...), got {result:?}"
+        );
     }
 
     #[test]
