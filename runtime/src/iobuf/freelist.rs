@@ -1132,9 +1132,10 @@ mod loom_tests {
 
     // These tests run the production `Freelist` implementation with loom's
     // atomics, thread local storage, and `UnsafeCell` substituted under
-    // `cfg(feature = "loom")`. They use two small bitmap geometries: a
-    // single-word freelist for same-word RMW races, and a striped freelist for
-    // cross-word publication and scan races.
+    // `cfg(feature = "loom")`. Targeted tests use small same-word or striped
+    // layouts to force specific RMW races, while geometry-matrix tests cover
+    // single-word/single-bit, single-word/multi-bit, multi-word/single-bit, and
+    // multi-word/multi-bit layouts.
     fn single_word_freelist(capacity: u32) -> Freelist {
         // Use one stripe so every slot in the model shares one bitmap word.
         // This keeps the model small enough for exhaustive exploration while
@@ -1188,6 +1189,8 @@ mod loom_tests {
                 Self::SingleWordSingleBit => &[0],
                 Self::SingleWordMultiBit => &[0, 1],
                 Self::MultiWordSingleBit => &[0, 1, 2, 3],
+                // Keep same-word slots adjacent in the batch order. With two
+                // words, slots 0/2 map to word 0 and slots 1/3 map to word 1.
                 Self::MultiWordMultiBit => &[0, 2, 1, 3],
             }
         }
