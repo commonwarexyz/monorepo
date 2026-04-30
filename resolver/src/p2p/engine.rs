@@ -1,6 +1,7 @@
 use super::{
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
+    inflight::Inflight,
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
@@ -24,7 +25,7 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand::Rng;
-use std::{collections::HashMap, marker::PhantomData};
+use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -42,16 +43,13 @@ pub struct Engine<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+    Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
-
-    /// Consumes data that is fetched from the network
-    consumer: Con,
 
     /// Produces data for incoming requests
     producer: Pro,
@@ -71,8 +69,8 @@ pub struct Engine<
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
-    /// Track the start time of fetch operations
-    fetch_timers: HashMap<Key, histogram::Timer<E>>,
+    /// Tracks all in-flight fetch state
+    inflight: Inflight<E, Con, P, Key>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -96,7 +94,7 @@ impl<
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
-        Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+        Con: Consumer<Key = Key, Value = Bytes>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
@@ -123,17 +121,16 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                consumer: cfg.consumer,
                 producer: cfg.producer,
                 peer_provider: cfg.peer_provider,
                 blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
+                inflight: Inflight::new(cfg.consumer),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
-                fetch_timers: HashMap::new(),
                 _r: PhantomData,
             },
             Mailbox::new(sender),
@@ -189,6 +186,7 @@ impl<
             },
             on_stopped => {
                 debug!("shutdown");
+                self.inflight.drain();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -224,7 +222,7 @@ impl<
                             trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
-                            let is_new = !self.fetch_timers.contains_key(&key);
+                            let is_new = !self.inflight.contains(&key);
 
                             // Update targets
                             match targets {
@@ -241,7 +239,7 @@ impl<
 
                             // Only start new fetch if not already in progress
                             if is_new {
-                                self.fetch_timers
+                                self.inflight
                                     .insert(key.clone(), self.metrics.fetch_duration.timer());
                                 self.fetcher.add_ready(key);
                             } else {
@@ -252,59 +250,36 @@ impl<
                     Message::Cancel { key } => {
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
-                        if self.fetcher.cancel(&key) {
+                        self.fetcher.cancel(&key);
+                        if self.inflight.cancel(&key) {
                             guard.set(Status::Success);
-                            self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
-                            self.consumer.failed(key.clone(), ()).await;
                         }
                     }
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        // Remove from fetcher
                         self.fetcher.retain(&predicate);
-
-                        // Clean up timers and notify consumer
-                        let before = self.fetch_timers.len();
-                        let removed = self
-                            .fetch_timers
-                            .extract_if(|k, _| !predicate(k))
-                            .collect::<Vec<_>>();
-                        for (key, timer) in removed {
-                            timer.cancel();
-                            self.consumer.failed(key, ()).await;
-                        }
-
-                        // Metrics
-                        let removed = (before - self.fetch_timers.len()) as u64;
-                        if removed == 0 {
-                            self.metrics.cancel.inc(Status::Dropped);
-                        } else {
-                            self.metrics.cancel.inc_by(Status::Success, removed);
-                        }
+                        let count = self.inflight.retain(predicate) as u64;
+                        self.record_cancellations(count);
                     }
                     Message::Clear => {
                         trace!("mailbox: clear");
 
-                        // Clear fetcher
                         self.fetcher.clear();
-
-                        // Drain timers and notify consumer
-                        let removed = self.fetch_timers.len() as u64;
-                        for (key, timer) in self.fetch_timers.drain() {
-                            timer.cancel();
-                            self.consumer.failed(key, ()).await;
-                        }
-
-                        // Metrics
-                        if removed == 0 {
-                            self.metrics.cancel.inc(Status::Dropped);
-                        } else {
-                            self.metrics.cancel.inc_by(Status::Success, removed);
-                        }
+                        let count = self.inflight.drain() as u64;
+                        self.record_cancellations(count);
                     }
                 }
-                assert_eq!(self.fetcher.len(), self.fetch_timers.len());
+            },
+            // Handle completed consumer deliveries
+            delivery = self.inflight.next_delivery() => {
+                // If the delivery was aborted, its inflight entry was dropped (via
+                // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
+                let (peer, key, valid) = match delivery {
+                    Ok(delivery) => delivery,
+                    Err(_) => continue,
+                };
+                self.handle_delivery(peer, key, valid).await;
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -352,12 +327,20 @@ impl<
                 };
                 match msg.payload {
                     wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) => {
-                        self.handle_network_response(peer, msg.id, response).await
-                    }
+                    wire::Payload::Response(response) =>
+                        self.handle_network_response(peer, msg.id, response),
                     wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
+        }
+    }
+
+    /// Record cancellation metrics for a retain-style operation.
+    fn record_cancellations(&mut self, count: u64) {
+        if count == 0 {
+            self.metrics.cancel.inc(Status::Dropped);
+        } else {
+            self.metrics.cancel.inc_by(Status::Success, count);
         }
     }
 
@@ -409,7 +392,7 @@ impl<
     }
 
     /// Handle a network response from a peer.
-    async fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
+    fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
@@ -418,13 +401,15 @@ impl<
             return;
         };
 
-        // The peer had the data, so we can deliver it to the consumer
-        if self.consumer.deliver(key.clone(), response).await {
-            // Record metrics
-            self.metrics.fetch.inc(Status::Success);
-            self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
+        // The peer had the data, so deliver it to the consumer without blocking the engine.
+        self.inflight.deliver(key, peer, response);
+    }
 
-            // Clear all targets for this key
+    /// Handle completed delivery to the consumer.
+    async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
+        if valid {
+            self.metrics.fetch.inc(Status::Success);
+            self.inflight.complete(&key); // records duration on drop
             self.fetcher.clear_targets(&key);
             return;
         }
