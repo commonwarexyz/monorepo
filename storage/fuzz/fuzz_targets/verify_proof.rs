@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location, Proof},
-    qmdb::{verify::verify_multi_proof, RootSpec},
+    merkle::{mmb, mmr, Family as MerkleFamily, Location, Proof},
+    qmdb::{verify::verify_multi_proof, Bagging},
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -22,7 +22,7 @@ struct OperationInput {
 // `proof_leaves` is typed `Location<F>` so that `Arbitrary` bounds it to `F::MAX_LEAVES`;
 // otherwise `verify_multi_proof` would reject on overflow before exercising its inner logic.
 #[derive(Debug)]
-struct FuzzInput<F: MerkleFamily + RootSpec> {
+struct FuzzInput<F: MerkleFamily + Bagging> {
     proof_leaves: Location<F>,
     inactive_peaks: usize,
     digests: Vec<[u8; 32]>,
@@ -30,7 +30,7 @@ struct FuzzInput<F: MerkleFamily + RootSpec> {
     root: [u8; 32],
 }
 
-impl<'a, F: MerkleFamily + RootSpec> Arbitrary<'a> for FuzzInput<F> {
+impl<'a, F: MerkleFamily + Bagging> Arbitrary<'a> for FuzzInput<F> {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             proof_leaves: u.arbitrary()?,
@@ -42,8 +42,8 @@ impl<'a, F: MerkleFamily + RootSpec> Arbitrary<'a> for FuzzInput<F> {
     }
 }
 
-fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput<F>) {
-    let hasher = Standard::<Sha256>::new();
+fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput<F>) {
+    let hasher = F::default_hasher::<Sha256>();
 
     let digests: Vec<Digest> = input
         .digests
@@ -77,7 +77,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput<F>) {
         &proof,
         operations.as_slice(),
         &root,
-        F::root_spec(proof.inactive_peaks),
+        proof.inactive_peaks,
     );
 }
 

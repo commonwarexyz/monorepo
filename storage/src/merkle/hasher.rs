@@ -1,6 +1,6 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use crate::merkle::{Bagging, Error, Family, Location, Position, RootSpec};
+use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
@@ -18,6 +18,10 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// The parts are concatenated before hashing (i.e. there is no domain separation between
     /// parts).
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
+
+    /// The bagging policy applied when this hasher folds peaks into a root. Only affects root peak
+    /// aggregation; `hash`, `leaf_digest`, and `node_digest` are unaffected.
+    fn root_bagging(&self) -> Bagging;
 
     /// Computes the digest for a node given its position and the digests of its children.
     fn node_digest(
@@ -48,32 +52,16 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         self.hash([acc.as_ref(), peak.as_ref()])
     }
 
-    /// Computes a root according to the supplied [`RootSpec`].
-    fn root<'a, I>(
-        &self,
-        leaves: Location<F>,
-        spec: RootSpec,
-        peak_digests: I,
-    ) -> Result<Self::Digest, Error<F>>
-    where
-        I: IntoIterator<Item = &'a Self::Digest>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        self.root_with_inactive_prefix(leaves, spec.inactive_peaks(), spec.bagging(), peak_digests)
-    }
-
-    /// Computes a root where the oldest `inactive_peaks` are forward-bagged into a single
-    /// accumulator and the remaining peaks are folded with the strategy indicated by `bagging`.
+    /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInactivePeaks`] if `inactive_peaks` exceeds the number of
     /// provided peak digests.
-    fn root_with_inactive_prefix<'a, I>(
+    fn root<'a, I>(
         &self,
         leaves: Location<F>,
         inactive_peaks: usize,
-        bagging: Bagging,
         peak_digests: I,
     ) -> Result<Self::Digest, Error<F>>
     where
@@ -82,7 +70,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     {
         let iter = peak_digests.into_iter();
         let peaks = iter.len();
-        self.root_with_folded_peaks(leaves, inactive_peaks, inactive_peaks, bagging, iter)
+        self.root_with_folded_peaks(leaves, inactive_peaks, inactive_peaks, iter)
             .ok_or(Error::InvalidInactivePeaks {
                 requested: inactive_peaks,
                 peaks,
@@ -90,7 +78,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     }
 
     /// Computes a root from a peak list that may already contain a forward-folded prefix
-    /// accumulator.
+    /// accumulator. The bagging policy is read from `self.root_bagging()`.
     ///
     /// `inactive_peaks_to_fold` is how many leading entries of `peak_digests` to fold before the
     /// root bagging step. `committed_inactive_peaks` is the boundary committed into the root. They
@@ -106,7 +94,6 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         leaves: Location<F>,
         inactive_peaks_to_fold: usize,
         committed_inactive_peaks: usize,
-        bagging: Bagging,
         peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Option<Self::Digest> {
         let mut peak_digests = peak_digests.into_iter();
@@ -121,7 +108,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
             acc = self.fold(&acc, peak);
         }
 
-        let folded_peaks = match bagging {
+        let folded_peaks = match self.root_bagging() {
             Bagging::ForwardFold => {
                 for peak in peak_digests {
                     acc = self.fold(&acc, peak);
@@ -158,16 +145,36 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 ///
 /// A single `Standard<H>` implements `Hasher<F>` for every Merkle family `F`, so
 /// one instance can be used with MMR, MMB, or any future family.
+///
+/// The `bagging` field selects how peaks are folded into the root; pick at construction time and
+/// keep the same hasher for the lifetime of any structure or proof that depends on root identity.
 #[derive(Clone)]
 pub struct Standard<H: CHasher> {
     _hasher: PhantomData<H>,
+    bagging: Bagging,
 }
 
 impl<H: CHasher> Standard<H> {
-    /// Creates a new [Standard] hasher.
+    /// Creates a new [Standard] hasher with the default forward-fold bagging.
     pub const fn new() -> Self {
+        Self::forward()
+    }
+
+    /// Creates a new [Standard] hasher with forward-fold bagging.
+    pub const fn forward() -> Self {
+        Self::with_bagging(Bagging::ForwardFold)
+    }
+
+    /// Creates a new [Standard] hasher with backward-fold bagging.
+    pub const fn backward() -> Self {
+        Self::with_bagging(Bagging::BackwardFold)
+    }
+
+    /// Creates a new [Standard] hasher with the given bagging policy.
+    pub const fn with_bagging(bagging: Bagging) -> Self {
         Self {
             _hasher: PhantomData,
+            bagging,
         }
     }
 
@@ -198,15 +205,24 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
         Self::hash(self, parts)
     }
+
+    fn root_bagging(&self) -> Bagging {
+        self.bagging
+    }
 }
 
-// This intentionally forwards only `hash`: the default `Hasher` methods are all expressed in terms
-// of `hash`. If a future hasher specializes other methods, forward those here as well.
+// This intentionally forwards only `hash` and `root_bagging`: the default `Hasher` methods are all
+// expressed in terms of `hash`. If a future hasher specializes other methods, forward those here as
+// well.
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     type Digest = T::Digest;
 
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
         (**self).hash(parts)
+    }
+
+    fn root_bagging(&self) -> Bagging {
+        (**self).root_bagging()
     }
 }
 
@@ -234,16 +250,16 @@ mod tests {
 
     #[test]
     fn test_invalid_inactive_prefix_returns_err() {
-        let mmr_hasher: Standard<Sha256> = Standard::new();
+        let mmr_hasher: Standard<Sha256> = Standard::backward();
         let d1 = test_digest::<Sha256>(1);
         let d2 = test_digest::<Sha256>(2);
         let digests = [d1, d2];
 
         assert!(matches!(
-            mmr_hasher.root_with_inactive_prefix(
+            <Standard<Sha256> as Hasher<crate::merkle::mmr::Family>>::root(
+                &mmr_hasher,
                 Location::new(2),
                 3,
-                Bagging::BackwardFold,
                 digests.iter()
             ),
             Err(crate::merkle::Error::InvalidInactivePeaks {
@@ -251,20 +267,21 @@ mod tests {
                 peaks: 2
             })
         ));
-        assert!(mmr_hasher
-            .root_with_folded_peaks(
+        assert!(
+            <Standard<Sha256> as Hasher<crate::merkle::mmr::Family>>::root_with_folded_peaks(
+                &mmr_hasher,
                 Location::new(2),
                 3,
                 3,
-                Bagging::BackwardFold,
                 digests.iter()
             )
-            .is_none());
+            .is_none()
+        );
         assert!(matches!(
-            mmr_hasher.root_with_inactive_prefix(
+            <Standard<Sha256> as Hasher<crate::merkle::mmr::Family>>::root(
+                &mmr_hasher,
                 Location::new(0),
                 1,
-                Bagging::BackwardFold,
                 Vec::<sha256::Digest>::new().iter()
             ),
             Err(crate::merkle::Error::InvalidInactivePeaks {
@@ -340,7 +357,7 @@ mod tests {
 
         let empty_vec: Vec<H::Digest> = Vec::new();
         let empty_out = mmr_hasher
-            .root(Location::new(0), RootSpec::FULL_FORWARD, empty_vec.iter())
+            .root(Location::new(0), 0, empty_vec.iter())
             .expect("zero inactive peaks is always valid");
         assert_ne!(
             empty_out,
@@ -351,36 +368,36 @@ mod tests {
         assert_eq!(
             empty_out,
             mmr_hasher
-                .root(Location::new(0), RootSpec::FULL_FORWARD, empty_vec.iter())
+                .root(Location::new(0), 0, empty_vec.iter())
                 .expect("zero inactive peaks is always valid")
         );
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher
-            .root(Location::new(10), RootSpec::FULL_FORWARD, digests.iter())
+            .root(Location::new(10), 0, digests.iter())
             .expect("zero inactive peaks is always valid");
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
         let mut out2 = mmr_hasher
-            .root(Location::new(10), RootSpec::FULL_FORWARD, digests.iter())
+            .root(Location::new(10), 0, digests.iter())
             .expect("zero inactive peaks is always valid");
         assert_eq!(out, out2, "root should be computed consistently");
 
         out2 = mmr_hasher
-            .root(Location::new(11), RootSpec::FULL_FORWARD, digests.iter())
+            .root(Location::new(11), 0, digests.iter())
             .expect("zero inactive peaks is always valid");
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
         out2 = mmr_hasher
-            .root(Location::new(10), RootSpec::FULL_FORWARD, digests.iter())
+            .root(Location::new(10), 0, digests.iter())
             .expect("zero inactive peaks is always valid");
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
         out2 = mmr_hasher
-            .root(Location::new(10), RootSpec::FULL_FORWARD, digests.iter())
+            .root(Location::new(10), 0, digests.iter())
             .expect("zero inactive peaks is always valid");
         assert_ne!(
             out, out2,

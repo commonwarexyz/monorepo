@@ -1,19 +1,20 @@
 use crate::merkle::{
-    hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof, RootSpec,
+    hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 ///
-/// `root_spec` must match the spec used to compute `target_root` for verification to succeed.
+/// `inactive_peaks` and the bagging carried by `hasher` must match those used to compute
+/// `target_root`.
 pub fn verify_proof<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
     start_loc: Location<F>,
     operations: &[Op],
     target_root: &D,
-    root_spec: RootSpec,
+    inactive_peaks: usize,
 ) -> bool
 where
     F: Family,
@@ -22,18 +23,10 @@ where
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(hasher, &elements, start_loc, target_root, root_spec)
+    proof.verify_range_inclusion(hasher, &elements, start_loc, target_root, inactive_peaks)
 }
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
-///
-/// The `pinned_nodes` are the pruning-boundary peaks at `start_loc` (as returned by
-/// `nodes_to_pin`). When the larger tree has merged smaller subtrees into a bigger parent, the
-/// pins sit below the prefix subtrees authenticated by the proof; the verifier hashes pairs of
-/// pins up to each authenticated subtree's root and compares. When `start_loc` is 0,
-/// `pinned_nodes` must be empty.
-///
-/// `root_spec` must match the spec used to compute `target_root`.
 pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
@@ -41,7 +34,7 @@ pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
     operations: &[Op],
     pinned_nodes: &[D],
     target_root: &D,
-    root_spec: RootSpec,
+    inactive_peaks: usize,
 ) -> bool
 where
     F: Family,
@@ -56,21 +49,19 @@ where
         start_loc,
         pinned_nodes,
         target_root,
-        root_spec,
+        inactive_peaks,
     )
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their
 /// positions) in the range of the [Proof].
-///
-/// `root_spec` must match the spec used to compute `target_root`.
 pub fn verify_proof_and_extract_digests<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
     start_loc: Location<F>,
     operations: &[Op],
     target_root: &D,
-    root_spec: RootSpec,
+    inactive_peaks: usize,
 ) -> Result<Vec<(Position<F>, D)>, Error<F>>
 where
     F: Family,
@@ -84,20 +75,18 @@ where
         &elements,
         start_loc,
         target_root,
-        root_spec,
+        inactive_peaks,
     )
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
-///
-/// `root_spec` must match the spec used to compute `root`.
 pub fn create_proof_store<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
     start_loc: Location<F>,
     operations: &[Op],
     root: &D,
-    root_spec: RootSpec,
+    inactive_peaks: usize,
 ) -> Result<ProofStore<F, D>, Error<F>>
 where
     F: Family,
@@ -106,7 +95,7 @@ where
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    ProofStore::new(hasher, proof, &elements, start_loc, root, root_spec)
+    ProofStore::new(hasher, proof, &elements, start_loc, root, inactive_peaks)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -131,14 +120,12 @@ where
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
-///
-/// `root_spec` must match the spec used to compute `target_root`.
 pub fn verify_multi_proof<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
     operations: &[(Location<F>, Op)],
     target_root: &D,
-    root_spec: RootSpec,
+    inactive_peaks: usize,
 ) -> bool
 where
     F: Family,
@@ -150,7 +137,7 @@ where
         .iter()
         .map(|(loc, op)| (op.encode(), *loc))
         .collect::<Vec<_>>();
-    proof.verify_multi_inclusion(hasher, &elements, target_root, root_spec)
+    proof.verify_multi_inclusion(hasher, &elements, target_root, inactive_peaks)
 }
 
 #[cfg(test)]
@@ -159,7 +146,7 @@ mod tests {
     use crate::{
         merkle::{build_range_proof, mem::Mem, LocationRangeExt as _},
         mmb, mmr,
-        qmdb::RootSpec,
+        qmdb::Bagging,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
@@ -174,15 +161,15 @@ mod tests {
         Standard::new()
     }
 
-    fn qmdb_root<F: Family + RootSpec>(
+    fn qmdb_root<F: Family + Bagging>(
         merkle: &Mem<F, Digest>,
         hasher: &Standard<Sha256>,
         inactive_peaks: usize,
     ) -> Digest {
-        merkle.root(hasher, F::root_spec(inactive_peaks)).unwrap()
+        merkle.root(hasher, inactive_peaks).unwrap()
     }
 
-    fn qmdb_range_proof<F: Family + RootSpec>(
+    fn qmdb_range_proof<F: Family + Bagging>(
         hasher: &Standard<Sha256>,
         merkle: &Mem<F, Digest>,
         inactive_peaks: usize,
@@ -191,7 +178,7 @@ mod tests {
         build_range_proof(
             hasher,
             merkle.leaves(),
-            F::root_spec(inactive_peaks),
+            inactive_peaks,
             range,
             |pos| merkle.get_node(pos),
             crate::merkle::Error::ElementPruned,
@@ -201,7 +188,7 @@ mod tests {
 
     // ---- Generic inner functions for tests that work on both MMR and MMB ----
 
-    fn verify_proof_inner<F: Family + RootSpec>() {
+    fn verify_proof_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -216,7 +203,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let root = qmdb_root(&merkle, &hasher, 0);
 
         // Generate proof for all operations
@@ -272,7 +259,7 @@ mod tests {
         executor.start(|_| async move { verify_proof_inner::<mmb::Family>() });
     }
 
-    fn verify_proof_with_offset_inner<F: Family + RootSpec>() {
+    fn verify_proof_with_offset_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -292,7 +279,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let start_loc = Location::<F>::new(5u64);
         let root = qmdb_root(&merkle, &hasher, 0);
         let proof = qmdb_range_proof(
@@ -335,7 +322,7 @@ mod tests {
         executor.start(|_| async move { verify_proof_with_offset_inner::<mmb::Family>() });
     }
 
-    fn verify_proof_and_extract_digests_inner<F: Family + RootSpec>() {
+    fn verify_proof_and_extract_digests_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -350,7 +337,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let root = qmdb_root(&merkle, &hasher, 0);
         let range = Location::<F>::new(1)..Location::<F>::new(4);
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
@@ -393,7 +380,7 @@ mod tests {
         executor.start(|_| async move { verify_proof_and_extract_digests_inner::<mmb::Family>() });
     }
 
-    fn create_proof_store_inner<F: Family + RootSpec>() {
+    fn create_proof_store_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -409,7 +396,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let root = qmdb_root(&merkle, &hasher, 0);
         let range = Location::<F>::new(0)..Location::<F>::new(3);
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
@@ -453,7 +440,7 @@ mod tests {
         executor.start(|_| async move { create_proof_store_inner::<mmb::Family>() });
     }
 
-    fn create_proof_store_invalid_proof_inner<F: Family + RootSpec>() {
+    fn create_proof_store_invalid_proof_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -479,7 +466,7 @@ mod tests {
             Location::<F>::new(0),
             &operations,
             &wrong_root,
-            F::root_spec(0),
+            0,
         )
         .is_err());
     }
@@ -496,7 +483,7 @@ mod tests {
         executor.start(|_| async move { create_proof_store_invalid_proof_inner::<mmb::Family>() });
     }
 
-    fn create_multi_proof_inner<F: Family + RootSpec>() {
+    fn create_multi_proof_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -511,7 +498,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let root = qmdb_root(&merkle, &hasher, 0);
 
         // Create proof for full range
@@ -571,7 +558,7 @@ mod tests {
         executor.start(|_| async move { create_multi_proof_inner::<mmb::Family>() });
     }
 
-    fn create_multi_proof_with_fold_prefix_peaks_inner<F: Family + RootSpec>() {
+    fn create_multi_proof_with_fold_prefix_peaks_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -586,7 +573,7 @@ mod tests {
             merkle.apply_batch(&batch).unwrap();
         }
         let inactive_peaks = 1;
-        let spec = F::root_spec(inactive_peaks);
+        let spec = inactive_peaks;
         let root = qmdb_root(&merkle, &hasher, inactive_peaks);
 
         // Proof store starts at 32, so the first peak is folded into the proof prefix.
@@ -709,7 +696,7 @@ mod tests {
         });
     }
 
-    fn verify_multi_proof_inner<F: Family + RootSpec>() {
+    fn verify_multi_proof_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -724,7 +711,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let root = qmdb_root(&merkle, &hasher, 0);
 
         // Generate multi-proof via range proof -> proof store -> multi-proof
@@ -800,9 +787,9 @@ mod tests {
         executor.start(|_| async move { verify_multi_proof_inner::<mmb::Family>() });
     }
 
-    fn multi_proof_empty_inner<F: Family + RootSpec>() {
+    fn multi_proof_empty_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
-        let spec = F::root_spec(0);
+        let spec = 0;
         let empty_merkle = Mem::<F, Digest>::new();
         let empty_root = qmdb_root(&empty_merkle, &hasher, 0);
 
@@ -856,7 +843,7 @@ mod tests {
         executor.start(|_| async move { multi_proof_empty_inner::<mmb::Family>() });
     }
 
-    fn multi_proof_single_element_inner<F: Family + RootSpec>() {
+    fn multi_proof_single_element_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -871,7 +858,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let spec = F::root_spec(0);
+        let spec = 0;
         let root = qmdb_root(&merkle, &hasher, 0);
 
         // Create proof store for all elements

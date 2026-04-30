@@ -19,7 +19,7 @@ use commonware_storage::{
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
         },
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
-        RootSpec,
+        Bagging,
     },
     translator::EightCap,
 };
@@ -65,7 +65,7 @@ pub type CurOVarVecDb<F> = OCVariable<F, Context, Digest, Vec<u8>, Sha256, Eight
 pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256>;
 
 /// Open a keyless benchmark database using the shared benchmark configuration.
-pub async fn open_keyless_db<F: Family + RootSpec>(ctx: Context) -> KeylessDb<F> {
+pub async fn open_keyless_db<F: Family + Bagging>(ctx: Context) -> KeylessDb<F> {
     let cfg = keyless_cfg(&ctx);
     KeylessDb::<F>::init(ctx, cfg).await.unwrap()
 }
@@ -119,8 +119,7 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
         translator: EightCap,
         split_root: true,
         root_bagging:
-            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -144,8 +143,7 @@ pub fn any_var_digest_cfg(
         translator: EightCap,
         split_root: true,
         root_bagging:
-            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -171,8 +169,7 @@ pub fn any_var_vec_cfg(
         translator: EightCap,
         split_root: true,
         root_bagging:
-            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 

@@ -264,8 +264,11 @@ pub trait Database: Sized + Send {
     /// Get the root digest for final verification.
     fn root(&self) -> Self::Digest;
 
-    /// Return the root spec used to verify the final commit proof against the target root.
-    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> merkle::RootSpec;
+    /// Return the inactive_peaks count for verifying the final commit proof.
+    fn proof_inactive_peaks(proof: &Proof<Self::Family, Self::Digest>) -> usize;
+
+    /// Bagging policy used by this database when computing roots.
+    fn root_bagging() -> merkle::Bagging;
 
     /// Persist the compact-initialized state once the caller has verified its root.
     fn persist_compact_state(
@@ -327,7 +330,7 @@ where
         }));
     }
 
-    let hasher = StandardHasher::<DB::Hasher>::new();
+    let hasher = StandardHasher::<DB::Hasher>::with_bagging(DB::root_bagging());
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     if !verify_proof(
         &hasher,
@@ -335,7 +338,7 @@ where
         last_commit_loc,
         std::slice::from_ref(&state.last_commit_op),
         &target.root,
-        DB::proof_spec(&state.last_commit_proof),
+        DB::proof_inactive_peaks(&state.last_commit_proof),
     ) {
         return Err(Error::Engine(EngineError::InvalidProof));
     }
@@ -407,7 +410,7 @@ macro_rules! impl_compact_resolver_keyless {
     ($db:ident, $op:ident, $val_bound:ident) => {
         impl<F, E, V, H> Resolver for Arc<$db<F, E, V, H>>
         where
-            F: Family + qmdb::RootSpec,
+            F: Family + qmdb::Bagging,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -444,7 +447,7 @@ macro_rules! impl_compact_resolver_keyless {
 
         impl<F, E, V, H> Resolver for Arc<AsyncRwLock<$db<F, E, V, H>>>
         where
-            F: Family + qmdb::RootSpec,
+            F: Family + qmdb::Bagging,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -482,7 +485,7 @@ macro_rules! impl_compact_resolver_keyless {
 
         impl<F, E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H>>>>
         where
-            F: Family + qmdb::RootSpec,
+            F: Family + qmdb::Bagging,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -527,7 +530,7 @@ macro_rules! impl_compact_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
         impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
         where
-            F: Family + qmdb::RootSpec,
+            F: Family + qmdb::Bagging,
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -567,7 +570,7 @@ macro_rules! impl_compact_resolver_immutable {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
         where
-            F: Family + qmdb::RootSpec,
+            F: Family + qmdb::Bagging,
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -608,7 +611,7 @@ macro_rules! impl_compact_resolver_immutable {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
         where
-            F: Family + qmdb::RootSpec,
+            F: Family + qmdb::Bagging,
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,

@@ -9,7 +9,7 @@ mod tests {
             StandardHasher as Standard,
         },
         proof::{nodes_required_for_multi_proof, Blueprint},
-        Bagging, Family as _, LocationRangeExt as _, RootSpec,
+        Bagging, Family as _, LocationRangeExt as _,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 
@@ -31,16 +31,12 @@ mod tests {
             batch.merkleize(&mmr, &hasher)
         };
         mmr.apply_batch(&batch).unwrap();
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
         let proof = mmr
-            .range_proof(
-                &hasher,
-                Location::new(0)..mmr.leaves(),
-                RootSpec::FULL_FORWARD,
-            )
+            .range_proof(&hasher, Location::new(0)..mmr.leaves(), 0)
             .unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
@@ -48,7 +44,7 @@ mod tests {
                 &elements,
                 Location::new(0),
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
@@ -65,16 +61,14 @@ mod tests {
                 &elements,
                 Location::new(0),
                 &wrong_root,
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             Err(Error::RootMismatch)
         ));
 
         // Test 2: Single element range (first element)
         let range = Location::new(0)..Location::new(1);
-        let single_proof = mmr
-            .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let single_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
         let range_start = range.start;
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
@@ -82,7 +76,7 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
         assert!(single_digests.len() > 1);
@@ -91,16 +85,14 @@ mod tests {
         let mid_idx = 24;
         let range = Location::new(mid_idx)..Location::new(mid_idx + 1);
         let range_start = range.start;
-        let mid_proof = mmr
-            .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let mid_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
         assert!(mid_digests.len() > 1);
@@ -109,16 +101,14 @@ mod tests {
         let last_idx = elements.len() as u64 - 1;
         let range = Location::new(last_idx)..Location::new(last_idx + 1);
         let range_start = range.start;
-        let last_proof = mmr
-            .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let last_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
         assert!(!last_digests.is_empty());
@@ -126,16 +116,14 @@ mod tests {
         // Test 5: Small range at the beginning
         let range = Location::new(0)..Location::new(5);
         let range_start = range.start;
-        let small_proof = mmr
-            .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let small_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
         // Verify that we get digests for the range elements and their ancestors
@@ -144,16 +132,14 @@ mod tests {
         // Test 6: Medium range in the middle
         let range = Location::new(10)..Location::new(31);
         let range_start = range.start;
-        let mid_range_proof = mmr
-            .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let mid_range_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
         let num_elements = range.end - range.start;
@@ -166,14 +152,19 @@ mod tests {
         let max_loc = Family::MAX_LEAVES;
         let max_loc_plus_1 = Location::new(*max_loc + 1);
 
-        let result = Blueprint::new(max_loc, 0, max_loc - 1..max_loc);
+        let result = Blueprint::new(max_loc, 0, Bagging::ForwardFold, max_loc - 1..max_loc);
         assert!(
             result.is_ok(),
             "Should be able to prove with MAX_LEAVES leaves"
         );
 
         // MAX_LEAVES + 1 should be rejected.
-        let result_overflow = Blueprint::new(max_loc_plus_1, 0, max_loc..max_loc_plus_1);
+        let result_overflow = Blueprint::new(
+            max_loc_plus_1,
+            0,
+            Bagging::ForwardFold,
+            max_loc..max_loc_plus_1,
+        );
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LEAVES"
@@ -257,7 +248,7 @@ mod tests {
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
         let loc = Location::new(0);
-        let bp = Blueprint::new(leaves, 0, loc..loc + 1)
+        let bp = Blueprint::new(leaves, 0, Bagging::ForwardFold, loc..loc + 1)
             .expect("should compute blueprint for location 0");
         let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
@@ -270,8 +261,13 @@ mod tests {
         // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
         // Expected: 0 path siblings + 61 other peaks = 61 digests
         let last_leaf_loc = leaves - 1;
-        let bp = Blueprint::new(leaves, 0, last_leaf_loc..last_leaf_loc + 1)
-            .expect("should compute blueprint for last leaf");
+        let bp = Blueprint::new(
+            leaves,
+            0,
+            Bagging::ForwardFold,
+            last_leaf_loc..last_leaf_loc + 1,
+        )
+        .expect("should compute blueprint for last leaf");
         let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         let expected_last_leaf = NUM_PEAKS - 1;
@@ -324,12 +320,12 @@ mod tests {
             batch.merkleize(&mmr, &hasher)
         };
         mmr.apply_batch(&batch).unwrap();
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
 
         // Proof for range [1, 3) -- fold prefix is empty, pinned node at position 0 is a sibling.
         let start_loc = Location::new(1);
         let proof = mmr
-            .range_proof(&hasher, start_loc..Location::new(3), RootSpec::FULL_FORWARD)
+            .range_proof(&hasher, start_loc..Location::new(3), 0)
             .unwrap();
 
         let pinned: Vec<Digest> = mmr.nodes_to_pin(start_loc).into_values().collect();
@@ -343,7 +339,7 @@ mod tests {
                 start_loc,
                 &pinned,
                 &root,
-                RootSpec::FULL_FORWARD
+                0
             ),
             "valid pinned nodes should verify"
         );
@@ -357,7 +353,7 @@ mod tests {
                 start_loc,
                 &bad_pinned,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             "wrong pinned digest should fail"
         );
@@ -371,21 +367,14 @@ mod tests {
                 start_loc,
                 &extra_pinned,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             "extra pinned node should fail"
         );
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &elements[1..],
-                start_loc,
-                &[],
-                &root,
-                RootSpec::FULL_FORWARD
-            ),
+            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], &root, 0),
             "missing pinned nodes should fail"
         );
     }
@@ -406,15 +395,11 @@ mod tests {
             batch.merkleize(&mmr, &hasher)
         };
         mmr.apply_batch(&batch).unwrap();
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
 
         let start_loc = Location::new(8);
         let proof = mmr
-            .range_proof(
-                &hasher,
-                start_loc..Location::new(10),
-                RootSpec::FULL_FORWARD,
-            )
+            .range_proof(&hasher, start_loc..Location::new(10), 0)
             .unwrap();
 
         let pinned: Vec<Digest> = mmr.nodes_to_pin(start_loc).into_values().collect();
@@ -427,7 +412,7 @@ mod tests {
                 start_loc,
                 &pinned,
                 &root,
-                RootSpec::FULL_FORWARD
+                0
             ),
             "valid fold-prefix pinned nodes should verify"
         );
@@ -440,7 +425,7 @@ mod tests {
                 start_loc,
                 &[test_digest(99)],
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             "wrong fold-prefix digest should fail"
         );

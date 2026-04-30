@@ -13,7 +13,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{Bagging, Family, Location, Proof, RootSpec},
+    merkle::{Bagging, Family, Location, Proof},
     qmdb::{
         bitmap::Shared, build_snapshot_from_log, delete_known_loc,
         operation::Operation as OperationTrait, update_known_loc, Error,
@@ -80,6 +80,7 @@ pub struct Db<
     pub(crate) split_root: bool,
 
     /// Bagging used by the operations root.
+    #[allow(dead_code)]
     pub(crate) root_bagging: Bagging,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
@@ -159,10 +160,18 @@ where
         self.root
     }
 
-    /// Return the operations-root spec for the given leaf count and inactivity floor.
-    pub(crate) fn root_spec(&self, leaves: Location<F>, inactivity_floor: Location<F>) -> RootSpec {
-        let inactive_peaks = F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
-        RootSpec::from_split_policy(self.split_root, self.root_bagging, inactive_peaks)
+    /// Return the inactive_peaks count for the given leaf count and inactivity floor.
+    ///
+    /// Returns 0 when `split_root` is false (the boundary is not committed in that case).
+    pub(crate) fn inactive_peaks(
+        &self,
+        leaves: Location<F>,
+        inactivity_floor: Location<F>,
+    ) -> usize {
+        if !self.split_root {
+            return 0;
+        }
+        F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -355,9 +364,9 @@ where
         } else {
             Location::new(0)
         };
-        let spec = self.root_spec(historical_size, inactivity_floor);
+        let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
-            .historical_proof(historical_size, start_loc, max_ops, spec)
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await
             .map_err(Into::into)
     }
@@ -534,7 +543,7 @@ where
         self.inactivity_floor_loc = rewind_floor;
         self.root = self
             .log
-            .root(self.root_spec(Location::new(rewind_size), rewind_floor))?;
+            .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
 
         Ok(())
     }
@@ -643,15 +652,15 @@ where
             ));
         }
 
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(log.merkle.leaves()),
-            inactivity_floor_loc,
-        );
-        let root = log.root(RootSpec::from_split_policy(
-            split_root,
-            root_bagging,
-            inactive_peaks,
-        ))?;
+        let inactive_peaks = if split_root {
+            F::inactive_peaks(
+                F::location_to_position(log.merkle.leaves()),
+                inactivity_floor_loc,
+            )
+        } else {
+            0
+        };
+        let root = log.root(inactive_peaks)?;
 
         Ok(Self {
             log,

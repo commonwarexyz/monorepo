@@ -707,13 +707,13 @@ where
         // re-encoded, or re-hashed.
         let ops = Arc::new(ops);
         let leaves = Location::new(self.base_size + ops.len() as u64);
-        let spec = db.root_spec(leaves, floor);
+        let inactive_peaks = db.inactive_peaks(leaves, floor);
         let journal = db
             .log
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
         let root = db
             .log
-            .with_mem(|base| journal.root(base, &db.log.hasher, spec))?;
+            .with_mem(|base| journal.root(base, &db.log.hasher, inactive_peaks))?;
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestor_diff_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();

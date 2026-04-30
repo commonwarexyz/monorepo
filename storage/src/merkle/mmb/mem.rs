@@ -12,7 +12,6 @@ mod tests {
     use crate::merkle::{
         hasher::{Hasher as _, Standard},
         mmb::{Error, Location, Position},
-        RootSpec,
     };
     use commonware_cryptography::Sha256;
 
@@ -113,14 +112,10 @@ mod tests {
         assert_eq!(mmb.get_node(Position::new(12)).unwrap(), digest12);
 
         let expected_root = hasher
-            .root(
-                Location::new(8),
-                RootSpec::FULL_FORWARD,
-                [digest7, digest9, digest12].iter(),
-            )
+            .root(Location::new(8), 0, [digest7, digest9, digest12].iter())
             .expect("zero inactive peaks is always valid");
         assert_eq!(
-            mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
+            mmb.root(&hasher, 0).unwrap(),
             expected_root,
             "incorrect root"
         );
@@ -130,21 +125,20 @@ mod tests {
     fn test_prune_and_reinit() {
         let (hasher, mut mmb) = build_mmb(24);
 
-        let root = mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmb.root(&hasher, 0).unwrap();
         let prune_loc = Location::new(9);
         mmb.prune(prune_loc).unwrap();
 
         assert_eq!(mmb.bounds().start, prune_loc);
-        assert_eq!(mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap(), root);
+        assert_eq!(mmb.root(&hasher, 0).unwrap(), root);
         assert!(matches!(
-            mmb.proof(&hasher, Location::new(0), RootSpec::FULL_FORWARD),
+            mmb.proof(&hasher, Location::new(0), 0),
             Err(Error::ElementPruned(_))
         ));
 
         for loc in *prune_loc..*mmb.leaves() {
             assert!(
-                mmb.proof(&hasher, Location::new(loc), RootSpec::FULL_FORWARD)
-                    .is_ok(),
+                mmb.proof(&hasher, Location::new(loc), 0).is_ok(),
                 "loc={loc} should remain provable after pruning"
             );
         }
@@ -161,13 +155,8 @@ mod tests {
         assert_eq!(mmb_copy.size(), mmb.size());
         assert_eq!(mmb_copy.leaves(), mmb.leaves());
         assert_eq!(mmb_copy.bounds(), mmb.bounds());
-        assert_eq!(
-            mmb_copy.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            root
-        );
-        assert!(mmb_copy
-            .proof(&hasher, Location::new(17), RootSpec::FULL_FORWARD)
-            .is_ok());
+        assert_eq!(mmb_copy.root(&hasher, 0).unwrap(), root);
+        assert!(mmb_copy.proof(&hasher, Location::new(17), 0).is_ok());
     }
 
     #[test]

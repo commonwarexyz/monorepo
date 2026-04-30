@@ -12,7 +12,7 @@ use crate::{
         },
         current::BitmapPrunedBits,
         operation::Key,
-        RootSpec,
+        Bagging,
     },
     translator::Translator,
     Context,
@@ -28,7 +28,7 @@ use commonware_utils::Array;
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize] fixed::Db<F, E, K, V, H, T, N>
     where {
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
@@ -46,7 +46,7 @@ crate::qmdb::any::traits::impl_db_any! {
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize] variable::Db<F, E, K, V, H, T, N>
     where {
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Key,
         V: VariableValue + 'static,
@@ -62,7 +62,7 @@ crate::qmdb::any::traits::impl_db_any! {
 // =============================================================================
 
 impl<
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -85,7 +85,7 @@ impl<
 }
 
 impl<
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Key,
         V: VariableValue,
@@ -117,7 +117,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize]
     fixed::partitioned::Db<F, E, K, V, H, T, P, N>
     where {
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
@@ -129,7 +129,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -160,7 +160,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize]
     variable::partitioned::Db<F, E, K, V, H, T, P, N>
     where {
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Key,
         V: VariableValue + 'static,

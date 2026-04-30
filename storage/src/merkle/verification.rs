@@ -15,7 +15,7 @@ use crate::merkle::{
     hasher::Hasher,
     proof::{self as merkle_proof, Blueprint},
     storage::Storage,
-    Bagging, Error, Family, Location, Position, Proof, RootSpec,
+    Bagging, Error, Family, Location, Position, Proof,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -56,32 +56,22 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         elements: &[E],
         start_loc: Location<F>,
         root: &D,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Self, Error<F>>
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if proof.inactive_peaks != spec.inactive_peaks() {
+        if proof.inactive_peaks != inactive_peaks {
             return Err(Error::InvalidProof);
         }
-        Self::new_using_policy(hasher, proof, elements, start_loc, root, spec.bagging())
-    }
-
-    pub(crate) fn new_using_policy<H, E>(
-        hasher: &H,
-        proof: &Proof<F, D>,
-        elements: &[E],
-        start_loc: Location<F>,
-        root: &D,
-        bagging: Bagging,
-    ) -> Result<Self, Error<F>>
-    where
-        H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        let digests = proof.verify_range_inclusion_and_extract_digests_using_policy(
-            hasher, elements, start_loc, root, bagging,
+        let bagging = hasher.root_bagging();
+        let digests = proof.verify_range_inclusion_and_extract_digests(
+            hasher,
+            elements,
+            start_loc,
+            root,
+            inactive_peaks,
         )?;
         let map: HashMap<Position<F>, D> = digests.into_iter().collect();
 
@@ -92,7 +82,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         let end_loc = start_loc
             .checked_add(elements.len() as u64)
             .ok_or(Error::LocationOverflow(F::MAX_LEAVES))?;
-        let bp = Blueprint::<F>::new_using_policy(
+        let bp = Blueprint::<F>::new(
             proof.leaves,
             proof.inactive_peaks,
             bagging,
@@ -136,7 +126,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         range: Range<Location<F>>,
     ) -> Result<Proof<F, D>, Error<F>> {
         let leaves = Location::try_from(self.size)?;
-        let bp = Blueprint::new_using_policy(leaves, self.inactive_peaks, self.bagging, range)?;
+        let bp = Blueprint::new(leaves, self.inactive_peaks, self.bagging, range)?;
 
         let mut digests: Vec<D> = Vec::new();
         if !bp.fold_prefix.is_empty() {
@@ -310,10 +300,10 @@ pub async fn range_proof<
     hasher: &H,
     merkle: &S,
     range: Range<Location<F>>,
-    spec: RootSpec,
+    inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
     let leaves = Location::try_from(merkle.size().await)?;
-    historical_range_proof(hasher, merkle, leaves, range, spec).await
+    historical_range_proof(hasher, merkle, leaves, range, inactive_peaks).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the
@@ -335,35 +325,9 @@ pub async fn historical_range_proof<
     merkle: &S,
     leaves: Location<F>,
     range: Range<Location<F>>,
-    spec: RootSpec,
-) -> Result<Proof<F, D>, Error<F>> {
-    historical_range_proof_using_policy(
-        hasher,
-        merkle,
-        leaves,
-        spec.inactive_peaks(),
-        spec.bagging(),
-        range,
-    )
-    .await
-}
-
-/// Analogous to [`historical_range_proof`] but lets internal callers select the decomposed root
-/// bagging pieces. Prefer [`historical_range_proof`] when a complete root spec is available.
-pub(crate) async fn historical_range_proof_using_policy<
-    F: Family,
-    D: Digest,
-    H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
->(
-    hasher: &H,
-    merkle: &S,
-    leaves: Location<F>,
     inactive_peaks: usize,
-    bagging: Bagging,
-    range: Range<Location<F>>,
 ) -> Result<Proof<F, D>, Error<F>> {
-    let bp = Blueprint::new_using_policy(leaves, inactive_peaks, bagging, range)?;
+    let bp = Blueprint::new(leaves, inactive_peaks, hasher.root_bagging(), range)?;
 
     let mut all_positions = BTreeSet::new();
     all_positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
@@ -403,17 +367,6 @@ pub(crate) async fn historical_range_proof_using_policy<
 /// Returns [Error::Empty] if locations is empty
 pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     merkle: &S,
-    spec: RootSpec,
-    locations: &[Location<F>],
-) -> Result<Proof<F, D>, Error<F>> {
-    multi_proof_using_policy(merkle, spec.inactive_peaks(), spec.bagging(), locations).await
-}
-
-/// Return a multi proof for the elements at the specified locations using decomposed root bagging
-/// pieces. Multi-proofs stay position-keyed, so backward-bagged split proofs may include active
-/// peaks that range proofs can collapse into a suffix accumulator.
-pub(crate) async fn multi_proof_using_policy<F: Family, D: Digest, S: Storage<F, Digest = D>>(
-    merkle: &S,
     inactive_peaks: usize,
     bagging: Bagging,
     locations: &[Location<F>],
@@ -452,7 +405,7 @@ pub(crate) async fn multi_proof_using_policy<F: Family, D: Digest, S: Storage<F,
 mod tests {
     use super::*;
     use crate::{
-        merkle::{LocationRangeExt as _, RootSpec},
+        merkle::LocationRangeExt as _,
         mmb::{mem::Mmb, Location as MmbLocation},
         mmr::{mem::Mmr, StandardHasher as Standard},
     };
@@ -480,18 +433,17 @@ mod tests {
                 batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
-            let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root = mmr.root(&hasher, 0).unwrap();
 
-            let inactive_peaks = 1;
-            let inactive_spec = RootSpec::split_forward(inactive_peaks);
-            let inactive_root = mmr.root(&hasher, inactive_spec).unwrap();
+            let inactive_peaks = 1usize;
+            let inactive_root = mmr.root(&hasher, inactive_peaks).unwrap();
             let inactive_range = Location::new(32)..Location::new(49);
             let inactive_proof = historical_range_proof(
                 &hasher,
                 &mmr,
                 mmr.leaves(),
                 inactive_range.clone(),
-                inactive_spec,
+                inactive_peaks,
             )
             .await
             .unwrap();
@@ -501,7 +453,7 @@ mod tests {
                 &elements[inactive_range.to_usize_range()],
                 inactive_range.start,
                 &inactive_root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .is_err());
             assert!(ProofStore::new(
@@ -510,7 +462,7 @@ mod tests {
                 &elements[inactive_range.to_usize_range()],
                 inactive_range.start,
                 &inactive_root,
-                inactive_spec,
+                inactive_peaks,
             )
             .is_ok());
 
@@ -520,16 +472,14 @@ mod tests {
             let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_proof = mmr
-                    .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-                    .unwrap();
+                let range_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
                 let proof_store = ProofStore::new(
                     &hasher,
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
                     &root,
-                    RootSpec::FULL_FORWARD,
+                    0,
                 )
                 .unwrap();
 
@@ -548,7 +498,7 @@ mod tests {
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
                         &root,
-                        RootSpec::FULL_FORWARD,
+                        0,
                     ));
                     subrange_start += 1;
                     subrange_end -= 1;
@@ -576,22 +526,20 @@ mod tests {
                 batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
-            let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root = mmr.root(&hasher, 0).unwrap();
 
             // Proof for range 32..49 has a non-empty fold prefix (the 32-leaf peak).
             // The ProofStore derives the fold accumulator from the proof itself, so
             // sub-proofs should succeed for all sub-ranges without needing peaks.
             let range = Location::new(32)..Location::new(49);
-            let range_proof = mmr
-                .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-                .unwrap();
+            let range_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
 
@@ -606,7 +554,7 @@ mod tests {
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             &root,
-                            RootSpec::FULL_FORWARD,
+                            0,
                         ),
                         "sub-proof should verify for range {start}..{end}"
                     );
@@ -630,22 +578,20 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let root = mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root = mmb.root(&hasher, 0).unwrap();
 
             // With 8 leaves, the oldest MMB peak covers locations 0..4 but sits at position 7,
             // while the first leaf in the proven range (location 4) sits at position 6.
             // A position-based peak comparison therefore misclassifies the fold prefix.
             let range = MmbLocation::new(4)..MmbLocation::new(8);
-            let range_proof = mmb
-                .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-                .unwrap();
+            let range_proof = mmb.range_proof(&hasher, range.clone(), 0).unwrap();
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .unwrap();
 
@@ -659,7 +605,7 @@ mod tests {
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             &root,
-                            RootSpec::FULL_FORWARD,
+                            0,
                         ),
                         "sub-proof should verify for MMB range {start}..{end}"
                     );
@@ -684,20 +630,21 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let spec = RootSpec::split_backward(inactive_peaks);
-            let root = mmb.root(&hasher, spec).unwrap();
+            let hasher: Standard<Sha256> = Standard::backward();
+            let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(0)..MmbLocation::new(1);
-            let proof = historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), spec)
-                .await
-                .unwrap();
+            let proof =
+                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
+                    .await
+                    .unwrap();
             let proof_store = ProofStore::new(
                 &hasher,
                 &proof,
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                spec,
+                inactive_peaks,
             )
             .unwrap();
 
@@ -707,7 +654,7 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                spec,
+                inactive_peaks,
             ));
             assert!(matches!(
                 proof_store.range_proof(&hasher, MmbLocation::new(64)..MmbLocation::new(65)),
@@ -749,12 +696,12 @@ mod tests {
             let total_leaves = *mmb.leaves();
             assert!(active_start > 0 && active_start < total_leaves);
 
-            let spec = RootSpec::split_backward(inactive_peaks);
-            let root = mmb.root(&hasher, spec).unwrap();
+            let hasher: Standard<Sha256> = Standard::backward();
+            let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(active_start)..MmbLocation::new(total_leaves);
             let range_proof =
-                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), spec)
+                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
                     .await
                     .unwrap();
             let proof_store = ProofStore::new(
@@ -763,7 +710,7 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                spec,
+                inactive_peaks,
             )
             .unwrap();
 
@@ -778,7 +725,7 @@ mod tests {
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             &root,
-                            spec,
+                            inactive_peaks,
                         ),
                         "sub-proof should verify for MMB range {start}..{end} with split_backward({inactive_peaks})"
                     );
@@ -817,8 +764,9 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let spec = RootSpec::split_backward(0);
-            let root = mmb.root(&hasher, spec).unwrap();
+            let hasher: Standard<Sha256> = Standard::backward();
+            let inactive_peaks = 0usize;
+            let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let target = vec![MmbLocation::new(0)];
             let selected: Vec<_> = target
@@ -827,14 +775,16 @@ mod tests {
                 .collect();
 
             // Case 1: multi-proof built from the source structure with the full witness verifies.
-            let direct = multi_proof(&mmb, spec, &target).await.unwrap();
-            assert!(direct.verify_multi_inclusion(&hasher, &selected, &root, spec));
+            let direct = multi_proof(&mmb, inactive_peaks, Bagging::BackwardFold, &target)
+                .await
+                .unwrap();
+            assert!(direct.verify_multi_inclusion(&hasher, &selected, &root, inactive_peaks));
 
             // Build a ProofStore from a backward-folded range proof over a single leaf.
             // The other ~6 active peaks are folded into one synthetic suffix accumulator.
             let range = MmbLocation::new(0)..MmbLocation::new(1);
             let range_proof =
-                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), spec)
+                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
                     .await
                     .unwrap();
             let proof_store = ProofStore::new(
@@ -843,7 +793,7 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                spec,
+                inactive_peaks,
             )
             .unwrap();
 
@@ -877,7 +827,7 @@ mod tests {
                 .map(|&pos| (pos, mmb.get_node(pos).unwrap()))
                 .collect();
             let derived = proof_store.multi_proof(&target, &peaks).unwrap();
-            assert!(derived.verify_multi_inclusion(&hasher, &selected, &root, spec));
+            assert!(derived.verify_multi_inclusion(&hasher, &selected, &root, inactive_peaks));
         });
     }
 }

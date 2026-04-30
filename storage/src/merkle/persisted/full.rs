@@ -18,7 +18,7 @@ use crate::{
         batch,
         hasher::Hasher,
         mem::{Config as MemConfig, Mem},
-        Error, Family, Location, Position, Proof, Readable, RootSpec,
+        Error, Family, Location, Position, Proof, Readable,
     },
     metadata::{Config as MConfig, Metadata},
 };
@@ -256,7 +256,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
         context: E,
         cfg: Config,
         hasher: &impl Hasher<F, Digest = D>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Option<(Location<F>, Location<F>, D)>, Error<F>> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
@@ -274,7 +274,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
                 pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             })?;
-            let empty_root = mem.root(hasher, spec)?;
+            let empty_root = mem.root(hasher, inactive_peaks)?;
             return Ok(Some((Location::new(0), Location::new(0), empty_root)));
         }
 
@@ -325,7 +325,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
             Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
         }
 
-        let root = mem.root(hasher, spec)?;
+        let root = mem.root(hasher, inactive_peaks)?;
         Ok(Some((prune_loc, journal_leaves, root)))
     }
 
@@ -765,9 +765,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
         Ok(())
     }
 
-    /// Compute the root of the structure using `spec`.
-    pub fn root(&self, hasher: &impl Hasher<F, Digest = D>, spec: RootSpec) -> Result<D, Error<F>> {
-        self.inner.read().mem.root(hasher, spec)
+    /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
+    pub fn root(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        inactive_peaks: usize,
+    ) -> Result<D, Error<F>> {
+        self.inner.read().mem.root(hasher, inactive_peaks)
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -1013,13 +1017,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
         hasher: &impl Hasher<F, Digest = D>,
         leaves: Location<F>,
         loc: Location<F>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
-        self.historical_range_proof(hasher, leaves, loc..loc + 1, spec)
+        self.historical_range_proof(hasher, leaves, loc..loc + 1, inactive_peaks)
             .await
     }
 
@@ -1039,12 +1043,19 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
         hasher: &impl Hasher<F, Digest = D>,
         leaves: Location<F>,
         range: core::ops::Range<Location<F>>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         if leaves > self.leaves() {
             return Err(Error::RangeOutOfBounds(leaves));
         }
-        crate::merkle::verification::historical_range_proof(hasher, self, leaves, range, spec).await
+        crate::merkle::verification::historical_range_proof(
+            hasher,
+            self,
+            leaves,
+            range,
+            inactive_peaks,
+        )
+        .await
     }
 
     /// Return an inclusion proof for the element at the location `loc` that can be verified against
@@ -1063,13 +1074,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
         &self,
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
-        self.range_proof(hasher, loc..loc + 1, spec).await
+        self.range_proof(hasher, loc..loc + 1, inactive_peaks).await
     }
 
     /// Return an inclusion proof for the elements within the specified location range, using
@@ -1088,9 +1099,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
         &self,
         hasher: &impl Hasher<F, Digest = D>,
         range: core::ops::Range<Location<F>>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
-        self.historical_range_proof(hasher, self.leaves(), range, spec)
+        self.historical_range_proof(hasher, self.leaves(), range, inactive_peaks)
             .await
     }
 }
@@ -1100,9 +1111,7 @@ mod tests {
     use super::*;
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal},
-        merkle::{
-            hasher::Standard, mmb, mmr, Location, LocationRangeExt as _, Position, Proof, RootSpec,
-        },
+        merkle::{hasher::Standard, mmb, mmr, Location, LocationRangeExt as _, Position, Proof},
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::{
@@ -1175,38 +1184,38 @@ mod tests {
 
         let empty_proof = Proof::<F, Digest>::default();
         let hasher: Standard<Sha256> = Standard::new();
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
         assert!(empty_proof.verify_range_inclusion(
             &hasher,
             &[] as &[Digest],
             Location::<F>::new(0),
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
         assert!(empty_proof.verify_multi_inclusion(
             &hasher,
             &[] as &[(Digest, Location<F>)],
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         // Confirm empty proof no longer verifies after adding an element.
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
         mmr.apply_batch(&batch).unwrap();
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
         assert!(!empty_proof.verify_range_inclusion(
             &hasher,
             &[] as &[Digest],
             Location::<F>::new(0),
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
         assert!(!empty_proof.verify_multi_inclusion(
             &hasher,
             &[] as &[(Digest, Location<F>)],
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         mmr.destroy().await.unwrap();
@@ -1346,17 +1355,14 @@ mod tests {
         const TEST_ELEMENT: usize = 133;
         let test_element_loc: Location<F> = Location::new(TEST_ELEMENT as u64);
 
-        let proof = mmr
-            .proof(&hasher, test_element_loc, RootSpec::FULL_FORWARD)
-            .await
-            .unwrap();
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let proof = mmr.proof(&hasher, test_element_loc, 0).await.unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
             &leaves[TEST_ELEMENT],
             test_element_loc,
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         // Sync the structure, make sure it flushes the in-mem structure as expected.
@@ -1364,24 +1370,18 @@ mod tests {
 
         // Now that the element is flushed from the in-mem structure, confirm its proof is still
         // generated correctly.
-        let proof2 = mmr
-            .proof(&hasher, test_element_loc, RootSpec::FULL_FORWARD)
-            .await
-            .unwrap();
+        let proof2 = mmr.proof(&hasher, test_element_loc, 0).await.unwrap();
         assert_eq!(proof, proof2);
 
         // Generate & verify a proof that spans flushed elements and the last element.
         let range = Location::<F>::new(TEST_ELEMENT as u64)..Location::<F>::new(LEAF_COUNT as u64);
-        let proof = mmr
-            .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-            .await
-            .unwrap();
+        let proof = mmr.range_proof(&hasher, range.clone(), 0).await.unwrap();
         assert!(proof.verify_range_inclusion(
             &hasher,
             &leaves[range.to_usize_range()],
             test_element_loc,
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         mmr.destroy().await.unwrap();
@@ -1548,16 +1548,16 @@ mod tests {
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
             mmr.apply_batch(&batch).unwrap();
             assert_eq!(
-                pruned_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-                mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+                pruned_mmr.root(&hasher, 0).unwrap(),
+                mmr.root(&hasher, 0).unwrap()
             );
         }
 
         // Sync the structures.
         pruned_mmr.sync().await.unwrap();
         assert_eq!(
-            pruned_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+            pruned_mmr.root(&hasher, 0).unwrap(),
+            mmr.root(&hasher, 0).unwrap()
         );
 
         // Sync the structure & reopen.
@@ -1571,16 +1571,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            pruned_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+            pruned_mmr.root(&hasher, 0).unwrap(),
+            mmr.root(&hasher, 0).unwrap()
         );
 
         // Prune everything.
         let size = pruned_mmr.size();
         pruned_mmr.prune_all().await.unwrap();
         assert_eq!(
-            pruned_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+            pruned_mmr.root(&hasher, 0).unwrap(),
+            mmr.root(&hasher, 0).unwrap()
         );
         let bounds = pruned_mmr.bounds();
         assert!(bounds.is_empty());
@@ -1607,8 +1607,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            pruned_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+            pruned_mmr.root(&hasher, 0).unwrap(),
+            mmr.root(&hasher, 0).unwrap()
         );
         let bounds = pruned_mmr.bounds();
         assert!(!bounds.is_empty());
@@ -1772,25 +1772,21 @@ mod tests {
                 &hasher,
                 original_leaves,
                 Location::<F>::new(2)..Location::<F>::new(6),
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .await
             .unwrap();
         assert_eq!(historical_proof.leaves, original_leaves);
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
         assert!(historical_proof.verify_range_inclusion(
             &hasher,
             &elements[2..6],
             Location::<F>::new(2),
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
         let regular_proof = mmr
-            .range_proof(
-                &hasher,
-                Location::<F>::new(2)..Location::<F>::new(6),
-                RootSpec::FULL_FORWARD,
-            )
+            .range_proof(&hasher, Location::<F>::new(2)..Location::<F>::new(6), 0)
             .await
             .unwrap();
         assert_eq!(regular_proof.leaves, historical_proof.leaves);
@@ -1811,7 +1807,7 @@ mod tests {
                 &hasher,
                 original_leaves,
                 Location::<F>::new(2)..Location::<F>::new(6),
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .await
             .unwrap();
@@ -1882,7 +1878,7 @@ mod tests {
         let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
         ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
-        let historical_root = ref_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let historical_root = ref_mmr.root(&hasher, 0).unwrap();
 
         // Test proof at historical position after pruning
         let historical_proof = mmr
@@ -1890,7 +1886,7 @@ mod tests {
                 &hasher,
                 historical_leaves,
                 Location::<F>::new(35)..Location::<F>::new(39),
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .await
             .unwrap();
@@ -1903,7 +1899,7 @@ mod tests {
             &elements[35..39],
             Location::<F>::new(35),
             &historical_root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         ref_mmr.destroy().await.unwrap();
@@ -1977,16 +1973,11 @@ mod tests {
         let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
         ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
-        let expected_root = ref_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let expected_root = ref_mmr.root(&hasher, 0).unwrap();
 
         // Generate proof from full structure
         let proof = mmr
-            .historical_range_proof(
-                &hasher,
-                historical_leaves,
-                range.clone(),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, historical_leaves, range.clone(), 0)
             .await
             .unwrap();
 
@@ -1995,7 +1986,7 @@ mod tests {
             &elements[range.to_usize_range()],
             range.start,
             &expected_root, // Compare to historical (reference) root
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         ref_mmr.destroy().await.unwrap();
@@ -2032,18 +2023,18 @@ mod tests {
                 &hasher,
                 Location::<F>::new(1),
                 Location::<F>::new(0)..Location::<F>::new(1),
-                RootSpec::FULL_FORWARD,
+                0,
             )
             .await
             .unwrap();
 
-        let root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
         assert!(single_proof.verify_range_inclusion(
             &hasher,
             &[element],
             Location::<F>::new(0),
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
         mmr.destroy().await.unwrap();
@@ -2089,7 +2080,7 @@ mod tests {
         sync_mmr.apply_batch(&batch).unwrap();
 
         // Root should be computable
-        let _root = sync_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let _root = sync_mmr.root(&hasher, 0).unwrap();
 
         sync_mmr.destroy().await.unwrap();
     }
@@ -2127,7 +2118,7 @@ mod tests {
         mmr.sync().await.unwrap();
         let original_size = mmr.size();
         let original_leaves = mmr.leaves();
-        let original_root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let original_root = mmr.root(&hasher, 0).unwrap();
 
         // Sync with range.start <= existing_size <= range.end should reuse data
         let lower_bound_loc = mmr.bounds().start;
@@ -2160,10 +2151,7 @@ mod tests {
         let bounds = sync_mmr.bounds();
         assert_eq!(bounds.start, lower_bound_loc);
         assert!(!bounds.is_empty());
-        assert_eq!(
-            sync_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            original_root
-        );
+        assert_eq!(sync_mmr.root(&hasher, 0).unwrap(), original_root);
         for pos in *lower_bound_pos..*upper_bound_pos {
             let pos = Position::<F>::new(pos);
             assert_eq!(
@@ -2211,7 +2199,7 @@ mod tests {
 
         let original_size = mmr.size();
         let original_leaves = mmr.leaves();
-        let original_root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let original_root = mmr.root(&hasher, 0).unwrap();
         let original_pruning_boundary = mmr.bounds().start;
         let original_pruning_pos = Position::<F>::try_from(original_pruning_boundary).unwrap();
 
@@ -2243,10 +2231,7 @@ mod tests {
         let bounds = sync_mmr.bounds();
         assert_eq!(bounds.start, lower_bound_loc);
         assert!(!bounds.is_empty());
-        assert_eq!(
-            sync_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            original_root
-        );
+        assert_eq!(sync_mmr.root(&hasher, 0).unwrap(), original_root);
 
         // Check that existing nodes are preserved in the overlapping range.
         for i in *original_pruning_pos..*original_size {
@@ -2401,7 +2386,7 @@ mod tests {
         // Prune to position 30 (this stores pinned nodes and updates metadata)
         let prune_loc = Location::<F>::new(16);
         mmr.prune(prune_loc).await.unwrap();
-        let expected_root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let expected_root = mmr.root(&hasher, 0).unwrap();
         let expected_size = mmr.size();
         drop(mmr);
 
@@ -2417,10 +2402,7 @@ mod tests {
 
         assert_eq!(mmr.bounds().start, prune_loc);
         assert_eq!(mmr.size(), expected_size);
-        assert_eq!(
-            mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            expected_root
-        );
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), expected_root);
 
         mmr.destroy().await.unwrap();
     }
@@ -2474,7 +2456,7 @@ mod tests {
         // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
         // read pinned nodes from the journal.
         let original_size = mmr.size();
-        let original_root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let original_root = mmr.root(&hasher, 0).unwrap();
         drop(mmr);
 
         // Reopen via init_sync with range.start > 0. This will prune the journal, so
@@ -2492,10 +2474,7 @@ mod tests {
 
         // Verify the structure state is correct.
         assert_eq!(sync_mmr.size(), original_size);
-        assert_eq!(
-            sync_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            original_root
-        );
+        assert_eq!(sync_mmr.root(&hasher, 0).unwrap(), original_root);
         assert_eq!(sync_mmr.bounds().start, prune_loc);
 
         sync_mmr.destroy().await.unwrap();
@@ -2541,12 +2520,7 @@ mod tests {
         for loc_u64 in 0..*historical_leaves {
             let loc = Location::<F>::new(loc_u64);
             let result = mmr
-                .historical_range_proof(
-                    &hasher,
-                    historical_leaves,
-                    loc..loc + 1,
-                    RootSpec::FULL_FORWARD,
-                )
+                .historical_range_proof(&hasher, historical_leaves, loc..loc + 1, 0)
                 .await;
             if matches!(result, Err(Error::ElementPruned(_))) {
                 pruned_loc = Some(loc);
@@ -2565,12 +2539,7 @@ mod tests {
 
         let requested = mmr.leaves();
         let result = mmr
-            .historical_range_proof(
-                &hasher,
-                requested,
-                pruned_loc..pruned_loc + 1,
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, requested, pruned_loc..pruned_loc + 1, 0)
             .await;
         assert!(matches!(result, Err(Error::ElementPruned(_))));
 
@@ -2620,17 +2589,12 @@ mod tests {
         mmr.apply_batch(&batch).unwrap();
 
         let proof = mmr
-            .historical_range_proof(
-                &hasher,
-                historical_leaves,
-                range.clone(),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, historical_leaves, range.clone(), 0)
             .await
             .unwrap();
 
         let expected = mmr
-            .historical_range_proof(&hasher, historical_leaves, range, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, historical_leaves, range, 0)
             .await
             .unwrap();
         assert_eq!(proof, expected);
@@ -2673,17 +2637,12 @@ mod tests {
         let historical_leaves = Location::<F>::new(20);
         let range = Location::<F>::new(5)..Location::<F>::new(15);
         let expected = mmr
-            .historical_range_proof(
-                &hasher,
-                historical_leaves,
-                range.clone(),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, historical_leaves, range.clone(), 0)
             .await
             .unwrap();
 
         let actual = mmr
-            .historical_range_proof(&hasher, historical_leaves, range, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, historical_leaves, range, 0)
             .await
             .unwrap();
         assert_eq!(actual, expected);
@@ -2726,7 +2685,7 @@ mod tests {
         let requested = Location::<F>::new(20);
         let range = prune_loc..requested;
         let proof = mmr
-            .historical_range_proof(&hasher, requested, range, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, requested, range, 0)
             .await
             .unwrap();
         assert!(proof.leaves > Location::<F>::new(0));
@@ -2759,21 +2718,11 @@ mod tests {
         .unwrap();
         let empty_end = Location::<F>::new(0);
         let empty_result = mmr
-            .historical_range_proof(
-                &hasher,
-                empty_end,
-                empty_end..empty_end,
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, empty_end, empty_end..empty_end, 0)
             .await;
         assert!(matches!(empty_result, Err(Error::Empty)));
         let oob_result = mmr
-            .historical_range_proof(
-                &hasher,
-                empty_end + 1,
-                empty_end..empty_end + 1,
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, empty_end + 1, empty_end..empty_end + 1, 0)
             .await;
         assert!(matches!(
             oob_result,
@@ -2799,11 +2748,11 @@ mod tests {
         mmr.prune_all().await.unwrap();
         assert!(mmr.bounds().is_empty());
         let pruned_result = mmr
-            .historical_range_proof(&hasher, end, end - 1..end, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, end, end - 1..end, 0)
             .await;
         assert!(matches!(pruned_result, Err(Error::ElementPruned(_))));
         let oob_result = mmr
-            .historical_range_proof(&hasher, end + 1, end - 1..end, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, end + 1, end - 1..end, 0)
             .await;
         assert!(matches!(
             oob_result,
@@ -2829,23 +2778,18 @@ mod tests {
         let keep_loc = end - 1;
         mmr.prune(keep_loc).await.unwrap();
         let ok_result = mmr
-            .historical_range_proof(&hasher, end, keep_loc..end, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, end, keep_loc..end, 0)
             .await;
         assert!(ok_result.is_ok());
         let pruned_end = keep_loc - 1;
         // make sure this is in a pruned range, considering blob boundaries.
         let start_loc = Location::<F>::new(1);
         let pruned_result = mmr
-            .historical_range_proof(
-                &hasher,
-                end,
-                start_loc..pruned_end + 1,
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, end, start_loc..pruned_end + 1, 0)
             .await;
         assert!(matches!(pruned_result, Err(Error::ElementPruned(_))));
         let oob_result = mmr
-            .historical_range_proof(&hasher, end + 1, keep_loc..end, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, end + 1, keep_loc..end, 0)
             .await;
         assert!(matches!(oob_result, Err(Error::RangeOutOfBounds(_))));
         mmr.destroy().await.unwrap();
@@ -2879,12 +2823,7 @@ mod tests {
         let requested = mmr.leaves() + 1;
 
         let result = mmr
-            .historical_range_proof(
-                &hasher,
-                requested,
-                Location::<F>::new(0)..requested,
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, requested, Location::<F>::new(0)..requested, 0)
             .await;
         assert!(matches!(
             result,
@@ -2931,19 +2870,14 @@ mod tests {
         let requested = Location::<F>::new(5);
         let empty_range = requested..requested;
         let empty_result = mmr
-            .historical_range_proof(&hasher, requested, empty_range, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, requested, empty_range, 0)
             .await;
         assert!(matches!(empty_result, Err(Error::Empty)));
 
         // Requested historical size is out of bounds.
         let leaves_oob = mmr.leaves() + 1;
         let result = mmr
-            .historical_range_proof(
-                &hasher,
-                leaves_oob,
-                valid_range.clone(),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, leaves_oob, valid_range.clone(), 0)
             .await;
         assert!(matches!(
             result,
@@ -2954,7 +2888,7 @@ mod tests {
         let end_oob = mmr.leaves() + 1;
         let range_oob = Location::<F>::new(0)..end_oob;
         let result = mmr
-            .historical_range_proof(&hasher, requested, range_oob, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, requested, range_oob, 0)
             .await;
         assert!(matches!(
             result,
@@ -2966,12 +2900,7 @@ mod tests {
         let range_oob_at_requested = Location::<F>::new(0)..range_end_gt_requested;
         assert!(range_end_gt_requested <= mmr.leaves());
         let result = mmr
-            .historical_range_proof(
-                &hasher,
-                requested,
-                range_oob_at_requested,
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_range_proof(&hasher, requested, range_oob_at_requested, 0)
             .await;
         assert!(matches!(
             result,
@@ -2983,7 +2912,7 @@ mod tests {
         let overflow_loc = Location::<F>::new(u64::MAX);
         let overflow_range = Location::<F>::new(0)..overflow_loc;
         let result = mmr
-            .historical_range_proof(&hasher, requested, overflow_range, RootSpec::FULL_FORWARD)
+            .historical_range_proof(&hasher, requested, overflow_range, 0)
             .await;
         assert!(matches!(
             result,
@@ -3032,7 +2961,7 @@ mod tests {
             for loc_u64 in 0..*end {
                 let loc = Location::<F>::new(loc_u64);
                 let range_includes_pruned_leaf = loc < prune_loc;
-                match mmr.historical_proof(&hasher, end, loc, RootSpec::FULL_FORWARD).await {
+                match mmr.historical_proof(&hasher, end, loc, 0).await {
                     Ok(_) => {}
                     Err(Error::ElementPruned(_)) if range_includes_pruned_leaf => {}
                     Err(Error::ElementPruned(_)) => failures.push(format!(
@@ -3090,7 +3019,7 @@ mod tests {
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
         mmr.apply_batch(&batch).unwrap();
         let valid_size = mmr.size();
-        let valid_root = mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let valid_root = mmr.root(&hasher, 0).unwrap();
         mmr.sync().await.unwrap();
         drop(mmr);
 
@@ -3126,10 +3055,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sync_mmr.size(), valid_size);
-        assert_eq!(
-            sync_mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            valid_root
-        );
+        assert_eq!(sync_mmr.root(&hasher, 0).unwrap(), valid_root);
 
         sync_mmr.destroy().await.unwrap();
     }

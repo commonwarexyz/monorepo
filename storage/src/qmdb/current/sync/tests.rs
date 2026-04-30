@@ -17,7 +17,7 @@ use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
     sync::Database as SyncDatabase,
-    RootSpec,
+    Bagging,
 };
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
@@ -269,7 +269,7 @@ mod harnesses {
 
     pub struct UnorderedFixedHarness<F>(std::marker::PhantomData<F>);
 
-    impl<F: merkle::Graftable + RootSpec> SyncTestHarness for UnorderedFixedHarness<F> {
+    impl<F: merkle::Graftable + Bagging> SyncTestHarness for UnorderedFixedHarness<F> {
         type Family = F;
         type Db = UnorderedFixedDb<F>;
 
@@ -316,7 +316,7 @@ mod harnesses {
 
     pub struct UnorderedVariableHarness<F>(std::marker::PhantomData<F>);
 
-    impl<F: merkle::Graftable + RootSpec> SyncTestHarness for UnorderedVariableHarness<F> {
+    impl<F: merkle::Graftable + Bagging> SyncTestHarness for UnorderedVariableHarness<F> {
         type Family = F;
         type Db = UnorderedVariableDb<F>;
 
@@ -363,7 +363,7 @@ mod harnesses {
 
     pub struct OrderedFixedHarness<F>(std::marker::PhantomData<F>);
 
-    impl<F: merkle::Graftable + RootSpec> SyncTestHarness for OrderedFixedHarness<F> {
+    impl<F: merkle::Graftable + Bagging> SyncTestHarness for OrderedFixedHarness<F> {
         type Family = F;
         type Db = OrderedFixedDb<F>;
 
@@ -410,7 +410,7 @@ mod harnesses {
 
     pub struct OrderedVariableHarness<F>(std::marker::PhantomData<F>);
 
-    impl<F: merkle::Graftable + RootSpec> SyncTestHarness for OrderedVariableHarness<F> {
+    impl<F: merkle::Graftable + Bagging> SyncTestHarness for OrderedVariableHarness<F> {
         type Family = F;
         type Db = OrderedVariableDb<F>;
 

@@ -5,10 +5,9 @@ use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
     merkle::{
-        hasher::Standard, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location,
-        Position, Proof,
+        mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location, Position, Proof,
     },
-    qmdb::RootSpec as QmdbRootSpec,
+    qmdb::Bagging as QmdbBagging,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -60,8 +59,8 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
     }
 }
 
-fn fuzz_family<F: MerkleFamily + QmdbRootSpec>(input: &FuzzInput<F>) {
-    let hasher = Standard::<Sha256>::new();
+fn fuzz_family<F: MerkleFamily + QmdbBagging>(input: &FuzzInput<F>) {
+    let hasher = F::default_hasher::<Sha256>();
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
         inactive_peaks: input.inactive_peaks,
@@ -75,7 +74,7 @@ fn fuzz_family<F: MerkleFamily + QmdbRootSpec>(input: &FuzzInput<F>) {
     let start_loc = Location::<F>::new(input.start_loc);
     let root = Digest::from(input.root);
     let range = Location::<F>::new(input.range.start)..Location::<F>::new(input.range.end);
-    let root_spec = F::root_spec(proof.inactive_peaks);
+    let root_spec = proof.inactive_peaks;
 
     let Ok(proof_store) = ProofStore::new(
         &hasher,

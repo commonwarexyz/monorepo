@@ -4,7 +4,7 @@ use super::{operation::Operation, Keyless};
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, Error, RootSpec},
+    qmdb::{any::value::ValueEncoding, Bagging, Error},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -18,7 +18,7 @@ use std::sync::{Arc, Weak};
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
 pub struct UnmerkleizedBatch<F, H, V>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -43,7 +43,7 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family + RootSpec, D: Digest, V: ValueEncoding>
+pub struct MerkleizedBatch<F: Family + Bagging, D: Digest, V: ValueEncoding>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -78,7 +78,7 @@ where
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
-impl<F: Family + RootSpec, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
+impl<F: Family + Bagging, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -98,7 +98,7 @@ where
 /// Returns `None` if the location cannot be found in the live parent chain (e.g. the
 /// owning ancestor was committed and freed). Callers should fall through to the committed
 /// DB in that case.
-fn read_chain_op<F: Family + RootSpec, D: Digest, V: ValueEncoding>(
+fn read_chain_op<F: Family + Bagging, D: Digest, V: ValueEncoding>(
     batch: &MerkleizedBatch<F, D, V>,
     loc: u64,
 ) -> Option<Operation<F, V>>
@@ -125,7 +125,7 @@ where
 
 impl<F, H, V> UnmerkleizedBatch<F, H, V>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -297,7 +297,7 @@ where
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
         let root = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, F::root_spec(inactive_peaks)))
+            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_batch_ends = Vec::new();
@@ -325,7 +325,7 @@ where
     }
 }
 
-impl<F: Family + RootSpec, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
+impl<F: Family + Bagging, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
 {

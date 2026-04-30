@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Family, RootSpec},
+        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Bagging, Family},
         mmb::Location,
     };
     use commonware_cryptography::Sha256;
@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn test_verify_proof_and_pinned_nodes_recursive_fold_prefix_regression() {
         let (hasher, mmb) = make_mmb(5);
-        let root = mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root = mmb.root(&hasher, 0).unwrap();
         let start = 4;
 
         let pinned: Vec<D> = crate::merkle::mmb::Family::nodes_to_pin(Location::new(start))
@@ -42,11 +42,7 @@ mod tests {
             .collect();
 
         let proof = mmb
-            .range_proof(
-                &hasher,
-                Location::new(start)..Location::new(start + 1),
-                RootSpec::FULL_FORWARD,
-            )
+            .range_proof(&hasher, Location::new(start)..Location::new(start + 1), 0)
             .unwrap();
 
         assert!(proof.verify_proof_and_pinned_nodes(
@@ -55,7 +51,7 @@ mod tests {
             Location::new(start),
             &pinned,
             &root,
-            RootSpec::FULL_FORWARD,
+            0,
         ));
     }
 
@@ -69,13 +65,18 @@ mod tests {
 
         while n <= 5000 {
             let leaves = mmb.leaves();
-            let root = mmb.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root = mmb.root(&hasher, 0).unwrap();
 
             let loc = n - 1;
             let inactive_peaks =
                 crate::merkle::mmb::Family::inactive_peaks(mmb.size(), Location::new(0));
-            let bp = Blueprint::new(leaves, inactive_peaks, Location::new(loc)..Location::new(n))
-                .unwrap();
+            let bp = Blueprint::new(
+                leaves,
+                inactive_peaks,
+                Bagging::ForwardFold,
+                Location::new(loc)..Location::new(n),
+            )
+            .unwrap();
 
             let total_digests = usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
             assert!(
@@ -87,16 +88,14 @@ mod tests {
             );
 
             // Verify the proof actually works.
-            let proof = mmb
-                .proof(&hasher, Location::new(loc), RootSpec::FULL_FORWARD)
-                .unwrap();
+            let proof = mmb.proof(&hasher, Location::new(loc), 0).unwrap();
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
                     &loc.to_be_bytes(),
                     Location::new(loc),
                     &root,
-                    RootSpec::FULL_FORWARD,
+                    0,
                 ),
                 "n={n}: verification failed"
             );

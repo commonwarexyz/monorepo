@@ -5,12 +5,10 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{
-        full::Config as MerkleConfig, hasher::Standard, mmb, mmr, Family as MerkleFamily, Location,
-    },
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily, Location},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
-        verify_proof, RootSpec,
+        verify_proof, Bagging,
     },
     translator::TwoCap,
 };
@@ -134,7 +132,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
-fn test_config<F: RootSpec>(
+fn test_config<F: Bagging>(
     test_name: &str,
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
@@ -158,16 +156,16 @@ fn test_config<F: RootSpec>(
         },
         translator: TwoCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: <F as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
-fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, test_name: &str) {
+fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let hasher = Standard::<Sha256>::new();
+        let hasher = F::default_hasher::<Sha256>();
         let cfg = test_config::<F>(&test_name, &context);
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
@@ -236,7 +234,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, test_name: &str) {
                     if start_loc >= oldest_retained_loc && start_loc < op_count {
                         if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
                             let root = db.root();
-                            let spec = F::root_spec(proof.inactive_peaks);
+                            let spec = proof.inactive_peaks;
                             assert!(verify_proof(&hasher, &proof, start_loc, &log, &root, spec,));
                         }
                     }
@@ -277,7 +275,7 @@ fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, test_name: &str) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        let spec = F::root_spec(proof.inactive_peaks);
+                        let spec = proof.inactive_peaks;
                         assert!(verify_proof(&hasher, &proof, start_loc, &log, root, spec));
                     }
                 }

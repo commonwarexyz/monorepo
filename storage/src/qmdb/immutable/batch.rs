@@ -8,7 +8,7 @@ use crate::{
         any::{batch::lookup_sorted, ValueEncoding},
         immutable::operation::Operation,
         operation::Key,
-        Error, RootSpec,
+        Bagging, Error,
     },
     translator::Translator,
     Context, Persistable,
@@ -25,7 +25,7 @@ type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
-pub(crate) struct DiffEntry<F: Family + RootSpec, V> {
+pub(crate) struct DiffEntry<F: Family + Bagging, V> {
     pub(crate) value: V,
     pub(crate) loc: Location<F>,
 }
@@ -38,7 +38,7 @@ pub(crate) struct DiffEntry<F: Family + RootSpec, V> {
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     K: Key,
     V: ValueEncoding,
     H: CHasher,
@@ -63,7 +63,7 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family + RootSpec, D: Digest, K: Key, V: ValueEncoding> {
+pub struct MerkleizedBatch<F: Family + Bagging, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>>>,
 
@@ -106,7 +106,7 @@ pub struct MerkleizedBatch<F: Family + RootSpec, D: Digest, K: Key, V: ValueEnco
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     K: Key,
     V: ValueEncoding,
     H: CHasher,
@@ -286,9 +286,7 @@ where
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
         let root = db
             .journal
-            .with_mem(|mem| {
-                journal_merkleized.root(mem, &db.journal.hasher, F::root_spec(inactive_peaks))
-            })
+            .with_mem(|mem| journal_merkleized.root(mem, &db.journal.hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_diffs = Vec::new();
@@ -321,7 +319,7 @@ where
     }
 }
 
-impl<F: Family + RootSpec, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
+impl<F: Family + Bagging, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
 {
@@ -445,7 +443,7 @@ where
 
 impl<F, E, K, V, C, H, T> Immutable<F, E, K, V, C, H, T>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     E: Context,
     K: Key,
     V: ValueEncoding,

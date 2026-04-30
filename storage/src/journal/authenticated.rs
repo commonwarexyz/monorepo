@@ -15,7 +15,7 @@ use crate::{
         full::Merkle,
         hasher::{Hasher as _, Standard as StandardHasher},
         mem::Mem,
-        Family, Location, Position, Proof, Readable, RootSpec,
+        Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
 };
@@ -192,37 +192,37 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
         *self.inner.leaves()
     }
 
-    /// Compute the root digest after this batch is applied using `spec`.
+    /// Compute the root digest after this batch is applied using `inactive_peaks` and the bagging
+    /// carried by `hasher`.
     ///
-    /// This recomputes the root rather than reading a cache. Callers that need repeated cheap root
-    /// access should compute it once and cache the digest at the layer that owns the root spec.
+    /// This recomputes the root rather than reading a cache.
     pub fn root(
         &self,
         base: &Mem<F, D>,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<D, merkle::Error<F>> {
-        self.inner.root(base, hasher, spec)
+        self.inner.root(base, hasher, inactive_peaks)
     }
 
-    /// Inclusion proof for the element at `loc` using an explicit root spec.
+    /// Inclusion proof for the element at `loc`.
     pub fn proof(
         &self,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         loc: Location<F>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.proof(hasher, loc, spec)
+        self.inner.proof(hasher, loc, inactive_peaks)
     }
 
-    /// Inclusion proof for all elements in `range` using an explicit root spec.
+    /// Inclusion proof for all elements in `range`.
     pub fn range_proof(
         &self,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         range: core::ops::Range<Location<F>>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.range_proof(hasher, range, spec)
+        self.inner.range_proof(hasher, range, inactive_peaks)
     }
 
     /// The items added in this batch.
@@ -299,9 +299,12 @@ where
         Location::new(self.journal.size().await)
     }
 
-    /// Compute the root of the Merkle structure using `spec`.
-    pub fn root(&self, spec: RootSpec) -> Result<H::Digest, Error<F>> {
-        self.merkle.root(&self.hasher, spec).map_err(Into::into)
+    /// Compute the root of the Merkle structure using `inactive_peaks` and the bagging carried by
+    /// the journal's hasher.
+    pub fn root(&self, inactive_peaks: usize) -> Result<H::Digest, Error<F>> {
+        self.merkle
+            .root(&self.hasher, inactive_peaks)
+            .map_err(Into::into)
     }
 
     /// Convert authenticated-journal errors to the contiguous journal trait error type.
@@ -592,9 +595,9 @@ where
         &self,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        self.historical_proof(self.size().await, start_loc, max_ops, spec)
+        self.historical_proof(self.size().await, start_loc, max_ops, inactive_peaks)
             .await
     }
 
@@ -615,7 +618,7 @@ where
         historical_leaves: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         let reader = self.journal.reader().await;
         let bounds = reader.bounds();
@@ -632,7 +635,12 @@ where
         let hasher = self.hasher.clone();
         let proof = self
             .merkle
-            .historical_range_proof(&hasher, historical_leaves, start_loc..end_loc, spec)
+            .historical_range_proof(
+                &hasher,
+                historical_leaves,
+                start_loc..end_loc,
+                inactive_peaks,
+            )
             .await?;
 
         let futures = (*start_loc..*end_loc)
@@ -695,12 +703,13 @@ macro_rules! impl_journal_new {
                 merkle_cfg: merkle::full::Config,
                 journal_cfg: $cfg_ty,
                 rewind_predicate: fn(&O) -> bool,
+                bagging: merkle::Bagging,
             ) -> Result<Self, Error<F>> {
                 let mut journal =
                     $journal_mod::Journal::init(context.with_label("journal"), journal_cfg).await?;
                 journal.rewind_to(rewind_predicate).await?;
 
-                let hasher = StandardHasher::<H>::new();
+                let hasher = StandardHasher::<H>::with_bagging(bagging);
                 let mut merkle =
                     Merkle::init(context.with_label("merkle"), &hasher, merkle_cfg).await?;
                 Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
@@ -782,6 +791,7 @@ pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
         merkle_cfg: merkle::full::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&Self::Item) -> bool,
+        bagging: merkle::Bagging,
     ) -> impl core::future::Future<Output = Result<Journal<F, E, Self, H>, Error<F>>> + Send
     where
         Self: Sized,
@@ -873,7 +883,7 @@ mod tests {
     >;
 
     fn journal_root<F: Family>(journal: &TestJournal<F>) -> Digest {
-        journal.root(RootSpec::FULL_FORWARD).unwrap()
+        journal.root(0).unwrap()
     }
 
     fn batch_root<F: Family>(
@@ -882,7 +892,7 @@ mod tests {
     ) -> Digest {
         journal
             .merkle
-            .with_mem(|mem| batch.root(mem, &journal.hasher, RootSpec::FULL_FORWARD))
+            .with_mem(|mem| batch.root(mem, &journal.hasher, 0))
             .unwrap()
     }
 
@@ -915,9 +925,13 @@ mod tests {
     ) -> TestJournal<F> {
         let merkle_cfg = merkle_config(suffix, &context);
         let journal_cfg = journal_config(suffix, &context);
-        TestJournal::<F>::new(context, merkle_cfg, journal_cfg, |op: &TestOp<F>| {
-            op.is_commit()
-        })
+        TestJournal::<F>::new(
+            context,
+            merkle_cfg,
+            journal_cfg,
+            |op: &TestOp<F>| op.is_commit(),
+            crate::merkle::Bagging::ForwardFold,
+        )
         .await
         .unwrap()
     }
@@ -990,13 +1004,7 @@ mod tests {
         hasher: &StandardHasher<Sha256>,
     ) -> bool {
         let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
-        proof.verify_range_inclusion(
-            hasher,
-            &encoded_ops,
-            start_loc,
-            root,
-            RootSpec::FULL_FORWARD,
-        )
+        proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root, 0)
     }
 
     /// Verify that new() creates an empty authenticated journal.
@@ -1361,10 +1369,15 @@ mod tests {
         {
             let merkle_cfg = merkle_config("rewind", &context);
             let journal_cfg = journal_config("rewind", &context);
-            let mut journal =
-                TestJournal::<F>::new(context, merkle_cfg, journal_cfg, |op| op.is_commit())
-                    .await
-                    .unwrap();
+            let mut journal = TestJournal::<F>::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |op| op.is_commit(),
+                crate::merkle::Bagging::ForwardFold,
+            )
+            .await
+            .unwrap();
 
             // Add operations with a commit at position 5 (in section 0: 0-6)
             for i in 0..5 {
@@ -1931,7 +1944,7 @@ mod tests {
         let journal = create_journal_with_ops::<F>(context, "proof_multi", 50).await;
 
         let (proof, ops) = journal
-            .proof(Location::<F>::new(0), NZU64!(50), RootSpec::FULL_FORWARD)
+            .proof(Location::<F>::new(0), NZU64!(50), 0)
             .await
             .unwrap();
 
@@ -1972,12 +1985,7 @@ mod tests {
 
         let size = journal.size().await;
         let (proof, ops) = journal
-            .historical_proof(
-                size,
-                Location::<F>::new(0),
-                NZU64!(20),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_proof(size, Location::<F>::new(0), NZU64!(20), 0)
             .await
             .unwrap();
 
@@ -2024,12 +2032,7 @@ mod tests {
         let size = journal.size().await;
         // Request proof starting near the end
         let (proof, ops) = journal
-            .historical_proof(
-                size,
-                Location::<F>::new(40),
-                NZU64!(20),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_proof(size, Location::<F>::new(40), NZU64!(20), 0)
             .await
             .unwrap();
 
@@ -2071,12 +2074,7 @@ mod tests {
 
         // Request proof with size > actual journal size
         let result = journal
-            .historical_proof(
-                Location::<F>::new(10),
-                Location::<F>::new(0),
-                NZU64!(1),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_proof(Location::<F>::new(10), Location::<F>::new(0), NZU64!(1), 0)
             .await;
 
         assert!(matches!(
@@ -2109,9 +2107,7 @@ mod tests {
 
         let size = journal.size().await;
         // Request proof starting at size (should fail)
-        let result = journal
-            .historical_proof(size, size, NZU64!(1), RootSpec::FULL_FORWARD)
-            .await;
+        let result = journal.historical_proof(size, size, NZU64!(1), 0).await;
 
         assert!(matches!(
             result,
@@ -2156,12 +2152,7 @@ mod tests {
 
         // Generate proof for the historical state
         let (proof, ops) = journal
-            .historical_proof(
-                historical_size,
-                Location::<F>::new(0),
-                NZU64!(50),
-                RootSpec::FULL_FORWARD,
-            )
+            .historical_proof(historical_size, Location::<F>::new(0), NZU64!(50), 0)
             .await
             .unwrap();
 
@@ -2211,7 +2202,7 @@ mod tests {
         let start_loc = Location::<F>::new(0);
         if start_loc < pruned_boundary {
             let result = journal
-                .historical_proof(size, start_loc, NZU64!(1), RootSpec::FULL_FORWARD)
+                .historical_proof(size, start_loc, NZU64!(1), 0)
                 .await;
 
             // Should fail when trying to read pruned operations
@@ -2464,7 +2455,7 @@ mod tests {
         assert_eq!(journal_root(&journal), expected_root);
         assert_eq!(journal.size().await, expected_size);
         let (_, ops) = journal
-            .proof(Location::<F>::new(0), NZU64!(1), RootSpec::FULL_FORWARD)
+            .proof(Location::<F>::new(0), NZU64!(1), 0)
             .await
             .unwrap();
         assert_eq!(ops, vec![op_a]);
@@ -2609,7 +2600,7 @@ mod tests {
 
         // Verify all items are present.
         let (_, ops) = journal
-            .proof(Location::<F>::new(3), NZU64!(5), RootSpec::FULL_FORWARD)
+            .proof(Location::<F>::new(3), NZU64!(5), 0)
             .await
             .unwrap();
         assert_eq!(ops.len(), 5);
@@ -2666,7 +2657,7 @@ mod tests {
 
         // Verify the actual items at each location.
         let (_, ops) = journal
-            .proof(Location::<F>::new(2), NZU64!(6), RootSpec::FULL_FORWARD)
+            .proof(Location::<F>::new(2), NZU64!(6), 0)
             .await
             .unwrap();
         for (i, op) in ops.iter().enumerate() {
