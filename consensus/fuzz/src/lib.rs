@@ -445,7 +445,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &oracle,
                 &participants,
                 schemes[i].clone(),
-                validator,
+                validator.clone(),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),

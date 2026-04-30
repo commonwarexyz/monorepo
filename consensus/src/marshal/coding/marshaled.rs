@@ -111,7 +111,8 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    Clock, Metrics, Shared, Spawner, Storage,
+    utils::Shared,
+    Clock, Metrics, Spawner, Storage,
 };
 use commonware_utils::{
     channel::{

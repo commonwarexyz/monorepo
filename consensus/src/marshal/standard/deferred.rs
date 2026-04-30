@@ -99,7 +99,8 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    Clock, Metrics, Shared, Spawner,
+    utils::Shared,
+    Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
