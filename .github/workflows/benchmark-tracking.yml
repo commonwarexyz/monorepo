@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   benchmark-tracking:
-    name: Run benchmark tracking
+    name: Run
     runs-on: ubuntu-latest-8
     timeout-minutes: 180
     env:
@@ -34,33 +34,23 @@ jobs:
         with:
           script: |
             const {owner, repo} = context.repo;
-            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {
               owner,
               repo,
-              workflow_id: 'benchmark-tracking.yml',
-              branch: 'main',
-              status: 'success',
+              name: 'benchmark-tracking-results',
               per_page: 100,
             });
-            for (const run of runs) {
-              if (run.id === context.runId) {
-                continue;
-              }
-              const artifacts = await github.paginate(
-                github.rest.actions.listWorkflowRunArtifacts,
-                {owner, repo, run_id: run.id, per_page: 100},
-              );
-              const artifact = artifacts.find((candidate) =>
-                candidate.name === 'benchmark-tracking-results' && !candidate.expired
-              );
-              if (artifact) {
-                core.setOutput('found', 'true');
-                core.setOutput('run_id', String(run.id));
-                return;
-              }
+            artifacts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const artifact = artifacts.find((candidate) =>
+              !candidate.expired && candidate.workflow_run?.head_branch === 'main'
+            );
+            if (artifact) {
+              core.setOutput('found', 'true');
+              core.setOutput('run_id', String(artifact.workflow_run.id));
+            } else {
+              core.warning('No benchmark-tracking artifact found for main');
+              core.setOutput('found', 'false');
             }
-            core.warning('No benchmark-tracking artifact found for main');
-            core.setOutput('found', 'false');
 
       - name: Download main benchmark artifact
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
