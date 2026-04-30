@@ -80,7 +80,7 @@ pub struct Engine<
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
-    automaton: Shared<A>,
+    automaton: A,
     monitor: M,
     provider: P,
     reporter: Z,
@@ -168,7 +168,7 @@ impl<
 
         Self {
             context: ContextCell::new(context),
-            automaton: Shared::new(cfg.automaton),
+            automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
             provider: cfg.provider,
