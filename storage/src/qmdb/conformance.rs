@@ -21,6 +21,7 @@ use crate::{
 };
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
 };
@@ -114,7 +115,7 @@ fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig {
         metadata_partition: format!("{suffix}-mm"),
         items_per_blob: NZU64!(11),
         write_buffer: NZUsize!(1024),
-        thread_pool: None,
+        strategy: Sequential,
         page_cache: page_cache.clone(),
     }
 }
@@ -229,7 +230,7 @@ fn keyless_variable_config(
 fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config {
     crate::merkle::compact::Config {
         partition: format!("{suffix}-compact"),
-        thread_pool: None,
+        strategy: Sequential,
     }
 }
 

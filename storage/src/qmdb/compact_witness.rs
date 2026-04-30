@@ -30,6 +30,7 @@ use crate::{
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{sequence::prefixed_u64::U64, sync::RwLock};
 
 // Per-slot db-extra layout. A "slot" is one side of the compact Merkle's ping-pong persistence
@@ -194,8 +195,8 @@ pub(crate) fn validate_ancestor_floors<F: Family>(
 /// Any missing metadata, decode failure, or proof/root mismatch is treated as
 /// [`Error::DataCorrupted`], because the persisted frontier and witness no longer describe the same
 /// committed state.
-pub(crate) async fn load_serve_state<F, E, H, C, M, DecodeCommitOp>(
-    merkle: &compact::Merkle<F, E, H::Digest>,
+pub(crate) async fn load_serve_state<F, E, H, S, C, M, DecodeCommitOp>(
+    merkle: &compact::Merkle<F, E, H::Digest, S>,
     commit_codec_config: &C,
     decode_commit_op: DecodeCommitOp,
 ) -> Result<(CachedServeState<F, H::Digest>, M, Location<F>), Error<F>>
@@ -203,6 +204,7 @@ where
     F: Family,
     E: Context,
     H: Hasher,
+    S: Strategy,
     DecodeCommitOp: FnOnce(&[u8], &C) -> Result<(M, Location<F>), Error<F>>,
 {
     let slot = merkle.active_slot();
@@ -259,14 +261,15 @@ where
 /// helper inserts that commit into the compact Merkle, builds its one-leaf proof, and persists the
 /// resulting witness/cache pair into the active slot so later reopen and rewind paths can use the
 /// same recovery logic as every subsequent commit.
-pub(crate) async fn bootstrap_initial_commit<F, E, H>(
-    merkle: &mut compact::Merkle<F, E, H::Digest>,
+pub(crate) async fn bootstrap_initial_commit<F, E, H, S>(
+    merkle: &mut compact::Merkle<F, E, H::Digest, S>,
     commit_op_bytes: Vec<u8>,
 ) -> Result<(), Error<F>>
 where
     F: Family,
     E: Context,
     H: Hasher,
+    S: Strategy,
 {
     let hasher = StandardHasher::<H>::new();
     let batch = {
@@ -301,14 +304,15 @@ where
 // This trait is intentionally narrow. It is not trying to abstract "all compact databases"; it
 // only centralizes the small amount of logic needed to capture, cache, persist, and restore the
 // authenticated tip witness that compact sync serves.
-pub(crate) trait WitnessSource<F, E, H>
+pub(crate) trait WitnessSource<F, E, H, S = Sequential>
 where
     F: Family,
     E: Context,
     H: Hasher,
+    S: Strategy,
 {
     /// Return the compact Merkle whose active slot is authoritative for this db.
-    fn merkle(&self) -> &compact::Merkle<F, E, H::Digest>;
+    fn merkle(&self) -> &compact::Merkle<F, E, H::Digest, S>;
 
     /// Return the location of the current tip commit in that Merkle.
     fn last_commit_loc(&self) -> Location<F>;
@@ -337,12 +341,13 @@ where
 /// Matching cached state is re-persisted without rebuilding a proof, since compact `Mem` may
 /// already be pruned to peaks. The cache check runs inside `sync_with_witness` so concurrent syncs
 /// observe the latest cache after each persisted slot flip.
-pub(crate) async fn persist_witness<S, F, E, H>(source: &S) -> Result<(), Error<F>>
+pub(crate) async fn persist_witness<W, F, E, H, S>(source: &W) -> Result<(), Error<F>>
 where
-    S: WitnessSource<F, E, H>,
+    W: WitnessSource<F, E, H, S>,
     F: Family,
     E: Context,
     H: Hasher,
+    S: Strategy,
 {
     let hasher = StandardHasher::<H>::new();
     let last_commit_loc = source.last_commit_loc();
@@ -384,12 +389,13 @@ where
 /// This is used when a compact db has reconstructed and verified state from persisted data and only
 /// needs to move that known-good witness into the Merkle's slot layout, without recomputing the
 /// proof from a fresh tip commit.
-pub(crate) async fn persist_cached_serve_state<S, F, E, H>(source: &S) -> Result<(), Error<F>>
+pub(crate) async fn persist_cached_serve_state<W, F, E, H, S>(source: &W) -> Result<(), Error<F>>
 where
-    S: WitnessSource<F, E, H>,
+    W: WitnessSource<F, E, H, S>,
     F: Family,
     E: Context,
     H: Hasher,
+    S: Strategy,
 {
     // Re-persist the already-verified cached witness after the Merkle slot changes (for example,
     // after root verification on compact sync initialization) without recomputing proofs.

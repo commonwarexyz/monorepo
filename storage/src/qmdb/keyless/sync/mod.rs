@@ -20,9 +20,10 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 
-impl<F, E, V, C, H> sync::Database for Keyless<F, E, V, C, H>
+impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -32,13 +33,14 @@ where
         + sync::Journal<F, Context = E, Op = Operation<F, V>>,
     C::Config: Clone + Send,
     H: Hasher,
+    S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     type Family = F;
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config>;
+    type Config = super::Config<C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -67,7 +69,7 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         let hasher = StandardHasher::<H>::new();
 
-        let merkle = Merkle::init_sync(
+        let merkle = Merkle::<F, _, _, S>::init_sync(
             context.with_label("merkle"),
             full::SyncConfig {
                 config: config.merkle.clone(),
@@ -78,7 +80,7 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<F, _, _, _>::from_components(
+        let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
             merkle,
             log,
             hasher,
@@ -115,19 +117,20 @@ where
     }
 }
 
-impl<F, E, V, H, Cfg> sync::compact::Database for CompactDb<F, E, V, H, Cfg>
+impl<F, E, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding + Codec,
     H: Hasher,
+    S: Strategy,
     Operation<F, V>: EncodeShared,
     Operation<F, V>: Read<Cfg = Cfg>,
     Cfg: Clone + Send + Sync + 'static,
 {
     type Family = F;
     type Op = Operation<F, V>;
-    type Config = super::CompactConfig<Cfg>;
+    type Config = super::CompactConfig<Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;

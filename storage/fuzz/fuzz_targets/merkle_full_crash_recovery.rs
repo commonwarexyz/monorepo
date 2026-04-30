@@ -5,6 +5,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
@@ -97,7 +98,7 @@ fn merkle_config(
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
-        thread_pool: None,
+        strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
 }

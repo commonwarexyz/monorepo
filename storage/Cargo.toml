@@ -23,12 +23,11 @@ commonware-codec = { workspace = true, default-features = false }
 commonware-cryptography = { workspace = true, default-features = false }
 commonware-formatting = { workspace = true, default-features = false }
 commonware-macros.workspace = true
-commonware-parallel = { workspace = true, optional = true, features = ["std"] }
+commonware-parallel = { workspace = true, default-features = false }
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
-rayon = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
@@ -53,13 +52,11 @@ std = [
 	"commonware-cryptography/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",
-	"commonware-parallel",
-	"commonware-parallel?/std",
+	"commonware-parallel/std",
 	"commonware-runtime",
 	"commonware-utils/std",
 	"futures",
 	"futures-util",
-	"rayon",
 	"thiserror/std",
 	"tracing",
 	"zstd",

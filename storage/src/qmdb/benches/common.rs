@@ -2,6 +2,7 @@
 //! macros, and the common `gen_random_kv` helper.
 
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_parallel::Rayon;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -39,29 +40,33 @@ pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 // -- Fixed value (Digest), fixed storage layout --
 
-pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
 // -- Fixed value (Digest), variable storage layout --
 // Measures overhead of variable-capable storage when values are fixed-size.
 
-pub type AnyUVarDigestDb<F> = UVariable<F, Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOVarDigestDb<F> = OVariable<F, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUVarDigestDb<F> = UCVariable<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarDigestDb<F> = OCVariable<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUVarDigestDb<F> = UVariable<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+pub type AnyOVarDigestDb<F> = OVariable<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+pub type CurUVarDigestDb<F> =
+    UCVariable<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+pub type CurOVarDigestDb<F> =
+    OCVariable<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
 // -- Variable value (Vec<u8>), variable storage layout --
 
-pub type AnyUVarVecDb<F> = UVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type AnyOVarVecDb<F> = OVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type CurUVarVecDb<F> = UCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarVecDb<F> = OCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUVarVecDb<F> = UVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, Rayon>;
+pub type AnyOVarVecDb<F> = OVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, Rayon>;
+pub type CurUVarVecDb<F> =
+    UCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+pub type CurOVarVecDb<F> =
+    OCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
 // -- Keyless --
 
-pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256>;
+pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256, Rayon>;
 
 pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
     let cfg = keyless_cfg(&ctx);
@@ -78,13 +83,13 @@ fn merkle_cfg(
     suffix: &str,
     ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
-) -> MerkleConfig {
+) -> MerkleConfig<Rayon> {
     MerkleConfig {
         journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
+        strategy: ctx.create_strategy(THREADS).unwrap(),
         page_cache,
     }
 }
@@ -109,7 +114,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
     }
 }
 
-pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
+pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
@@ -118,7 +123,9 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
     }
 }
 
-pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
+pub fn cur_fix_cfg(
+    ctx: &(impl BufferPooler + ThreadPooler),
+) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
@@ -130,7 +137,7 @@ pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConf
 
 pub fn any_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> AnyVariableConfig<EightCap, ((), ())> {
+) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
@@ -141,7 +148,7 @@ pub fn any_var_digest_cfg(
 
 pub fn cur_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> CurrentVariableConfig<EightCap, ((), ())> {
+) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
@@ -151,9 +158,12 @@ pub fn cur_var_digest_cfg(
     }
 }
 
+/// Codec config for variable-length `Vec<u8>` values.
+type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
+
 pub fn any_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
@@ -164,7 +174,7 @@ pub fn any_var_vec_cfg(
 
 pub fn cur_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
@@ -176,7 +186,7 @@ pub fn cur_var_vec_cfg(
 
 pub fn keyless_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
+) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
         merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),

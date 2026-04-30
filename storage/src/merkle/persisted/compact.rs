@@ -31,7 +31,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{
     sequence::prefixed_u64::U64,
     sync::{AsyncMutex, RwLock},
@@ -39,13 +39,13 @@ use commonware_utils::{
 use std::sync::Arc;
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, D: Digest> {
-    inner: batch::UnmerkleizedBatch<F, D>,
+pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
+    inner: batch::UnmerkleizedBatch<F, D, S>,
 }
 
-impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
+impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Wrap an existing [`batch::UnmerkleizedBatch`] as an append-only batch.
-    pub(crate) const fn wrap(inner: batch::UnmerkleizedBatch<F, D>) -> Self {
+    pub(crate) const fn wrap(inner: batch::UnmerkleizedBatch<F, D, S>) -> Self {
         Self { inner }
     }
 
@@ -68,39 +68,32 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         self.inner.leaves()
     }
 
-    /// Set a thread pool for parallel merkleization.
-    pub fn with_pool(self, pool: Option<ThreadPool>) -> Self {
-        Self {
-            inner: self.inner.with_pool(pool),
-        }
-    }
-
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] with computed root.
     pub fn merkleize(
         self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
-    ) -> Arc<batch::MerkleizedBatch<F, D>> {
+    ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         self.inner.merkleize(base, hasher)
     }
 }
 
 /// Configuration for a compact Merkle structure.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<S: Strategy = Sequential> {
     /// Metadata partition used to persist the current compact state.
     pub partition: String,
 
-    /// Optional thread pool used for batch merkleization.
-    pub thread_pool: Option<ThreadPool>,
+    /// Strategy used to parallelize batch operations.
+    pub strategy: S,
 }
 
 /// A Merkle structure that persists only the state required to continue appending.
-pub struct Merkle<F: Family, E: Context, D: Digest> {
+pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy = Sequential> {
     inner: RwLock<Mem<F, D>>,
     metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
     sync_lock: AsyncMutex<()>,
-    pool: Option<ThreadPool>,
+    strategy: S,
     /// Active slot (0 or 1). Source of truth lives on disk under `GEN_PTR_PREFIX`; this is an
     /// in-memory cache refreshed on every `sync_with` and `rewind`.
     active_slot: RwLock<u8>,
@@ -131,7 +124,7 @@ const fn node_prefix(slot: u8) -> u8 {
     }
 }
 
-impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
+impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     const fn validate_persisted_leaves(leaves: Location<F>) -> Result<(), Error<F>> {
         if !leaves.is_valid() {
             return Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"));
@@ -203,7 +196,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
     pub async fn init(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
-        cfg: Config,
+        cfg: Config<S>,
     ) -> Result<Self, Error<F>> {
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.with_label("compact_metadata"),
@@ -233,7 +226,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
             inner: RwLock::new(mem),
             metadata: AsyncMutex::new(metadata),
             sync_lock: AsyncMutex::new(()),
-            pool: cfg.thread_pool,
+            strategy: cfg.strategy,
             active_slot: RwLock::new(active_slot),
         })
     }
@@ -255,7 +248,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
     pub(crate) async fn init_from_compact_state(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
-        cfg: Config,
+        cfg: Config<S>,
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Result<Self, Error<F>> {
@@ -291,7 +284,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
             inner: RwLock::new(mem),
             metadata: AsyncMutex::new(metadata),
             sync_lock: AsyncMutex::new(()),
-            pool: cfg.thread_pool,
+            strategy: cfg.strategy,
             active_slot: RwLock::new(0),
         };
         Ok(merkle)
@@ -312,9 +305,9 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
         self.inner.read().leaves()
     }
 
-    /// Return the thread pool, if any.
-    pub fn pool(&self) -> Option<ThreadPool> {
-        self.pool.clone()
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        &self.strategy
     }
 
     /// Return the index of the slot currently holding the committed state.
@@ -329,24 +322,19 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
     }
 
     /// Create a new speculative batch with this structure as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, D> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
         let inner = self.inner.read();
-        UnmerkleizedBatch::wrap(batch::MerkleizedBatch::from_mem(&inner).new_batch())
-            .with_pool(self.pool())
+        UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
     }
 
     /// Create an owned merkleized batch representing the current committed state.
-    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D>> {
+    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         let inner = self.inner.read();
-        let mut batch = batch::MerkleizedBatch::from_mem(&inner);
-        if let Some(pool) = &self.pool {
-            Arc::get_mut(&mut batch).expect("just created").pool = Some(pool.clone());
-        }
-        batch
+        batch::MerkleizedBatch::from_mem_with_strategy(&inner, self.strategy.clone())
     }
 
     /// Apply a merkleized batch to the in-memory structure.
-    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
+    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
         self.inner.get_mut().apply_batch(batch)
     }
 
@@ -523,7 +511,7 @@ mod tests {
             &StandardHasher::<Sha256>::new(),
             Config {
                 partition: partition.into(),
-                thread_pool: None,
+                strategy: Sequential,
             },
         )
         .await
@@ -550,7 +538,7 @@ mod tests {
         let hasher = StandardHasher::<Sha256>::new();
         let cfg = Config {
             partition: partition.into(),
-            thread_pool: None,
+            strategy: Sequential,
         };
 
         let mut merkle = TestMerkle::<F>::init(context.with_label("first"), &hasher, cfg.clone())
@@ -686,7 +674,7 @@ mod tests {
             let partition = "rewind-reopen";
             let cfg = Config {
                 partition: partition.into(),
-                thread_pool: None,
+                strategy: Sequential,
             };
 
             let mut merkle = open::<mmr::Family>(context.with_label("first"), partition).await;
@@ -751,7 +739,7 @@ mod tests {
             let partition = "compact-invalid-leaf-count";
             let cfg = Config {
                 partition: partition.into(),
-                thread_pool: None,
+                strategy: Sequential,
             };
 
             let mut merkle =

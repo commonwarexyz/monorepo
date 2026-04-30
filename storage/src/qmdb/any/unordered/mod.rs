@@ -12,6 +12,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 
 pub mod fixed;
 pub mod variable;
@@ -27,7 +28,8 @@ impl<
         I: Index<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<F, E, C, I, H, Update<K, V>, N>
+        S: Strategy,
+    > Db<F, E, C, I, H, Update<K, V>, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -58,7 +60,7 @@ where
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, C, I, H] Db<F, E, C, I, H, Update<K, V>>
+    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
     where {
         F: crate::merkle::Family,
         E: Context,
@@ -67,6 +69,7 @@ crate::qmdb::any::traits::impl_db_any! {
         C: PersistableMutableLog<Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
         H: Hasher,
+        S: Strategy,
         Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
     }
@@ -75,7 +78,7 @@ crate::qmdb::any::traits::impl_db_any! {
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_provable! {
-    [F, E, K, V, C, I, H] Db<F, E, C, I, H, Update<K, V>>
+    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
     where {
         F: crate::merkle::Family,
         E: Context,
@@ -84,6 +87,7 @@ crate::qmdb::any::traits::impl_provable! {
         C: PersistableMutableLog<Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
         H: Hasher,
+        S: Strategy,
         Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
     }
