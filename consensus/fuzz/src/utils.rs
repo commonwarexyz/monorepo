@@ -1,4 +1,4 @@
-use arbitrary::Arbitrary;
+use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::{Clock, Quota};
@@ -30,29 +30,51 @@ pub enum Action {
     Unlink,
 }
 
-/// Network partition strategies for fuzz testing.
-#[derive(Debug, Clone, Arbitrary, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Partition {
-    /// All validators connected to each other.
+    /// Fully connected, no fault for the run.
     Connected,
-    /// Two partitions where only the Byzantine node (index 0) bridges them.
+    /// One fault active for the entire run.
+    Static(NetworkFault),
+    /// Round-indexed schedule of faults; topology reverts to fully connected outside entries.
+    Adaptive(Vec<(View, NetworkFault)>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NetworkFault {
     TwoPartitionsWithByzantine,
-    /// Each honest node isolated, only connected to the Byzantine node (index 0).
     ManyPartitionsWithByzantine,
-    /// No connections between any validators.
     Isolated,
-    /// Ring topology: node i connects to i-1 and i+1 (with wraparound).
     Ring,
 }
 
 impl Partition {
     pub fn filter(&self) -> Option<fn(usize, usize, usize) -> bool> {
         match self {
-            Partition::Connected => None,
-            Partition::Isolated => Some(|_, i, j| i == j),
-            Partition::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
-            Partition::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            Partition::Ring => Some(ring),
+            Partition::Connected | Partition::Adaptive(_) => None,
+            Partition::Static(fault) => Some(fault.filter()),
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Partition::Connected)
+    }
+
+    pub fn schedule(&self) -> Option<&[(View, NetworkFault)]> {
+        match self {
+            Partition::Adaptive(schedule) => Some(schedule),
+            _ => None,
+        }
+    }
+}
+
+impl NetworkFault {
+    pub fn filter(&self) -> fn(usize, usize, usize) -> bool {
+        match self {
+            NetworkFault::Isolated => |_, i, j| i == j,
+            NetworkFault::TwoPartitionsWithByzantine => two_partitions_with_byzantine,
+            NetworkFault::ManyPartitionsWithByzantine => many_partitions_with_byzantine,
+            NetworkFault::Ring => ring,
         }
     }
 }
@@ -108,6 +130,35 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
                         .unwrap();
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+/// Apply a partition filter as the full network state.
+///
+/// For every ordered pair (i, j), i != j: ensure a link exists if `filter` permits it,
+/// and ensure the link is removed otherwise. Used by the round-indexed network fault
+/// scheduler to toggle topology mid-run.
+pub async fn apply_partition<P: PublicKey, E: Clock>(
+    oracle: &Oracle<P, E>,
+    validators: &[P],
+    filter: Option<fn(usize, usize, usize) -> bool>,
+    link: &Link,
+) {
+    let n = validators.len();
+    for (i1, v1) in validators.iter().enumerate() {
+        for (i2, v2) in validators.iter().enumerate() {
+            if i1 == i2 {
+                continue;
+            }
+            let want = filter.map_or(true, |f| f(n, i1, i2));
+            oracle.remove_link(v1.clone(), v2.clone()).await.ok();
+            if want {
+                oracle
+                    .add_link(v1.clone(), v2.clone(), link.clone())
+                    .await
+                    .unwrap();
             }
         }
     }

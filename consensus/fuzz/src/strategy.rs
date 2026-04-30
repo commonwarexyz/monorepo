@@ -1,4 +1,4 @@
-use crate::EPOCH;
+use crate::{utils::NetworkFault, EPOCH, FAULT_INJECTION_RATIO};
 use commonware_consensus::{
     simplex::types::Proposal,
     types::{Epoch, Round, View},
@@ -74,6 +74,12 @@ pub trait Strategy: Send + Sync {
 
     fn repeated_proposal_index(&self, rng: &mut impl Rng, proposals_len: usize) -> Option<usize>;
 
+    fn network_faults(
+        &self,
+        required_containers: u64,
+        rng: &mut impl Rng,
+    ) -> Vec<(View, NetworkFault)>;
+
     fn fault_bounds(&self) -> Option<(u64, u64)>;
 }
 
@@ -88,6 +94,37 @@ pub enum StrategyChoice {
         fault_rounds: u64,
         fault_rounds_bound: u64,
     },
+}
+
+fn sample_faults(
+    count: u64,
+    min_view: u64,
+    max_view: u64,
+    rng: &mut impl Rng,
+) -> Vec<(View, NetworkFault)> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let mut entries = Vec::with_capacity(count as usize);
+    let mut views = (min_view..=max_view).collect::<Vec<_>>();
+    let count = (count as usize).min(views.len());
+    for i in 0..count {
+        let idx = rng.gen_range(i..views.len());
+        views.swap(i, idx);
+        let view = views[i];
+        entries.push((View::new(view), sample_network_fault(rng)));
+    }
+    entries
+}
+
+fn sample_network_fault(rng: &mut impl Rng) -> NetworkFault {
+    match rng.gen_range(0..4) {
+        0 => NetworkFault::Isolated,
+        1 => NetworkFault::TwoPartitionsWithByzantine,
+        2 => NetworkFault::ManyPartitionsWithByzantine,
+        _ => NetworkFault::Ring,
+    }
 }
 
 pub struct SmallScope {
@@ -252,6 +289,18 @@ impl Strategy for SmallScope {
             return None;
         }
         Some(proposals_len - 2)
+    }
+
+    fn network_faults(
+        &self,
+        required_containers: u64,
+        rng: &mut impl Rng,
+    ) -> Vec<(View, NetworkFault)> {
+        let bound = self.fault_rounds_bound.min(required_containers).max(1);
+        // `.max(1)` enforces "adaptive is never silently empty" at the method
+        // boundary, even if a caller constructs SmallScope with `fault_rounds = 0`.
+        let d = self.fault_rounds.max(1).min(bound);
+        sample_faults(d, 1, bound, rng)
     }
 
     fn fault_bounds(&self) -> Option<(u64, u64)> {
@@ -451,6 +500,19 @@ impl Strategy for AnyScope {
         Some(idx)
     }
 
+    fn network_faults(
+        &self,
+        required_containers: u64,
+        rng: &mut impl Rng,
+    ) -> Vec<(View, NetworkFault)> {
+        // Scale d with run length so density mirrors SmallScope's max
+        // (`fault_rounds_bound / FAULT_INJECTION_RATIO`). Always ≥ 1 entry so
+        // `Partition::Adaptive` is never silently empty.
+        let max_d = (required_containers / FAULT_INJECTION_RATIO).max(1);
+        let d = rng.gen_range(1..=max_d);
+        sample_faults(d, 1, required_containers, rng)
+    }
+
     fn fault_bounds(&self) -> Option<(u64, u64)> {
         None
     }
@@ -594,6 +656,26 @@ impl Strategy for FutureScope {
             return None;
         }
         Some(proposals_len - 2)
+    }
+
+    fn network_faults(
+        &self,
+        required_containers: u64,
+        rng: &mut impl Rng,
+    ) -> Vec<(View, NetworkFault)> {
+        // Clamp `start` to at most `required_containers` so a future window of at least one
+        // view always exists. Without the clamp, `bound == required_containers` would yield
+        // an empty schedule and silently degenerate `Partition::Adaptive` into a no-op.
+        let start = self
+            .fault_rounds_bound
+            .saturating_add(1)
+            .min(required_containers)
+            .max(1);
+        let window = required_containers - start + 1;
+        // `.max(1)` enforces "adaptive is never silently empty" at the method
+        // boundary, even if a caller constructs FutureScope with `fault_rounds = 0`.
+        let d = self.fault_rounds.max(1).min(window);
+        sample_faults(d, start, required_containers, rng)
     }
 
     fn fault_bounds(&self) -> Option<(u64, u64)> {

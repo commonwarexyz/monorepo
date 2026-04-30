@@ -14,8 +14,8 @@ use crate::{
     disrupter::Disrupter,
     network::ByzantineFirstReceiver,
     simplex_node::NodeFuzzInput,
-    strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
-    utils::{link_peers, register, Action, Partition},
+    strategy::{AnyScope, FutureScope, SmallScope, Strategy, StrategyChoice},
+    utils::{apply_partition, link_peers, register, Action, NetworkFault, Partition},
 };
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
@@ -60,7 +60,7 @@ pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-const FAULT_INJECTION_RATIO: u64 = 5;
+pub(crate) const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 1;
 const MAX_REQUIRED_CONTAINERS: u64 = 30;
@@ -144,18 +144,18 @@ pub struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Bias towards Connected partition
         let partition = match u.int_in_range(0..=99)? {
-            0..=79 => Partition::Connected,                    // 80%
-            80..=84 => Partition::Isolated,                    // 5%
-            85..=89 => Partition::TwoPartitionsWithByzantine,  // 5%
-            90..=94 => Partition::ManyPartitionsWithByzantine, // 5%
-            _ => Partition::Ring,                              // 5%
+            0..=29 => Partition::Connected,
+            30..=34 => Partition::Static(NetworkFault::Isolated),
+            35..=39 => Partition::Static(NetworkFault::TwoPartitionsWithByzantine),
+            40..=44 => Partition::Static(NetworkFault::ManyPartitionsWithByzantine),
+            45..=49 => Partition::Static(NetworkFault::Ring),
+            _ => Partition::Adaptive(Vec::new()),
         };
 
         let configuration = match u.int_in_range(1..=100)? {
             1..=95 => N4F1C3, // 95%
-            _ => N4F3C1,      // 5%
+            _ => N4F0C4,      // 5%
         };
 
         // Bias degraded networking - 1%
@@ -488,12 +488,110 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     )
 }
 
-fn run<P: simplex::Simplex>(input: FuzzInput) {
+/// Default link used by the round-indexed fault scheduler when re-establishing edges.
+fn default_link() -> Link {
+    Link {
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
+        success_rate: 1.0,
+    }
+}
+
+fn filter_id(f: Option<fn(usize, usize, usize) -> bool>) -> usize {
+    f.map(|p| p as usize).unwrap_or(0)
+}
+
+async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
+    context: &deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    reporters: &mut [reporter::Reporter<
+        deterministic::Context,
+        P::Scheme,
+        P::Elector,
+        Sha256Digest,
+    >],
+    partition: Partition,
+    required_containers: u64,
+) {
+    let Some(schedule) = partition.schedule() else {
+        return;
+    };
+    if schedule.is_empty() || reporters.is_empty() {
+        return;
+    }
+    let (mut latest, mut monitor) = reporters[0].subscribe().await;
+    let oracle = oracle.clone();
+    let participants: Vec<_> = participants.to_vec();
+    let base_filter = partition.filter();
+    let schedule = schedule.to_vec();
+    context
+        .with_label("network_fault_scheduler")
+        .spawn(move |_| async move {
+            let link = default_link();
+            let mut active = filter_id(base_filter);
+            let mut current_view = latest.get();
+            loop {
+                let target_filter = schedule.iter().find_map(|(view, fault)| {
+                    (*view == View::new(current_view)).then(|| fault.filter())
+                });
+                let target_id = filter_id(target_filter);
+                if target_id != active {
+                    apply_partition(&oracle, &participants, target_filter, &link).await;
+                    active = target_id;
+                }
+                if current_view >= required_containers {
+                    break;
+                }
+                let Some(next) = monitor.recv().await else {
+                    break;
+                };
+                latest = next;
+                current_view = latest.get();
+            }
+        });
+}
+
+fn network_faults(
+    strategy: StrategyChoice,
+    required_containers: u64,
+    rng: &mut impl rand::Rng,
+) -> Vec<(View, NetworkFault)> {
+    match strategy {
+        StrategyChoice::SmallScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => SmallScope {
+            fault_rounds,
+            fault_rounds_bound,
+        }
+        .network_faults(required_containers, rng),
+        StrategyChoice::AnyScope => AnyScope.network_faults(required_containers, rng),
+        StrategyChoice::FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        }
+        .network_faults(required_containers, rng),
+    }
+}
+
+fn run<P: simplex::Simplex>(mut input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
+        if matches!(input.partition, Partition::Adaptive(_)) {
+            input.partition = Partition::Adaptive(network_faults(
+                input.strategy,
+                input.required_containers,
+                &mut context,
+            ));
+        }
+
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
@@ -530,7 +628,17 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             reporters.push(reporter);
         }
 
-        if input.partition == Partition::Connected && config.is_valid() {
+        spawn_network_fault_scheduler::<P>(
+            &context,
+            &oracle,
+            &participants,
+            &mut reporters,
+            input.partition.clone(),
+            input.required_containers,
+        )
+        .await;
+
+        if input.partition.is_connected() && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -608,7 +716,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.is_valid() {
+        if input.partition.is_connected() && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -836,7 +944,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.is_valid() {
+        if input.partition.is_connected() && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -888,6 +996,7 @@ pub enum Mode {
     Standard,
     Twin,
     AdversarialNetwork,
+    FaultyNet,
     WithRecovery,
 }
 
@@ -918,13 +1027,24 @@ impl FuzzMode for AdversarialNetwork {
     const MODE: Mode = Mode::AdversarialNetwork;
 }
 
-pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
+pub struct FaultyNet;
+impl FuzzMode for FaultyNet {
+    const MODE: Mode = Mode::FaultyNet;
+}
+
+pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
         Mode::AdversarialNetwork => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_adversarial_network::<P>(input)
         })),
+        Mode::FaultyNet => {
+            // We run only fuzzing with network faults
+            // which will be populated later, depending on the chosen strategy.
+            input.partition = Partition::Adaptive(Vec::new());
+            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
+        }
         Mode::Twin => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
         })),
