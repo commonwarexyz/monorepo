@@ -16,7 +16,10 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+};
 
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type JournalBatch<F, D, K, V> = authenticated::MerkleizedBatch<F, D, Operation<F, K, V>>;
@@ -71,11 +74,17 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
     pub(super) diff: Arc<DiffVec<K, F, V::Value>>,
 
-    /// Strong refs to uncommitted ancestors, newest-to-oldest.
-    ///
-    /// This is a wrapper-level chain for validation/read-through and may include itemless
-    /// `to_batch` markers that the journal layer intentionally filters out.
-    pub(super) ancestors: Vec<Arc<Self>>,
+    /// The parent batch in the chain, if any.
+    parent: Option<Weak<Self>>,
+
+    /// Arc refs to each ancestor's diff, collected during `merkleize()` while ancestors are alive.
+    /// Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// 1:1 with `ancestor_bounds` (same length, same ordering).
+    pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
+
+    /// Each ancestor's log range. A batch is committed when its range ends at or before the
+    /// current DB size.
+    pub(super) ancestor_bounds: Vec<Bounds<F>>,
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
@@ -136,7 +145,7 @@ where
             if let Some(entry) = lookup_sorted(parent.diff.as_slice(), key) {
                 return Ok(Some(entry.value.clone()));
             }
-            for batch in &parent.ancestors {
+            for batch in parent.ancestors() {
                 if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
                     return Ok(Some(entry.value.clone()));
                 }
@@ -183,7 +192,7 @@ where
                     found = true;
                 }
                 if !found {
-                    for batch in &parent.ancestors {
+                    for batch in parent.ancestors() {
                         if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
                             results.push(Some(entry.value.clone()));
                             found = true;
@@ -247,11 +256,16 @@ where
         journal_batch = journal_batch.add(Operation::Commit(metadata, inactivity_floor));
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let ancestors = self
-            .parent
-            .as_ref()
-            .map(MerkleizedBatch::ancestor_chain)
-            .unwrap_or_default();
+        let (ancestor_diffs, ancestor_bounds) = self.parent.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |parent| {
+                let mut diffs = vec![Arc::clone(&parent.diff)];
+                diffs.extend(parent.ancestor_diffs.iter().cloned());
+                let mut bounds = vec![parent.bounds];
+                bounds.extend(parent.ancestor_bounds.iter().copied());
+                (diffs, bounds)
+            },
+        );
         let bounds =
             Bounds::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
 
@@ -259,7 +273,9 @@ where
             journal_batch: journal_merkleized,
             bounds,
             diff: Arc::new(diff),
-            ancestors,
+            parent: self.parent.as_ref().map(Arc::downgrade),
+            ancestor_diffs,
+            ancestor_bounds,
         })
     }
 }
@@ -268,12 +284,15 @@ impl<F: Family, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
 where
     Operation<F, K, V>: EncodeShared,
 {
-    /// Build a newest-to-oldest ancestor chain rooted at `parent`, including `parent` itself.
-    fn ancestor_chain(parent: &Arc<Self>) -> Vec<Arc<Self>> {
-        let mut ancestors = Vec::with_capacity(parent.ancestors.len() + 1);
-        ancestors.push(Arc::clone(parent));
-        ancestors.extend(parent.ancestors.iter().cloned());
-        ancestors
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
+    /// weak ref fails to upgrade.
+    fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
+        core::iter::from_fn(move || {
+            let batch = next.take()?;
+            next = batch.parent.as_ref().and_then(Weak::upgrade);
+            Some(batch)
+        })
     }
 
     /// Return the speculative root.
@@ -297,7 +316,7 @@ where
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(Some(entry.value.clone()));
         }
-        for batch in &self.ancestors {
+        for batch in self.ancestors() {
             if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
                 return Ok(Some(entry.value.clone()));
             }
@@ -337,7 +356,7 @@ where
 
             // Walk ancestor diffs captured when this batch was merkleized.
             let mut found = false;
-            for batch in &self.ancestors {
+            for batch in self.ancestors() {
                 if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
                     results.push(Some(entry.value.clone()));
                     found = true;
@@ -404,7 +423,9 @@ where
             journal_batch,
             bounds,
             diff: Arc::new(Vec::new()),
-            ancestors: Vec::new(),
+            parent: None,
+            ancestor_diffs: Vec::new(),
+            ancestor_bounds: Vec::new(),
         })
     }
 }

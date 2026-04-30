@@ -399,7 +399,8 @@ where
         Arc::new(batch::MerkleizedBatch {
             journal_batch,
             bounds,
-            ancestors: Vec::new(),
+            parent: None,
+            ancestor_bounds: Vec::new(),
         })
     }
 
@@ -437,7 +438,7 @@ where
             self.last_commit_loc,
             self.inactivity_floor_loc,
             &batch.bounds,
-            batch.ancestors.iter().map(|ancestor| ancestor.bounds),
+            batch.ancestor_bounds.iter().copied(),
         )?;
         self.journal.apply_batch(&batch.journal_batch).await?;
 

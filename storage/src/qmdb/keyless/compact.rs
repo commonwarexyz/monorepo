@@ -117,24 +117,15 @@ where
 {
     pub(super) compact: CompactBatch<F, D>,
     pub(super) commit_metadata: Option<V::Value>,
-    /// Strong refs to uncommitted ancestors, newest-to-oldest.
-    ///
-    /// This is a wrapper-level chain for validation and may include itemless `to_batch` markers.
-    pub(super) ancestors: Vec<Arc<Self>>,
+    /// Each ancestor's log range. A batch is committed when its range ends at or before the
+    /// current DB size.
+    pub(super) ancestor_bounds: Vec<Bounds<F>>,
 }
 
 impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
 {
-    /// Build a newest-to-oldest ancestor chain rooted at `parent`, including `parent` itself.
-    fn ancestor_chain(parent: &Arc<Self>) -> Vec<Arc<Self>> {
-        let mut ancestors = Vec::with_capacity(parent.ancestors.len() + 1);
-        ancestors.push(Arc::clone(parent));
-        ancestors.extend(parent.ancestors.iter().cloned());
-        ancestors
-    }
-
     /// Return the root digest after this batch is applied.
     pub fn root(&self) -> D {
         self.compact.root()
@@ -198,17 +189,21 @@ where
         Operation<F, V>: Read<Cfg = C>,
     {
         let hasher = StandardHasher::<H>::new();
-        let (base_size, db_size, merkle_parent, ancestors) = match self.base {
+        let (base_size, db_size, merkle_parent, ancestor_bounds) = match self.base {
             Base::Db {
                 db_size,
                 merkle_parent,
             } => (db_size, db_size, merkle_parent, Vec::new()),
-            Base::Child(parent) => (
-                parent.compact.bounds.new_size(),
-                parent.compact.bounds.committed_size(),
-                Arc::clone(&parent.compact.merkle),
-                MerkleizedBatch::ancestor_chain(&parent),
-            ),
+            Base::Child(parent) => {
+                let mut ancestor_bounds = vec![parent.compact.bounds];
+                ancestor_bounds.extend(parent.ancestor_bounds.iter().copied());
+                (
+                    parent.compact.bounds.new_size(),
+                    parent.compact.bounds.committed_size(),
+                    Arc::clone(&parent.compact.merkle),
+                    ancestor_bounds,
+                )
+            }
         };
         let commit_op = Operation::Commit(metadata.clone(), inactivity_floor);
         let compact = db.inner.merkle.with_mem(|mem| {
@@ -227,7 +222,7 @@ where
         Arc::new(MerkleizedBatch {
             compact,
             commit_metadata: metadata,
-            ancestors,
+            ancestor_bounds,
         })
     }
 }
@@ -352,7 +347,7 @@ where
                 bounds,
             },
             commit_metadata: self.inner.get_metadata(),
-            ancestors: Vec::new(),
+            ancestor_bounds: Vec::new(),
         })
     }
 
@@ -376,10 +371,7 @@ where
             self.inner.last_commit_loc,
             self.inner.inactivity_floor_loc,
             &batch.compact.bounds,
-            batch
-                .ancestors
-                .iter()
-                .map(|ancestor| ancestor.compact.bounds),
+            batch.ancestor_bounds.iter().copied(),
         )?;
         self.inner.merkle.apply_batch(&batch.compact.merkle)?;
         self.inner.last_commit_metadata = batch.commit_metadata.clone();

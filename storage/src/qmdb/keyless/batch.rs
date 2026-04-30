@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -49,11 +49,11 @@ where
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>>>,
     /// Position bookkeeping plus the floor declared by this batch's commit.
     pub(super) bounds: Bounds<F>,
-    /// Strong refs to uncommitted ancestors, newest-to-oldest.
-    ///
-    /// This is a wrapper-level chain for validation/read-through and may include itemless
-    /// `to_batch` markers that the journal layer intentionally filters out.
-    pub(super) ancestors: Vec<Arc<Self>>,
+    /// The parent batch in the chain, if any.
+    pub(super) parent: Option<Weak<Self>>,
+    /// Each ancestor's log range. A batch is committed when its range ends at or before the
+    /// current DB size.
+    pub(super) ancestor_bounds: Vec<Bounds<F>>,
 }
 
 /// Read a single operation from the parent chain at the given location.
@@ -75,7 +75,7 @@ where
     if loc >= self_base && loc < self_end {
         return Some(batch.journal_batch.items()[(loc - self_base) as usize].clone());
     }
-    for ancestor in &batch.ancestors {
+    for ancestor in batch.ancestors() {
         let end = ancestor.journal_batch.size();
         let base = end - ancestor.journal_batch.items().len() as u64;
         if loc >= base && loc < end {
@@ -246,18 +246,19 @@ where
         journal_batch = journal_batch.add(Operation::Commit(metadata, inactivity_floor));
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let ancestors = self
-            .parent
-            .as_ref()
-            .map(MerkleizedBatch::ancestor_chain)
-            .unwrap_or_default();
+        let ancestor_bounds = self.parent.as_ref().map_or_else(Vec::new, |parent| {
+            let mut bounds = vec![parent.bounds];
+            bounds.extend(parent.ancestor_bounds.iter().copied());
+            bounds
+        });
         let bounds =
             Bounds::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
             bounds,
-            ancestors,
+            parent: self.parent.as_ref().map(Arc::downgrade),
+            ancestor_bounds,
         })
     }
 }
@@ -266,12 +267,15 @@ impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
 where
     Operation<F, V>: EncodeShared,
 {
-    /// Build a newest-to-oldest ancestor chain rooted at `parent`, including `parent` itself.
-    fn ancestor_chain(parent: &Arc<Self>) -> Vec<Arc<Self>> {
-        let mut ancestors = Vec::with_capacity(parent.ancestors.len() + 1);
-        ancestors.push(Arc::clone(parent));
-        ancestors.extend(parent.ancestors.iter().cloned());
-        ancestors
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
+    /// weak ref fails to upgrade.
+    fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
+        core::iter::from_fn(move || {
+            let batch = next.take()?;
+            next = batch.parent.as_ref().and_then(Weak::upgrade);
+            Some(batch)
+        })
     }
 
     /// Return the speculative root.

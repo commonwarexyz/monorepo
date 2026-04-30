@@ -582,11 +582,15 @@ where
             self.snapshot
                 .insert_and_prune(key, entry.loc, |v| *v < oldest_retained);
         }
-        for ancestor in &batch.ancestors {
-            if !validated.is_unapplied(&ancestor.bounds) {
+        for (ancestor_diff, ancestor_bounds) in batch
+            .ancestor_diffs
+            .iter()
+            .zip(batch.ancestor_bounds.iter())
+        {
+            if !validated.is_unapplied(ancestor_bounds) {
                 continue;
             }
-            for (key, entry) in ancestor.diff.iter() {
+            for (key, entry) in ancestor_diff.iter() {
                 if seen.insert(key.clone()) {
                     self.snapshot
                         .insert_and_prune(key, entry.loc, |v| *v < oldest_retained);
@@ -630,7 +634,7 @@ where
             self.last_commit_loc,
             self.inactivity_floor_loc,
             &batch.bounds,
-            batch.ancestors.iter().map(|ancestor| ancestor.bounds),
+            batch.ancestor_bounds.iter().copied(),
         )?;
         // Apply journal.
         self.journal.apply_batch(&batch.journal_batch).await?;
