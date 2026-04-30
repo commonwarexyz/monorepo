@@ -54,8 +54,9 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
+pub(crate) mod batch_chain;
 pub(crate) mod bitmap;
-pub(crate) mod compact_witness;
+pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
@@ -110,7 +111,7 @@ pub enum Error<F: Family> {
 
     /// The batch was created from a different database state than the current one.
     #[error(
-        "stale batch: db has {db_size} ops, batch requires {batch_db_size} or {batch_base_size}"
+        "stale batch: db has {db_size} ops, batch requires {batch_db_size}, {batch_base_size}, or an ancestor boundary"
     )]
     StaleBatch {
         db_size: u64,

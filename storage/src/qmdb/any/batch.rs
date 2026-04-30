@@ -14,6 +14,7 @@ use crate::{
             ordered::{find_next_key, find_prev_key},
             ValueEncoding,
         },
+        batch_chain,
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
@@ -25,7 +26,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
-use core::{iter, ops::Range};
+use core::ops::Range;
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -120,7 +121,7 @@ where
     fn base_size(&self) -> u64 {
         match self {
             Self::Db { db_size, .. } => *db_size,
-            Self::Child(parent) => parent.total_size,
+            Self::Child(parent) => parent.bounds.total_size,
         }
     }
 
@@ -131,7 +132,7 @@ where
     fn db_size(&self) -> u64 {
         match self {
             Self::Db { db_size, .. } => *db_size,
-            Self::Child(parent) => parent.db_size,
+            Self::Child(parent) => parent.bounds.db_size,
         }
     }
 
@@ -141,7 +142,7 @@ where
                 inactivity_floor_loc,
                 ..
             } => *inactivity_floor_loc,
-            Self::Child(parent) => parent.new_inactivity_floor_loc,
+            Self::Child(parent) => parent.bounds.inactivity_floor,
         }
     }
 
@@ -222,36 +223,16 @@ pub struct MerkleizedBatch<
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
 
-    /// Inactivity floor location after this batch's floor raise.
-    pub(crate) new_inactivity_floor_loc: Location<F>,
-
-    /// Location of the CommitFloor operation appended by this batch.
-    pub(crate) new_last_commit_loc: Location<F>,
-
-    /// Total operations before this batch's own ops (DB + ancestor batches).
-    pub(crate) base_size: u64,
-
-    /// Total operation count after this batch.
-    pub(crate) total_size: u64,
-
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
 
-    /// Effective DB size at the base of this batch's ancestor chain. Equals `base_size`
-    /// when all ancestors are alive, but shifts up if ancestors were dropped before
-    /// merkleize (to account for the gap left by dead ancestors). Used by `apply_batch`
-    /// to validate that the DB hasn't diverged from this batch's chain.
-    pub(crate) db_size: u64,
-
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
     /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// 1:1 with `ancestor_diff_ends` (same length, same ordering).
+    /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
 
-    /// Each ancestor's `total_size` (operation count after that ancestor).
-    /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
-    /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
-    pub(crate) ancestor_diff_ends: Vec<u64>,
+    /// Position and floor bounds for this batch chain.
+    pub(crate) bounds: batch_chain::Bounds<F>,
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
@@ -702,7 +683,7 @@ where
         drop(reader);
 
         // CommitFloor operation.
-        let commit_loc = Location::new(self.base_size + ops.len() as u64);
+        let commit_loc = Location::<F>::new(self.base_size + ops.len() as u64);
         ops.push(Operation::CommitFloor(metadata, floor));
 
         // Merkleize the journal batch.
@@ -716,21 +697,29 @@ where
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestor_diff_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
+        let ancestors: Vec<_> = self
+            .ancestors
+            .iter()
+            .map(|a| batch_chain::AncestorBounds {
+                floor: a.bounds.inactivity_floor,
+                end: a.bounds.total_size,
+            })
+            .collect();
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
             parent: self.ancestors.first().map(Arc::downgrade),
-            new_inactivity_floor_loc: floor,
-            new_last_commit_loc: commit_loc,
-            base_size: self.base_size,
-            total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
-            db_size: self.db_size,
             ancestor_diffs,
-            ancestor_diff_ends,
+            bounds: batch_chain::Bounds {
+                base_size: self.base_size,
+                db_size: self.db_size,
+                total_size: *commit_loc + 1,
+                ancestors,
+                inactivity_floor: floor,
+            },
         }))
     }
 }
@@ -1401,12 +1390,7 @@ where
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
-        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        iter::from_fn(move || {
-            let batch = next.take()?;
-            next = batch.parent.as_ref().and_then(Weak::upgrade);
-            Some(batch)
-        })
+        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 }
 
@@ -1567,18 +1551,9 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // Valid db_size values: batch.db_size (nothing committed), batch.base_size
-        // (all ancestors committed), or any ancestor_diff_ends[i] (partial commit).
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_diff_ends.contains(&db_size);
-        if !valid {
-            return Err(crate::qmdb::Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
+        batch
+            .bounds
+            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
         let start_loc = Location::new(db_size);
 
         // Apply journal (handles its own partial ancestor skipping).
@@ -1589,7 +1564,7 @@ where
         // Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
         let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
+            if batch.bounds.ancestors[i].end <= db_size {
                 for (key, entry) in ancestor_diff.iter() {
                     // parent-first order: .or_insert keeps the nearest committed.
                     committed_locs.entry(key).or_insert(entry.loc());
@@ -1600,7 +1575,7 @@ where
         // Apply diffs to snapshot and bitmap under one write lock (sync, no await).
         {
             let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(*batch.new_last_commit_loc + 1);
+            bitmap.extend_to(batch.bounds.total_size);
 
             // Apply child's diff (child wins via seen set). Safe to use a HashSet here since we
             // don't rely on iteration order.
@@ -1616,7 +1591,7 @@ where
 
             // Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                if batch.ancestor_diff_ends[i] <= db_size {
+                if batch.bounds.ancestors[i].end <= db_size {
                     continue;
                 }
                 for (key, entry) in ancestor_diff.iter() {
@@ -1638,17 +1613,16 @@ where
             // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
             // set the new; earlier ancestor commits between them are already 0 from `extend_to`.
             bitmap.set_bit(*self.last_commit_loc, false);
-            bitmap.set_bit(*batch.new_last_commit_loc, true);
+            bitmap.set_bit(batch.bounds.total_size - 1, true);
         }
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
-        self.last_commit_loc = batch.new_last_commit_loc;
+        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
 
         // Return range of operations that were written to the log.
-        let end_loc = Location::new(*self.last_commit_loc + 1);
-        Ok(start_loc..end_loc)
+        Ok(start_loc..Location::new(batch.bounds.total_size))
     }
 }
 
@@ -1672,14 +1646,15 @@ where
             journal_batch: self.log.to_merkleized_batch(),
             diff: Arc::new(Vec::new()),
             parent: None,
-            new_inactivity_floor_loc: self.inactivity_floor_loc,
-            new_last_commit_loc: self.last_commit_loc,
-            base_size: journal_size,
-            total_size: journal_size,
             total_active_keys: self.active_keys,
-            db_size: journal_size,
             ancestor_diffs: Vec::new(),
-            ancestor_diff_ends: Vec::new(),
+            bounds: batch_chain::Bounds {
+                base_size: journal_size,
+                db_size: journal_size,
+                total_size: journal_size,
+                ancestors: Vec::new(),
+                inactivity_floor: self.inactivity_floor_loc,
+            },
         })
     }
 }

@@ -576,7 +576,7 @@ where
     Operation<F, U>: Codec,
 {
     let batch_len = inner.journal_batch.items().len();
-    let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
+    let batch_base = inner.bounds.total_size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
     let overlay = build_chunk_overlay::<F, U, _, N>(

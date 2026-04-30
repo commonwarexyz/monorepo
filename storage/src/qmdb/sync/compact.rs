@@ -14,7 +14,7 @@
 //! A compact db persists two pieces of state that must always describe the same committed tip:
 //!
 //! 1. the compact Merkle frontier (persisted by [`crate::merkle::compact`]), and
-//! 2. a db-level witness for the last commit (persisted by `qmdb::compact_witness`).
+//! 2. a db-level witness for the last commit (persisted by `qmdb::compact::witness`).
 //!
 //! The witness exists because only the db layer knows how to encode and decode the typed commit
 //! operation. Without it, a compact db could recover its root and continue appending, but it could
@@ -193,12 +193,28 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
-    /// The caller requested a target different from the source's current servable state.
+    /// The caller requested a target different from the source's current witness.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]
     StaleTarget {
         requested: Target<F, D>,
         current: Target<F, D>,
     },
+}
+
+fn state_for_matching_witness<F: Family, Op, D: Digest>(
+    requested: Target<F, D>,
+    witness_target: Target<F, D>,
+    state: State<F, Op, D>,
+) -> Result<State<F, Op, D>, ServeError<F, D>> {
+    // Compact DBs can only serve their current witness, so the resolver rejects stale requests
+    // before returning that witness-backed state.
+    if requested.root != witness_target.root || requested.leaf_count != witness_target.leaf_count {
+        return Err(ServeError::StaleTarget {
+            requested,
+            current: witness_target,
+        });
+    }
+    Ok(state)
 }
 
 /// Trait for compact sync fetches from a source database.
@@ -647,7 +663,7 @@ macro_rules! impl_compact_resolver_immutable {
 }
 
 // Resolver impls for compact keyless databases. These already persist a compact witness, so serving
-// is just a validated `compact_state()` read rather than reconstructing anything from history.
+// is just a target check over the current witness rather than reconstructing anything from history.
 macro_rules! impl_compact_resolver_compact_keyless {
     ($db:ident, $op:ident) => {
         impl<F, E, V, H, C> Resolver for Arc<$db<F, E, V, H, C>>
@@ -668,7 +684,9 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target)
+                let (witness_target, state) =
+                    self.current_witness_state().map_err(ServeError::Database)?;
+                state_for_matching_witness(target, witness_target, state)
             }
         }
 
@@ -690,7 +708,10 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.read().await.compact_state(target)
+                let db = self.read().await;
+                let (witness_target, state) =
+                    db.current_witness_state().map_err(ServeError::Database)?;
+                state_for_matching_witness(target, witness_target, state)
             }
         }
 
@@ -714,14 +735,16 @@ macro_rules! impl_compact_resolver_compact_keyless {
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target)
+                let (witness_target, state) =
+                    db.current_witness_state().map_err(ServeError::Database)?;
+                state_for_matching_witness(target, witness_target, state)
             }
         }
     };
 }
 
 // Resolver impls for compact immutable databases. Like the keyless compact path, these read the
-// persisted witness/cache directly instead of rebuilding it from a full operation log.
+// persisted witness directly instead of rebuilding it from a full operation log.
 macro_rules! impl_compact_resolver_compact_immutable {
     ($db:ident, $op:ident) => {
         impl<F, E, K, V, H, C> Resolver for Arc<$db<F, E, K, V, H, C>>
@@ -743,7 +766,9 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target)
+                let (witness_target, state) =
+                    self.current_witness_state().map_err(ServeError::Database)?;
+                state_for_matching_witness(target, witness_target, state)
             }
         }
 
@@ -766,7 +791,10 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.read().await.compact_state(target)
+                let db = self.read().await;
+                let (witness_target, state) =
+                    db.current_witness_state().map_err(ServeError::Database)?;
+                state_for_matching_witness(target, witness_target, state)
             }
         }
 
@@ -791,7 +819,9 @@ macro_rules! impl_compact_resolver_compact_immutable {
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target)
+                let (witness_target, state) =
+                    db.current_witness_state().map_err(ServeError::Database)?;
+                state_for_matching_witness(target, witness_target, state)
             }
         }
     };

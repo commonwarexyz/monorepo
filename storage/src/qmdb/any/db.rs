@@ -246,19 +246,11 @@ where
         &self,
         loc: Location<F>,
     ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
-        if !loc.is_valid() {
-            return Err(crate::merkle::Error::LocationOverflow(loc).into());
-        }
-        let futs: Vec<_> = F::nodes_to_pin(loc)
-            .map(|p| async move {
-                self.log
-                    .merkle
-                    .get_node(p)
-                    .await?
-                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
-            })
-            .collect();
-        futures::future::try_join_all(futs).await
+        self.log
+            .merkle
+            .pinned_nodes_at(loc)
+            .await
+            .map_err(Into::into)
     }
 }
 

@@ -676,6 +676,17 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
     }
 
+    /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        let futs = F::nodes_to_pin(loc)
+            .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
+            .collect::<Vec<_>>();
+        futures::future::try_join_all(futs).await
+    }
+
     /// Sync the structure to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
