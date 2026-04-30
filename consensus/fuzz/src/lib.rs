@@ -366,8 +366,7 @@ where
         scheme: scheme.clone(),
         elector: elector.clone(),
     };
-    let reporter_context = context.child("reporter");
-    let reporter = reporter::Reporter::new(reporter_context, reporter_cfg);
+    let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -454,27 +453,38 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 recovered,
                 resolver,
             );
-            reporters.push(reporter);
+            reporters.push((validator, reporter));
         }
 
         // Wait for finalization or timeout
         if input.partition == Partition::Connected && config.can_finalize() {
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(context.child("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
-                        latest = monitor.recv().await.expect("event missing");
-                    }
-                }));
+                finalizers.push(
+                    context
+                        .child("finalizer")
+                        .with_attribute("validator", validator)
+                        .spawn(move |_| async move {
+                            while latest.get() < required_containers {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        }),
+                );
             }
             join_all(finalizers).await;
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
+        let states = invariants::extract(
+            reporters
+                .into_iter()
+                .map(|(_, reporter)| reporter)
+                .collect(),
+            config.n as usize,
+        );
         invariants::check::<P>(config.n, states);
     });
 }
@@ -509,7 +519,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
             let context = context
                 .child("twin")
-                .with_attribute("index", idx)
                 .with_attribute("public_key", validator);
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
@@ -599,8 +608,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 scheme: scheme.clone(),
                 elector: primary_elector.clone(),
             };
-            let reporter_context = primary_context.child("reporter");
-            let reporter = reporter::Reporter::new(reporter_context, reporter_cfg);
+            let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -661,7 +669,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
             let ctx = context
                 .child("honest")
-                .with_attribute("index", idx)
                 .with_attribute("public_key", validator);
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
@@ -679,27 +686,38 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 recovered,
                 resolver,
             );
-            reporters.push(reporter);
+            reporters.push((validator, reporter));
         }
 
         // Wait for finalization or timeout
         if input.partition == Partition::Connected && config.can_finalize() {
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(context.child("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
-                        latest = monitor.recv().await.expect("event missing");
-                    }
-                }));
+                finalizers.push(
+                    context
+                        .child("finalizer")
+                        .with_attribute("validator", validator)
+                        .spawn(move |_| async move {
+                            while latest.get() < required_containers {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        }),
+                );
             }
             join_all(finalizers).await;
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
+        let states = invariants::extract(
+            reporters
+                .into_iter()
+                .map(|(_, reporter)| reporter)
+                .collect(),
+            config.n as usize,
+        );
         invariants::check::<P>(config.n, states);
     });
 }
