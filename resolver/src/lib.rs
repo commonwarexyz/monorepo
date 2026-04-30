@@ -20,12 +20,14 @@ commonware_macros::stability_scope!(BETA {
         /// Type of data to retrieve.
         type Value;
 
-        /// Type used to indicate why data is not available.
-        type Failure;
-
         /// Deliver data to the consumer.
         ///
         /// Returns `true` if the data is valid.
+        ///
+        /// The returned future may be dropped before completion if the
+        /// application cancels the fetch via [`Resolver::cancel`],
+        /// [`Resolver::clear`], or [`Resolver::retain`]. When this happens,
+        /// the resolver discards the validation result.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
@@ -34,15 +36,6 @@ commonware_macros::stability_scope!(BETA {
             key: Self::Key,
             value: Self::Value,
         ) -> impl Future<Output = bool> + Send;
-
-        /// Let the consumer know that the data is not being fetched anymore.
-        ///
-        /// The failure is used to indicate why.
-        fn failed(
-            &mut self,
-            key: Self::Key,
-            failure: Self::Failure,
-        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.
@@ -90,12 +83,22 @@ commonware_macros::stability_scope!(BETA {
         ) -> impl Future<Output = ()> + Send;
 
         /// Cancel a fetch request.
+        ///
+        /// If response validation is in progress, cancellation may drop the
+        /// [`Consumer::deliver`] future before it reports whether the data was
+        /// valid.
         fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
 
         /// Cancel all fetch requests.
+        ///
+        /// See [`cancel`](Self::cancel) for how cancellation affects
+        /// in-progress response validation.
         fn clear(&mut self) -> impl Future<Output = ()> + Send;
 
         /// Retain only the fetch requests that satisfy the predicate.
+        ///
+        /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
+        /// how cancellation affects in-progress response validation.
         fn retain(
             &mut self,
             predicate: impl Fn(&Self::Key) -> bool + Send + 'static,

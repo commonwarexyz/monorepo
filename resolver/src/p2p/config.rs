@@ -11,7 +11,7 @@ pub struct Config<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+    Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
 > {
     /// Manages the current set of peers.
