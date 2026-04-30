@@ -8,7 +8,6 @@ use super::{
 };
 use crate::{
     aggregation::{scheme, types::Certificate},
-    shared::Shared,
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
     Automaton, Monitor, Reporter,
 };
@@ -72,7 +71,7 @@ pub struct Engine<
     E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
     P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Height, Digest = D>,
+    A: Automaton<Context = Height, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
@@ -155,7 +154,7 @@ impl<
         E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
-        A: Automaton<Context = Height, Digest = D>,
+        A: Automaton<Context = Height, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,

@@ -5,7 +5,6 @@ use super::{
     types::{Activity, Context},
 };
 use crate::{
-    shared::Shared,
     simplex::{scheme::Scheme, Plan},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -27,16 +26,16 @@ pub struct Engine<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
-    F: Reporter<Activity = Activity<S, D>>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>> + Clone,
+    F: Reporter<Activity = Activity<S, D>> + Clone,
     T: Strategy,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, L, B, D, A, Shared<R>, Shared<F>>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, Shared<F>, Shared<R>, T>,
+    batcher: batcher::Actor<E, S, B, D, F, R, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
     resolver: resolver::Actor<E, S, B, D, T>,
@@ -50,8 +49,8 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
-        F: Reporter<Activity = Activity<S, D>>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>> + Clone,
+        F: Reporter<Activity = Activity<S, D>> + Clone,
         T: Strategy,
     > Engine<E, S, L, B, D, A, R, F, T>
 {
@@ -59,8 +58,6 @@ impl<
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
-        let reporter = Shared::new(cfg.reporter);
-        let relay = Shared::new(cfg.relay);
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(
@@ -68,8 +65,8 @@ impl<
             batcher::Config {
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
-                reporter: reporter.clone(),
-                relay: relay.clone(),
+                reporter: cfg.reporter.clone(),
+                relay: cfg.relay.clone(),
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
@@ -87,8 +84,8 @@ impl<
                 elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
-                relay,
-                reporter,
+                relay: cfg.relay,
+                reporter: cfg.reporter,
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,

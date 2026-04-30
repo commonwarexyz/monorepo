@@ -17,9 +17,6 @@ stability_scope!(BETA {
 
     pub mod simplex;
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub mod shared;
-
     pub mod types;
     use types::{Epoch, Height, View};
 

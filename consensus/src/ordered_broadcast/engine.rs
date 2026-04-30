@@ -16,7 +16,6 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{
-    shared::Shared,
     types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
@@ -66,7 +65,7 @@ pub struct Engine<
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
     D: Digest,
-    A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
+    A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
@@ -79,7 +78,7 @@ pub struct Engine<
     sequencer_signer: Option<ChunkSigner<C>>,
     sequencers_provider: S,
     validators_provider: P,
-    automaton: Shared<A>,
+    automaton: A,
     relay: R,
     monitor: M,
     reporter: Z,
@@ -204,7 +203,7 @@ impl<
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
-        A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
+        A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
@@ -220,7 +219,7 @@ impl<
             sequencer_signer: cfg.sequencer_signer,
             sequencers_provider: cfg.sequencers_provider,
             validators_provider: cfg.validators_provider,
-            automaton: Shared::new(cfg.automaton),
+            automaton: cfg.automaton,
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
