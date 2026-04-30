@@ -279,35 +279,38 @@ mod tests {
             let (tx, rx) = oneshot::channel();
             receivers.push(rx);
 
-            context.child("reporter_watcher").spawn({
-                let reporter = reporter.clone();
-                let mut mailbox = mailbox.clone();
-                move |context| async move {
-                    loop {
-                        let (height, epoch) = mailbox
-                            .get_tip()
-                            .await
-                            .unwrap_or((Height::zero(), Epoch::zero()));
-                        debug!(
-                            %height,
-                            epoch = %epoch,
-                            %threshold_height,
-                            threshold_epoch = %threshold_epoch,
-                            ?reporter,
-                            "reporter status"
-                        );
-                        if height >= threshold_height && epoch >= threshold_epoch {
+            context
+                .child("reporter_watcher")
+                .with_attribute("reporter", reporter)
+                .spawn({
+                    let reporter = reporter.clone();
+                    let mut mailbox = mailbox.clone();
+                    move |context| async move {
+                        loop {
+                            let (height, epoch) = mailbox
+                                .get_tip()
+                                .await
+                                .unwrap_or((Height::zero(), Epoch::zero()));
                             debug!(
+                                %height,
+                                epoch = %epoch,
+                                %threshold_height,
+                                threshold_epoch = %threshold_epoch,
                                 ?reporter,
-                                "reporter reached threshold, signaling completion"
+                                "reporter status"
                             );
-                            tx.send_lossy(reporter.clone());
-                            break;
+                            if height >= threshold_height && epoch >= threshold_epoch {
+                                debug!(
+                                    ?reporter,
+                                    "reporter reached threshold, signaling completion"
+                                );
+                                tx.send_lossy(reporter.clone());
+                                break;
+                            }
+                            context.sleep(Duration::from_millis(100)).await;
                         }
-                        context.sleep(Duration::from_millis(100)).await;
                     }
-                }
-            });
+                });
         }
 
         // Wait for all oneshot receivers to complete.
