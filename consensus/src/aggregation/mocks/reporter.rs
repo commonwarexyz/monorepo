@@ -24,7 +24,10 @@ enum Message<S: Scheme, D: Digest> {
 }
 
 pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
+    // RNG used for signature verification
     context: ContextCell<R>,
+
+    // Messages from the engine
     mailbox: mpsc::Receiver<Message<S, D>>,
 
     // Signing scheme for verification
