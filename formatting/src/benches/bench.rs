@@ -1,6 +1,7 @@
 use criterion::criterion_main;
 
 mod decode;
+mod display;
 mod encode;
 
-criterion_main!(encode::benches, decode::benches);
+criterion_main!(encode::benches, decode::benches, display::benches);
