@@ -3591,13 +3591,12 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(
-                    ctx.child("storage"),
-                    variable_config::<OneCap>("spec_eq", &ctx),
-                )
-                .await
-                .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_config::<OneCap>("spec_eq", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Seed all keys in one committed batch.
             let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
