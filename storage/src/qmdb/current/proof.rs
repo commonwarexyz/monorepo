@@ -704,6 +704,7 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 
@@ -758,10 +759,14 @@ mod tests {
                         )
                     })
                     .collect();
-            let mut leaf_digests =
-                db::compute_grafted_leaves::<F, Sha256, N>(&hasher, &ops, chunk_inputs, None)
-                    .await
-                    .unwrap();
+            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
             leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
             let grafted_hasher =
@@ -859,10 +864,14 @@ mod tests {
                         )
                     })
                     .collect();
-            let mut leaf_digests =
-                db::compute_grafted_leaves::<F, Sha256, N>(&hasher, &ops, chunk_inputs, None)
-                    .await
-                    .unwrap();
+            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
             leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
             let grafted_hasher =
@@ -964,10 +973,14 @@ mod tests {
                         )
                     })
                     .collect();
-            let mut leaf_digests =
-                db::compute_grafted_leaves::<F, Sha256, N>(&hasher, &ops, chunk_inputs, None)
-                    .await
-                    .unwrap();
+            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
             leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
             let grafted_hasher =
@@ -1046,10 +1059,14 @@ mod tests {
                         )
                     })
                     .collect();
-            let mut leaf_digests =
-                db::compute_grafted_leaves::<F, Sha256, N>(&hasher, &ops, chunk_inputs, None)
-                    .await
-                    .unwrap();
+            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
             leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
             let grafted_hasher =
@@ -1154,10 +1171,14 @@ mod tests {
                         )
                     })
                     .collect();
-            let mut leaf_digests =
-                db::compute_grafted_leaves::<F, Sha256, N>(&hasher, &ops, chunk_inputs, None)
-                    .await
-                    .unwrap();
+            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
             leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
             let grafted_hasher =

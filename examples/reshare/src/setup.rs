@@ -9,9 +9,9 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Signer,
 };
+use commonware_formatting::{from_hex, hex};
 use commonware_math::algebra::Random;
 use commonware_utils::{
-    from_hex, hex,
     ordered::{Map, Set},
     Faults, N3f1, TryCollect, NZU32,
 };
@@ -279,7 +279,7 @@ fn generate_configs(
 mod serde_hex {
     use super::*;
     use commonware_codec::DecodeExt;
-    use commonware_utils::from_hex;
+    use commonware_formatting::from_hex;
     use serde::{Deserializer, Serializer};
     use serde_json::Value;
 
@@ -313,7 +313,7 @@ mod serde_hex {
 mod serde_hex_ordered {
     use super::*;
     use commonware_codec::DecodeExt;
-    use commonware_utils::from_hex;
+    use commonware_formatting::from_hex;
     use core::fmt;
     use serde::{
         de::{SeqAccess, Visitor},
@@ -369,7 +369,7 @@ mod serde_hex_ordered {
 mod serde_peer_map {
     use super::*;
     use commonware_codec::DecodeExt;
-    use commonware_utils::from_hex;
+    use commonware_formatting::from_hex;
     use serde::{Deserializer, Serializer};
     use serde_json::Value;
 

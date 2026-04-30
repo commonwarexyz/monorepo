@@ -128,7 +128,7 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, mocks, BufMut, IoBufMut, Runner};
+    use commonware_runtime::{deterministic, mocks, BufMut, IoBufMut, Runner, Spawner};
     use rand::Rng;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
@@ -338,21 +338,30 @@ mod tests {
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.coalesce(), &payload[..]);
 
-            // Slow path: peek returns empty
-            let (mut sink, mut stream) = mocks::Channel::init_with_read_buffer_size(0);
-            send_frame(&mut sink, payload.clone(), MAX_MESSAGE_SIZE)
-                .await
-                .unwrap();
+            // Slow path: peek returns empty (buffer_size=0 means send always
+            // blocks, so send and recv must run concurrently).
+            let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(0);
+            let payload2 = payload.clone();
+            let send_handle = context.clone().spawn(|_| async move {
+                send_frame(&mut sink, payload2, MAX_MESSAGE_SIZE)
+                    .await
+                    .unwrap();
+            });
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.coalesce(), &payload[..]);
+            send_handle.await.unwrap();
 
             // Slow path: peek returns partial varint
-            let (mut sink, mut stream) = mocks::Channel::init_with_read_buffer_size(1);
-            send_frame(&mut sink, payload.clone(), MAX_MESSAGE_SIZE)
-                .await
-                .unwrap();
+            let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(1);
+            let payload2 = payload.clone();
+            let send_handle = context.clone().spawn(|_| async move {
+                send_frame(&mut sink, payload2, MAX_MESSAGE_SIZE)
+                    .await
+                    .unwrap();
+            });
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.coalesce(), &payload[..]);
+            send_handle.await.unwrap();
         });
     }
 }

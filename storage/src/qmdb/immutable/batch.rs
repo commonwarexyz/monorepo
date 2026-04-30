@@ -15,6 +15,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_parallel::{Sequential, Strategy};
 use core::iter;
 use std::{
     collections::BTreeMap,
@@ -36,7 +37,7 @@ pub(crate) struct DiffEntry<F: Family + Bagging, V> {
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
 /// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
 #[allow(clippy::type_complexity)]
-pub struct UnmerkleizedBatch<F, H, K, V>
+pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy = Sequential>
 where
     F: Family + Bagging,
     K: Key,
@@ -44,13 +45,13 @@ where
     H: CHasher,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
-    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>,
 
     /// Pending mutations.
     mutations: BTreeMap<K, V::Value>,
 
     /// Parent batch in the chain. `None` for batches created directly from the DB.
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, K, V>>>,
+    parent: Option<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>>,
 
     /// Total operation count before this batch (committed DB + prior batches).
     /// This batch's i-th operation lands at location `base_size + i`.
@@ -60,12 +61,21 @@ where
     db_size: u64,
 }
 
+/// Merkleized authenticated-journal batch wrapping an [`Operation`] payload.
+type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>, S>>;
+
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family + Bagging, D: Digest, K: Key, V: ValueEncoding> {
+pub struct MerkleizedBatch<
+    F: Family + Bagging,
+    D: Digest,
+    K: Key,
+    V: ValueEncoding,
+    S: Strategy = Sequential,
+> {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>>>,
+    pub(super) journal_batch: JournalBatch<F, D, K, V, S>,
 
     /// Cached operations root after applying this batch.
     pub(super) root: D,
@@ -104,7 +114,7 @@ pub struct MerkleizedBatch<F: Family + Bagging, D: Digest, K: Key, V: ValueEncod
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
-impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
+impl<F, H, K, V, S: Strategy> UnmerkleizedBatch<F, H, K, V, S>
 where
     F: Family + Bagging,
     K: Key,
@@ -114,7 +124,7 @@ where
 {
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C, T>(
-        immutable: &Immutable<F, E, K, V, C, H, T>,
+        immutable: &Immutable<F, E, K, V, C, H, T, S>,
         journal_size: u64,
     ) -> Self
     where
@@ -145,7 +155,7 @@ where
     pub async fn get<E, C, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T>,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -246,10 +256,10 @@ where
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     pub fn merkleize<E, C, T>(
         self,
-        db: &Immutable<F, E, K, V, C, H, T>,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V>>
+    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
@@ -319,7 +329,8 @@ where
     }
 }
 
-impl<F: Family + Bagging, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
+impl<F: Family + Bagging, D: Digest, K: Key, V: ValueEncoding, S: Strategy>
+    MerkleizedBatch<F, D, K, V, S>
 where
     Operation<F, K, V>: EncodeShared,
 {
@@ -342,7 +353,7 @@ where
     pub async fn get<E, C, H, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T>,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -368,7 +379,7 @@ where
     pub async fn get_many<E, C, H, T>(
         &self,
         keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T>,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -427,7 +438,7 @@ where
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
-    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V>
+    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
         H: CHasher<Digest = D>,
     {
@@ -441,7 +452,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T> Immutable<F, E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family + Bagging,
     E: Context,
@@ -451,9 +462,10 @@ where
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
+    S: Strategy,
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>> {
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),

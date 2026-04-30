@@ -4,7 +4,8 @@ use commonware_cryptography::{
     bls12381::{dkg::deal_anonymous, primitives::variant::MinSig},
     ed25519, Signer as _,
 };
-use commonware_utils::{hex, N3f1, NZU32};
+use commonware_formatting::hex;
+use commonware_utils::{N3f1, NZU32};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {

@@ -16,6 +16,7 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
@@ -23,15 +24,30 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T> =
-    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
+pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
+    F,
+    E,
+    Journal<E, Operation<F, K, V>>,
+    Index<T, Location<F>>,
+    H,
+    Update<K, V>,
+    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+    S,
+>;
 
-impl<F: Family + Bagging, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<F, E, K, V, H, T>
+impl<
+        F: Family + Bagging,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg).await
     }
 }
@@ -55,6 +71,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_cryptography::Hasher;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
@@ -66,13 +83,15 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<F, E, K, V, H, T, const P: usize> = crate::qmdb::any::ordered::Db<
+    pub type Db<F, E, K, V, H, T, const P: usize, S = Sequential> = crate::qmdb::any::ordered::Db<
         F,
         E,
         Journal<E, Operation<F, K, V>>,
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        S,
     >;
 
     impl<
@@ -83,25 +102,28 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<F, E, K, V, H, T, P>
+            S: Strategy,
+        > Db<F, E, K, V, H, T, P, S>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
-        pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
+        pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
     }
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
+        use super::Sequential;
         /// Fixed-value DB with 256 partitions.
-        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 1>;
+        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
+        use super::Sequential;
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 2>;
+        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 2, S>;
     }
 }
 

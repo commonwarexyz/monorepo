@@ -25,6 +25,7 @@ use alloc::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
@@ -40,22 +41,27 @@ pub enum Error<F: Family> {
     Journal(#[from] super::Error),
 }
 
+/// Strong ref to an ancestor [`MerkleizedBatch`] in the journal-batch chain.
+type MerkleizedParent<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item, S>>;
+
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync> {
+pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strategy = Sequential> {
     // The inner batch of Merkle leaf digests.
-    inner: batch::UnmerkleizedBatch<F, H::Digest>,
+    inner: batch::UnmerkleizedBatch<F, H::Digest, S>,
     // The hasher to use for hashing the items.
     hasher: StandardHasher<H>,
     // The items to append from this batch.
     items: Vec<Item>,
     // This batch's parent, or None if the parent is the journal itself.
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, Item>>>,
+    parent: Option<MerkleizedParent<F, H, Item, S>>,
 }
 
-type MerkleizedBatchArc<F, H, Item> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item>>;
+type MerkleizedBatchArc<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item, S>>;
 
-impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, Item> {
+impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
+    UnmerkleizedBatch<F, H, Item, S>
+{
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
@@ -67,7 +73,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 
     /// Collect ancestor items from the parent chain before downgrading.
     fn collect_ancestor_items(
-        parent: &Option<Arc<MerkleizedBatch<F, H::Digest, Item>>>,
+        parent: &Option<MerkleizedParent<F, H, Item, S>>,
     ) -> Vec<Arc<Vec<Item>>> {
         let Some(parent) = parent else {
             return Vec::new();
@@ -89,7 +95,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 
     /// Merkleize the batch.
     /// `base` provides committed node data as fallback during hash computation.
-    pub fn merkleize(mut self, base: &Mem<F, H::Digest>) -> MerkleizedBatchArc<F, H, Item> {
+    pub fn merkleize(mut self, base: &Mem<F, H::Digest>) -> MerkleizedBatchArc<F, H, Item, S> {
         let items = Arc::new(core::mem::take(&mut self.items));
         let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
@@ -115,51 +121,24 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         mut self,
         base: &Mem<F, H::Digest>,
         items: Arc<Vec<Item>>,
-    ) -> MerkleizedBatchArc<F, H, Item> {
+    ) -> MerkleizedBatchArc<F, H, Item, S> {
         assert!(
             self.items.is_empty(),
             "merkleize_with expects no items added via add"
         );
 
-        #[cfg(feature = "std")]
-        if let Some(pool) = self
-            .inner
-            .pool()
-            .filter(|_| items.len() >= batch::MIN_TO_PARALLELIZE)
-        {
-            // Parallel path: encode items and compute leaf digests on the thread pool,
-            // then feed the pre-computed digests sequentially into the MMR batch.
-            use rayon::prelude::*;
-
-            let starting_leaves = self.inner.leaves();
-            let digests: Vec<H::Digest> = pool.install(|| {
-                items
-                    .par_iter()
-                    .enumerate()
-                    .map_init(
-                        || self.hasher.clone(),
-                        |h, (i, item)| {
-                            let loc = Location::<F>::new(*starting_leaves + i as u64);
-                            let pos = Position::try_from(loc).expect("valid leaf location");
-                            h.leaf_digest(pos, &item.encode())
-                        },
-                    )
-                    .collect()
-            });
-            for digest in digests {
-                self.inner = self.inner.add_leaf_digest(digest);
-            }
-        } else {
-            for item in &*items {
-                let encoded = item.encode();
-                self.inner = self.inner.add(&self.hasher, &encoded);
-            }
-        }
-
-        #[cfg(not(feature = "std"))]
-        for item in &*items {
-            let encoded = item.encode();
-            self.inner = self.inner.add(&self.hasher, &encoded);
+        let starting_leaves = self.inner.leaves();
+        let digests: Vec<H::Digest> = self.inner.strategy().map_init_collect_vec(
+            items.iter().enumerate(),
+            || self.hasher.clone(),
+            |h, (i, item)| {
+                let loc = Location::<F>::new(*starting_leaves + i as u64);
+                let pos = Position::try_from(loc).expect("valid leaf location");
+                h.leaf_digest(pos, &item.encode())
+            },
+        );
+        for digest in digests {
+            self.inner = self.inner.add_leaf_digest(digest);
         }
 
         let merkle = self.inner.merkleize(base, &self.hasher);
@@ -175,9 +154,9 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone, Debug)]
-pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
+pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy = Sequential> {
     /// The inner batch of Merkle leaf digests.
-    pub(crate) inner: Arc<batch::MerkleizedBatch<F, D>>,
+    pub(crate) inner: Arc<batch::MerkleizedBatch<F, D, S>>,
     /// The items to append from this batch.
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
@@ -186,7 +165,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
 
-impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
+impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D, Item, S> {
     /// The number of items visible through this batch, including ancestors.
     pub(crate) fn size(&self) -> u64 {
         *self.inner.leaves()
@@ -234,7 +213,7 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
     ///
     /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
     /// fork has been applied.
-    pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item>
+    pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item, S>
     where
         Item: Encode,
     {
@@ -247,7 +226,9 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
     }
 }
 
-impl<F: Family, D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<F, D, Item> {
+impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
+    for MerkleizedBatch<F, D, Item, S>
+{
     type Family = F;
     type Digest = D;
     type Error = merkle::Error<F>;
@@ -269,16 +250,17 @@ impl<F: Family, D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<F, D,
 /// Merkle-family structure. The item at index i in the journal corresponds to the leaf at Location
 /// i in the Merkle structure. This structure enables efficient proofs that an item is included in
 /// the journal at a specific location.
-pub struct Journal<F, E, C, H>
+pub struct Journal<F, E, C, H, S = Sequential>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
+    S: Strategy,
 {
     /// Merkle structure where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) merkle: Merkle<F, E, H::Digest>,
+    pub(crate) merkle: Merkle<F, E, H::Digest, S>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
@@ -287,12 +269,13 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<F, E, C, H> Journal<F, E, C, H>
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
+    S: Strategy,
 {
     /// Returns the Location of the next item appended to the journal.
     pub async fn size(&self) -> Location<F> {
@@ -315,8 +298,13 @@ where
         }
     }
 
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.merkle.strategy()
+    }
+
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item>
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S>
     where
         C::Item: Encode,
     {
@@ -338,7 +326,7 @@ where
     ///
     /// The batch has no items (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_merkleized_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, C::Item>> {
+    pub(crate) fn to_merkleized_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, C::Item, S>> {
         Arc::new(MerkleizedBatch {
             inner: self.merkle.to_batch(),
             items: Arc::new(Vec::new()),
@@ -348,12 +336,13 @@ where
     }
 }
 
-impl<F, E, C, H> Journal<F, E, C, H>
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
+    S: Strategy,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the Merkle
     /// structure, meaning recovery will be required on startup if we crash before `sync()`.
@@ -362,17 +351,18 @@ where
     }
 }
 
-impl<F, E, C, H> Journal<F, E, C, H>
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
+    S: Strategy,
 {
     /// Create a new [Journal] from the given components after aligning the Merkle structure with
     /// the journal.
     pub async fn from_components(
-        mut merkle: Merkle<F, E, H::Digest>,
+        mut merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -395,7 +385,7 @@ where
     /// structure are added. Items are added in batches of size `apply_batch_size` to avoid memory
     /// bloat.
     async fn align(
-        merkle: &mut Merkle<F, E, H::Digest>,
+        merkle: &mut Merkle<F, E, H::Digest, S>,
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: u64,
@@ -470,7 +460,7 @@ where
     /// Applying a batch from a different fork returns an error.
     pub async fn apply_batch(
         &mut self,
-        batch: &MerkleizedBatch<F, H::Digest, C::Item>,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<(), Error<F>> {
         let merkle_size = self.merkle.size();
         let base_size = batch.inner.base_size();
@@ -571,12 +561,13 @@ where
     }
 }
 
-impl<F, E, C, H> Journal<F, E, C, H>
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
+    S: Strategy,
 {
     /// Generate a proof of inclusion for items starting at `start_loc`.
     ///
@@ -652,12 +643,13 @@ where
     }
 }
 
-impl<F, E, C, H> Journal<F, E, C, H>
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
+    S: Strategy,
 {
     /// Destroy the authenticated journal, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error<F>> {
@@ -687,12 +679,13 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 /// journal type.
 macro_rules! impl_journal_new {
     ($journal_mod:ident, $cfg_ty:ty, $codec_bound:path) => {
-        impl<F, E, O, H> Journal<F, E, $journal_mod::Journal<E, O>, H>
+        impl<F, E, O, H, S> Journal<F, E, $journal_mod::Journal<E, O>, H, S>
         where
             F: Family,
             E: Context,
             O: $codec_bound,
             H: Hasher,
+            S: Strategy,
         {
             /// Create a new authenticated [Journal].
             ///
@@ -700,7 +693,7 @@ macro_rules! impl_journal_new {
             /// and the merkle structure will be aligned to match.
             pub async fn new(
                 context: E,
-                merkle_cfg: merkle::full::Config,
+                merkle_cfg: merkle::full::Config<S>,
                 journal_cfg: $cfg_ty,
                 rewind_predicate: fn(&O) -> bool,
                 bagging: merkle::Bagging,
@@ -730,12 +723,13 @@ macro_rules! impl_journal_new {
 impl_journal_new!(fixed, fixed::Config, CodecFixedShared);
 impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
 
-impl<F, E, C, H> Contiguous for Journal<F, E, C, H>
+impl<F, E, C, H, S> Contiguous for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
+    S: Strategy,
 {
     type Item = C::Item;
 
@@ -748,12 +742,13 @@ where
     }
 }
 
-impl<F, E, C, H> Mutable for Journal<F, E, C, H>
+impl<F, E, C, H, S> Mutable for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
+    S: Strategy,
 {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
         let res = self.append(item).await.map_err(Self::map_error)?;
@@ -786,24 +781,25 @@ pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
     type Config: Clone + Send;
 
     /// Initialize an authenticated [Journal] backed by this journal type.
-    fn init<F: Family, H: Hasher>(
+    fn init<F: Family, H: Hasher, S: Strategy>(
         context: E,
-        merkle_cfg: merkle::full::Config,
+        merkle_cfg: merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&Self::Item) -> bool,
         bagging: merkle::Bagging,
-    ) -> impl core::future::Future<Output = Result<Journal<F, E, Self, H>, Error<F>>> + Send
+    ) -> impl core::future::Future<Output = Result<Journal<F, E, Self, H, S>, Error<F>>> + Send
     where
         Self: Sized,
         Self::Item: EncodeShared;
 }
 
-impl<F, E, C, H> Persistable for Journal<F, E, C, H>
+impl<F, E, C, H, S> Persistable for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
+    S: Strategy,
 {
     type Error = JournalError;
 
@@ -821,11 +817,12 @@ where
 }
 
 #[cfg(test)]
-impl<F, E, C, H> Journal<F, E, C, H>
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
+    S: Strategy,
     H: Hasher,
 {
     /// Test helper: Read the item at the given location.
@@ -903,7 +900,7 @@ mod tests {
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

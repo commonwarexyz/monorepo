@@ -19,6 +19,7 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
 // =============================================================================
@@ -26,7 +27,7 @@ use commonware_utils::Array;
 // =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, H, T, const N: usize] fixed::Db<F, E, K, V, H, T, N>
+    [F, E, K, V, H, T, const N: usize, S] fixed::Db<F, E, K, V, H, T, N, S>
     where {
         F: Graftable + Bagging,
         E: Context,
@@ -34,6 +35,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
+        S: Strategy,
         FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -44,7 +46,7 @@ crate::qmdb::any::traits::impl_db_any! {
 // =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, H, T, const N: usize] variable::Db<F, E, K, V, H, T, N>
+    [F, E, K, V, H, T, const N: usize, S] variable::Db<F, E, K, V, H, T, N, S>
     where {
         F: Graftable + Bagging,
         E: Context,
@@ -52,6 +54,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
+        S: Strategy,
         VariableOperation<F, K, V>: Codec,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -69,7 +72,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N>
+        S: Strategy,
+    > BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N, S>
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()
@@ -92,7 +96,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N>
+        S: Strategy,
+    > BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N, S>
 where
     VariableOperation<F, K, V>: Codec,
 {
@@ -114,8 +119,8 @@ where
 // =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, H, T, const P: usize, const N: usize]
-    fixed::partitioned::Db<F, E, K, V, H, T, P, N>
+    [F, E, K, V, H, T, const P: usize, const N: usize, S]
+    fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
         F: Graftable + Bagging,
         E: Context,
@@ -123,6 +128,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
+        S: Strategy,
         FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -137,7 +143,8 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > BitmapPrunedBits for fixed::partitioned::Db<F, E, K, V, H, T, P, N>
+        S: Strategy,
+    > BitmapPrunedBits for fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()
@@ -157,8 +164,8 @@ impl<
 // =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, H, T, const P: usize, const N: usize]
-    variable::partitioned::Db<F, E, K, V, H, T, P, N>
+    [F, E, K, V, H, T, const P: usize, const N: usize, S]
+    variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
         F: Graftable + Bagging,
         E: Context,
@@ -166,6 +173,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
+        S: Strategy,
         VariableOperation<F, K, V>: Codec,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -180,7 +188,8 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > BitmapPrunedBits for variable::partitioned::Db<F, E, K, V, H, T, P, N>
+        S: Strategy,
+    > BitmapPrunedBits for variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
 where
     VariableOperation<F, K, V>: Codec,
 {

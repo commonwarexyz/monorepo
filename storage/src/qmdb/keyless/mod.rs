@@ -55,6 +55,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -72,26 +73,27 @@ pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
-pub struct Config<J> {
+pub struct Config<J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle: MerkleConfig,
+    pub merkle: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub log: J,
 }
 
 /// A keyless authenticated database.
-pub struct Keyless<F, E, V, C, H>
+pub struct Keyless<F, E, V, C, H, S = Sequential>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     C: Contiguous<Item = Operation<F, V>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal of operations.
-    journal: authenticated::Journal<F, E, C, H>,
+    journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
     root: H::Digest,
@@ -104,17 +106,18 @@ where
     inactivity_floor_loc: Location<F>,
 }
 
-impl<F, E, V, C, H> Keyless<F, E, V, C, H>
+impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
 where
     F: Family + Bagging,
     E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
     H: Hasher,
+    S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H>,
+        mut journal: authenticated::Journal<F, E, C, H, S>,
     ) -> Result<Self, Error<F>> {
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
@@ -237,6 +240,11 @@ where
     /// Return the root of the db.
     pub const fn root(&self) -> H::Digest {
         self.root
+    }
+
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.journal.strategy()
     }
 
     /// Generate and return:
@@ -405,13 +413,13 @@ where
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V, S> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
 
     /// Create an initial [`batch::MerkleizedBatch`] from the committed DB state.
-    pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V>> {
+    pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V, S>> {
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
@@ -453,7 +461,7 @@ where
     /// [`Keyless::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
-        batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
+        batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size

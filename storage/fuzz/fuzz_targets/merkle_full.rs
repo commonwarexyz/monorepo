@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Error, Family as MerkleFamily, Location,
@@ -82,7 +83,7 @@ fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
-        thread_pool: None,
+        strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }

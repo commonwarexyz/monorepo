@@ -1,6 +1,6 @@
 use super::Header;
 use crate::{BufferPool, Error, IoBufs, IoBufsMut};
-use commonware_utils::hex;
+use commonware_formatting::hex;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,

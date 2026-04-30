@@ -3,8 +3,8 @@ use crate::{
     qmdb::{any::value::ValueEncoding, operation::Committable},
 };
 use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_formatting::hex;
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::hex;
 use core::fmt::Display;
 
 pub(crate) mod fixed;
@@ -118,7 +118,8 @@ mod tests {
     use super::*;
     use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
     use commonware_codec::Encode;
-    use commonware_utils::{hex, sequence::U64};
+    use commonware_formatting::hex;
+    use commonware_utils::sequence::U64;
 
     #[test]
     fn display_append() {

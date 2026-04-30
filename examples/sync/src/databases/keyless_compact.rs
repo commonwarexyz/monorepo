@@ -1,6 +1,7 @@
 //! Compact keyless database types and helpers for compact sync demonstration.
 
 use crate::{Hasher, Key, Value};
+use commonware_parallel::Sequential;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     merkle::{
@@ -26,7 +27,7 @@ pub fn create_config(_context: &impl BufferPooler) -> CompactConfig {
     CompactConfig {
         merkle: MerkleConfig {
             partition: "compact-keyless".into(),
-            thread_pool: None,
+            strategy: Sequential,
         },
         commit_codec_config: (),
     }

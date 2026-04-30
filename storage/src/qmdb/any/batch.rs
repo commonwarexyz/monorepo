@@ -23,6 +23,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::{iter, ops::Range};
 use futures::future::try_join_all;
@@ -97,7 +98,7 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
 }
 
 /// Where this batch's inherited state comes from.
-enum Base<F: Family, D: Digest, U: update::Update + Send + Sync>
+enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy = Sequential>
 where
     Operation<F, U>: Send + Sync,
 {
@@ -108,10 +109,10 @@ where
         active_keys: usize,
     },
     /// Created from a parent batch via `parent.new_batch()`.
-    Child(Arc<MerkleizedBatch<F, D, U>>),
+    Child(Arc<MerkleizedBatch<F, D, U, S>>),
 }
 
-impl<F: Family, D: Digest, U: update::Update + Send + Sync> Base<F, D, U>
+impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> Base<F, D, U, S>
 where
     Operation<F, U>: Send + Sync,
 {
@@ -151,7 +152,7 @@ where
         }
     }
 
-    const fn parent(&self) -> Option<&Arc<MerkleizedBatch<F, D, U>>> {
+    const fn parent(&self) -> Option<&Arc<MerkleizedBatch<F, D, U, S>>> {
         match self {
             Self::Db { .. } => None,
             Self::Child(parent) => Some(parent),
@@ -164,20 +165,20 @@ where
 ///
 /// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
 /// parameter, so the batch is lifetime-free and can be stored independently of the DB.
-pub struct UnmerkleizedBatch<F: Family, H, U>
+pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy = Sequential>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
     Operation<F, U>: Codec,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
-    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>, S>,
 
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
 
     /// The committed DB or parent batch this batch was created from.
-    base: Base<F, H::Digest, U>,
+    base: Base<F, H::Digest, U, S>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -203,12 +204,16 @@ where
 /// ```
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync>
-where
+pub struct MerkleizedBatch<
+    F: Family,
+    D: Digest,
+    U: update::Update + Send + Sync,
+    S: Strategy = Sequential,
+> where
     Operation<F, U>: Send + Sync,
 {
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
-    pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>>>,
+    pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>, S>>,
 
     /// Cached operations root after applying this batch.
     pub(crate) root: D,
@@ -252,20 +257,23 @@ where
     pub(crate) ancestor_diff_ends: Vec<u64>,
 }
 
+/// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
+type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
+
 /// Batch-infrastructure state used during merkleization.
 ///
 /// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending mutations
 /// from the resolution/merkleization machinery. Helpers that need access to the parent
 /// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
 /// threading.
-struct Merkleizer<F: Family, H, U>
+struct Merkleizer<F: Family, H, U, S: Strategy = Sequential>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>>,
-    ancestors: Vec<Arc<MerkleizedBatch<F, H::Digest, U>>>,
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>, S>,
+    ancestors: Vec<AncestorBatch<F, H::Digest, U, S>>,
     base_size: u64,
     db_size: u64,
     base_inactivity_floor_loc: Location<F>,
@@ -273,8 +281,8 @@ where
 }
 
 /// Look up a key in the ancestor chain (immediate parent first).
-fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update + Send + Sync>(
-    ancestors: &'a [Arc<MerkleizedBatch<F, D, U>>],
+fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>(
+    ancestors: &'a [Arc<MerkleizedBatch<F, D, U, S>>],
     key: &U::Key,
 ) -> Option<&'a DiffEntry<F, U::Value>>
 where
@@ -351,8 +359,8 @@ fn next_candidate<F: Family, const N: usize>(
 /// Panics if `loc` cannot be located in the chain: either it falls outside the region (including
 /// when `ancestors` is empty), or the ancestor spans are non-contiguous (a bookkeeping invariant
 /// violation).
-fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
-    ancestors: &[Arc<MerkleizedBatch<F, D, U>>],
+fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>(
+    ancestors: &[Arc<MerkleizedBatch<F, D, U, S>>],
     loc: u64,
     db_size: u64,
 ) -> &Operation<F, U>
@@ -396,7 +404,7 @@ where
 /// batch_ops.len()` (i.e., within one of the three regions). Passing an out-of-range `loc` may
 /// panic (via `batch_ops` indexing or the ancestor-chain walk) or result in a disk-read error.
 /// In-memory locations are resolved synchronously; only disk locations await the `reader`.
-impl<F: Family, H, U> Merkleizer<F, H, U>
+impl<F: Family, H, U, S: Strategy> Merkleizer<F, H, U, S>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -491,7 +499,7 @@ where
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: &Db<F, E, C, I, H, U, N>,
+        db: &Db<F, E, C, I, H, U, N, S>,
         include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
     where
@@ -542,7 +550,7 @@ where
         key: &U::Key,
         loc: Location<F>,
         batch_diff: &DiffSlice<U::Key, F, U::Value>,
-        db: &Db<F, E, C, I, H, U, N>,
+        db: &Db<F, E, C, I, H, U, N, S>,
     ) -> bool
     where
         E: Context,
@@ -594,8 +602,8 @@ where
         metadata: Option<U::Value>,
         mut next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
         reader: R,
-        db: &Db<F, E, C, I, H, U, N>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U>>, crate::qmdb::Error<F>>
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -736,7 +744,7 @@ where
     }
 }
 
-impl<F: Family, H, U> UnmerkleizedBatch<F, H, U>
+impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -753,7 +761,7 @@ where
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U>) {
+    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
         let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut v = vec![Arc::clone(parent)];
             v.extend(parent.ancestors());
@@ -785,7 +793,7 @@ where
 }
 
 // Generic get() for both ordered and unordered UnmerkleizedBatch.
-impl<F: Family, H, U> UnmerkleizedBatch<F, H, U>
+impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -795,7 +803,7 @@ where
     pub async fn get<E, C, I, const N: usize>(
         &self,
         key: &U::Key,
-        db: &Db<F, E, C, I, H, U, N>,
+        db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -824,7 +832,7 @@ where
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, N>,
+        db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -886,7 +894,7 @@ where
 }
 
 // Unordered-specific methods.
-impl<F: Family, K, V, H> UnmerkleizedBatch<F, H, update::Unordered<K, V>>
+impl<F: Family, K, V, H, S: Strategy> UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>
 where
     K: Key,
     V: ValueEncoding,
@@ -896,9 +904,9 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>>>, crate::qmdb::Error<F>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -914,14 +922,14 @@ where
     ///
     /// The callback may skip locations only when it knows they are inactive. The floor-raise
     /// loop revalidates each returned candidate via `is_active_at` because the bitmap reflects
-    /// committed state only — uncommitted ancestor ops aren't tracked, and bits can be set for
+    /// committed state only -- uncommitted ancestor ops aren't tracked, and bits can be set for
     /// locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>>>, crate::qmdb::Error<F>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -1048,7 +1056,7 @@ where
 }
 
 // Ordered-specific methods.
-impl<F: Family, K, V, H> UnmerkleizedBatch<F, H, update::Ordered<K, V>>
+impl<F: Family, K, V, H, S: Strategy> UnmerkleizedBatch<F, H, update::Ordered<K, V>, S>
 where
     K: Key,
     V: ValueEncoding,
@@ -1058,9 +1066,9 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -1076,14 +1084,14 @@ where
     ///
     /// The callback may skip locations only when it knows they are inactive. The floor-raise
     /// loop revalidates each returned candidate via `is_active_at` because the bitmap reflects
-    /// committed state only — uncommitted ancestor ops aren't tracked, and bits can be set for
+    /// committed state only -- uncommitted ancestor ops aren't tracked, and bits can be set for
     /// locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -1390,7 +1398,7 @@ where
     }
 }
 
-impl<F: Family, D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<F, D, U>
+impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> MerkleizedBatch<F, D, U, S>
 where
     Operation<F, U>: Send + Sync,
 {
@@ -1411,7 +1419,7 @@ where
     }
 }
 
-impl<F: Family, D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<F, D, U>
+impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> MerkleizedBatch<F, D, U, S>
 where
     Operation<F, U>: Codec,
 {
@@ -1420,7 +1428,7 @@ where
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
-    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U>
+    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S>
     where
         H: Hasher<Digest = D>,
     {
@@ -1435,7 +1443,7 @@ where
     pub async fn get<E, C, I, H, const N: usize>(
         &self,
         key: &U::Key,
-        db: &Db<F, E, C, I, H, U, N>,
+        db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1462,7 +1470,7 @@ where
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
         keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, N>,
+        db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1516,7 +1524,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -1524,10 +1532,11 @@ where
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, S> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
@@ -1542,7 +1551,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -1550,6 +1559,7 @@ where
     C: Mutable<Item = Operation<F, U>> + crate::Persistable<Error = crate::journal::Error>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Apply a batch to the database, returning the range of written operations.
@@ -1563,7 +1573,7 @@ where
     /// guarantee durability.
     pub async fn apply_batch(
         &mut self,
-        batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
+        batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         // Valid db_size values: batch.db_size (nothing committed), batch.base_size
@@ -1652,19 +1662,20 @@ where
     }
 }
 
-impl<F: Family, E, C, I, H, U, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F: Family, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     ///
     /// This is the starting point for building owned batch chains.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U>> {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
@@ -1701,8 +1712,9 @@ mod trait_impls {
     };
     use std::future::Future;
 
-    impl<F, K, V, H, E, C, I> UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Unordered<K, V>>>
-        for UnmerkleizedBatch<F, H, update::Unordered<K, V>>
+    impl<F, K, V, H, E, C, I, const N: usize, S>
+        UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>
+        for UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>
     where
         F: Family,
         K: Key,
@@ -1711,13 +1723,14 @@ mod trait_impls {
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
+        S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
     {
         type Family = F;
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>>>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
 
         fn write(mut self, key: K, value: Option<V::Value>) -> Self {
             self.mutations.insert(key, value);
@@ -1726,15 +1739,16 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            db: &Db<F, E, C, I, H, update::Unordered<K, V>>,
+            db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
             self.merkleize(db, metadata)
         }
     }
 
-    impl<F, K, V, H, E, C, I> UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Ordered<K, V>>>
-        for UnmerkleizedBatch<F, H, update::Ordered<K, V>>
+    impl<F, K, V, H, E, C, I, const N: usize, S>
+        UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>
+        for UnmerkleizedBatch<F, H, update::Ordered<K, V>, S>
     where
         F: Family,
         K: Key,
@@ -1743,13 +1757,14 @@ mod trait_impls {
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
+        S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
     {
         type Family = F;
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>>>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
 
         fn write(mut self, key: K, value: Option<V::Value>) -> Self {
             self.mutations.insert(key, value);
@@ -1758,15 +1773,15 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            db: &Db<F, E, C, I, H, update::Ordered<K, V>>,
+            db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
             self.merkleize(db, metadata)
         }
     }
 
-    impl<F: Family, D: Digest, U: update::Update + Send + Sync + 'static> MerkleizedBatchTrait
-        for Arc<MerkleizedBatch<F, D, U>>
+    impl<F: Family, D: Digest, U: update::Update + Send + Sync + 'static, S: Strategy>
+        MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, S>>
     where
         Operation<F, U>: Codec,
     {
@@ -1777,7 +1792,8 @@ mod trait_impls {
         }
     }
 
-    impl<F, E, K, V, C, I, H> BatchableDb for Db<F, E, C, I, H, update::Unordered<K, V>>
+    impl<F, E, K, V, C, I, H, const N: usize, S> BatchableDb
+        for Db<F, E, C, I, H, update::Unordered<K, V>, N, S>
     where
         F: Family,
         E: Context,
@@ -1787,13 +1803,14 @@ mod trait_impls {
             + crate::Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
+        S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
     {
         type Family = F;
         type K = K;
         type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>>>;
-        type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
+        type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>;
 
         fn new_batch(&self) -> Self::Batch {
             self.new_batch()
@@ -1807,7 +1824,8 @@ mod trait_impls {
         }
     }
 
-    impl<F, E, K, V, C, I, H> BatchableDb for Db<F, E, C, I, H, update::Ordered<K, V>>
+    impl<F, E, K, V, C, I, H, const N: usize, S> BatchableDb
+        for Db<F, E, C, I, H, update::Ordered<K, V>, N, S>
     where
         F: Family,
         E: Context,
@@ -1817,13 +1835,14 @@ mod trait_impls {
             + crate::Persistable<Error = crate::journal::Error>,
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher,
+        S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
     {
         type Family = F;
         type K = K;
         type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>>>;
-        type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
+        type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>, S>;
 
         fn new_batch(&self) -> Self::Batch {
             self.new_batch()

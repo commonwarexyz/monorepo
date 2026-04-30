@@ -2,21 +2,11 @@ use crate::Span;
 use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 use std::collections::HashMap;
 
-/// An event that indicates the messages that were sent to the consumer
-#[derive(Debug)]
-pub enum Event<K, V> {
-    /// The consumer received a value for a key and considered it valid
-    Success(K, V),
-
-    /// The consumer failed to fetch a value for a key
-    Failed(K),
-}
-
 /// A consumer that can be used for testing
 #[derive(Clone)]
 pub struct Consumer<K: Span, V> {
-    /// The sender to send events to
-    sender: mpsc::UnboundedSender<Event<K, V>>,
+    /// The sender to send delivered (key, value) pairs to
+    sender: mpsc::UnboundedSender<(K, V)>,
 
     /// The expected values for each key
     ///
@@ -27,8 +17,8 @@ pub struct Consumer<K: Span, V> {
 impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
     /// Create a new consumer
     ///
-    /// Returns the consumer and a receiver that can be used to get the events
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<Event<K, V>>) {
+    /// Returns the consumer and a receiver that can be used to get delivered (key, value) pairs
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<(K, V)>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
@@ -62,7 +52,6 @@ impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
 impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consumer<K, V> {
     type Key = K;
     type Value = V;
-    type Failure = ();
 
     /// Deliver data to the consumer.
     ///
@@ -70,13 +59,8 @@ impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consume
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
         let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {
-            self.sender.send_lossy(Event::Success(key, value));
+            self.sender.send_lossy((key, value));
         }
         valid
-    }
-
-    /// Let the consumer know that the data is not being fetched anymore.
-    async fn failed(&mut self, key: Self::Key, _failure: ()) {
-        self.sender.send_lossy(Event::Failed(key));
     }
 }

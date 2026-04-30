@@ -7,7 +7,7 @@
 //!   derivation and scalar-scalar arithmetic (equivalent to [`ed25519_zebra`]).
 //! - Zeroizes the signing key's prefix, along with the seed and scalar.
 //! - Removed `serde` dependency.
-//! - Swapped `hex` dependency to [`commonware_utils::hex()`].
+//! - Swapped `hex` dependency to [`commonware_formatting::Hex`].
 //! - Adapted code to `commonware`'s clippy rules.
 //! - The batch verifier accepts pre-decompressed [`VerificationKey`] values and reuses their
 //!   cached point decompression state.

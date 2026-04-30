@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use commonware_codec::Encode;
-use commonware_utils::hex;
+use commonware_formatting::hex;
 use core::fmt::Display;
 
 // Context byte prefixes for identifying the operation type.

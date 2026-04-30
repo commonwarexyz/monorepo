@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -84,7 +85,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {

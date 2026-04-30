@@ -21,6 +21,7 @@ blst = { workspace = true, features = ["no-threads"] }
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
+commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
@@ -88,6 +89,7 @@ std = [
 	"chacha20poly1305/getrandom",
 	"chacha20poly1305/std",
 	"commonware-codec/std",
+	"commonware-formatting/std",
 	"commonware-macros/std",
 	"commonware-math/std",
 	"commonware-parallel/std",

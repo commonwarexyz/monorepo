@@ -9,8 +9,8 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch::MIN_TO_PARALLELIZE, hasher::Standard as StandardHasher, mem::Mem,
-        storage::Storage as MerkleStorage, Location, Position,
+        self, hasher::Standard as StandardHasher, mem::Mem, storage::Storage as MerkleStorage,
+        Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
@@ -38,7 +38,6 @@ use commonware_utils::{
 };
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
-use rayon::prelude::*;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
@@ -57,11 +56,12 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
+    S: Strategy = Sequential,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
     /// install grafted-tree updates and serve proofs.
-    pub(super) any: any::db::Db<F, E, C, I, H, U, N>,
+    pub(super) any: any::db::Db<F, E, C, I, H, U, N, S>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -75,8 +75,9 @@ pub struct Db<
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
     pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
 
-    /// Optional thread pool for parallelizing grafted leaf computation.
-    pub(super) thread_pool: Option<ThreadPool>,
+    /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
+    /// and grafted leaf computation.
+    pub(super) strategy: S,
 
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
@@ -84,7 +85,7 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<F, E, C, I, H, U, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
@@ -92,6 +93,7 @@ where
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -132,7 +134,7 @@ where
 }
 
 // Functionality requiring non-mutable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
@@ -140,6 +142,7 @@ where
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
@@ -158,6 +161,11 @@ where
     /// See the [Root structure](super) section in the module documentation.
     pub const fn root(&self) -> H::Digest {
         self.root
+    }
+
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        &self.strategy
     }
 
     /// Returns the ops tree root.
@@ -191,12 +199,15 @@ where
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
-    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest>> {
-        merkle::batch::MerkleizedBatch::from_mem(&self.grafted_tree)
+    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
+        merkle::batch::MerkleizedBatch::from_mem_with_strategy(
+            &self.grafted_tree,
+            self.strategy.clone(),
+        )
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N> {
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N, S> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
             self.grafted_snapshot(),
@@ -248,7 +259,7 @@ where
 }
 
 // Functionality requiring mutable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
@@ -256,6 +267,7 @@ where
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
@@ -533,12 +545,12 @@ where
         self.any.rewind(size).await?;
 
         let hasher = StandardHasher::<H>::new();
-        let grafted_tree = build_grafted_tree::<F, H, N>(
+        let grafted_tree = build_grafted_tree::<F, H, S, N>(
             &hasher,
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
-            self.thread_pool.as_ref(),
+            &self.strategy,
         )
         .await?;
         let storage = grafting::Storage::new(
@@ -594,7 +606,7 @@ where
 }
 
 // Functionality requiring mutable + persistable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
@@ -602,6 +614,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
@@ -626,7 +639,7 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
@@ -634,6 +647,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Apply a batch to the database, returning the range of written operations.
@@ -647,7 +661,7 @@ where
     /// durability.
     pub async fn apply_batch(
         &mut self,
-        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N>>,
+        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         self.grafted_tree.apply_batch(&batch.grafted)?;
@@ -656,7 +670,7 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize> Persistable for Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
@@ -664,6 +678,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     type Error = Error<F>;
@@ -812,12 +827,17 @@ pub(super) async fn compute_grafted_root<
 /// `chunk_ops_digest`, then combines with the bitmap chunk: `hash(chunk || chunk_ops_digest)`. For
 /// all-zero chunks the grafted leaf equals the `chunk_ops_digest` directly (zero-chunk identity).
 ///
-/// When a thread pool is provided and there are enough chunks, hashing is parallelized.
-pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, const N: usize>(
+/// The provided strategy determines if or how to parallelize merkleization.
+pub(super) async fn compute_grafted_leaves<
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+    const N: usize,
+>(
     hasher: &StandardHasher<H>,
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
-    pool: Option<&ThreadPool>,
+    strategy: &S,
 ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let ops_size = ops_tree.size().await;
@@ -845,8 +865,10 @@ pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, cons
     // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
     // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
     let zero_chunk = [0u8; N];
-    let graft =
-        |h: &StandardHasher<H>, chunk_idx: usize, chunk_ops_digest: H::Digest, chunk: [u8; N]| {
+    Ok(strategy.map_init_collect_vec(
+        inputs,
+        || hasher.clone(),
+        |h, (chunk_idx, chunk_ops_digest, chunk)| {
             if chunk == zero_chunk {
                 (chunk_idx, chunk_ops_digest)
             } else {
@@ -855,27 +877,8 @@ pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, cons
                     h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
                 )
             }
-        };
-
-    Ok(match pool.filter(|_| inputs.len() >= MIN_TO_PARALLELIZE) {
-        Some(pool) => pool.install(|| {
-            inputs
-                .into_par_iter()
-                .map_init(
-                    || hasher.clone(),
-                    |h, (chunk_idx, chunk_ops_digest, chunk)| {
-                        graft(h, chunk_idx, chunk_ops_digest, chunk)
-                    },
-                )
-                .collect()
-        }),
-        None => inputs
-            .into_iter()
-            .map(|(chunk_idx, chunk_ops_digest, chunk)| {
-                graft(hasher, chunk_idx, chunk_ops_digest, chunk)
-            })
-            .collect(),
-    })
+        },
+    ))
 }
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
@@ -885,23 +888,28 @@ pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, cons
 /// [grafted leaf formula](super) in the module documentation). The caller must ensure that all
 /// ops tree nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops tree
 /// (i.e., not pruned from the journal).
-pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N: usize>(
+pub(super) async fn build_grafted_tree<
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+    const N: usize,
+>(
     hasher: &StandardHasher<H>,
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
-    pool: Option<&ThreadPool>,
+    strategy: &S,
 ) -> Result<Mem<F, H::Digest>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
 
     // Compute grafted leaves for each unpruned complete chunk.
-    let leaves = compute_grafted_leaves::<F, H, N>(
+    let leaves = compute_grafted_leaves::<F, H, S, N>(
         hasher,
         ops_tree,
         (pruned_chunks..complete_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
-        pool,
+        strategy,
     )
     .await?;
 
@@ -918,7 +926,7 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
     // Add each grafted leaf digest.
     if !leaves.is_empty() {
         let batch = {
-            let mut batch = grafted_tree.new_batch().with_pool(pool.cloned());
+            let mut batch = grafted_tree.new_batch_with_strategy(strategy.clone());
             for &(_ops_pos, digest) in &leaves {
                 batch = batch.add_leaf_digest(digest);
             }

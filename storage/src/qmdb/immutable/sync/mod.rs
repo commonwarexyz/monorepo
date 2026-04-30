@@ -23,9 +23,10 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 
-impl<F, E, K, V, C, H, T> sync::Database for immutable::Immutable<F, E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family + FamilyBagging,
     E: Context,
@@ -38,12 +39,13 @@ where
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
+    S: Strategy,
 {
     type Family = F;
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config>;
+    type Config = immutable::Config<T, C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -74,7 +76,7 @@ where
         let hasher = F::default_hasher();
 
         // Initialize Merkle structure for sync
-        let merkle = Merkle::init_sync(
+        let merkle = Merkle::<F, _, _, S>::init_sync(
             context.with_label("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
@@ -84,7 +86,7 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _, _>::from_components(
+        let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
             merkle,
             log,
             hasher,
@@ -145,20 +147,21 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg>
+impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
     F: Family + FamilyBagging,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
+    S: Strategy,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: Read<Cfg = Cfg>,
     Cfg: Clone + Send + Sync + 'static,
 {
     type Family = F;
     type Op = Operation<F, K, V>;
-    type Config = immutable::CompactConfig<Cfg>;
+    type Config = immutable::CompactConfig<Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;

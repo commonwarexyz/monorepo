@@ -416,6 +416,17 @@ mod tests {
     }
 
     #[test]
+    fn test_abortable_pool_aborts_pre_polled_ready_future() {
+        block_on(async move {
+            let mut pool = AbortablePool::<i32>::default();
+            let hook = pool.push(future::ready(42));
+            drop(hook);
+            let result = pool.next_completed().await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
     fn test_abortable_pool_drop_abort() {
         block_on(async move {
             let mut pool = AbortablePool::<i32>::default();

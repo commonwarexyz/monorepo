@@ -96,6 +96,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
+use commonware_parallel::{Sequential, Strategy};
 use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -114,9 +115,9 @@ pub use operation::Operation;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J> {
+pub struct Config<T: Translator, J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub log: J,
@@ -142,11 +143,12 @@ pub struct Immutable<
     C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
     H: CHasher,
     T: Translator,
+    S: Strategy = Sequential,
 > where
     C::Item: EncodeShared,
 {
     /// Authenticated journal of operations.
-    pub(crate) journal: authenticated::Journal<F, E, C, H>,
+    pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
     pub(crate) root: H::Digest,
@@ -167,7 +169,7 @@ pub struct Immutable<
 }
 
 // Shared read-only functionality.
-impl<F, E, K, V, C, H, T> Immutable<F, E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family + Bagging,
     E: Context,
@@ -177,13 +179,14 @@ where
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
+    S: Strategy,
 {
     /// Initialize from a pre-constructed authenticated journal.
     ///
     /// Seeds an initial commit if the journal is empty, builds the in-memory snapshot,
     /// and returns the initialized database.
     pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H>,
+        mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
         translator: T,
     ) -> Result<Self, Error<F>> {
@@ -555,6 +558,11 @@ where
         self.root
     }
 
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.journal.strategy()
+    }
+
     /// Return the pinned Merkle nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         if !loc.is_valid() {
@@ -591,7 +599,7 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V, S> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
@@ -624,7 +632,7 @@ where
     /// [`Immutable::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
-        batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
+        batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size

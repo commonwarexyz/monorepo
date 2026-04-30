@@ -65,12 +65,13 @@ use commonware_cryptography::{
     transcript::Transcript,
     Signer,
 };
+use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_runtime::{
     BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
     Stream,
 };
-use commonware_utils::{hex, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;

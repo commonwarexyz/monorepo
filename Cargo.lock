@@ -1006,6 +1006,7 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
@@ -1057,6 +1058,7 @@ dependencies = [
  "chrono",
  "clap",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
@@ -1176,6 +1178,7 @@ name = "commonware-conformance"
 version = "2026.4.0"
 dependencies = [
  "commonware-conformance-macros",
+ "commonware-formatting",
  "commonware-macros",
  "futures",
  "serde",
@@ -1205,6 +1208,7 @@ dependencies = [
  "commonware-conformance",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
@@ -1263,6 +1267,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-formatting",
  "commonware-invariants",
  "commonware-macros",
  "commonware-math",
@@ -1364,6 +1369,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-deployer",
+ "commonware-formatting",
  "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
@@ -1378,12 +1384,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-formatting"
+version = "2026.4.0"
+dependencies = [
+ "commonware-macros",
+ "const-hex",
+ "criterion",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-invariants"
 version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-formatting",
  "commonware-macros",
- "commonware-utils",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1397,6 +1413,7 @@ dependencies = [
  "clap",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-p2p",
  "commonware-parallel",
@@ -1525,6 +1542,7 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
@@ -1577,6 +1595,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-parallel",
  "commonware-runtime-macros",
@@ -1641,6 +1660,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
@@ -1651,7 +1671,6 @@ dependencies = [
  "futures",
  "futures-util",
  "rand 0.8.5",
- "rayon",
  "rstest",
  "thiserror 2.0.17",
  "tracing",
@@ -1666,6 +1685,7 @@ dependencies = [
  "arbitrary",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
@@ -1681,6 +1701,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-macros",
  "commonware-runtime",
  "commonware-utils",
@@ -1717,6 +1738,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-stream",
@@ -1739,6 +1761,7 @@ dependencies = [
  "cfg-if",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-formatting",
  "commonware-macros",
  "criterion",
  "futures",
@@ -1765,6 +1788,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-formatting",
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
@@ -1826,6 +1850,18 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "const-hex"
+version = "1.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "531185e432bb31db1ecda541e9e7ab21468d4d844ad7505e0546a49b4945d49b"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "proptest",
+ "serde_core",
 ]
 
 [[package]]

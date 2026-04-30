@@ -13,6 +13,7 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Digest;
+use commonware_parallel::Strategy;
 use core::ops::Range;
 
 /// Configuration for initializing a [`Mem`].
@@ -349,8 +350,20 @@ impl<F: Family, D: Digest> Mem<F, D> {
         root.new_batch()
     }
 
+    /// Create a new speculative batch backed by `strategy` for merkleization.
+    pub fn new_batch_with_strategy<S: Strategy>(
+        &self,
+        strategy: S,
+    ) -> batch::UnmerkleizedBatch<F, D, S> {
+        let root = batch::MerkleizedBatch::from_mem_with_strategy(self, strategy);
+        root.new_batch()
+    }
+
     /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
-    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
+    pub fn apply_batch<S: Strategy>(
+        &mut self,
+        batch: &batch::MerkleizedBatch<F, D, S>,
+    ) -> Result<(), Error<F>> {
         let skip_ancestors = if self.size() == batch.base_size {
             false
         } else if self.size() > batch.base_size && self.size() < batch.size() {
@@ -449,6 +462,7 @@ mod tests {
     use super::*;
     use crate::merkle::{hasher::Standard, Bagging, Error, Location, Position};
     use commonware_cryptography::{sha256, Sha256};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
     use commonware_utils::NZUsize;
 
@@ -643,19 +657,12 @@ mod tests {
         });
     }
 
-    fn do_batch_update<F: Family>(
-        hasher: &H,
-        mut mem: Mem<F, D>,
-        pool: Option<commonware_parallel::ThreadPool>,
-    ) {
+    fn do_batch_update<F: Family, S: Strategy>(hasher: &H, mut mem: Mem<F, D>, strategy: S) {
         let element = D::from(*b"01234567012345670123456701234567");
         let root = plain_root(&mem, hasher);
 
         let batch = {
-            let mut batch = mem.new_batch();
-            if let Some(ref pool) = pool {
-                batch = batch.with_pool(Some(pool.clone()));
-            }
+            let mut batch = mem.new_batch_with_strategy(strategy);
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
                 batch = batch
                     .update_leaf(hasher, Location::new(leaf), &element)
@@ -685,7 +692,7 @@ mod tests {
         executor.start(|_| async move {
             let hasher: H = Standard::new();
             let mem = build::<F>(&hasher, 200);
-            do_batch_update(&hasher, mem, None);
+            do_batch_update(&hasher, mem, Sequential);
         });
     }
 
@@ -694,8 +701,8 @@ mod tests {
         executor.start(|ctx| async move {
             let hasher: H = Standard::new();
             let mem = build::<F>(&hasher, 200);
-            let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
-            do_batch_update(&hasher, mem, Some(pool));
+            let strategy = ctx.create_strategy(NZUsize!(4)).unwrap();
+            do_batch_update(&hasher, mem, strategy);
         });
     }
 
