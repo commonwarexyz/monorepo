@@ -1,5 +1,5 @@
 use crate::{BufferPool, Error, IoBufs};
-use std::{net::SocketAddr, time::Duration};
+use std::{convert::identity, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
@@ -14,9 +14,28 @@ use tracing::warn;
 pub struct Sink {
     write_timeout: Duration,
     sink: OwnedWriteHalf,
+    state: SinkState,
+}
+
+/// Lifecycle state for the write-half of a connection.
+enum SinkState {
+    /// Sends may be attempted.
+    Open,
+    /// A send is currently in progress.
+    Sending,
+    /// The write-half has been shut down.
+    Closed,
 }
 
 impl Sink {
+    async fn close(&mut self) {
+        if matches!(self.state, SinkState::Closed) {
+            return;
+        }
+        let _ = self.sink.shutdown().await;
+        self.state = SinkState::Closed;
+    }
+
     async fn send_single(&mut self, buf: &[u8]) -> Result<(), Error> {
         self.sink
             .write_all(buf)
@@ -34,6 +53,19 @@ impl Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        match self.state {
+            SinkState::Open => {}
+            SinkState::Sending => {
+                self.close().await;
+                return Err(Error::Closed);
+            }
+            SinkState::Closed => return Err(Error::Closed),
+        }
+
+        // Mark the sink as sending before awaiting so cancellation can be
+        // detected by the next send.
+        self.state = SinkState::Sending;
+
         let write_timeout = self.write_timeout;
         let bufs = bufs.into();
         let send = async {
@@ -44,9 +76,19 @@ impl crate::Sink for Sink {
         };
 
         // Time out if we take too long to write
-        timeout(write_timeout, send)
+        let result = timeout(write_timeout, send)
             .await
-            .map_err(|_| Error::Timeout)?
+            .map_or(Err(Error::Timeout), identity);
+
+        // A failed send leaves the write-half unusable.
+        if result.is_err() {
+            self.close().await;
+            return result;
+        }
+
+        // Mark the sink reusable on success.
+        self.state = SinkState::Open;
+        Ok(())
     }
 }
 
@@ -58,11 +100,20 @@ pub struct Stream {
     read_timeout: Duration,
     stream: BufReader<OwnedReadHalf>,
     pool: BufferPool,
+    poisoned: bool,
 }
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
-        let read_fut = async {
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
+        // Pre-poison so that cancellation leaves the stream permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
+        let recv = async {
             // SAFETY: `len` bytes are written by read_exact below.
             let mut buf = unsafe { self.pool.alloc_len(len) };
             self.stream
@@ -73,9 +124,16 @@ impl crate::Stream for Stream {
         };
 
         // Time out if we take too long to read
-        timeout(self.read_timeout, read_fut)
+        let result = timeout(self.read_timeout, recv)
             .await
-            .map_err(|_| Error::Timeout)?
+            .map_or(Err(Error::Timeout), identity);
+
+        // Unpoison on success.
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+
+        result
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
@@ -121,11 +179,13 @@ impl crate::Listener for Listener {
             Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
+                state: SinkState::Open,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
+                poisoned: false,
             },
         ))
     }
@@ -153,12 +213,14 @@ pub struct Config {
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     zero_linger: bool,
-    /// Read timeout for connections, after which the connection will be closed.
+    /// Read timeout for connections, after which the stream half returns
+    /// [`Error::Timeout`] and is no longer reusable.
     ///
     /// This bounds the entire `Stream::recv` call, not each underlying socket
     /// read attempt.
     read_timeout: Duration,
-    /// Write timeout for connections, after which the connection will be closed.
+    /// Write timeout for connections, after which the sink half returns
+    /// [`Error::Timeout`] and is no longer reusable.
     ///
     /// This bounds the entire `Sink::send` call, not each underlying socket
     /// write attempt. If callers batch more bytes into one send, slow links may
@@ -292,11 +354,13 @@ impl crate::Network for Network {
             Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
+                state: SinkState::Open,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
+                poisoned: false,
             },
         ))
     }
