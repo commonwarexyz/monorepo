@@ -192,6 +192,7 @@ fn fuzz(input: FuzzInput) {
                         adversary_l_sink,
                     ))
                 });
+
         // We need to do a selection to correctly assert the errors, avoiding deadlock.
         //
         // A deadlock might happen if one side asserts an error, and then we're foolishly waiting
