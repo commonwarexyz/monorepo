@@ -238,13 +238,14 @@ impl crate::Storage for Storage {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
             if let Some(name) = entry.file_name().to_str() {
-                let decoded = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
                 // Reject anything that isn't canonical lowercase hex (no `0x`
                 // prefix, no whitespace) since `from_hex` is lenient and
                 // storage only ever writes the canonical form via `hex()`.
+                let decoded = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
                 if hex(&decoded) != name {
                     return Err(Error::PartitionCorrupt(partition.into()));
                 }
+
                 blobs.push(decoded);
             }
         }
