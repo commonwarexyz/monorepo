@@ -2,12 +2,12 @@
 """Run exact Criterion benchmarks and compare them with a main-branch artifact."""
 
 import argparse
-import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +18,11 @@ BENCHER_RE = re.compile(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, help="Path to benchmark tracking config JSON")
+    parser.add_argument("--config", required=True, help="Path to benchmark tracking config TOML")
     parser.add_argument("--output-dir", required=True, help="Directory for result artifacts")
     parser.add_argument(
         "--baseline",
-        help="Path to a previous benchmark-tracking current.json artifact from main",
+        help="Path to a previous benchmark-tracking current.toml artifact from main",
     )
     parser.add_argument(
         "--skip-run",
@@ -32,9 +32,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+def read_toml(path: Path) -> dict[str, Any]:
+    with path.open("rb") as f:
+        return tomllib.load(f)
 
 
 def validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -164,10 +164,9 @@ def load_baseline(path: str | None) -> list[dict[str, Any]] | None:
     baseline_path = Path(path)
     if not baseline_path.exists():
         return None
-    with baseline_path.open("r", encoding="utf-8") as f:
-        baseline = json.load(f)
+    baseline = read_toml(baseline_path).get("benchmarks")
     if not isinstance(baseline, list):
-        raise ValueError(f"baseline `{path}` must contain a JSON array")
+        raise ValueError(f"baseline `{path}` must contain a `benchmarks` array")
     return baseline
 
 
@@ -198,6 +197,56 @@ def format_value(value: int | None, unit: str) -> str:
 
 def escape_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", "<br>")
+
+
+def toml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, str):
+        return toml_quote(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    raise TypeError(f"unsupported TOML value: {value!r}")
+
+
+def write_toml_table(path: Path, values: dict[str, Any]) -> None:
+    lines = []
+    for key, value in values.items():
+        if value is None:
+            continue
+        lines.append(f"{key} = {toml_value(value)}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def append_toml_values(lines: list[str], values: dict[str, Any], prefix: str) -> None:
+    nested = []
+    for key, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            nested.append((key, value))
+        else:
+            lines.append(f"{key} = {toml_value(value)}")
+    for key, value in nested:
+        lines.extend(["", f"[{prefix}.{key}]"])
+        append_toml_values(lines, value, f"{prefix}.{key}")
+
+
+def write_toml_array(path: Path, name: str, values: list[dict[str, Any]]) -> None:
+    lines = []
+    for value in values:
+        if lines:
+            lines.append("")
+        lines.append(f"[[{name}]]")
+        append_toml_values(lines, value, name)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def compare_results(
@@ -301,7 +350,7 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = read_json(config_path)
+    config = read_toml(config_path)
     benchmarks = validate_config(config)
 
     if args.skip_run:
@@ -335,14 +384,13 @@ def main() -> int:
         "missing_baseline_count": missing_count,
     }
 
-    (output_dir / "current.json").write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
-    (output_dir / "comparison.json").write_text(
-        json.dumps(comparisons, indent=2) + "\n", encoding="utf-8"
-    )
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    write_toml_array(output_dir / "current.toml", "benchmarks", current)
+    write_toml_array(output_dir / "comparison.toml", "comparisons", comparisons)
+    write_toml_table(output_dir / "summary.toml", summary)
     (output_dir / "comment.md").write_text(render_markdown(comparisons), encoding="utf-8")
 
-    print(json.dumps(summary, indent=2))
+    for key, value in summary.items():
+        print(f"{key}: {value}")
     return 0
 
 

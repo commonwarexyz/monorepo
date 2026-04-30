@@ -1,0 +1,7 @@
+default_threshold_percent = 10.0
+
+[[benchmarks]]
+package = "commonware-storage"
+bench = "qmdb"
+cargo_flags = ["--features", "test-traits"]
+name = "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false"
