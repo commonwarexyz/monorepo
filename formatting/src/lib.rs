@@ -97,9 +97,13 @@ mod tests {
 
     #[test]
     fn test_hex_roundtrip() {
-        for bytes in [&[][..], &[0x01], &[0x01, 0x02, 0x03]] {
-            let encoded = crate::hex(bytes);
-            assert_eq!(from_hex(&encoded).unwrap(), bytes.to_vec());
+        for (bytes, encoded) in [
+            (&[][..], ""),
+            (&[0x01][..], "01"),
+            (&[0x01, 0x02, 0x03][..], "010203"),
+        ] {
+            assert_eq!(crate::hex(bytes), encoded);
+            assert_eq!(from_hex(encoded).unwrap(), bytes.to_vec());
         }
     }
 
