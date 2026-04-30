@@ -7,7 +7,6 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    shared::Shared,
     simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
@@ -76,7 +75,7 @@ where
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
-    application: Shared<A>,
+    application: A,
 
     oracle: B,
     marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
@@ -120,7 +119,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                application: Shared::new(config.application),
+                application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,

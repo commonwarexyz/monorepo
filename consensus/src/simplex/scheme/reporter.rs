@@ -56,8 +56,8 @@ impl<
         E: CryptoRngCore + Send + 'static,
         S: certificate::Scheme + Clone,
         D: Digest,
-        T: Strategy + Clone,
-        R: Reporter<Activity = Activity<S, D>> + Clone,
+        T: Strategy,
+        R: Reporter<Activity = Activity<S, D>>,
     > Clone for AttributableReporter<E, S, D, T, R>
 {
     fn clone(&self) -> Self {

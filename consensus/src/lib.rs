@@ -82,7 +82,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
     /// and verifying payloads proposed by other participants.
-    pub trait Automaton: Send + 'static {
+    pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
         /// This often includes things like the proposer, view number, the height, or the epoch.
@@ -180,7 +180,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// The consensus engine is only aware of a payload's digest, not its contents. It is up
     /// to the relay to efficiently broadcast the full payload to other participants.
-    pub trait Relay: Send + 'static {
+    pub trait Relay: Clone + Send + 'static {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
@@ -203,7 +203,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.
-    pub trait Reporter: Send + 'static {
+    pub trait Reporter: Clone + Send + 'static {
         /// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
         ///
         /// Examples of activity would be "vote", "finalize", or "fault". Various consensus implementations may
@@ -223,7 +223,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Monitor can be implemented using [crate::Reporter] to avoid introducing complexity
     /// into any particular consensus implementation.
-    pub trait Monitor: Send + 'static {
+    pub trait Monitor: Clone + Send + 'static {
         /// Index is the type used to indicate the in-progress consensus decision.
         type Index;
 

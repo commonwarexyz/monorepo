@@ -68,7 +68,7 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    Clock, Metrics, Spawner,
+    Clock, Metrics, Shared, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -139,13 +139,33 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: E,
+    context: Shared<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed,
+}
+
+impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E>,
+    B: Block + Clone,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            epocher: self.epocher.clone(),
+            available_blocks: self.available_blocks.clone(),
+            build_duration: self.build_duration.clone(),
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
@@ -173,7 +193,7 @@ where
         let build_duration = Timed::new(build_histogram);
 
         Self {
-            context,
+            context: Shared::new(context),
             application,
             marshal,
             epocher,
@@ -235,10 +255,13 @@ where
         let build_duration = self.build_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let context = self
+            .context
+            .lock()
+            .await
             .child("propose")
-            .with_attribute("round", consensus_context.round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", consensus_context.round);
+        context.spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
                 // for this round (persisted by a pre-crash propose whose
                 // notarize vote never reached the journal).
@@ -360,7 +383,7 @@ where
                     success,
                     "proposed new block"
                 );
-            });
+        });
         rx
     }
 
@@ -385,10 +408,13 @@ where
         let available_blocks = self.available_blocks.clone();
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let runtime_context = self
+            .context
+            .lock()
+            .await
             .child("inline_verify")
-            .with_attribute("round", context.round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", context.round);
+        runtime_context.spawn(move |runtime_context| async move {
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
@@ -446,7 +472,7 @@ where
                     available_blocks.lock().insert((round, digest));
                 }
                 tx.send_lossy(application_valid);
-            });
+        });
         rx
     }
 }
@@ -487,10 +513,13 @@ where
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let context = self
+            .context
+            .lock()
+            .await
             .child("inline_certify")
-            .with_attribute("round", round)
-            .spawn(move |_| async move {
+            .with_attribute("round", round);
+        context.spawn(move |_| async move {
                 let Some(block) =
                     await_block_subscription(&mut tx, block_rx, &digest, "certification").await
                 else {
@@ -505,7 +534,7 @@ where
                 if marshal.certified(round, block).await {
                     tx.send_lossy(true);
                 }
-            });
+        });
 
         // We don't need to verify the block here because we could not have
         // reached certification without a notarization (implying at least f+1

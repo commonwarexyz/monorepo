@@ -99,7 +99,7 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    Clock, Metrics, Spawner,
+    Clock, Metrics, Shared, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
@@ -141,13 +141,33 @@ where
     B: CertifiableBlock,
     ES: Epocher,
 {
-    context: E,
+    context: Shared<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
     build_duration: Timed,
+}
+
+impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E>,
+    B: CertifiableBlock,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            epocher: self.epocher.clone(),
+            verification_tasks: self.verification_tasks.clone(),
+            build_duration: self.build_duration.clone(),
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
@@ -173,7 +193,7 @@ where
         let build_duration = Timed::new(build_histogram);
 
         Self {
-            context,
+            context: Shared::new(context),
             application,
             marshal,
             epocher,
@@ -251,10 +271,13 @@ where
         let build_duration = self.build_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let context = self
+            .context
+            .lock()
+            .await
             .child("propose")
-            .with_attribute("round", consensus_context.round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", consensus_context.round);
+        context.spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
                 // for this round (persisted by a pre-crash propose whose
                 // notarize vote never reached the journal).
@@ -391,7 +414,7 @@ where
                     success,
                     "proposed new block"
                 );
-            });
+        });
         rx
     }
 
@@ -409,10 +432,13 @@ where
         verification_tasks.insert(round, digest, task_rx);
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let runtime_context = self
+            .context
+            .lock()
+            .await
             .child("optimistic_verify")
-            .with_attribute("round", round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", round);
+        runtime_context.spawn(move |runtime_context| async move {
                 let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
                 let block = select! {
                     _ = tx.closed() => {
@@ -505,7 +531,7 @@ where
                     None => return,
                 };
                 task_tx.send_lossy(application_valid);
-            });
+        });
         rx
     }
 }
@@ -547,10 +573,13 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let context = self
+            .context
+            .lock()
+            .await
             .child("certify")
-            .with_attribute("round", round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", round);
+        context.spawn(move |runtime_context| async move {
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -614,7 +643,7 @@ where
                     None => return,
                 };
                 tx.send_lossy(application_valid);
-            });
+        });
         rx
     }
 }

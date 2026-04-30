@@ -111,7 +111,7 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Shared, Spawner, Storage,
 };
 use commonware_utils::{
     channel::{
@@ -175,7 +175,7 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    context: E,
+    context: Shared<E>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
@@ -189,6 +189,36 @@ where
     verify_duration: Timed,
     proposal_parent_fetch_duration: Timed,
     erasure_encode_duration: Timed,
+}
+
+impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
+where
+    E: Rng + Storage + Spawner + Metrics + Clock,
+    A: Application<E>,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    C: CodingScheme,
+    H: Hasher,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    S: Strategy,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            shards: self.shards.clone(),
+            scheme_provider: self.scheme_provider.clone(),
+            epocher: self.epocher.clone(),
+            strategy: self.strategy.clone(),
+            verification_tasks: self.verification_tasks.clone(),
+            cached_genesis: self.cached_genesis.clone(),
+            build_duration: self.build_duration.clone(),
+            verify_duration: self.verify_duration.clone(),
+            proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
+            erasure_encode_duration: self.erasure_encode_duration.clone(),
+        }
+    }
 }
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
@@ -251,7 +281,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            context,
+            context: Shared::new(context),
             application,
             marshal,
             shards,
@@ -285,17 +315,21 @@ where
     /// If `prefetched_block` is provided, it will be used directly instead of fetching from
     /// the marshal. This is useful in `certify` when we've already fetched the block to
     /// extract its embedded context.
-    fn deferred_verify(
+    async fn deferred_verify(
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
+        let context = self
+            .context
+            .lock()
+            .await
+            .child("deferred_verify")
+            .with_attribute("round", consensus_context.round);
         spawn_deferred_verify(
-            self.context
-                .child("deferred_verify")
-                .with_attribute("round", consensus_context.round),
+            context,
             self.application.clone(),
             self.marshal.clone(),
             self.epocher.clone(),
@@ -550,10 +584,13 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let context = self
+            .context
+            .lock()
+            .await
             .child("propose")
-            .with_attribute("round", consensus_context.round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", consensus_context.round);
+        context.spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
                 // for this round (persisted before voting in consensus).
                 //
@@ -691,7 +728,7 @@ where
                 }
                 let success = tx.send_lossy(commitment);
                 debug!(?round, ?commitment, success, "proposed new block");
-            });
+        });
         rx
     }
 
@@ -783,9 +820,8 @@ where
             verification_tasks.insert(round, payload, task_rx);
 
             let (mut tx, rx) = oneshot::channel();
-            self.context
-                .child("verify_reproposal")
-                .spawn(move |_| async move {
+            let context = self.context.lock().await.child("verify_reproposal");
+            context.spawn(move |_| async move {
                     let block = select! {
                         _ = tx.closed() => {
                             debug!(
@@ -827,7 +863,7 @@ where
                     }
                     task_tx.send_lossy(true);
                     tx.send_lossy(true);
-                });
+            });
             return rx;
         }
 
@@ -843,7 +879,9 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
+        let task = self
+            .deferred_verify(consensus_context, payload, None, Stage::Verified)
+            .await;
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -855,9 +893,8 @@ where
                 // not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
                 let (tx, rx) = oneshot::channel();
-                self.context
-                    .child("shard_validity_wait")
-                    .spawn(|_| async move {
+                let context = self.context.lock().await.child("shard_validity_wait");
+                context.spawn(|_| async move {
                         if validity_rx.await.is_ok() {
                             tx.send_lossy(true);
                         }
@@ -922,10 +959,13 @@ where
         let cached_genesis = self.cached_genesis.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
-        self.context
+        let context = self
+            .context
+            .lock()
+            .await
             .child("certify")
-            .with_attribute("round", round)
-            .spawn(move |runtime_context| async move {
+            .with_attribute("round", round);
+        context.spawn(move |runtime_context| async move {
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -1002,7 +1042,7 @@ where
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
-            });
+        });
         rx
     }
 }

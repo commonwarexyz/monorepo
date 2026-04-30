@@ -24,6 +24,9 @@ pub(crate) use handle::{Aborter, MetricHandle, Panicker};
 mod cell;
 pub use cell::Cell as ContextCell;
 
+mod shared;
+pub use shared::Shared;
+
 pub(crate) mod supervision;
 
 /// The execution mode of a task.

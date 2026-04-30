@@ -26,8 +26,8 @@ pub struct Engine<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>> + Clone,
-    F: Reporter<Activity = Activity<S, D>> + Clone,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
+    F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
 > {
     context: ContextCell<E>,
@@ -49,8 +49,8 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>> + Clone,
-        F: Reporter<Activity = Activity<S, D>> + Clone,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
+        F: Reporter<Activity = Activity<S, D>>,
         T: Strategy,
     > Engine<E, S, L, B, D, A, R, F, T>
 {

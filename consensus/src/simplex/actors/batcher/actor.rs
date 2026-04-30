@@ -46,7 +46,7 @@ where
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    Re: Reporter<Activity = Activity<S, D>> + Clone,
+    Re: Reporter<Activity = Activity<S, D>>,
     Rl: Relay,
     T: Strategy,
 {
@@ -83,7 +83,7 @@ where
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    Re: Reporter<Activity = Activity<S, D>> + Clone,
+    Re: Reporter<Activity = Activity<S, D>>,
     Rl: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     T: Strategy,
 {
