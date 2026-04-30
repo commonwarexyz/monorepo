@@ -261,9 +261,12 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::init(context.child("init").with_attribute("index", 1), cfg.clone())
-                .await
-                .expect("Failed to initialize cache");
+            let mut cache = Cache::init(
+                context.child("init").with_attribute("index", 1),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize cache");
 
             // Insert multiple items
             let mut items = BTreeMap::new();
@@ -305,9 +308,12 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::<_, [u8; 1024]>::init(context.child("init").with_attribute("index", 2), cfg.clone())
-                .await
-                .expect("Failed to initialize cache");
+            let mut cache = Cache::<_, [u8; 1024]>::init(
+                context.child("init").with_attribute("index", 2),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize cache");
 
             // Ensure all items can be retrieved
             for (index, data) in &items {

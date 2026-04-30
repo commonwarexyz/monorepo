@@ -690,7 +690,11 @@ pub mod tests {
                 // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
                 // state of the DB should be as of the last commit.
                 drop(db);
-                let db: C = open_db(context.child("scenario").with_attribute("index", 1), partition.clone()).await;
+                let db: C = open_db(
+                    context.child("scenario").with_attribute("index", 1),
+                    partition.clone(),
+                )
+                .await;
                 assert_eq!(db.root(), committed_root);
                 assert_eq!(db.bounds().await.end, committed_op_count);
 
@@ -707,7 +711,11 @@ pub mod tests {
 
                 // We should be able to recover, so the root should differ from the previous commit, and
                 // the op count should be greater than before.
-                let db: C = open_db(context.child("scenario").with_attribute("index", 2), partition.clone()).await;
+                let db: C = open_db(
+                    context.child("scenario").with_attribute("index", 2),
+                    partition.clone(),
+                )
+                .await;
                 let scenario_2_root = db.root();
 
                 // To confirm the second committed hash is correct we'll re-build the DB in a new

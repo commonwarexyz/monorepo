@@ -64,10 +64,12 @@ impl Conformance for QueueConformance {
             drop(queue);
 
             // Re-open and verify surviving items are readable
-            let mut queue =
-                Queue::<_, Vec<u8>>::init(context.child("queue").with_attribute("index", 2), config(seed, &context))
-                    .await
-                    .unwrap();
+            let mut queue = Queue::<_, Vec<u8>>::init(
+                context.child("queue").with_attribute("index", 2),
+                config(seed, &context),
+            )
+            .await
+            .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {
                 assert_eq!(item, data[pos as usize]);
                 queue.ack(pos).await.unwrap();

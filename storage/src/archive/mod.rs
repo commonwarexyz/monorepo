@@ -1043,7 +1043,11 @@ mod tests {
     {
         // Write multi-items, sync, and drop
         {
-            let mut archive = creator(context.child("init").with_attribute("index", 1), compression).await;
+            let mut archive = creator(
+                context.child("init").with_attribute("index", 1),
+                compression,
+            )
+            .await;
             archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
             archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
             archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
@@ -1051,7 +1055,11 @@ mod tests {
         }
 
         // Reinitialize and verify
-        let archive = creator(context.child("init").with_attribute("index", 2), compression).await;
+        let archive = creator(
+            context.child("init").with_attribute("index", 2),
+            compression,
+        )
+        .await;
 
         assert_eq!(
             archive

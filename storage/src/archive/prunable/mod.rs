@@ -538,9 +538,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(context.child("init").with_attribute("index", 1), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let mut archive = Archive::init(
+                context.child("init").with_attribute("index", 1),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Insert multiple keys across different sections
             let mut keys = BTreeMap::new();
@@ -599,10 +602,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive =
-                Archive::<_, _, _, FixedBytes<1024>>::init(context.child("init").with_attribute("index", 2), cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
+                context.child("init").with_attribute("index", 2),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {

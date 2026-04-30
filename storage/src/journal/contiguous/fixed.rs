@@ -2845,9 +2845,12 @@ mod tests {
             context.remove(&blob_part, None).await.unwrap();
 
             // Recovery should see no blobs and return empty journal, ignoring metadata
-            let journal = Journal::<_, Digest>::init(context.child("crash").with_attribute("index", 1), cfg.clone())
-                .await
-                .expect("init failed after clear crash");
+            let journal = Journal::<_, Digest>::init(
+                context.child("crash").with_attribute("index", 1),
+                cfg.clone(),
+            )
+            .await
+            .expect("init failed after clear crash");
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 0);
             assert_eq!(bounds.start, 0);
@@ -2881,9 +2884,12 @@ mod tests {
             blob.sync().await.unwrap(); // Ensure it exists
 
             // Recovery should warn "metadata ahead" and use blob state (0, 0)
-            let journal = Journal::<_, Digest>::init(context.child("crash").with_attribute("index", 2), cfg.clone())
-                .await
-                .expect("init failed after create crash");
+            let journal = Journal::<_, Digest>::init(
+                context.child("crash").with_attribute("index", 2),
+                cfg.clone(),
+            )
+            .await
+            .expect("init failed after create crash");
 
             // Should recover to blob state (section 0 aligned)
             let bounds = journal.bounds().await;

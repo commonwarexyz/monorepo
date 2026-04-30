@@ -3687,8 +3687,10 @@ mod tests {
                     true
                 })),
             };
-            let (actor, application) =
-                mocks::application::Application::new(context.child("app").with_attribute("index", 2), app_cfg);
+            let (actor, application) = mocks::application::Application::new(
+                context.child("app").with_attribute("index", 2),
+                app_cfg,
+            );
             actor.start();
 
             let voter_cfg = Config {

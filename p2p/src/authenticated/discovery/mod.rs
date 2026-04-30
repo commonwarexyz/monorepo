@@ -1301,20 +1301,26 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::channel::<()>(2);
             let done0 = done_sender.clone();
             let pk1_clone = pk1.clone();
-            context.child("recv").with_attribute("index", 0).spawn(move |_| async move {
-                let (sender, message) = receiver0.recv().await.unwrap();
-                assert_eq!(sender, pk1_clone);
-                assert_eq!(message, msg1.as_slice());
-                done0.send(()).await.unwrap();
-            });
+            context
+                .child("recv")
+                .with_attribute("index", 0)
+                .spawn(move |_| async move {
+                    let (sender, message) = receiver0.recv().await.unwrap();
+                    assert_eq!(sender, pk1_clone);
+                    assert_eq!(message, msg1.as_slice());
+                    done0.send(()).await.unwrap();
+                });
             let done1 = done_sender.clone();
             let pk0_clone = pk0.clone();
-            context.child("recv").with_attribute("index", 1).spawn(move |_| async move {
-                let (sender, message) = receiver1.recv().await.unwrap();
-                assert_eq!(sender, pk0_clone);
-                assert_eq!(message, msg0.as_slice());
-                done1.send(()).await.unwrap();
-            });
+            context
+                .child("recv")
+                .with_attribute("index", 1)
+                .spawn(move |_| async move {
+                    let (sender, message) = receiver1.recv().await.unwrap();
+                    assert_eq!(sender, pk0_clone);
+                    assert_eq!(message, msg0.as_slice());
+                    done1.send(()).await.unwrap();
+                });
 
             // Send messages until both peers connected
             context.child("sender").spawn({
