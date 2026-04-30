@@ -67,7 +67,10 @@ impl<const N: usize> Prunable<N> {
 
     /* Length */
 
-    /// Return the number of bits in the bitmap, irrespective of any pruning.
+    /// Return the highest bit position ever pushed, plus one. Pruning does not subtract from
+    /// this value: pruned positions stay counted because the bitmap is a sequential array
+    /// where positions retain meaning even when their values become inaccessible. Equivalent
+    /// to `pruned_bits() + (len of unpruned region)`.
     #[inline]
     pub const fn len(&self) -> u64 {
         let pruned_bits = (self.pruned_chunks as u64)

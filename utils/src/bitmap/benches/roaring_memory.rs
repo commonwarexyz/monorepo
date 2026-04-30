@@ -1,0 +1,189 @@
+//! Memory profile of `Bitmap` workloads, side by side with `roaring-rs`'s
+//! `RoaringTreemap`.
+//!
+//! Run with:
+//!
+//! ```bash
+//! cargo bench -p commonware-utils --bench roaring_memory --features analysis
+//! ```
+//!
+//! This is a reporting binary, not a Criterion timing benchmark. It builds canonical
+//! workloads (a near-saturated range at varying gap counts, plus a few sparse and
+//! multi-shelf cases for context) and prints a markdown table comparing:
+//!
+//! - `ours_bytes` — exact heap+stack footprint of our [`Bitmap`] via
+//!   [`Bitmap::byte_size`] (gated by the `analysis` feature). The BTreeMap node
+//!   overhead is approximate.
+//! - `ours_wire` — bytes our codec emits via `EncodeSize::encode_size`.
+//! - `theirs_wire` — bytes `roaring-rs` emits via `RoaringTreemap::serialized_size`.
+//!
+//! Heap-footprint comparison against `roaring-rs` is not possible without reaching for an
+//! external heap profiler (their internals are opaque). Wire size is the only directly
+//! comparable axis; it correlates with heap size strongly enough to be informative.
+//!
+//! After landing the Bitmap-to-Run conversion optimization, re-run this bench and diff
+//! the `ours_bytes` and `A/B/R` columns to see the impact on the near-saturated rows.
+
+use commonware_codec::EncodeSize;
+use commonware_utils::bitmap::roaring::{Bitmap, Container};
+use roaring::RoaringTreemap;
+
+/// Builds a near-saturated bitmap: every value in `[0, total)` is present except for
+/// `num_gaps` evenly-spaced missing entries. The number of resulting "runs" tracks the
+/// gap count, so this workload directly stresses the Bitmap-to-Run conversion threshold.
+fn near_saturated(total: u64, num_gaps: u64) -> (Bitmap, RoaringTreemap) {
+    let mut ours = Bitmap::new();
+    let mut theirs = RoaringTreemap::new();
+    let stride = if num_gaps == 0 {
+        u64::MAX
+    } else {
+        total / num_gaps
+    };
+    for i in 0..total {
+        // Skip every `stride`-th index (excluding 0) to create gaps.
+        if num_gaps > 0 && i > 0 && i % stride == 0 {
+            continue;
+        }
+        ours.insert(i);
+        theirs.insert(i);
+    }
+    (ours, theirs)
+}
+
+/// Builds a sparse bitmap with `count` evenly-spaced values in a single 16-bit shelf.
+fn sparse_single_shelf(count: u64) -> (Bitmap, RoaringTreemap) {
+    let mut ours = Bitmap::new();
+    let mut theirs = RoaringTreemap::new();
+    // Stride values within [0, 65536) so they all land in the first container.
+    let stride = 65_536 / count.max(1);
+    for i in 0..count {
+        let v = i * stride;
+        ours.insert(v);
+        theirs.insert(v);
+    }
+    (ours, theirs)
+}
+
+/// Builds a multi-shelf workload: `count` consecutive values starting at each of
+/// `shelves` evenly-spaced container keys. Stresses the outer BTreeMap.
+fn multi_shelf(shelves: u64, count_per_shelf: u64) -> (Bitmap, RoaringTreemap) {
+    let mut ours = Bitmap::new();
+    let mut theirs = RoaringTreemap::new();
+    for s in 0..shelves {
+        let base = s * 65_536;
+        for i in 0..count_per_shelf {
+            let v = base + i;
+            ours.insert(v);
+            theirs.insert(v);
+        }
+    }
+    (ours, theirs)
+}
+
+/// Counts how many containers of each variant the bitmap holds. Diagnostic for the
+/// auto-conversion logic — most useful when comparing pre/post run-optimization.
+fn variant_counts(bm: &Bitmap) -> (usize, usize, usize) {
+    let mut counts = (0usize, 0usize, 0usize);
+    for (_, c) in bm.containers().iter() {
+        match c {
+            Container::Array(_) => counts.0 += 1,
+            Container::Bitmap(_) => counts.1 += 1,
+            Container::Run(_) => counts.2 += 1,
+        }
+    }
+    counts
+}
+
+fn measure(name: &str, ours: &Bitmap, theirs: &RoaringTreemap) {
+    assert_eq!(
+        ours.len(),
+        theirs.len(),
+        "cardinality mismatch in workload {name}: ours={}, theirs={}",
+        ours.len(),
+        theirs.len()
+    );
+    let (a, b, r) = variant_counts(ours);
+    let containers = ours.container_count();
+    let ours_bytes = ours.byte_size();
+    let ours_wire = ours.encode_size();
+    let theirs_wire = theirs.serialized_size();
+    let abr = format!("A={a} B={b} R={r}");
+    println!(
+        "| {:38} | {:>11} | {:>10} | {:>14} | {:>10} | {:>10} | {:>11} |",
+        name,
+        ours.len(),
+        containers,
+        abr,
+        ours_bytes,
+        ours_wire,
+        theirs_wire
+    );
+}
+
+fn print_header() {
+    println!(
+        "| {:38} | {:>11} | {:>10} | {:>14} | {:>10} | {:>10} | {:>11} |",
+        "workload",
+        "cardinality",
+        "containers",
+        "A/B/R (ours)",
+        "ours_bytes",
+        "ours_wire",
+        "theirs_wire"
+    );
+    println!(
+        "|{:-<40}|{:->13}|{:->12}|{:->16}|{:->12}|{:->12}|{:->13}|",
+        "", ":", ":", "", ":", ":", ":"
+    );
+}
+
+fn main() {
+    println!("# Roaring memory profile: commonware vs roaring-rs");
+    println!();
+    println!("Generated by `cargo bench -p commonware-utils --bench roaring_memory --features analysis`.");
+    println!();
+    print_header();
+
+    // Near-saturated scenarios: 65k values, varying gap counts. Total cardinality stays
+    // close to 65k while the number of "runs" tracks the gap count, exercising the
+    // Bitmap-to-Run conversion threshold.
+    let scenarios: &[(&str, u64)] = &[
+        ("near-saturated: 65k, no gaps", 0),
+        ("near-saturated: 65k, 50 gaps", 50),
+        ("near-saturated: 65k, 500 gaps", 500),
+        ("near-saturated: 65k, 5000 gaps", 5000),
+    ];
+    for (name, gaps) in scenarios {
+        let (ours, theirs) = near_saturated(65_536, *gaps);
+        measure(name, &ours, &theirs);
+    }
+
+    // Sparse scenarios: stress the Array container variant.
+    for &count in &[100u64, 1000, 4000] {
+        let (ours, theirs) = sparse_single_shelf(count);
+        let name = format!("sparse single shelf: {count} values");
+        measure(&name, &ours, &theirs);
+    }
+
+    // Multi-shelf scenarios: stress the outer BTreeMap.
+    for &shelves in &[10u64, 100, 1000] {
+        let count_per_shelf = 100u64;
+        let (ours, theirs) = multi_shelf(shelves, count_per_shelf);
+        let name = format!("multi-shelf: {shelves} shelves x {count_per_shelf}");
+        measure(&name, &ours, &theirs);
+    }
+
+    println!();
+    println!("**Notes**");
+    println!();
+    println!("- `ours_bytes` is the analytical heap+stack estimate via `byte_size()`. The");
+    println!("  BTreeMap-overhead constants in the source are approximate (no exposed");
+    println!("  layout in stdlib); see the `byte_size()` doc comments.");
+    println!("- `ours_wire` and `theirs_wire` use *different* serialization formats and are");
+    println!("  not byte-comparable, but both reflect the underlying density and so are");
+    println!("  proxies for relative encoded size.");
+    println!("- Heap footprint of `roaring-rs` is opaque from outside the crate; comparing");
+    println!("  `ours_bytes` to a comparable number for `roaring-rs` would require an");
+    println!("  external heap profiler (e.g. `dhat`, `valgrind --tool=massif`).");
+    println!("- `A/B/R` is the count of Array/Bitmap/Run container variants in the result.");
+}
