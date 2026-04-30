@@ -373,18 +373,20 @@ impl Iterator for Iter<'_> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = match (self.current_run, self.current_value) {
-            (Some((_, end)), Some(value)) if value <= end => {
-                let in_current = (end - value + 1) as usize;
-                let in_remaining: usize = self
-                    .runs_iter
-                    .clone()
-                    .map(|&(s, e)| (e - s + 1) as usize)
-                    .sum();
-                in_current + in_remaining
-            }
+        // Values left in the current run, if any. Between `next()` calls, the
+        // current run can already be exhausted (`value > end`) while `runs_iter`
+        // still holds further runs; counting must continue from `runs_iter` in
+        // that state.
+        let in_current = match (self.current_run, self.current_value) {
+            (Some((_, end)), Some(value)) if value <= end => (end - value + 1) as usize,
             _ => 0,
         };
+        let in_remaining: usize = self
+            .runs_iter
+            .clone()
+            .map(|&(s, e)| (e - s + 1) as usize)
+            .sum();
+        let remaining = in_current + in_remaining;
         (remaining, Some(remaining))
     }
 }
@@ -532,6 +534,52 @@ mod tests {
 
         let values: Vec<_> = container.iter().collect();
         assert_eq!(values, vec![5, 10, 100, 1000]);
+    }
+
+    #[test]
+    fn test_iter_size_hint_between_runs() {
+        let mut container = Run::new();
+        container.insert(1);
+        container.insert(3);
+        container.insert(5);
+        // Confirm the container holds three single-value runs.
+        assert_eq!(
+            container.runs().collect::<Vec<_>>(),
+            vec![(1, 1), (3, 3), (5, 5)]
+        );
+
+        let mut iter = container.iter();
+        assert_eq!(iter.len(), 3);
+
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.len(), 2);
+
+        assert_eq!(iter.next(), Some(3));
+        assert_eq!(iter.len(), 1);
+
+        assert_eq!(iter.next(), Some(5));
+        assert_eq!(iter.len(), 0);
+
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.len(), 0);
+    }
+
+    #[test]
+    fn test_iter_size_hint_within_run() {
+        // Mid-run: size_hint must count the remaining values in the current run
+        // plus all later runs.
+        let mut container = Run::new();
+        container.insert_range(10, 14); // run (10, 13)
+        container.insert_range(20, 23); // run (20, 22)
+
+        let mut iter = container.iter();
+        assert_eq!(iter.len(), 4 + 3); // 7 total
+
+        assert_eq!(iter.next(), Some(10));
+        assert_eq!(iter.len(), 6);
+
+        assert_eq!(iter.next(), Some(11));
+        assert_eq!(iter.len(), 5);
     }
 
     #[test]

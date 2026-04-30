@@ -64,8 +64,8 @@
 //! # References
 //!
 //! * <https://arxiv.org/pdf/1402.6407>: Better bitmap performance with Roaring bitmaps
-//! * <https://github.com/Bitmap/RoaringFormatSpec>: Roaring Bitmap Format Specification
-//! * <https://github.com/Bitmap/roaring-rs>: roaring-rs Crate
+//! * <https://github.com/RoaringBitmap/RoaringFormatSpec>: Roaring Bitmap Format Specification
+//! * <https://github.com/RoaringBitmap/roaring-rs>: roaring-rs Crate
 
 pub mod container;
 #[cfg(any(test, feature = "fuzz"))]
@@ -134,9 +134,26 @@ pub struct Bitmap {
     containers: BTreeMap<u64, Container>,
 }
 
-impl From<BTreeMap<u64, Container>> for Bitmap {
-    fn from(containers: BTreeMap<u64, Container>) -> Self {
-        Self { containers }
+impl TryFrom<BTreeMap<u64, Container>> for Bitmap {
+    type Error = CodecError;
+
+    /// Wraps a pre-built container map into a [`Bitmap`], rejecting any key above
+    /// the 48-bit container-key range.
+    fn try_from(containers: BTreeMap<u64, Container>) -> Result<Self, Self::Error> {
+        if let Some((&max_key, _)) = containers.last_key_value() {
+            if max_key > MAX_KEY {
+                return Err(CodecError::Invalid(
+                    "Bitmap",
+                    "container key exceeds 48-bit range",
+                ));
+            }
+        }
+
+        if containers.values().any(|c| c.is_empty()) {
+            return Err(CodecError::Invalid("Bitmap", "empty container"));
+        }
+
+        Ok(Self { containers })
     }
 }
 
@@ -317,9 +334,13 @@ impl Bitmap {
         &self.containers
     }
 
-    /// Creates a bitmap with a single container.
+    /// Builds a bitmap with a single container at `key`.
+    ///
+    /// Assumes that the provided `key` is not greater than `MAX_KEY`.
     #[inline]
-    pub fn from_single_container(key: u64, container: Container) -> Self {
+    pub(crate) fn from_single_container(key: u64, container: Container) -> Self {
+        debug_assert!(key <= MAX_KEY, "container key exceeds 48-bit range");
+        debug_assert!(!container.is_empty(), "empty container");
         let mut containers = BTreeMap::new();
         containers.insert(key, container);
         Self { containers }
@@ -396,17 +417,8 @@ impl Read for Bitmap {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         // Use BTreeMap's codec which validates sorted/unique keys and bounds count.
         let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
-        // Reject keys outside the 48-bit container-key range. BTreeMap is sorted, so
-        // the last entry's key is the maximum; checking it covers all keys.
-        if let Some((&max_key, _)) = containers.iter().next_back() {
-            if max_key > MAX_KEY {
-                return Err(CodecError::Invalid(
-                    "Bitmap",
-                    "container key exceeds 48-bit range",
-                ));
-            }
-        }
-        Ok(Self { containers })
+        // `TryFrom` enforces the 48-bit key-range invariant.
+        Self::try_from(containers)
     }
 }
 
@@ -697,6 +709,63 @@ mod tests {
     }
 
     #[test]
+    fn test_codec_roundtrip_large_mixed_variants() {
+        // Exercises BTreeMap-codec scaling and confirms all three Container variants
+        // roundtrip correctly when packed into one bitmap. 600 containers across
+        // disjoint shelves: 200 sparse (Array), 200 dense alternating (Bitmap),
+        // 200 contiguous ranges (Run).
+        use commonware_codec::{Decode, Encode};
+
+        let mut bitmap = Bitmap::new();
+
+        // Sparse shelves: 100 values each, well below MAX_CARDINALITY.
+        for shelf in 0..200u64 {
+            let base = shelf * 65_536;
+            for i in 0..100u64 {
+                bitmap.insert(base + i * 500);
+            }
+        }
+
+        // Dense shelves: 5000 alternating values. Above MAX_CARDINALITY (Array→Bitmap)
+        // with run count above the Run-conversion threshold so they stay Bitmap.
+        for shelf in 200..400u64 {
+            let base = shelf * 65_536;
+            for i in 0..5_000u64 {
+                bitmap.insert(base + i * 2);
+            }
+        }
+
+        // Run shelves: one contiguous range. After Array→Bitmap conversion at
+        // MAX_CARDINALITY, the single-run state triggers Bitmap→Run.
+        for shelf in 400..600u64 {
+            let base = shelf * 65_536;
+            bitmap.insert_range(base, base + 50_000);
+        }
+
+        assert_eq!(bitmap.container_count(), 600);
+
+        // Confirm all three variants are present.
+        let mut has_array = false;
+        let mut has_bitmap = false;
+        let mut has_run = false;
+        for container in bitmap.containers().values() {
+            match container {
+                Container::Array(_) => has_array = true,
+                Container::Bitmap(_) => has_bitmap = true,
+                Container::Run(_) => has_run = true,
+            }
+        }
+        assert!(
+            has_array && has_bitmap && has_run,
+            "expected all three variants, got A={has_array} B={has_bitmap} R={has_run}"
+        );
+
+        let encoded = bitmap.encode();
+        let decoded = Bitmap::decode_cfg(encoded, &(..=1000usize).into()).unwrap();
+        assert_eq!(decoded, bitmap);
+    }
+
+    #[test]
     fn test_codec_container_limit() {
         use commonware_codec::{Decode, Encode, Error};
 
@@ -716,6 +785,53 @@ mod tests {
         // Should fail with limit < 3
         let result = Bitmap::decode_cfg(encoded, &(..=2).into());
         assert!(matches!(result, Err(Error::InvalidLength(3))));
+    }
+
+    #[test]
+    fn test_try_from_btreemap_rejects_out_of_range_key() {
+        use commonware_codec::Error;
+
+        let mut malformed: BTreeMap<u64, Container> = BTreeMap::new();
+        let mut container = Container::new();
+        container.insert(0);
+        malformed.insert(1u64 << 48, container);
+
+        let result = Bitmap::try_from(malformed);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Invalid("Bitmap", msg)) if msg.contains("48-bit")
+            ),
+            "expected Invalid(\"Bitmap\", ...), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_try_from_btreemap_accepts_in_range_keys() {
+        let mut map: BTreeMap<u64, Container> = BTreeMap::new();
+        let mut container = Container::new();
+        container.insert(42);
+        map.insert(MAX_KEY, container);
+
+        let bm = Bitmap::try_from(map).unwrap();
+        assert!(bm.contains(combine(MAX_KEY, 42)));
+    }
+
+    #[test]
+    fn test_try_from_btreemap_rejects_empty_container() {
+        // An empty container has no values to find via iteration, but the key still
+        // shows up in `container_count()` and confuses `min`/`max`. Reject at
+        // construction so callers can't smuggle one in via the public TryFrom.
+        use commonware_codec::Error;
+
+        let mut map: BTreeMap<u64, Container> = BTreeMap::new();
+        map.insert(0, Container::new());
+
+        let result = Bitmap::try_from(map);
+        assert!(
+            matches!(result, Err(Error::Invalid("Bitmap", "empty container"))),
+            "expected Invalid(\"Bitmap\", \"empty container\"), got {result:?}"
+        );
     }
 
     #[test]

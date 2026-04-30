@@ -96,7 +96,7 @@ pub fn union(a: &Bitmap, b: &Bitmap, limit: u64) -> Bitmap {
         }
     }
 
-    Bitmap::from(result)
+    Bitmap { containers: result }
 }
 
 /// Computes the intersection of two bitmaps, returning at most `limit` values.
@@ -146,7 +146,7 @@ pub fn intersection(a: &Bitmap, b: &Bitmap, limit: u64) -> Bitmap {
         }
     }
 
-    Bitmap::from(result)
+    Bitmap { containers: result }
 }
 
 /// Computes the difference (a - b), returning at most `limit` values.
@@ -195,7 +195,7 @@ pub fn difference(a: &Bitmap, b: &Bitmap, limit: u64) -> Bitmap {
         }
     }
 
-    Bitmap::from(result)
+    Bitmap { containers: result }
 }
 
 /// Returns `true` if every value in `a` is also in `b` (i.e. `a ⊆ b`).
