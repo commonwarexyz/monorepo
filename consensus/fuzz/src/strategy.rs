@@ -1,4 +1,4 @@
-use crate::{utils::NetworkFault, EPOCH, FAULT_INJECTION_RATIO};
+use crate::{utils::SetPartition, EPOCH, FAULT_INJECTION_RATIO};
 use commonware_consensus::{
     simplex::types::Proposal,
     types::{Epoch, Round, View},
@@ -78,7 +78,7 @@ pub trait Strategy: Send + Sync {
         &self,
         required_containers: u64,
         rng: &mut impl Rng,
-    ) -> Vec<(View, NetworkFault)>;
+    ) -> Vec<(View, SetPartition)>;
 
     fn fault_bounds(&self) -> Option<(u64, u64)>;
 }
@@ -101,7 +101,7 @@ fn sample_faults(
     min_view: u64,
     max_view: u64,
     rng: &mut impl Rng,
-) -> Vec<(View, NetworkFault)> {
+) -> Vec<(View, SetPartition)> {
     if count == 0 {
         return Vec::new();
     }
@@ -118,13 +118,12 @@ fn sample_faults(
     entries
 }
 
-fn sample_network_fault(rng: &mut impl Rng) -> NetworkFault {
-    match rng.gen_range(0..4) {
-        0 => NetworkFault::Isolated,
-        1 => NetworkFault::TwoPartitionsWithByzantine,
-        2 => NetworkFault::ManyPartitionsWithByzantine,
-        _ => NetworkFault::Ring,
-    }
+/// Uniform sampler over the 14 non-trivial set partitions of `{0, 1, 2, 3}`.
+/// Index 0 (the trivial single-block partition) is excluded because it equals
+/// fully-connected and would be a no-op fault.
+fn sample_network_fault(rng: &mut impl Rng) -> SetPartition {
+    let idx = rng.gen_range(1..15);
+    SetPartition::n4(idx)
 }
 
 pub struct SmallScope {
@@ -295,7 +294,7 @@ impl Strategy for SmallScope {
         &self,
         required_containers: u64,
         rng: &mut impl Rng,
-    ) -> Vec<(View, NetworkFault)> {
+    ) -> Vec<(View, SetPartition)> {
         let bound = self.fault_rounds_bound.min(required_containers).max(1);
         // `.max(1)` enforces "adaptive is never silently empty" at the method
         // boundary, even if a caller constructs SmallScope with `fault_rounds = 0`.
@@ -504,7 +503,7 @@ impl Strategy for AnyScope {
         &self,
         required_containers: u64,
         rng: &mut impl Rng,
-    ) -> Vec<(View, NetworkFault)> {
+    ) -> Vec<(View, SetPartition)> {
         // Scale d with run length so density mirrors SmallScope's max
         // (`fault_rounds_bound / FAULT_INJECTION_RATIO`). Always ≥ 1 entry so
         // `Partition::Adaptive` is never silently empty.
@@ -662,7 +661,7 @@ impl Strategy for FutureScope {
         &self,
         required_containers: u64,
         rng: &mut impl Rng,
-    ) -> Vec<(View, NetworkFault)> {
+    ) -> Vec<(View, SetPartition)> {
         // Clamp `start` to at most `required_containers` so a future window of at least one
         // view always exists. Without the clamp, `bound == required_containers` would yield
         // an empty schedule and silently degenerate `Partition::Adaptive` into a no-op.

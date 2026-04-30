@@ -15,7 +15,7 @@ use crate::{
     network::ByzantineFirstReceiver,
     simplex_node::NodeFuzzInput,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy, StrategyChoice},
-    utils::{apply_partition, link_peers, register, Action, NetworkFault, Partition},
+    utils::{apply_partition, link_peers, register, Action, Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
@@ -145,12 +145,19 @@ pub struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Partition distribution:
+        //   30%  fully Connected (no fault)
+        //   20%  Static fault: uniform sample over the 14 non-trivial set
+        //        partitions of {0,1,2,3} (Bell(4) - 1 = 14; the trivial single-block
+        //        partition is excluded since it equals `Connected`)
+        //   50%  Adaptive (round-indexed schedule, populated later)
         let partition = match u.int_in_range(0..=99)? {
             0..=29 => Partition::Connected,
-            30..=34 => Partition::Static(NetworkFault::Isolated),
-            35..=39 => Partition::Static(NetworkFault::TwoPartitionsWithByzantine),
-            40..=44 => Partition::Static(NetworkFault::ManyPartitionsWithByzantine),
-            45..=49 => Partition::Static(NetworkFault::Ring),
+            30..=49 => {
+                // 14 non-trivial partitions live at N4[1..15].
+                let idx = u.int_in_range(1..=14)?;
+                Partition::Static(SetPartition::n4(idx))
+            }
             _ => Partition::Adaptive(Vec::new()),
         };
 
@@ -257,7 +264,7 @@ async fn setup_network<P: simplex::Simplex>(
         &mut oracle,
         &participants,
         Action::Link(link),
-        input.partition.filter(),
+        input.partition.set_partition(),
     )
     .await;
 
@@ -501,10 +508,6 @@ fn default_link() -> Link {
     }
 }
 
-fn filter_id(f: Option<fn(usize, usize, usize) -> bool>) -> usize {
-    f.map(|p| p as usize).unwrap_or(0)
-}
-
 async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -527,22 +530,21 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     let (mut latest, mut monitor) = reporters[0].subscribe().await;
     let oracle = oracle.clone();
     let participants: Vec<_> = participants.to_vec();
-    let base_filter = partition.filter();
+    let base_partition: Option<SetPartition> = partition.set_partition().copied();
     let schedule = schedule.to_vec();
     context
         .with_label("network_fault_scheduler")
         .spawn(move |_| async move {
             let link = default_link();
-            let mut active = filter_id(base_filter);
+            let mut active: Option<SetPartition> = base_partition;
             let mut current_view = latest.get();
             loop {
-                let target_filter = schedule.iter().find_map(|(view, fault)| {
-                    (*view == View::new(current_view)).then(|| fault.filter())
-                });
-                let target_id = filter_id(target_filter);
-                if target_id != active {
-                    apply_partition(&oracle, &participants, target_filter, &link).await;
-                    active = target_id;
+                let target: Option<SetPartition> = schedule
+                    .iter()
+                    .find_map(|(view, p)| (*view == View::new(current_view)).then_some(*p));
+                if target != active {
+                    apply_partition(&oracle, &participants, target.as_ref(), &link).await;
+                    active = target;
                 }
                 if current_view >= required_containers {
                     break;
@@ -560,7 +562,7 @@ fn network_faults(
     strategy: StrategyChoice,
     required_containers: u64,
     rng: &mut impl rand::Rng,
-) -> Vec<(View, NetworkFault)> {
+) -> Vec<(View, SetPartition)> {
     match strategy {
         StrategyChoice::SmallScope {
             fault_rounds,
@@ -793,7 +795,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 jitter: Duration::from_millis(500),
                 success_rate: 1.0,
             }),
-            input.partition.filter(),
+            input.partition.set_partition(),
         )
         .await;
 

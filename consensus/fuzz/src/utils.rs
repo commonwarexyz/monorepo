@@ -30,29 +30,70 @@ pub enum Action {
     Unlink,
 }
 
+/// A set partition of `{0, 1, 2, 3}` (n = 4) stored as block-id assignments.
+/// Two nodes can communicate iff they share a block id. Replaces the previous
+/// hand-picked `NetworkFault` shapes with a uniform sample over Bell(4) = 15
+/// canonical partitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPartition([u8; 4]);
+
+impl SetPartition {
+    /// All 15 canonical set partitions of `{0, 1, 2, 3}` in canonical form
+    /// (each new block is numbered sequentially as it appears).
+    ///
+    /// Index 0 is the trivial single-block partition (= fully connected);
+    /// index 14 is the all-singleton "Isolated" partition.
+    pub const N4: [Self; 15] = [
+        Self([0, 0, 0, 0]), // {{0,1,2,3}}      — trivial / fully connected
+        Self([0, 0, 0, 1]), // {{0,1,2},{3}}
+        Self([0, 0, 1, 0]), // {{0,1,3},{2}}
+        Self([0, 1, 0, 0]), // {{0,2,3},{1}}
+        Self([0, 1, 1, 1]), // {{0},{1,2,3}}
+        Self([0, 0, 1, 1]), // {{0,1},{2,3}}
+        Self([0, 1, 0, 1]), // {{0,2},{1,3}}
+        Self([0, 1, 1, 0]), // {{0,3},{1,2}}
+        Self([0, 0, 1, 2]), // {{0,1},{2},{3}}
+        Self([0, 1, 0, 2]), // {{0,2},{1},{3}}
+        Self([0, 1, 2, 0]), // {{0,3},{1},{2}}
+        Self([0, 1, 1, 2]), // {{0},{1,2},{3}}
+        Self([0, 1, 2, 1]), // {{0},{1,3},{2}}
+        Self([0, 1, 2, 2]), // {{0},{1},{2,3}}
+        Self([0, 1, 2, 3]), // {{0},{1},{2},{3}} — Isolated
+    ];
+
+    /// Returns the canonical partition at index `idx` in `N4`.
+    pub const fn n4(idx: usize) -> Self {
+        Self::N4[idx]
+    }
+
+    /// True iff nodes `i` and `j` are in the same block (and thus permitted
+    /// to communicate). Returns false for out-of-range indices.
+    pub fn connected(&self, i: usize, j: usize) -> bool {
+        if i >= self.0.len() || j >= self.0.len() {
+            return false;
+        }
+        self.0[i] == self.0[j]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Partition {
     /// Fully connected, no fault for the run.
     Connected,
-    /// One fault active for the entire run.
-    Static(NetworkFault),
-    /// Round-indexed schedule of faults; topology reverts to fully connected outside entries.
-    Adaptive(Vec<(View, NetworkFault)>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum NetworkFault {
-    TwoPartitionsWithByzantine,
-    ManyPartitionsWithByzantine,
-    Isolated,
-    Ring,
+    /// One set-partition fault active for the entire run.
+    Static(SetPartition),
+    /// Round-indexed schedule of set-partition faults; topology reverts to
+    /// fully connected outside scheduled views.
+    Adaptive(Vec<(View, SetPartition)>),
 }
 
 impl Partition {
-    pub fn filter(&self) -> Option<fn(usize, usize, usize) -> bool> {
+    /// Returns the active set partition (if any). `Connected` and `Adaptive(_)`
+    /// (no active overlay) return `None`, meaning a full mesh.
+    pub fn set_partition(&self) -> Option<&SetPartition> {
         match self {
             Partition::Connected | Partition::Adaptive(_) => None,
-            Partition::Static(fault) => Some(fault.filter()),
+            Partition::Static(p) => Some(p),
         }
     }
 
@@ -60,7 +101,7 @@ impl Partition {
         matches!(self, Partition::Connected)
     }
 
-    pub fn schedule(&self) -> Option<&[(View, NetworkFault)]> {
+    pub fn schedule(&self) -> Option<&[(View, SetPartition)]> {
         match self {
             Partition::Adaptive(schedule) => Some(schedule),
             _ => None,
@@ -68,51 +109,19 @@ impl Partition {
     }
 }
 
-impl NetworkFault {
-    pub fn filter(&self) -> fn(usize, usize, usize) -> bool {
-        match self {
-            NetworkFault::Isolated => |_, i, j| i == j,
-            NetworkFault::TwoPartitionsWithByzantine => two_partitions_with_byzantine,
-            NetworkFault::ManyPartitionsWithByzantine => many_partitions_with_byzantine,
-            NetworkFault::Ring => ring,
-        }
-    }
-}
-
-// Byzantine node (index 0) connects both partitions, honest nodes split in half.
-fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
-    if i == 0 || j == 0 {
-        return true;
-    }
-    let mid = n / 2;
-    let i_partition = if i <= mid { 1 } else { 2 };
-    let j_partition = if j <= mid { 1 } else { 2 };
-    i_partition == j_partition
-}
-
-// Only Byzantine node (index 0) has connections, creating a star topology.
-fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
-    i == 0 || j == 0
-}
-
-// Ring topology: node i connects to i-1 and i+1 (with wraparound).
-fn ring(n: usize, i: usize, j: usize) -> bool {
-    i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
-}
-
 pub async fn link_peers<P: PublicKey, E: Clock>(
     oracle: &mut Oracle<P, E>,
     validators: &[P],
     action: Action,
-    filter: Option<fn(usize, usize, usize) -> bool>,
+    partition: Option<&SetPartition>,
 ) {
     for (i1, v1) in validators.iter().enumerate() {
         for (i2, v2) in validators.iter().enumerate() {
             if v2 == v1 {
                 continue;
             }
-            if let Some(f) = filter {
-                if !f(validators.len(), i1, i2) {
+            if let Some(p) = partition {
+                if !p.connected(i1, i2) {
                     continue;
                 }
             }
@@ -135,24 +144,23 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
     }
 }
 
-/// Apply a partition filter as the full network state.
+/// Apply a set partition as the full network state.
 ///
-/// For every ordered pair (i, j), i != j: ensure a link exists if `filter` permits it,
-/// and ensure the link is removed otherwise. Used by the round-indexed network fault
-/// scheduler to toggle topology mid-run.
+/// For every ordered pair (i, j), i != j: ensure a link exists if `partition`
+/// permits it, and ensure the link is removed otherwise. Used by the
+/// round-indexed network fault scheduler to toggle topology mid-run.
 pub async fn apply_partition<P: PublicKey, E: Clock>(
     oracle: &Oracle<P, E>,
     validators: &[P],
-    filter: Option<fn(usize, usize, usize) -> bool>,
+    partition: Option<&SetPartition>,
     link: &Link,
 ) {
-    let n = validators.len();
     for (i1, v1) in validators.iter().enumerate() {
         for (i2, v2) in validators.iter().enumerate() {
             if i1 == i2 {
                 continue;
             }
-            let want = filter.map_or(true, |f| f(n, i1, i2));
+            let want = partition.map_or(true, |p| p.connected(i1, i2));
             oracle.remove_link(v1.clone(), v2.clone()).await.ok();
             if want {
                 oracle
