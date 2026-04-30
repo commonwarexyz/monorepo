@@ -566,8 +566,6 @@ mod tests {
 
     #[test]
     fn test_iter_size_hint_within_run() {
-        // Mid-run: size_hint must count the remaining values in the current run
-        // plus all later runs.
         let mut container = Run::new();
         container.insert_range(10, 14); // run (10, 13)
         container.insert_range(20, 23); // run (20, 22)

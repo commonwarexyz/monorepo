@@ -277,7 +277,8 @@ fn copy_container_with_limit(container: &Container, limit: u64) -> (Container, u
 fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
     // Fast path for array-array union.
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
-        let (result, count) = a_arr.union(b_arr, limit as usize);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let (result, count) = a_arr.union(b_arr, limit);
         if result.len() > container::array::MAX_CARDINALITY {
             let bm = container::Bitmap::from(&result);
             return (Container::Bitmap(Box::new(bm)), count as u64);
@@ -340,7 +341,8 @@ fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64
 fn intersect_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
     // Fast path for array-array intersection
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
-        let (result, count) = a_arr.intersection(b_arr, limit as usize);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let (result, count) = a_arr.intersection(b_arr, limit);
         return (Container::Array(result), count as u64);
     }
 
@@ -378,7 +380,8 @@ fn intersect_containers(a: &Container, b: &Container, limit: u64) -> (Container,
 fn diff_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
     // Fast path for array-array difference
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
-        let (result, count) = a_arr.difference(b_arr, limit as usize);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let (result, count) = a_arr.difference(b_arr, limit);
         return (Container::Array(result), count as u64);
     }
 

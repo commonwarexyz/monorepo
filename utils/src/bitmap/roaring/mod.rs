@@ -443,7 +443,15 @@ impl arbitrary::Arbitrary<'_> for Bitmap {
             if key > MAX_KEY {
                 break;
             }
-            containers.insert(key, Container::arbitrary(u)?);
+            // `Container::arbitrary` can produce an empty container (zero-length
+            // Array/Run, all-zero Bitmap). Bitmap rejects empty containers via
+            // `try_from` and the decoder, so skip them here to keep generated
+            // values round-trippable through encode/decode.
+            let container = Container::arbitrary(u)?;
+            if container.is_empty() {
+                continue;
+            }
+            containers.insert(key, container);
             prev_key = key;
         }
 

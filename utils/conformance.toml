@@ -20,11 +20,11 @@ hash = "efebe83452076cc232bde86678e04d7664a190acd914cbc7e8b127c0f733c16d"
 
 ["commonware_utils::bitmap::roaring::prunable::tests::conformance::CodecConformance<super::Prunable>"]
 n_cases = 65536
-hash = "e962efc8dc781f49aabde0bb618f13ae29a90f727451f883bbba90ca07d8f3f4"
+hash = "a487d3c65b8618a07e539f5a6dfa598f278ca0d41e013423c965a9d938f73d58"
 
 ["commonware_utils::bitmap::roaring::tests::conformance::CodecConformance<super::Bitmap>"]
 n_cases = 65536
-hash = "275be0bb51e390a080057bbce88987bb83f13ec1ec63fb4d410530806b044be4"
+hash = "fe0202274573c2799d42ec2eeb0b9a31b98017072d325c4b2e1b850c1d36e734"
 
 ["commonware_utils::bitmap::tests::conformance::CodecConformance<BitMap>"]
 n_cases = 65536
