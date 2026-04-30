@@ -567,13 +567,14 @@ impl Context {
         &self.executor.metrics
     }
 
-    /// Spawn a task that periodically asks Rayon workers to flush their
+    /// Spawn a task that periodically asks Rayon workers to flush idle
     /// thread-local buffer pool caches.
     ///
     /// Rayon worker threads are long-lived, so without periodic flushes they
     /// could retain cached buffers indefinitely. Each pass injects a broadcast
-    /// task that runs once per worker after it drains local work, allowing the
-    /// worker to release any cached buffers back to the global freelists.
+    /// task that runs once per worker after it drains local work. Caches used
+    /// since the previous pass are retained for locality, caches untouched for
+    /// a full interval are released back to the global freelists.
     fn spawn_rayon_buffer_pool_thread_cache_flush(&self, pool: &ThreadPool) {
         let pool = Arc::downgrade(pool);
         let pending = Arc::new(AtomicBool::new(false));
@@ -602,7 +603,7 @@ impl Context {
                     let remaining = AtomicUsize::new(pool.current_num_threads());
                     let pending = pending.clone();
                     pool.spawn_broadcast(move |_| {
-                        BufferPoolThreadCache::flush();
+                        BufferPoolThreadCache::flush_idle();
 
                         if remaining.fetch_sub(1, Ordering::Relaxed) == 1 {
                             pending.store(false, Ordering::Relaxed);

@@ -559,6 +559,7 @@ struct TlsSizeClassCacheEntry {
 struct TlsSizeClassCache {
     entries: Vec<TlsSizeClassCacheEntry>,
     capacity: usize,
+    recently_used: bool,
 }
 
 impl TlsSizeClassCache {
@@ -567,6 +568,7 @@ impl TlsSizeClassCache {
         Self {
             entries: Vec::with_capacity(capacity),
             capacity,
+            recently_used: false,
         }
     }
 
@@ -578,6 +580,9 @@ impl TlsSizeClassCache {
     /// and retain the rest locally for future allocations.
     #[inline]
     fn pop(&mut self, class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
+        // Record activity for the next reclamation pass.
+        self.recently_used = true;
+
         // Serve local hits without touching shared state.
         if let Some(entry) = self.entries.pop() {
             return Some(entry);
@@ -631,6 +636,9 @@ impl TlsSizeClassCache {
     /// queue traffic across future returns.
     #[inline]
     fn push(&mut self, entry: TlsSizeClassCacheEntry) {
+        // Record activity for the next reclamation pass.
+        self.recently_used = true;
+
         // Preserve same-thread locality while the cache still has room.
         if self.entries.len() < self.capacity {
             self.entries.push(entry);
@@ -708,6 +716,29 @@ impl BufferPoolThreadCache {
             let bins = unsafe { &mut *bins.get() };
             for cache in bins.iter_mut() {
                 let _ = cache.take();
+            }
+        });
+    }
+
+    /// Flushes local caches that were inactive across two consecutive checks.
+    ///
+    /// This uses a single activity bit instead of timestamping allocator hot
+    /// paths. A push or pop sets the bit. The first check after activity clears
+    /// it and keeps the cache warm, a later check that finds it still clear
+    /// drops the cache, returning entries to the global freelists.
+    pub(crate) fn flush_idle() {
+        Self::TLS_SIZE_CLASS_CACHES.with(|bins| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let bins = unsafe { &mut *bins.get() };
+            for cache in bins.iter_mut() {
+                let Some(local) = cache.as_mut() else {
+                    continue;
+                };
+                if local.recently_used {
+                    local.recently_used = false;
+                } else {
+                    let _ = cache.take();
+                }
             }
         });
     }
@@ -1697,6 +1728,46 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_cache_flush_idle_skips_recently_used_cache_once() {
+        let page = page_size();
+        let pool =
+            test_pool(test_config(page, page * 2, 8).with_thread_cache_capacity(NZUsize!(4)));
+
+        // Use two distinct size classes so the idle pass walks the whole TLS
+        // registry and applies the same policy to each populated bin.
+        let small_index = pool.inner.config.class_index(page).unwrap();
+        let large_index = pool.inner.config.class_index(page + 1).unwrap();
+        let small_class = &pool.inner.classes[small_index];
+        let large_class = &pool.inner.classes[large_index];
+
+        let small = pool.try_alloc(page).expect("tracked allocation");
+        let large = pool.try_alloc(page + 1).expect("tracked allocation");
+        drop(small);
+        drop(large);
+
+        assert_eq!(get_local_len(small_class), 1);
+        assert_eq!(get_local_len(large_class), 1);
+        assert_eq!(get_global_len(small_class), 0);
+        assert_eq!(get_global_len(large_class), 0);
+
+        // The first idle pass sees recent use, preserves local cache locality,
+        // and arms each cache to be flushed if it remains untouched.
+        BufferPoolThreadCache::flush_idle();
+        assert_eq!(get_local_len(small_class), 1);
+        assert_eq!(get_local_len(large_class), 1);
+        assert_eq!(get_global_len(small_class), 0);
+        assert_eq!(get_global_len(large_class), 0);
+
+        // A second pass with no intervening use moves the cached buffers back
+        // to the global freelists.
+        BufferPoolThreadCache::flush_idle();
+        assert_eq!(get_local_len(small_class), 0);
+        assert_eq!(get_local_len(large_class), 0);
+        assert_eq!(get_global_len(small_class), 1);
+        assert_eq!(get_global_len(large_class), 1);
+    }
+
+    #[test]
     fn test_config_with_budget_bytes() {
         // Classes: 4, 8, 16 (sum = 28). Budget 280 => max_per_class = 10.
         let config = BufferPoolConfig {
@@ -1900,6 +1971,7 @@ mod tests {
         let mut cache = TlsSizeClassCache {
             entries: Vec::new(),
             capacity: 0,
+            recently_used: false,
         };
 
         // Small local capacities should bypass batching and push straight to global.
