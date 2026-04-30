@@ -1155,7 +1155,8 @@ mod loom_tests {
     fn buffer() -> AlignedBuffer {
         // The payload itself is not important to the model. The aligned
         // allocation is enough to exercise ownership transfer through the
-        // parking cell and make double-reads/double-drops visible.
+        // parking cell. The per-test bitmasks and counts make duplicate
+        // ownership transfers visible.
         AlignedBuffer::new(64, 64)
     }
 
@@ -1263,6 +1264,141 @@ mod loom_tests {
                 4
             );
             assert_eq!(seen.load(Ordering::Relaxed), 0b1111);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn put_and_take_compose_on_partially_free_word() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(2));
+            set.put(0, buffer());
+
+            // Slot 0 starts free, then a producer returns slot 1 while `take`
+            // races on the same bitmap word. The producer's `fetch_or`
+            // must compose with the consumer's `fetch_and`: clearing the
+            // existing bit must not lose the newly published bit, and
+            // publishing the new bit must not resurrect a claimed bit.
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(1, buffer()))
+            };
+
+            let taker = {
+                let set = Arc::clone(&set);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    if let Some((slot, buffer)) = set.take() {
+                        drop(buffer);
+                        let mask = 1 << slot;
+                        let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                        assert_eq!(previous & mask, 0);
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            taker.join().unwrap();
+
+            // The taker may run before slot 1 is published. After the writer
+            // has joined, any slot not claimed during the race must still be
+            // available exactly once.
+            while let Some((slot, buffer)) = set.take() {
+                drop(buffer);
+                let mask = 1 << slot;
+                let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                assert_eq!(previous & mask, 0);
+            }
+
+            assert_eq!(seen.load(Ordering::Relaxed), 0b11);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn put_and_take_batch_compose_on_partially_free_word() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(2));
+            set.put(0, buffer());
+
+            // This is the batch-claim version of the partially-free word race:
+            // `take_batch` may speculatively choose candidates from a stale
+            // relaxed load while a producer publishes a different bit in the
+            // same word. Only bits actually cleared by the batch taker may
+            // drive callbacks, and missed bits must remain available.
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(1, buffer()))
+            };
+
+            let batch_taker = {
+                let set = Arc::clone(&set);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    let count = set.take_batch(2, |slot, buffer| {
+                        drop(buffer);
+                        let mask = 1 << slot;
+                        let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                        assert_eq!(previous & mask, 0);
+                    });
+                    assert!(count <= 2);
+                })
+            };
+
+            writer.join().unwrap();
+            batch_taker.join().unwrap();
+
+            // If the batch taker ran before slot 1 was published, the slot must
+            // still be visible after the writer completes.
+            while let Some((slot, buffer)) = set.take() {
+                drop(buffer);
+                let mask = 1 << slot;
+                let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                assert_eq!(previous & mask, 0);
+            }
+
+            assert_eq!(seen.load(Ordering::Relaxed), 0b11);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn put_batch_and_drain_compose_on_partially_free_word() {
+        loom::model(|| {
+            let set = Arc::new(single_word_freelist(3));
+            set.put(0, buffer());
+
+            // Slot 0 starts free, then a batch producer stages slots 1 and 2
+            // and publishes them with one `fetch_or`. A concurrent `drain`
+            // clears the whole word with `swap(0)`. The two RMWs must compose:
+            // the drainer may get only slot 0 or all three slots, but the slots
+            // it misses must remain available after the writer completes.
+            let drained = Arc::new(AtomicUsize::new(0));
+
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put_batch([(1, buffer()), (2, buffer())]))
+            };
+
+            let drainer = {
+                let set = Arc::clone(&set);
+                let drained = Arc::clone(&drained);
+                thread::spawn(move || {
+                    let count = set.drain();
+                    assert!(count <= 3);
+                    drained.store(count, Ordering::Relaxed);
+                })
+            };
+
+            writer.join().unwrap();
+            drainer.join().unwrap();
+
+            let total = drained.load(Ordering::Relaxed) + set.drain();
+            assert_eq!(total, 3);
             assert_eq!(set.drain(), 0);
         });
     }
@@ -1615,7 +1751,7 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
 
             // Publish one slot per bitmap word. The reader may observe any
-            // prefix of the per-word Release operations and must keep scanning
+            // subset of the per-word Release operations and must keep scanning
             // other stripes until it has claimed each slot exactly once.
             //
             // This complements the two-slot same-word models above: same-word
