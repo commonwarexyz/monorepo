@@ -1,7 +1,54 @@
+# Benchmark tracking configuration.
+#
+# Each variant is passed to Criterion with `--exact`, so names must match the full benchmark name
+# printed by `cargo bench -- --list` or `cargo bench -- --output-format bencher`.
+#
+# Add one `[[packages]]` table per Cargo package/feature configuration. The same package may appear
+# multiple times with different `cargo_flags`, for example to run storage benchmarks with and
+# without io_uring. When doing this, set a distinct `baseline_suite` for each feature
+# configuration so results are matched against the correct main-branch baseline.
+#
+# Thresholds can be set globally with `default_threshold_percent`, per package, per benchmark, or
+# per variant table. More specific settings override less specific settings.
+#
+# Variants may be specified as strings:
+#
+#   variants = ["crate::bench/key=value"]
+#
+# or as tables when per-variant overrides are needed:
+#
+#   [[packages.benchmarks.variants]]
+#   name = "crate::bench/key=value"
+#   threshold_percent = 20.0
+#
+# Example duplicate package configuration:
+#
+#   [[packages]]
+#   name = "commonware-storage"
+#   baseline_suite = "commonware-storage"
+#   cargo_flags = ["--features", "test-traits"]
+#
+#   [[packages.benchmarks]]
+#   name = "qmdb"
+#   variants = ["qmdb::merkleize/variant=... keys=10000 ch=false sync=false"]
+#
+#   [[packages]]
+#   name = "commonware-storage"
+#   baseline_suite = "commonware-storage-iouring"
+#   cargo_flags = ["--features", "commonware-runtime/iouring-storage,test-traits"]
+#
+#   [[packages.benchmarks]]
+#   name = "qmdb"
+#   variants = ["qmdb::merkleize/variant=... keys=10000 ch=false sync=false"]
+
 default_threshold_percent = 10.0
 
-[[benchmarks]]
-package = "commonware-storage"
-bench = "qmdb"
+[[packages]]
+name = "commonware-storage"
 cargo_flags = ["--features", "test-traits"]
-name = "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false"
+
+[[packages.benchmarks]]
+name = "qmdb"
+variants = [
+  "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false",
+]

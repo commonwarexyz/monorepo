@@ -42,52 +42,106 @@ def read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
-def validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
-    benchmarks = config.get("benchmarks")
-    if not isinstance(benchmarks, list) or not benchmarks:
-        raise ValueError("config must contain a non-empty `benchmarks` array")
+def string_array(value: Any, field: str) -> list[str]:
+    if isinstance(value, str):
+        value = shlex.split(value)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"`{field}` must be a string array or shell string")
+    return value
 
-    default_threshold = float(config.get("default_threshold_percent", 10.0))
+
+def threshold(value: Any, field: str) -> float:
+    threshold_percent = float(value)
+    if threshold_percent < 0:
+        raise ValueError(f"`{field}` must be non-negative")
+    return threshold_percent
+
+
+def validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
+    packages = config.get("packages")
+    if not isinstance(packages, list) or not packages:
+        raise ValueError("config must contain a non-empty `packages` array")
+
+    default_threshold = threshold(
+        config.get("default_threshold_percent", 10.0), "default_threshold_percent"
+    )
     validated = []
-    for idx, bench in enumerate(benchmarks):
-        if not isinstance(bench, dict):
-            raise ValueError(f"benchmark #{idx} must be an object")
-        for key in ["package", "bench", "name"]:
-            if not isinstance(bench.get(key), str) or not bench[key]:
-                raise ValueError(f"benchmark #{idx} must contain a non-empty `{key}`")
-        baseline_suite = bench.get("baseline_suite", bench["package"])
+    seen = set()
+    for package_idx, package in enumerate(packages):
+        prefix = f"packages[{package_idx}]"
+        if not isinstance(package, dict):
+            raise ValueError(f"`{prefix}` must be an object")
+        package_name = package.get("name")
+        if not isinstance(package_name, str) or not package_name:
+            raise ValueError(f"`{prefix}.name` must be a non-empty string")
+        baseline_suite = package.get("baseline_suite", package_name)
         if not isinstance(baseline_suite, str) or not baseline_suite:
-            raise ValueError(
-                f"benchmark #{idx} `baseline_suite` must be a non-empty string"
-            )
-        flags = bench.get("cargo_flags", [])
-        if isinstance(flags, str):
-            flags = shlex.split(flags)
-        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
-            raise ValueError(
-                f"benchmark #{idx} `cargo_flags` must be a string array or shell string"
-            )
-        criterion_args = bench.get("criterion_args", [])
-        if isinstance(criterion_args, str):
-            criterion_args = shlex.split(criterion_args)
-        if not isinstance(criterion_args, list) or not all(
-            isinstance(arg, str) for arg in criterion_args
-        ):
-            raise ValueError(
-                f"benchmark #{idx} `criterion_args` must be a string array or shell string"
-            )
-        threshold = float(bench.get("threshold_percent", default_threshold))
-        if threshold < 0:
-            raise ValueError(f"benchmark #{idx} threshold must be non-negative")
-        validated.append(
-            {
-                **bench,
-                "baseline_suite": baseline_suite,
-                "cargo_flags": flags,
-                "criterion_args": criterion_args,
-                "threshold_percent": threshold,
-            }
+            raise ValueError(f"`{prefix}.baseline_suite` must be a non-empty string")
+        cargo_flags = string_array(package.get("cargo_flags", []), f"{prefix}.cargo_flags")
+        package_criterion_args = string_array(
+            package.get("criterion_args", []), f"{prefix}.criterion_args"
         )
+        package_threshold = threshold(
+            package.get("threshold_percent", default_threshold), f"{prefix}.threshold_percent"
+        )
+        benchmarks = package.get("benchmarks")
+        if not isinstance(benchmarks, list) or not benchmarks:
+            raise ValueError(f"`{prefix}.benchmarks` must be a non-empty array")
+
+        for benchmark_idx, benchmark in enumerate(benchmarks):
+            bench_prefix = f"{prefix}.benchmarks[{benchmark_idx}]"
+            if not isinstance(benchmark, dict):
+                raise ValueError(f"`{bench_prefix}` must be an object")
+            bench_name = benchmark.get("name")
+            if not isinstance(bench_name, str) or not bench_name:
+                raise ValueError(f"`{bench_prefix}.name` must be a non-empty string")
+            criterion_args = string_array(
+                benchmark.get("criterion_args", package_criterion_args),
+                f"{bench_prefix}.criterion_args",
+            )
+            benchmark_threshold = threshold(
+                benchmark.get("threshold_percent", package_threshold),
+                f"{bench_prefix}.threshold_percent",
+            )
+            variants = benchmark.get("variants")
+            if not isinstance(variants, list) or not variants:
+                raise ValueError(f"`{bench_prefix}.variants` must be a non-empty array")
+
+            for variant_idx, variant in enumerate(variants):
+                variant_prefix = f"{bench_prefix}.variants[{variant_idx}]"
+                variant_criterion_args = criterion_args
+                variant_threshold = benchmark_threshold
+                if isinstance(variant, str):
+                    variant_name = variant
+                elif isinstance(variant, dict):
+                    variant_name = variant.get("name")
+                    if not isinstance(variant_name, str) or not variant_name:
+                        raise ValueError(f"`{variant_prefix}.name` must be a non-empty string")
+                    variant_criterion_args = string_array(
+                        variant.get("criterion_args", criterion_args),
+                        f"{variant_prefix}.criterion_args",
+                    )
+                    variant_threshold = threshold(
+                        variant.get("threshold_percent", benchmark_threshold),
+                        f"{variant_prefix}.threshold_percent",
+                    )
+                else:
+                    raise ValueError(f"`{variant_prefix}` must be a string or object")
+                key = (baseline_suite, package_name, bench_name, variant_name)
+                if key in seen:
+                    raise ValueError(f"duplicate benchmark variant `{variant_name}`")
+                seen.add(key)
+                validated.append(
+                    {
+                        "package": package_name,
+                        "bench": bench_name,
+                        "name": variant_name,
+                        "baseline_suite": baseline_suite,
+                        "cargo_flags": cargo_flags,
+                        "criterion_args": variant_criterion_args,
+                        "threshold_percent": variant_threshold,
+                    }
+                )
     return validated
 
 
@@ -295,11 +349,15 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
         "",
     ]
     if regression_count:
-        lines.append(f"> [!CAUTION]\n>\n> {regression_count} benchmark(s) exceeded the regression threshold.")
+        lines.append(
+            f"❌ **FAILED**: {regression_count} benchmark(s) exceeded the regression threshold."
+        )
     else:
         lines.append("✅ **PASSED**: No benchmark exceeded the regression threshold.")
     if missing_count:
-        lines.append(f"> [!WARNING]\n>\n> {missing_count} benchmark(s) had no uploaded main-branch baseline.")
+        lines.append(
+            f"⚠️ **WARNING**: {missing_count} benchmark(s) had no uploaded main-branch baseline."
+        )
     lines.extend(
         [
             "",
