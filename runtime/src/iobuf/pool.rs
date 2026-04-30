@@ -726,6 +726,7 @@ impl BufferPoolThreadCache {
     /// paths. A push or pop sets the bit. The first check after activity clears
     /// it and keeps the cache warm, a later check that finds it still clear
     /// drops the cache, returning entries to the global freelists.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn flush_idle() {
         Self::TLS_SIZE_CLASS_CACHES.with(|bins| {
             // SAFETY: this TLS value is only ever accessed by the current thread.
