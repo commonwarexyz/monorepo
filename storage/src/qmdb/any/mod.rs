@@ -315,7 +315,7 @@ pub(crate) mod test {
         let op_count = db.size().await;
         let inactivity_floor_loc = db.inactivity_floor_loc().await;
 
-        let db = reopen_db(context.child("reopen1")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -330,7 +330,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let db = reopen_db(context.child("reopen2")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -345,7 +345,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let db = reopen_db(context.child("reopen3")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.root(), root);
 
@@ -359,7 +359,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let mut db = reopen_db(context.child("reopen4")).await;
+        let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.root(), root);
 
@@ -375,7 +375,7 @@ pub(crate) mod test {
             db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
-        let db = reopen_db(context.child("reopen5")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size().await > op_count);
         assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_ne!(db.root(), root);
@@ -394,7 +394,7 @@ pub(crate) mod test {
     {
         let root = db.root();
 
-        let db = reopen_db(context.child("reopen1")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -408,7 +408,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let db = reopen_db(context.child("reopen2")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -423,7 +423,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         drop(db);
-        let db = reopen_db(context.child("reopen3")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -438,7 +438,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         drop(db);
-        let mut db = reopen_db(context.child("reopen4")).await;
+        let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -455,7 +455,7 @@ pub(crate) mod test {
         }
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen_db(context.child("reopen5")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size().await > 1);
         assert_ne!(db.root(), root);
 
@@ -2436,7 +2436,8 @@ pub(crate) mod test {
     fn test_mmb_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.child("db0"), "recovery").await;
+            let mut db =
+                open_mmb_db(context.child("db").with_attribute("index", 0), "recovery").await;
 
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(val(99))).await;
             commit_writes_mmb(&mut db, [(key(1), Some(val(1)))], None).await;
@@ -2447,7 +2448,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen and verify state.
-            let db = open_mmb_db(context.child("db1"), "recovery").await;
+            let db = open_mmb_db(context.child("db").with_attribute("index", 1), "recovery").await;
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await, bounds);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));

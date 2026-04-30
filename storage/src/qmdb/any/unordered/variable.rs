@@ -263,7 +263,7 @@ pub(crate) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let db = open_db(context.child("open1")).await;
+            let db = open_db(context.child("open").with_attribute("index", 1)).await;
             let root = db.root();
 
             // Build a batch but don't apply it (simulate failure before commit).
@@ -280,7 +280,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.child("open2")).await;
+            let mut db = open_db(context.child("open").with_attribute("index", 2)).await;
             assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
@@ -311,7 +311,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.child("open3")).await;
+            let mut db = open_db(context.child("open").with_attribute("index", 3)).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
@@ -344,7 +344,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.child("open4")).await;
+            let mut db = open_db(context.child("open").with_attribute("index", 4)).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
@@ -371,7 +371,7 @@ pub(crate) mod test {
             drop(db);
 
             // Confirm state is preserved after reopen.
-            let db = open_db(context.child("open5")).await;
+            let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
             assert_eq!(db.bounds().await, bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);

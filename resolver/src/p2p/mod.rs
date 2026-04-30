@@ -2596,7 +2596,7 @@ mod tests {
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
             let (engine, mut mailbox1) = Engine::new(
-                actor_context.child("peer_0"),
+                actor_context.child("peer").with_attribute("index", 0),
                 Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
@@ -2616,7 +2616,7 @@ mod tests {
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
             let (engine, _mailbox2) = Engine::new(
-                actor_context.child("peer_1"),
+                actor_context.child("peer").with_attribute("index", 1),
                 Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),

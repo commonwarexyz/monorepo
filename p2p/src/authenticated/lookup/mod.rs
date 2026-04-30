@@ -680,7 +680,8 @@ mod tests {
 
             // Create network for peer 0
             let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             oracle0.track(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -688,7 +689,8 @@ mod tests {
 
             // Create network for peer 1
             let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             oracle1.track(0, peers.clone()).await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -1309,7 +1311,8 @@ mod tests {
             // Create peer 0 with allow_private_ips=true
             let mut config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
             config0.allow_private_ips = true;
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
 
             // Peer 0 knows about peer 1 with a socket address
             let peers0: Vec<(_, Address)> = vec![
@@ -1325,7 +1328,8 @@ mod tests {
             // Create peer 1 with allow_private_ips=false
             let mut config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
             config1.allow_private_ips = false; // This should prevent dialing the private IP
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
 
             // Peer 1 knows about peer 0 with a DNS address that resolves to private IP
             let peers1: Vec<(_, Address)> = vec![
@@ -1433,7 +1437,8 @@ mod tests {
 
                 // Create peer 0
                 let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
-                let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+                let (mut network0, mut oracle0) =
+                    Network::new(context.child("peer").with_attribute("index", 0), config0);
                 oracle0
                     .track(0, Map::try_from(peers.clone()).unwrap())
                     .await;
@@ -1443,7 +1448,8 @@ mod tests {
 
                 // Create peer 1
                 let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
-                let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+                let (mut network1, mut oracle1) =
+                    Network::new(context.child("peer").with_attribute("index", 1), config1);
                 oracle1
                     .track(0, Map::try_from(peers.clone()).unwrap())
                     .await;
@@ -2010,7 +2016,8 @@ mod tests {
 
             // Start peer 0
             let config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -2035,7 +2042,8 @@ mod tests {
 
             // Start peer 1 (has duplicate but correct address)
             let config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             let (_sender1, mut receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
@@ -2091,14 +2099,16 @@ mod tests {
 
             // Start peer 0
             let config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
 
             // Start peer 2
             let config2 = Config::test(peer2.clone(), socket2, MAX_MESSAGE_SIZE);
-            let (mut network2, mut oracle2) = Network::new(context.child("peer_2"), config2);
+            let (mut network2, mut oracle2) =
+                Network::new(context.child("peer").with_attribute("index", 2), config2);
             let (_sender2, mut receiver2) =
                 network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network2.start();
@@ -2134,7 +2144,8 @@ mod tests {
 
             // Start peer 1 (has duplicate but correct address)
             let config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             let (mut sender1, _receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();

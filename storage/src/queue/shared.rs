@@ -472,14 +472,14 @@ mod tests {
             let writer2 = writer.clone();
 
             // Spawn two writer tasks
-            let handle1 = context.child("writer1").spawn(|_ctx| async move {
+            let handle1 = context.child("writer").with_attribute("index", 1).spawn(|_ctx| async move {
                 for i in 0..5u8 {
                     writer.enqueue(vec![i]).await.unwrap();
                 }
                 writer
             });
 
-            let handle2 = context.child("writer2").spawn(|_ctx| async move {
+            let handle2 = context.child("writer").with_attribute("index", 2).spawn(|_ctx| async move {
                 for i in 5..10u8 {
                     writer2.enqueue(vec![i]).await.unwrap();
                 }

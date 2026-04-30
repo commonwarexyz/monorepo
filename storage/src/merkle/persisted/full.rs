@@ -1594,7 +1594,7 @@ mod tests {
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
         let mut pruned_mmr = Merkle::<F, _, Digest>::init(
-            context.child("pruned_reopen2"),
+            context.child("pruned_reopen").with_attribute("index", 2),
             &hasher,
             cfg_pruned.clone(),
         )

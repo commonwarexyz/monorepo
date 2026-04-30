@@ -295,7 +295,7 @@ mod tests {
             .await;
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -402,7 +402,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -527,7 +527,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -746,7 +746,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -836,7 +836,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -913,7 +913,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1007,7 +1007,7 @@ mod tests {
             .await;
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1107,7 +1107,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1214,7 +1214,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1385,7 +1385,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1508,7 +1508,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1607,14 +1607,14 @@ mod tests {
             };
 
             let v0_setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
             let v1_setup = CodingHarness::setup_validator(
-                context.child("validator_1"),
+                context.child("validator").with_attribute("index", 1),
                 &mut oracle,
                 participants[1].clone(),
                 ConstantProvider::new(schemes[1].clone()),
@@ -1713,7 +1713,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1792,7 +1792,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1874,7 +1874,9 @@ mod tests {
             // persisted - otherwise the validator would have voted finalize
             // for a block it cannot serve from local storage.
             let setup2 = CodingHarness::setup_validator(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1915,7 +1917,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1985,7 +1987,9 @@ mod tests {
             drop(shards);
 
             let setup2 = CodingHarness::setup_validator(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2031,7 +2035,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2124,7 +2128,7 @@ mod tests {
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),

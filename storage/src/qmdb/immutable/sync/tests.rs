@@ -1518,7 +1518,7 @@ mod compact_variable_mmr {
             assert_eq!(source.current_target(), target1);
 
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve1"),
+                context: context.child("serve").with_attribute("index", 1),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1")),
@@ -1548,7 +1548,7 @@ mod compact_variable_mmr {
             assert_eq!(source.current_target(), target1);
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve2"),
+                context: context.child("serve").with_attribute("index", 2),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2")),
@@ -1577,7 +1577,7 @@ mod compact_variable_mmr {
             assert_ne!(target3, target2);
 
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve3"),
+                context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3")),
@@ -1991,7 +1991,7 @@ mod compact_variable_mmb {
             assert_eq!(source.current_target(), target1);
 
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve1"),
+                context: context.child("serve").with_attribute("index", 1),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1")),
@@ -2021,7 +2021,7 @@ mod compact_variable_mmb {
             assert_eq!(source.current_target(), target1);
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve2"),
+                context: context.child("serve").with_attribute("index", 2),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2")),
@@ -2050,7 +2050,7 @@ mod compact_variable_mmb {
             assert_ne!(target3, target2);
 
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve3"),
+                context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3")),

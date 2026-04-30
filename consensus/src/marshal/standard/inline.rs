@@ -626,7 +626,7 @@ mod tests {
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -707,7 +707,7 @@ mod tests {
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -778,7 +778,7 @@ mod tests {
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -880,7 +880,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -948,7 +948,9 @@ mod tests {
             // persisted - otherwise the validator would have voted notarize
             // for a block it cannot serve from local storage.
             let setup2 = StandardHarness::setup_validator(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -996,7 +998,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1053,7 +1055,9 @@ mod tests {
             drop(buffer);
 
             let setup2 = StandardHarness::setup_validator(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1088,7 +1092,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1168,7 +1172,9 @@ mod tests {
             drop(buffer);
 
             let setup2 = StandardHarness::setup_validator(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1222,7 +1228,7 @@ mod tests {
             // mirroring an aborted pre-crash `Inline::propose` that persisted
             // its verified block before the voter could journal a notarize.
             let pre_setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1247,7 +1253,9 @@ mod tests {
             // be recovered from storage during archive restore so that
             // `Message::GetVerified` on the new mailbox observes it.
             let post_setup = StandardHarness::setup_validator(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),

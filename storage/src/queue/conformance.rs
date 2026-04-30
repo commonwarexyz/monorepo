@@ -65,7 +65,7 @@ impl Conformance for QueueConformance {
 
             // Re-open and verify surviving items are readable
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.child("queue2"), config(seed, &context))
+                Queue::<_, Vec<u8>>::init(context.child("queue").with_attribute("index", 2), config(seed, &context))
                     .await
                     .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {

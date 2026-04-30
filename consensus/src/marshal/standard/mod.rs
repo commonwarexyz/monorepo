@@ -1181,7 +1181,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1267,7 +1267,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1410,7 +1410,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1551,7 +1551,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -2039,7 +2039,7 @@ mod tests {
 
             let (application, started, release) = GatedBlockReporter::new();
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -2074,7 +2074,9 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
 
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2152,7 +2154,7 @@ mod tests {
             let validator = participants[0].clone();
             let application = Application::<B>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -2255,7 +2257,7 @@ mod tests {
             let unknown = Sha256::hash(b"unknown-block");
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2300,7 +2302,7 @@ mod tests {
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("proposed-cache-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2359,7 +2361,7 @@ mod tests {
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2405,7 +2407,7 @@ mod tests {
             let me = participants[0].clone();
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2451,7 +2453,7 @@ mod tests {
             );
 
             let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2493,7 +2495,7 @@ mod tests {
             let me = participants[0].clone();
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2545,7 +2547,7 @@ mod tests {
             );
 
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),

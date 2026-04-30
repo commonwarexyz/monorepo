@@ -1390,7 +1390,7 @@ mod compact_variable_mmr {
 
             let serve1_cfg = client_config(&format!("{suffix}-serve1"));
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve1"),
+                context: context.child("serve").with_attribute("index", 1),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: serve1_cfg.clone(),
@@ -1422,7 +1422,7 @@ mod compact_variable_mmr {
 
             let serve2_cfg = client_config(&format!("{suffix}-serve2"));
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve2"),
+                context: context.child("serve").with_attribute("index", 2),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: serve2_cfg.clone(),
@@ -1453,7 +1453,7 @@ mod compact_variable_mmr {
 
             let serve3_cfg = client_config(&format!("{suffix}-serve3"));
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve3"),
+                context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: serve3_cfg.clone(),
@@ -1857,7 +1857,7 @@ mod compact_variable_mmb {
 
             let serve1_cfg = client_config(&format!("{suffix}-serve1"));
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve1"),
+                context: context.child("serve").with_attribute("index", 1),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: serve1_cfg.clone(),
@@ -1889,7 +1889,7 @@ mod compact_variable_mmb {
 
             let serve2_cfg = client_config(&format!("{suffix}-serve2"));
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve2"),
+                context: context.child("serve").with_attribute("index", 2),
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: serve2_cfg.clone(),
@@ -1920,7 +1920,7 @@ mod compact_variable_mmb {
 
             let serve3_cfg = client_config(&format!("{suffix}-serve3"));
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve3"),
+                context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: serve3_cfg.clone(),

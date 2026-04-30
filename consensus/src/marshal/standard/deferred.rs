@@ -706,7 +706,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -836,7 +836,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -937,7 +937,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1035,7 +1035,7 @@ mod tests {
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1128,7 +1128,7 @@ mod tests {
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1195,7 +1195,7 @@ mod tests {
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.child("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),

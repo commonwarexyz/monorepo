@@ -1164,7 +1164,7 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(
-                context.child("init1"),
+                context.child("init").with_attribute("index", 1),
                 cfg.clone(),
             )
             .await
@@ -1236,7 +1236,7 @@ mod tests {
 
             // Reopen the freezer
             let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init_with_checkpoint(
-                context.child("init2"),
+                context.child("init").with_attribute("index", 2),
                 cfg.clone(),
                 Some(checkpoint),
             )

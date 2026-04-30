@@ -155,7 +155,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_db_empty() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_empty(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -163,7 +163,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_build_basic() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_build_basic(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -171,7 +171,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_recovery() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_recovery(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -179,7 +179,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_non_empty_recovery() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_non_empty_recovery(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -203,7 +203,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_db_proof_with_pruning() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_proof_with_pruning(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -211,7 +211,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_empty_db_recovery() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_empty_db_recovery(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -219,7 +219,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_replay_with_trailing_appends() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_replay_with_trailing_appends(ctx, db, reopen::<mmr::Family>())
                 .await;
         });
@@ -470,7 +470,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_db_empty_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_empty(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -478,7 +478,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_build_basic_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_build_basic(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -486,7 +486,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_recovery_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_recovery(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -494,7 +494,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_non_empty_recovery_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_non_empty_recovery(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -518,7 +518,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_db_proof_with_pruning_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_proof_with_pruning(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -526,7 +526,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_empty_db_recovery_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_empty_db_recovery(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -534,7 +534,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_replay_with_trailing_appends_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_replay_with_trailing_appends(ctx, db, reopen::<mmb::Family>())
                 .await;
         });
@@ -711,7 +711,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_variable_floor_tracking_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_floor_tracking(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -760,7 +760,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_variable_rewind_after_reopen_with_floor_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmb::Family>())
                 .await;
         });
@@ -793,7 +793,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_variable_single_commit_live_set_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmb::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_single_commit_live_set(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
@@ -801,7 +801,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_variable_floor_tracking() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_floor_tracking(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
@@ -850,7 +850,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_variable_rewind_after_reopen_with_floor() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmr::Family>())
                 .await;
         });
@@ -883,7 +883,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_variable_single_commit_live_set() {
         deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db1")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_single_commit_live_set(ctx, db, reopen::<mmr::Family>()).await;
         });
     }

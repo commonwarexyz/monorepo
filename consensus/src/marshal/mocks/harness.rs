@@ -898,7 +898,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                 )
                 .await;
                 let setup = H::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     provider.clone(),
@@ -1007,7 +1007,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                 )
                 .await;
                 let setup = H::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     provider.clone(),
@@ -1122,7 +1122,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                 )
                 .await;
                 let setup = H::setup_validator(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     provider.clone(),
@@ -1211,7 +1211,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         )
         .await;
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             participants[0].clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -1352,7 +1352,7 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
         )
         .await;
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             participants[0].clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -1458,7 +1458,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                 )
                 .await;
                 let setup = H::setup_validator_with(
-                    context.child("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     provider.clone(),
@@ -2926,7 +2926,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
         let validator = participants[0].clone();
         let application = Application::<H::ApplicationBlock>::manual_ack();
         let setup = H::setup_validator_with(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             validator,
             ConstantProvider::new(schemes[0].clone()),
@@ -3022,7 +3022,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         let validator = participants[0].clone();
         let application = Application::<H::ApplicationBlock>::manual_ack();
         let setup = H::setup_validator_with(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -3090,7 +3090,9 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
 
         // Restart marshal and confirm the processed height restored from metadata.
         let restart = H::setup_validator_with(
-            context.child("validator_0_restart"),
+            context
+                .child("validator_restart")
+                .with_attribute("index", 0),
             &mut oracle,
             validator,
             ConstantProvider::new(schemes[0].clone()),
@@ -3215,7 +3217,7 @@ pub fn sync_height_floor<H: TestHarness>() {
         // Create the first validator now
         let validator = participants.first().unwrap();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -4056,7 +4058,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             me,
             ConstantProvider::new(schemes[0].clone()),
@@ -4143,7 +4145,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             me,
             ConstantProvider::new(schemes[0].clone()),
@@ -4221,7 +4223,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             me,
             ConstantProvider::new(schemes[0].clone()),
@@ -4316,7 +4318,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             me,
             ConstantProvider::new(schemes[0].clone()),
@@ -4381,7 +4383,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             me,
             ConstantProvider::new(schemes[0].clone()),
@@ -4469,7 +4471,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 
         // Set up two validators
         let setup0 = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             participants[0].clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -4482,7 +4484,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         };
 
         let setup1 = H::setup_validator(
-            context.child("validator_1"),
+            context.child("validator").with_attribute("index", 1),
             &mut oracle,
             participants[1].clone(),
             ConstantProvider::new(schemes[1].clone()),
@@ -4582,7 +4584,7 @@ pub fn ancestry_stream<H: TestHarness>() {
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             me,
             ConstantProvider::new(schemes[0].clone()),
@@ -4789,7 +4791,7 @@ pub fn init_processed_height<H: TestHarness>() {
 
         // First session: create validator and finalize some blocks
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -4845,7 +4847,9 @@ pub fn init_processed_height<H: TestHarness>() {
 
         // Second session: create new validator instance, should recover processed height
         let setup2 = H::setup_validator(
-            context.child("validator_0_restart"),
+            context
+                .child("validator_restart")
+                .with_attribute("index", 0),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -4877,7 +4881,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
         // Set up one validator
         let validator = participants[0].clone();
         let setup = H::setup_validator(
-            context.child("validator_0"),
+            context.child("validator").with_attribute("index", 0),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -4913,7 +4917,9 @@ pub fn broadcast_caches_block<H: TestHarness>() {
 
         // Restart marshal, removing any in-memory cache
         let setup2 = H::setup_validator(
-            context.child("validator_0_restart"),
+            context
+                .child("validator_restart")
+                .with_attribute("index", 0),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),

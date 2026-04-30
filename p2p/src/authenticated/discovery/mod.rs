@@ -739,7 +739,8 @@ mod tests {
                 vec![(peers[1].public_key(), socket1.into())],
                 1_024 * 1_024, // 1MB
             );
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             oracle0
                 .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
@@ -755,7 +756,8 @@ mod tests {
                 vec![(peers[0].public_key(), socket0.into())],
                 1_024 * 1_024, // 1MB
             );
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             oracle1
                 .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
@@ -1245,7 +1247,8 @@ mod tests {
 
             // Create network for peer 0 (bootstrapper, no DNS)
             let config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             oracle0
                 .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
@@ -1266,7 +1269,8 @@ mod tests {
                 )],
                 1_024 * 1_024,
             );
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             oracle1
                 .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
@@ -1297,7 +1301,7 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::channel::<()>(2);
             let done0 = done_sender.clone();
             let pk1_clone = pk1.clone();
-            context.child("recv0").spawn(move |_| async move {
+            context.child("recv").with_attribute("index", 0).spawn(move |_| async move {
                 let (sender, message) = receiver0.recv().await.unwrap();
                 assert_eq!(sender, pk1_clone);
                 assert_eq!(message, msg1.as_slice());
@@ -1305,7 +1309,7 @@ mod tests {
             });
             let done1 = done_sender.clone();
             let pk0_clone = pk0.clone();
-            context.child("recv1").spawn(move |_| async move {
+            context.child("recv").with_attribute("index", 1).spawn(move |_| async move {
                 let (sender, message) = receiver1.recv().await.unwrap();
                 assert_eq!(sender, pk0_clone);
                 assert_eq!(message, msg0.as_slice());
@@ -1483,7 +1487,8 @@ mod tests {
             // Create peer 0 (bootstrapper) with allow_private_ips=true
             let mut config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
             config0.allow_private_ips = true;
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             oracle0
                 .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
@@ -1501,7 +1506,8 @@ mod tests {
             )];
             let mut config1 = Config::test(peer1.clone(), socket1, bootstrappers, 1_024 * 1_024);
             config1.allow_private_ips = false; // This should prevent dialing the private IP
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             oracle1
                 .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
@@ -1580,7 +1586,8 @@ mod tests {
                     },
                 )];
                 let config0 = Config::test(peer0.clone(), socket0, bootstrappers0, 1_024 * 1_024);
-                let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+                let (mut network0, mut oracle0) =
+                    Network::new(context.child("peer").with_attribute("index", 0), config0);
                 oracle0
                     .track(0, Set::try_from(addresses.clone()).unwrap())
                     .await;
@@ -1597,7 +1604,8 @@ mod tests {
                     },
                 )];
                 let config1 = Config::test(peer1.clone(), socket1, bootstrappers1, 1_024 * 1_024);
-                let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+                let (mut network1, mut oracle1) =
+                    Network::new(context.child("peer").with_attribute("index", 1), config1);
                 oracle1
                     .track(0, Set::try_from(addresses.clone()).unwrap())
                     .await;
@@ -2211,7 +2219,8 @@ mod tests {
                 ],
                 MAX_MESSAGE_SIZE,
             );
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -2237,7 +2246,8 @@ mod tests {
                 vec![(peer0.public_key(), wrong_socket0.into())],
                 MAX_MESSAGE_SIZE,
             );
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             let (_sender1, mut receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
@@ -2298,7 +2308,8 @@ mod tests {
                 ],
                 MAX_MESSAGE_SIZE,
             );
-            let (mut network0, mut oracle0) = Network::new(context.child("peer_0"), config0);
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -2312,7 +2323,8 @@ mod tests {
                 MAX_MESSAGE_SIZE,
             );
             config2.dialable = socket1.into();
-            let (mut network2, mut oracle2) = Network::new(context.child("peer_2"), config2);
+            let (mut network2, mut oracle2) =
+                Network::new(context.child("peer").with_attribute("index", 2), config2);
             let (_sender2, mut receiver2) =
                 network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network2.start();
@@ -2350,7 +2362,8 @@ mod tests {
                 vec![(peer0.public_key(), wrong_socket0.into())],
                 MAX_MESSAGE_SIZE,
             );
-            let (mut network1, mut oracle1) = Network::new(context.child("peer_1"), config1);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
             let (mut sender1, _receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();

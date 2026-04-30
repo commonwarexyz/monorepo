@@ -690,7 +690,7 @@ pub mod tests {
                 // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
                 // state of the DB should be as of the last commit.
                 drop(db);
-                let db: C = open_db(context.child("scenario1"), partition.clone()).await;
+                let db: C = open_db(context.child("scenario").with_attribute("index", 1), partition.clone()).await;
                 assert_eq!(db.root(), committed_root);
                 assert_eq!(db.bounds().await.end, committed_op_count);
 
@@ -707,7 +707,7 @@ pub mod tests {
 
                 // We should be able to recover, so the root should differ from the previous commit, and
                 // the op count should be greater than before.
-                let db: C = open_db(context.child("scenario2"), partition.clone()).await;
+                let db: C = open_db(context.child("scenario").with_attribute("index", 2), partition.clone()).await;
                 let scenario_2_root = db.root();
 
                 // To confirm the second committed hash is correct we'll re-build the DB in a new
@@ -2933,7 +2933,7 @@ pub mod tests {
 
             // Build the same result via two sequential plain batches in a fresh DB
             // and verify the roots match.
-            let ctx2 = context.child("db2");
+            let ctx2 = context.child("db").with_attribute("index", 2);
             let mut db2: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx2.child("db"),
                 variable_config::<OneCap>("ff2", &ctx2),
@@ -3254,7 +3254,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // -- Path 1: build a 3-deep chain and apply the tip directly. --
-            let ctx1 = context.child("db1");
+            let ctx1 = context.child("db").with_attribute("index", 1);
             let mut db1: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx1.child("db"),
                 variable_config::<OneCap>("ord1", &ctx1),
@@ -3312,7 +3312,7 @@ pub mod tests {
             let chain_then_d_root = d1.root();
 
             // -- Path 2: apply the same operations sequentially. --
-            let ctx2 = context.child("db2");
+            let ctx2 = context.child("db").with_attribute("index", 2);
             let mut db2: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx2.child("db"),
                 variable_config::<OneCap>("ord2", &ctx2),
