@@ -630,8 +630,7 @@ cfg_if::cfg_if! {
         }
     } else {
         loom::thread_local! {
-            // Loom's `thread_local!` macro does not accept const initializers or
-            // associated static items.
+            // Loom's `thread_local!` macro does not accept const initializers.
             static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = Cell::new(None);
         }
     }
