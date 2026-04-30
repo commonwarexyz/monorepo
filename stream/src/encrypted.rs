@@ -952,7 +952,6 @@ mod test {
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_config.time_information(&context);
-            let mut listener_rng = context.child("listener");
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
@@ -964,7 +963,7 @@ mod test {
                 ),
             );
             let (_, syn_ack) = listen_start(
-                &mut listener_rng,
+                &mut context.child("listener"),
                 Context::new(
                     &Transcript::new(&dialer_config.namespace),
                     current_time,
