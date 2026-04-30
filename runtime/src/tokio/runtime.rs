@@ -511,6 +511,25 @@ impl crate::Runner for Runner {
     }
 }
 
+/// Marks one worker's Rayon broadcast maintenance task as complete on drop.
+///
+/// The maintenance loop allows only one broadcast to be in flight at a time by
+/// holding a `pending` latch until every worker has run the broadcast closure.
+/// Keep the accounting in a guard so an unwind from maintenance code cannot
+/// leave that latch set forever and silently disable future flush passes.
+struct RayonBroadcastGuard<'a> {
+    remaining: &'a AtomicUsize,
+    pending: &'a AtomicBool,
+}
+
+impl Drop for RayonBroadcastGuard<'_> {
+    fn drop(&mut self) {
+        if self.remaining.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.pending.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
@@ -603,11 +622,12 @@ impl Context {
                     let remaining = AtomicUsize::new(pool.current_num_threads());
                     let pending = pending.clone();
                     pool.spawn_broadcast(move |_| {
-                        BufferPoolThreadCache::flush_idle();
+                        let _guard = RayonBroadcastGuard {
+                            remaining: &remaining,
+                            pending: pending.as_ref(),
+                        };
 
-                        if remaining.fetch_sub(1, Ordering::Relaxed) == 1 {
-                            pending.store(false, Ordering::Relaxed);
-                        }
+                        BufferPoolThreadCache::flush_idle();
                     });
                 }
             });
