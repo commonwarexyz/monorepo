@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
       - name: Find latest main benchmark artifact
+        if: github.event_name == 'pull_request'
         id: baseline
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
@@ -62,7 +63,7 @@ jobs:
             core.setOutput('found', 'false');
 
       - name: Download main benchmark artifact
-        if: steps.baseline.outputs.found == 'true'
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: benchmark-tracking-results
@@ -81,14 +82,18 @@ jobs:
       - name: Run benchmark tracking
         id: run
         run: |
-          baseline_args=()
-          if [ -f benchmark-tracking-baseline/current.toml ]; then
-            baseline_args=(--baseline benchmark-tracking-baseline/current.toml)
+          args=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ -f benchmark-tracking-baseline/current.toml ]; then
+              args=(--baseline benchmark-tracking-baseline/current.toml)
+            fi
+          else
+            args=(--no-compare)
           fi
           python3 .github/scripts/benchmark-tracking.py \
             --config "$BENCHMARK_TRACKING_CONFIG" \
             --output-dir benchmark-tracking-results \
-            "${baseline_args[@]}"
+            "${args[@]}"
 
       - name: Upload benchmark results
         if: always() && github.ref == 'refs/heads/main' && steps.run.outcome == 'success'
@@ -99,7 +104,7 @@ jobs:
           if-no-files-found: error
 
       - name: Add benchmark summary
-        if: always() && steps.run.outcome == 'success'
+        if: always() && github.event_name == 'pull_request' && steps.run.outcome == 'success'
         run: cat benchmark-tracking-results/comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on pull request

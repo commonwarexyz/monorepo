@@ -25,9 +25,14 @@ def parse_args() -> argparse.Namespace:
         help="Path to a previous benchmark-tracking current.toml artifact from main",
     )
     parser.add_argument(
+        "--no-compare",
+        action="store_true",
+        help="Only write current benchmark results without comparing to a baseline",
+    )
+    parser.add_argument(
         "--skip-run",
         action="store_true",
-        help="Only compare an existing bencher output file in the output directory",
+        help="Only process an existing bencher output file in the output directory",
     )
     return parser.parse_args()
 
@@ -373,13 +378,16 @@ def main() -> int:
         if ref:
             result["ref"] = ref
 
-    baseline_data = load_baseline(args.baseline)
-    comparisons = compare_results(current, baseline_data)
+    if args.no_compare:
+        comparisons = []
+    else:
+        baseline_data = load_baseline(args.baseline)
+        comparisons = compare_results(current, baseline_data)
 
     regression_count = sum(1 for item in comparisons if item["regressed"])
     missing_count = sum(1 for item in comparisons if item["baseline"] is None)
     summary = {
-        "benchmark_count": len(comparisons),
+        "benchmark_count": len(current),
         "regression_count": regression_count,
         "missing_baseline_count": missing_count,
     }
