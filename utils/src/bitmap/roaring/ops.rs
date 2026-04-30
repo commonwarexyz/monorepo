@@ -275,9 +275,13 @@ fn copy_container_with_limit(container: &Container, limit: u64) -> (Container, u
 /// Computes the union of two containers, limiting the number of values.
 #[inline]
 fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
-    // Fast path for array-array union
+    // Fast path for array-array union.
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
         let (result, count) = a_arr.union(b_arr, limit as usize);
+        if result.len() > container::array::MAX_CARDINALITY {
+            let bm = container::Bitmap::from(&result);
+            return (Container::Bitmap(Box::new(bm)), count as u64);
+        }
         return (Container::Array(result), count as u64);
     }
 
@@ -523,6 +527,41 @@ mod tests {
         assert_eq!(result.len(), 2);
         let values: Vec<_> = result.iter().collect();
         assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_union_containers_array_array_promotes_to_bitmap_when_oversized() {
+        use commonware_codec::{Decode, Encode};
+
+        let mut a = Bitmap::new();
+        let mut b = Bitmap::new();
+        // 4000 even + 4000 odd values in shelf 0; each side stays in Array variant.
+        for i in 0..4000u64 {
+            a.insert(i * 2);
+            b.insert(i * 2 + 1);
+        }
+        assert!(matches!(
+            a.containers().get(&0).unwrap(),
+            Container::Array(_)
+        ));
+        assert!(matches!(
+            b.containers().get(&0).unwrap(),
+            Container::Array(_)
+        ));
+
+        let result = union(&a, &b, u64::MAX);
+        assert_eq!(result.len(), 8000);
+
+        // Result must promote to Bitmap.
+        assert!(
+            matches!(result.containers().get(&0).unwrap(), Container::Bitmap(_)),
+            "oversized array union must promote to Bitmap variant"
+        );
+
+        // Roundtrip exercises the codec, which would reject an oversized Array.
+        let bytes = result.encode();
+        let decoded = Bitmap::decode_cfg(bytes, &(..=10usize).into()).unwrap();
+        assert_eq!(result, decoded);
     }
 
     #[test]
