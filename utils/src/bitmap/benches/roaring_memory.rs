@@ -20,9 +20,6 @@
 //! Heap-footprint comparison against `roaring-rs` is not possible without reaching for an
 //! external heap profiler (their internals are opaque). Wire size is the only directly
 //! comparable axis; it correlates with heap size strongly enough to be informative.
-//!
-//! After landing the Bitmap-to-Run conversion optimization, re-run this bench and diff
-//! the `ours_bytes` and `A/B/R` columns to see the impact on the near-saturated rows.
 
 use commonware_codec::EncodeSize;
 use commonware_utils::bitmap::roaring::{Bitmap, Container};

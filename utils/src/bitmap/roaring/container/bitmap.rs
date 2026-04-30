@@ -1,11 +1,17 @@
 //! Bitmap container for dense data.
 //!
-//! Stores values using a fixed 8KB bit array (65536 bits). This is efficient
-//! for containers with cardinality > 4096, where an array container would
-//! use more memory than the fixed bitmap overhead.
+//! Stores values as a fixed 8 KB bit array (65,536 bits packed into 1024
+//! `u64` words). Cheaper than an [`Array`](super::array::Array) container
+//! above ~4,096 values, since Array storage scales with cardinality while
+//! the Bitmap's footprint is fixed.
 //!
-//! When the container becomes fully saturated (cardinality == 65536), it
-//! should be converted to a `Run` with a single run \[0, 65535\].
+//! Tracks `run_count` (the number of maximal consecutive 1-bit sequences)
+//! incrementally on insert. The auto-conversion logic in [`super`] reads
+//! this to decide when to switch to a [`Run`](super::run::Run)
+//! representation; the transition is governed by a hysteresis band on
+//! run count rather than by cardinality alone, so a near-saturated bitmap
+//! with few gaps converts to Run while a dense one with many isolated
+//! runs stays as Bitmap.
 
 use crate::bitmap::roaring::container::{array, run};
 use bytes::{Buf, BufMut};
@@ -27,10 +33,8 @@ pub struct Bitmap {
     words: [u64; WORDS],
     /// Cached cardinality for O(1) `len()` queries.
     cardinality: u32,
-    /// Cached run count (number of maximal consecutive `1`-bit sequences). Used by the
+    /// Cached run count (number of consecutive `1`-bit sequences). Used by the
     /// `Container` auto-conversion logic to decide when to switch to a `Run` variant.
-    /// Maintained incrementally by `insert` (O(1)) and recomputed by bulk operations
-    /// via [`count_runs`].
     ///
     /// Max possible value is 32768 (alternating bit pattern), which fits in `u16`.
     run_count: u16,
@@ -266,9 +270,9 @@ impl Bitmap {
             inserted += self.words[end_word].count_ones() - old_count;
         }
 
-        self.cardinality += inserted;
         // Recompute run_count after a bulk modification. Single pass over WORDS = 1024
         // u64 words; cheap relative to insert_range itself.
+        self.cardinality += inserted;
         self.run_count = count_runs(&self.words);
         inserted
     }

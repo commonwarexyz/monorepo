@@ -21,17 +21,6 @@
 //! container. Callers wanting strict semantics can pass a container-aligned threshold
 //! (e.g. `threshold & !0xFFFF` or rounded up to the next boundary).
 //!
-//! # Why container-aligned?
-//!
-//! Truncating within a container would require a per-variant `truncate_below(idx)` on the
-//! three [`super::Container`] variants and could trigger a container-type conversion (e.g.
-//! dense `Bitmap` to sparse `Array`). The added complexity buys very little for the typical
-//! use case (memory recovery as a finality watermark advances), where pruning happens in
-//! chunks of many containers at a time and a few thousand stragglers in the boundary
-//! container are negligible. If precise pruning becomes necessary later, the primitive can
-//! be added without breaking this API: `prune_below` would just return the exact threshold
-//! instead of the aligned one.
-//!
 //! # Invariant
 //!
 //! After construction or any operation, the underlying bitmap contains no values
