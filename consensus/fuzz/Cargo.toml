@@ -285,3 +285,17 @@ path = "fuzz_targets/simplex_ed25519_faulty_net.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_twins_campaign"
+path = "fuzz_targets/simplex_ed25519_twins_campaign.rs"
+test = false
+doc = false
+bench = false

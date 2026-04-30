@@ -1484,12 +1484,13 @@ where
         .remove(&honest)
         .expect("honest participant must exist");
     let (pending, recovered, resolver) = honest_channels;
-    let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _>(
+    let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _, _>(
         context.with_label("honest_validator"),
         &oracle,
         &participants,
         honest_scheme,
         honest.clone(),
+        <P::Elector as Default>::default(),
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -1551,12 +1552,13 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             .remove(&honest)
             .expect("honest participant must exist in recovery");
         let (pending, recovered, resolver) = honest_channels;
-        let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _>(
+        let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _, _>(
             context.with_label("honest_validator_recovery"),
             &oracle,
             &participants,
             schemes[HONEST_ID].clone(),
             honest,
+            <P::Elector as Default>::default(),
             relay,
             Duration::from_secs(1),
             Duration::from_secs(2),

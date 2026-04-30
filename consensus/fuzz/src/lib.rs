@@ -22,6 +22,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         config,
+        elector::Config as ElectorConfig,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
         Engine, ForwardingPolicy,
@@ -346,6 +347,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
 #[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator<
     P,
+    EC,
     PendingSender,
     PendingReceiver,
     RecoveredSender,
@@ -358,15 +360,17 @@ fn spawn_honest_validator<
     participants: &[PublicKeyOf<P>],
     scheme: P::Scheme,
     validator: PublicKeyOf<P>,
+    elector: EC,
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
+) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -374,7 +378,6 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
-    let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
         scheme: scheme.clone(),
@@ -473,12 +476,13 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
         });
     let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
 
-    spawn_honest_validator::<P, _, _, _, _, _, _>(
+    spawn_honest_validator::<P, _, _, _, _, _, _, _>(
         context,
         oracle,
         participants,
         scheme,
         validator,
+        P::Elector::default(),
         relay,
         leader_timeout,
         certification_timeout,
@@ -612,12 +616,13 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
-            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
                 validator,
+                P::Elector::default(),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -741,6 +746,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
 
 fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
     input.partition = Partition::Connected;
+    input.configuration = N4F1C3;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -750,6 +756,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
         let (mut oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
+        let n = input.configuration.n as usize;
+        let faults = input.configuration.faults as usize;
 
         link_peers(
             &mut oracle,
@@ -767,22 +775,58 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
         let mut reporters = Vec::new();
         let config = input.configuration;
 
-        // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
-        for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
+        // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
+        // the scenario (per-round partitions and scripted leaders) and the
+        // compromised-assignment from the case are consumed: twin indices come from
+        // `case.compromised` and the byzantine set is forwarded to
+        // `check_vote_invariants_with_byzantine`.
+        let mode = if rand::Rng::gen_bool(&mut context, 0.5) {
+            twins::Mode::Sampled
+        } else {
+            twins::Mode::Sustained
+        };
+        let rounds = (input.required_containers as usize).clamp(1, 8);
+        let cases = twins::cases(
+            &mut context,
+            twins::Framework {
+                participants: n,
+                faults,
+                rounds,
+                mode,
+                max_cases: 16,
+            },
+        );
+        if cases.is_empty() {
+            return;
+        }
+        let case_idx = rand::Rng::gen_range(&mut context, 0..cases.len());
+        let case = cases.into_iter().nth(case_idx).unwrap();
+        let scenario = case.scenario.clone();
+        let compromised: std::collections::HashSet<usize> =
+            case.compromised.iter().copied().collect();
+
+        // Twins-aware elector with scripted leaders for the first `rounds` views.
+        let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
+
+        // Spawn Byzantine twins (indices from `case.compromised`):
+        // primary (legitimate engine) + secondary (Disrupter).
+        for idx in case.compromised.iter().copied() {
+            let validator = participants[idx].clone();
             let context = context.with_label(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
-                .remove(validator)
+                .remove(&validator)
                 .expect("validator should be registered");
 
             let make_vote_forwarder = || {
                 let participants = participants.clone();
+                let scenario = scenario.clone();
                 move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        twins::view_partitions(msg.view(), participants.as_ref());
+                        scenario.partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -792,6 +836,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
             let make_certificate_forwarder = || {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
+                let scenario = scenario.clone();
                 move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
                         &mut message.as_ref(),
@@ -800,7 +845,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        twins::view_partitions(msg.view(), participants.as_ref());
+                        scenario.partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -809,16 +854,18 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
             };
             let make_vote_router = || {
                 let participants = participants.clone();
+                let scenario = scenario.clone();
                 move |(sender, message): &(_, IoBuf)| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return SplitTarget::None;
                     };
-                    twins::view_route(msg.view(), sender, participants.as_ref())
+                    scenario.route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_certificate_router = || {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
+                let scenario = scenario.clone();
                 move |(sender, message): &(_, IoBuf)| {
                     let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
                         &mut message.as_ref(),
@@ -826,7 +873,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
                     ) else {
                         return SplitTarget::None;
                     };
-                    twins::view_route(msg.view(), sender, participants.as_ref())
+                    scenario.route(msg.view(), sender, participants.as_ref())
                 }
             };
             let (vote_sender, vote_receiver) = vote_network;
@@ -853,10 +900,10 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
                     SplitTarget::Both
                 });
 
-            // Primary: legitimate engine
+            // Primary: legitimate engine driven by the twins-aware elector.
             let primary_label = format!("twin_{idx}_primary");
             let primary_context = context.with_label(&primary_label);
-            let primary_elector = P::Elector::default();
+            let primary_elector = twin_elector.clone();
             let reporter_cfg = reporter::Config {
                 participants: participants
                     .as_ref()
@@ -923,18 +970,24 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
             );
         }
 
-        // Spawn honest validators
-        for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
+        // Spawn honest validators (every index NOT in `case.compromised`).
+        // They share the twins-aware elector so leaders agree across twin and
+        // honest engines for the scripted prefix.
+        for (idx, validator) in participants.iter().enumerate() {
+            if compromised.contains(&idx) {
+                continue;
+            }
             let ctx = context.with_label(&format!("honest_{idx}"));
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
-            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 participants.as_ref(),
                 schemes[idx].clone(),
                 validator.clone(),
+                twin_elector.clone(),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_millis(1_500),
@@ -963,8 +1016,318 @@ fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
         }
 
         if config.is_valid() {
-            invariants::check_vote_invariants(config.faults as usize, &reporters);
+            invariants::check_vote_invariants_with_byzantine(&compromised, &reporters);
             let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
+        }
+    });
+}
+
+/// Twins-campaign mode (mirrors `consensus/src/simplex/mod.rs::twins_campaign`).
+///
+/// Both halves of every twin pair run as full legitimate engines (the reference
+/// campaign does not start a `Disrupter`); the only adversarial behavior is that
+/// the two halves see different views of the network per the sampled scenario.
+///
+/// Twin indices come from `case.compromised` (sampled by `twins::cases`), exactly
+/// as in the reference. The Byzantine set is then passed to
+/// [`invariants::check_vote_invariants_with_byzantine`] so the equivocation check
+/// excludes the actual compromised participants regardless of their positions.
+fn run_with_twins_campaign<P: simplex::Simplex>(mut input: FuzzInput) {
+    input.partition = Partition::Connected;
+    input.configuration = N4F1C3;
+
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    executor.start(|mut context| async move {
+        let (mut oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
+        let participants: Arc<[_]> = participants.into();
+        let n = input.configuration.n as usize;
+        let faults = input.configuration.faults as usize;
+
+        link_peers(
+            &mut oracle,
+            participants.as_ref(),
+            Action::Update(Link {
+                latency: Duration::from_millis(500),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            }),
+            input.partition.filter(),
+        )
+        .await;
+
+        let relay = Arc::new(relay::Relay::new());
+        let mut reporters = Vec::new();
+        let config = input.configuration;
+
+        let mode = if rand::Rng::gen_bool(&mut context, 0.5) {
+            twins::Mode::Sampled
+        } else {
+            twins::Mode::Sustained
+        };
+        let rounds = (input.required_containers as usize).clamp(1, 8);
+        let cases = twins::cases(
+            &mut context,
+            twins::Framework {
+                participants: n,
+                faults,
+                rounds,
+                mode,
+                max_cases: 16,
+            },
+        );
+        if cases.is_empty() {
+            return;
+        }
+        let case_idx = rand::Rng::gen_range(&mut context, 0..cases.len());
+        let case = cases.into_iter().nth(case_idx).unwrap();
+        let scenario = case.scenario.clone();
+        let compromised: std::collections::HashSet<usize> =
+            case.compromised.iter().copied().collect();
+        let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
+
+        // Spawn each twin pair (indices from `case.compromised`, mirroring
+        // `consensus/src/simplex/mod.rs::twins_campaign`); primary AND secondary
+        // are both legitimate engines.
+        for idx in case.compromised.iter().copied() {
+            let validator = participants[idx].clone();
+            let twin_context = context.with_label(&format!("twin_{idx}"));
+            let scheme = schemes[idx].clone();
+            let (vote_network, certificate_network, resolver_network) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
+
+            let make_vote_forwarder = || {
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                    let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
+                        return Some(recipients.clone());
+                    };
+                    let (primary, secondary) =
+                        scenario.partitions(msg.view(), participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_certificate_forwarder = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                        &mut message.as_ref(),
+                        &codec,
+                    ) else {
+                        return Some(recipients.clone());
+                    };
+                    let (primary, secondary) =
+                        scenario.partitions(msg.view(), participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_vote_router = || {
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
+                        return SplitTarget::None;
+                    };
+                    scenario.route(msg.view(), sender, participants.as_ref())
+                }
+            };
+            let make_certificate_router = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                        &mut message.as_ref(),
+                        &codec,
+                    ) else {
+                        return SplitTarget::None;
+                    };
+                    scenario.route(msg.view(), sender, participants.as_ref())
+                }
+            };
+
+            let (vote_sender, vote_receiver) = vote_network;
+            let (certificate_sender, certificate_receiver) = certificate_network;
+            let (resolver_sender, resolver_receiver) = resolver_network;
+
+            let (vote_sender_primary, vote_sender_secondary) =
+                vote_sender.split_with(make_vote_forwarder());
+            let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                twin_context.with_label(&format!("pending_split_{idx}")),
+                make_vote_router(),
+            );
+            let (certificate_sender_primary, certificate_sender_secondary) =
+                certificate_sender.split_with(make_certificate_forwarder());
+            let (certificate_receiver_primary, certificate_receiver_secondary) =
+                certificate_receiver.split_with(
+                    twin_context.with_label(&format!("recovered_split_{idx}")),
+                    make_certificate_router(),
+                );
+            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
+                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
+            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                .split_with(
+                    twin_context.with_label(&format!("resolver_split_{idx}")),
+                    |_| SplitTarget::Both,
+                );
+
+            // Spawn primary and secondary halves, both as full engines.
+            for (half_label, vote, certificate, resolver) in [
+                (
+                    "primary",
+                    (vote_sender_primary, vote_receiver_primary),
+                    (certificate_sender_primary, certificate_receiver_primary),
+                    (resolver_sender_primary, resolver_receiver_primary),
+                ),
+                (
+                    "secondary",
+                    (vote_sender_secondary, vote_receiver_secondary),
+                    (certificate_sender_secondary, certificate_receiver_secondary),
+                    (resolver_sender_secondary, resolver_receiver_secondary),
+                ),
+            ] {
+                let label = format!("twin_{idx}_{half_label}");
+                let half_context = twin_context.with_label(&label);
+                let half_elector = twin_elector.clone();
+                let reporter_cfg = reporter::Config {
+                    participants: participants
+                        .as_ref()
+                        .try_into()
+                        .expect("public keys are unique"),
+                    scheme: scheme.clone(),
+                    elector: half_elector.clone(),
+                };
+                let reporter =
+                    reporter::Reporter::new(half_context.with_label("reporter"), reporter_cfg);
+                reporters.push(reporter.clone());
+
+                let app_cfg = application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: application::Certifier::Always,
+                };
+                let (actor, application) =
+                    application::Application::new(half_context.with_label("application"), app_cfg);
+                actor.start();
+
+                let blocker = oracle.control(validator.clone());
+                let engine_cfg = config::Config {
+                    blocker,
+                    scheme: scheme.clone(),
+                    elector: half_elector,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: label,
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(EPOCH),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_millis(1_500),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: Delta::new(10),
+                    skip_timeout: Delta::new(5),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&half_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(half_context.with_label("engine"), engine_cfg);
+                engine.start(vote, certificate, resolver);
+            }
+        }
+
+        // Boundary in `reporters` between twin halves (indices `0..honest_start`)
+        // and honest validators (indices `honest_start..`). Twin halves are
+        // Byzantine test machinery and must not gate liveness or trip safety
+        // invariants - mirrors `consensus/src/simplex/mod.rs::twins_campaign`.
+        let honest_start = reporters.len();
+
+        // Spawn honest validators (every index NOT in `case.compromised`)
+        // sharing the twins-aware elector.
+        for (idx, validator) in participants.iter().enumerate() {
+            if compromised.contains(&idx) {
+                continue;
+            }
+            let ctx = context.with_label(&format!("honest_{idx}"));
+            let (pending, recovered, resolver) = registrations
+                .remove(validator)
+                .expect("validator should be registered");
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                ctx,
+                &oracle,
+                participants.as_ref(),
+                schemes[idx].clone(),
+                validator.clone(),
+                twin_elector.clone(),
+                relay.clone(),
+                Duration::from_secs(1),
+                Duration::from_millis(1_500),
+                pending,
+                recovered,
+                resolver,
+            );
+            reporters.push(reporter);
+        }
+
+        // Wait for liveness across honest reporters only. Count finalizations
+        // *after* the adversarial prefix so we verify the protocol actually
+        // recovers under synchrony - finalizations during the prefix may be
+        // attack-setup artifacts and don't demonstrate liveness.
+        let prefix_end = View::new(scenario.rounds().len() as u64);
+        let trailing_finalizations = input.required_containers;
+        if config.is_valid() {
+            let mut finalizers = Vec::new();
+            for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
+                let (_latest, mut monitor) = reporter.subscribe().await;
+                let required = trailing_finalizations;
+                let label = format!("finalizer_{i}");
+                finalizers.push(context.with_label(&label).spawn(move |_| async move {
+                    let mut count = 0u64;
+                    while count < required {
+                        let view = monitor.recv().await.expect("event missing");
+                        if view > prefix_end {
+                            count += 1;
+                        }
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        } else {
+            context.sleep(MAX_SLEEP_DURATION).await;
+        }
+
+        // Invariants run only over honest reporters. Twin halves are expected
+        // to disagree internally (that's what the scenario engineers); checking
+        // them in global agreement / equivocation invariants would reject valid
+        // Twins scenarios.
+        if config.is_valid() {
+            let honest_reporters = &reporters[honest_start..];
+            invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
+            let states = invariants::extract(
+                reporters.into_iter().skip(honest_start).collect(),
+                config.n as usize,
+            );
             invariants::check::<P>(config.n, states);
         }
     });
@@ -996,7 +1359,8 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
-    Twin,
+    Twinable,
+    TwinsCampaign,
     AdversarialNetwork,
     FaultyNet,
     WithRecovery,
@@ -1011,9 +1375,17 @@ impl FuzzMode for Standard {
     const MODE: Mode = Mode::Standard;
 }
 
+/// Twins-mode: it runs a correct node and a Disruptor-based node.
 pub struct Twinable;
 impl FuzzMode for Twinable {
-    const MODE: Mode = Mode::Twin;
+    const MODE: Mode = Mode::Twinable;
+}
+
+/// Twins-campaign mode: both halves of every twin pair run as legitimate engines
+/// (no `Disrupter`), exactly as in `consensus/src/simplex/mod.rs::twins_campaign`.
+pub struct TwinsCampaign;
+impl FuzzMode for TwinsCampaign {
+    const MODE: Mode = Mode::TwinsCampaign;
 }
 
 impl FuzzMode for simplex_node::WithoutRecovery {
@@ -1047,8 +1419,11 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
             input.partition = Partition::Adaptive(Vec::new());
             panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
         }
-        Mode::Twin => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        Mode::Twinable => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
+        })),
+        Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_twins_campaign::<P>(input)
         })),
         Mode::WithRecovery => {
             panic!("unsupported mode for fuzz")
