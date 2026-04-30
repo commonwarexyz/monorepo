@@ -90,8 +90,6 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::FromHex { hex_str } => {
-            // Round-trip property: anything that decodes successfully must
-            // re-encode and decode back to the same bytes.
             if let Some(decoded) = from_hex(&hex_str) {
                 let re_encoded = hex(&decoded);
                 assert_eq!(from_hex(&re_encoded), Some(decoded));

@@ -22,10 +22,10 @@ commonware_macros::stability_scope!(BETA {
         const_hex::encode(bytes)
     }
 
-    /// Converts a hexadecimal string to bytes, stripping ASCII whitespace and an
-    /// optional `0x` (handled by `const-hex::decode`) / `0X` prefix. Commonly used
-    /// in tests to encode external test vectors without modification.
+    /// Converts a hexadecimal string to bytes, stripping ASCII whitespace
+    /// and an optional `0x` / `0X` prefix.
     pub fn from_hex(s: &str) -> Option<Vec<u8>> {
+        // "0x" prefix stripping is handled by `const-hex::decode`.
         let s = s.replace(['\t', '\n', '\r', ' '], "");
         let stripped = s
             .strip_prefix("0X")
