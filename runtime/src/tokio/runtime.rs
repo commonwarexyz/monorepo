@@ -56,7 +56,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 pub(crate) const RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(100)
 } else {
-    Duration::from_secs(10)
+    Duration::from_secs(2)
 };
 
 #[cfg(feature = "iouring-network")]
