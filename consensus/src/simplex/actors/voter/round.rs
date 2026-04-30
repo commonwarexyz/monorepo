@@ -219,6 +219,24 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns true if this node has verified the proposal.
+    ///
+    /// This includes both locally built proposals (`Verified(true)`) and
+    /// peer proposals that completed local verification (`Verified(false)`).
+    pub const fn is_verified(&self) -> bool {
+        matches!(self.proposal.status(), ProposalStatus::Verified(_))
+    }
+
+    /// Returns true if we already broadcast a notarize vote for this round.
+    pub const fn broadcast_notarize(&self) -> bool {
+        self.broadcast_notarize
+    }
+
+    /// Returns true if we already broadcast a finalize vote for this round.
+    pub const fn broadcast_finalize(&self) -> bool {
+        self.broadcast_finalize
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
@@ -289,6 +307,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     pub const fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
+    }
+
+    /// Returns true if the round contains a proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.has_unequivocated_proposal()
     }
 
     pub const fn set_deadlines(

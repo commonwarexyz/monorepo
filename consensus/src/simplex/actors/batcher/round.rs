@@ -3,8 +3,9 @@ use crate::{
     simplex::{
         scheme::Scheme,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
+            Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize,
+            Finalization, Notarization, Nullification, NullifyFinalize, Proposal, Vote,
+            VoteTracker,
         },
     },
     types::Participant,
@@ -107,6 +108,24 @@ impl<
     /// Stores a finalization certificate.
     pub fn set_finalization(&mut self, finalization: Finalization<S, D>) {
         self.finalization = Some(finalization);
+    }
+
+    /// Returns true if we already have a certificate matching `certificate`'s type.
+    pub const fn has_certificate(&self, certificate: &Certificate<S, D>) -> bool {
+        match certificate {
+            Certificate::Notarization(_) => self.has_notarization(),
+            Certificate::Nullification(_) => self.has_nullification(),
+            Certificate::Finalization(_) => self.has_finalization(),
+        }
+    }
+
+    /// Stores a certificate matching its type.
+    pub fn set_certificate(&mut self, certificate: Certificate<S, D>) {
+        match certificate {
+            Certificate::Notarization(notarization) => self.set_notarization(notarization),
+            Certificate::Nullification(nullification) => self.set_nullification(nullification),
+            Certificate::Finalization(finalization) => self.set_finalization(finalization),
+        }
     }
 
     /// Adds a vote from the network to this round's verifier.

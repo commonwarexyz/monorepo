@@ -165,6 +165,12 @@ where
     /// the oldest entered, unfinalized view in the current term.
     pub same_term_finalization_timeout: Duration,
 
+    /// Maximum number of optimistic intra-term views to verify beyond the last
+    /// directly notarized view.
+    ///
+    /// A value of `0` disables optimistic validation entirely.
+    pub term_optimistic_views: u64,
+
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
     pub forwarding: ForwardingPolicy,

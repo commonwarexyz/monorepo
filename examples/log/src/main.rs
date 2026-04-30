@@ -228,6 +228,7 @@ fn main() {
             term_length: commonware_utils::NZU64!(1),
             term_stop_notarize_on_nullify: false,
             same_term_finalization_timeout: Duration::from_secs(12),
+            term_optimistic_views: 0,
             forwarding: simplex::ForwardingPolicy::Disabled,
         };
         let engine = simplex::Engine::new(context.child("engine"), cfg);

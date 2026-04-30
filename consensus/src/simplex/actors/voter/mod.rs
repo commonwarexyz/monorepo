@@ -45,6 +45,7 @@ pub struct Config<
     pub term_length: NonZeroU64,
     pub term_stop_notarize_on_nullify: bool,
     pub same_term_finalization_timeout: Duration,
+    pub term_optimistic_views: u64,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
     pub page_cache: CacheRef,
@@ -274,6 +275,7 @@ mod tests {
             term_length: NZU64!(1),
             term_stop_notarize_on_nullify: false,
             same_term_finalization_timeout: Duration::from_secs(4),
+            term_optimistic_views: 0,
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -377,6 +379,105 @@ mod tests {
             term_length,
             term_stop_notarize_on_nullify: false,
             same_term_finalization_timeout,
+            term_optimistic_views: 0,
+            replay_buffer: NZUsize!(10240),
+            write_buffer: NZUsize!(10240),
+            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        };
+        let (voter, mailbox) = Actor::new(context.child("voter"), voter_cfg);
+
+        let (resolver_sender, _) = mpsc::channel(8);
+        let (batcher_sender, batcher_receiver) = mpsc::channel(16);
+
+        let (vote_sender, _) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (certificate_sender, _) = oracle
+            .control(me.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+
+        voter.start(
+            batcher::Mailbox::new(batcher_sender),
+            resolver::Mailbox::new(resolver_sender),
+            vote_sender,
+            certificate_sender,
+        );
+
+        (mailbox, batcher_receiver, relay)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn setup_voter_with_term_optimistic_views_and_latency<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        local_index: usize,
+        elector: L,
+        leader_timeout: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
+        same_term_finalization_timeout: Duration,
+        term_length: NonZeroU64,
+        term_optimistic_views: u64,
+        propose_latency_ms: f64,
+        verify_latency_ms: f64,
+        certify_latency_ms: f64,
+        should_certify: mocks::application::Certifier<Sha256Digest>,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
+        let signing = schemes[local_index].clone();
+        let me = participants[local_index].clone();
+        let reporter_cfg = mocks::reporter::Config {
+            participants: participants.to_vec().try_into().unwrap(),
+            scheme: signing.clone(),
+            elector: elector.clone(),
+        };
+        let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+        let relay = Arc::new(mocks::relay::Relay::new());
+
+        let application_cfg = mocks::application::Config {
+            hasher: Sha256::default(),
+            relay: relay.clone(),
+            me: me.clone(),
+            propose_latency: (propose_latency_ms, 0.0),
+            verify_latency: (verify_latency_ms, 0.0),
+            certify_latency: (certify_latency_ms, 0.0),
+            should_certify,
+        };
+        let (actor, application) =
+            mocks::application::Application::new(context.child("app"), application_cfg);
+        actor.start();
+
+        let voter_cfg = Config {
+            scheme: signing.clone(),
+            elector,
+            blocker: oracle.control(me.clone()),
+            automaton: application.clone(),
+            relay: application.clone(),
+            reporter,
+            partition: format!("voter_test_{me}"),
+            epoch: Epoch::new(333),
+            mailbox_size: 128,
+            leader_timeout,
+            certification_timeout,
+            timeout_retry,
+            activity_timeout: ViewDelta::new(10),
+            term_length,
+            term_stop_notarize_on_nullify: false,
+            same_term_finalization_timeout,
+            term_optimistic_views,
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -514,6 +615,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -738,6 +840,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1364,6 +1467,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1550,6 +1654,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1743,6 +1848,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1833,6 +1939,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1974,6 +2081,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
@@ -2212,6 +2320,235 @@ mod tests {
         );
         same_term_finalization_timeout_nullifies_current_view::<_, _>(ed25519::fixture);
         same_term_finalization_timeout_nullifies_current_view::<_, _>(secp256r1::fixture);
+    }
+
+    /// Regression: optimistic future proposal requests must not be dropped when
+    /// unrelated events (like current-view timeout handling) occur first.
+    fn optimistic_future_proposal_survives_interleaved_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"optimistic_future_proposal_survives_interleaved_timeout".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = NZU64!(5);
+        let term_optimistic_views = 2;
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
+
+            let elector: RoundRobinElector<S> =
+                RoundRobin::<Sha256>::default().build(schemes[0].participants(), term_length);
+            let local_index = usize::from(elector.elect(Round::new(epoch, View::new(1)), None));
+
+            let (_mailbox, mut batcher_receiver, _relay) =
+                setup_voter_with_term_optimistic_views_and_latency(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    local_index,
+                    RoundRobin::<Sha256>::default(),
+                    Duration::from_secs(2),
+                    Duration::from_secs(4),
+                    Duration::from_millis(200),
+                    Duration::from_secs(30),
+                    term_length,
+                    term_optimistic_views,
+                    200.0,
+                    1.0,
+                    5_000.0,
+                    mocks::application::Certifier::Always,
+                )
+                .await;
+
+            let mut saw_view_1_notarize = false;
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { response, .. } => {
+                                response.send(None).unwrap();
+                            }
+                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                                if notarize.view() == View::new(1) {
+                                    saw_view_1_notarize = true;
+                                }
+                                if notarize.view() == View::new(2) {
+                                    assert!(
+                                        saw_view_1_notarize,
+                                        "expected view 1 notarize before optimistic view 2 notarize"
+                                    );
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(8)) => {
+                        panic!(
+                            "expected optimistic notarize for view 2 despite interleaved timeout handling"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_optimistic_future_proposal_survives_interleaved_timeout() {
+        optimistic_future_proposal_survives_interleaved_timeout::<_, _>(ed25519::fixture);
+    }
+
+    /// Regression: optimistic future verify requests must survive interleaved
+    /// current-view timeout handling.
+    fn optimistic_future_verify_survives_interleaved_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"optimistic_future_verify_survives_interleaved_timeout".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = NZU64!(5);
+        let term_optimistic_views = 2;
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let built_elector: RoundRobinElector<S> =
+                RoundRobin::<Sha256>::default().build(schemes[0].participants(), term_length);
+            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let local_index = (usize::from(leader_idx) + 1) % participants.len();
+            let leader = participants[usize::from(leader_idx)].clone();
+
+            let (mut mailbox, mut batcher_receiver, relay) =
+                setup_voter_with_term_optimistic_views_and_latency(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    local_index,
+                    RoundRobin::<Sha256>::default(),
+                    Duration::from_secs(10),
+                    Duration::from_secs(10),
+                    Duration::from_secs(30),
+                    Duration::from_secs(30),
+                    term_length,
+                    term_optimistic_views,
+                    10.0,
+                    1_000.0,
+                    10_000.0,
+                    mocks::application::Certifier::Always,
+                )
+                .await;
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                _ => panic!("expected initial update"),
+            }
+
+            let mut hasher = Sha256::default();
+            hasher.update(&(bytes::Bytes::from_static(b"genesis"), epoch).encode());
+            let genesis = hasher.finalize();
+
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(b"optimistic_future_verify_view_1"),
+            );
+            let contents_1 = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&leader, (proposal_1.payload, contents_1));
+            mailbox.proposal(proposal_1.clone()).await;
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                            batcher::Message::Constructed(Vote::Notarize(notarize))
+                                if notarize.view() == View::new(1) =>
+                            {
+                                break;
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected local notarize for view 1 before testing optimistic future verify");
+                    }
+                }
+            }
+
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(b"optimistic_future_verify_view_2"),
+            );
+            let contents_2 = (proposal_2.round, proposal_1.payload, 1u64).encode();
+            relay.broadcast(&leader, (proposal_2.payload, contents_2));
+            mailbox.proposal(proposal_2.clone()).await;
+
+            // Interleave timeout handling for the current view while verify(view=2)
+            // is still in-flight.
+            mailbox.timeout(View::new(1), TimeoutReason::LeaderNullify).await;
+
+            let mut saw_view_1_nullify = false;
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == View::new(1) =>
+                            {
+                                saw_view_1_nullify = true;
+                            }
+                            batcher::Message::Constructed(Vote::Notarize(notarize))
+                                if notarize.view() == View::new(2) =>
+                            {
+                                assert!(
+                                    saw_view_1_nullify,
+                                    "expected current-view timeout/nullify to interleave before optimistic view 2 notarize"
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(8)) => {
+                        panic!(
+                            "expected optimistic notarize for view 2 despite interleaved timeout handling"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_optimistic_future_verify_survives_interleaved_timeout() {
+        optimistic_future_verify_survives_interleaved_timeout::<_, _>(ed25519::fixture);
     }
 
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
@@ -2485,6 +2822,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2697,6 +3035,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2890,6 +3229,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3055,6 +3395,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3397,6 +3738,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3677,6 +4019,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3804,6 +4147,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3944,6 +4288,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4106,6 +4451,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4209,6 +4555,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4381,6 +4728,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4494,6 +4842,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4662,6 +5011,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4778,6 +5128,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4947,6 +5298,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5122,6 +5474,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5224,6 +5577,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5404,6 +5758,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5588,6 +5943,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5772,6 +6128,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6586,6 +6943,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6701,6 +7059,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -7908,6 +8267,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8035,6 +8395,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8183,6 +8544,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8294,6 +8656,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8435,6 +8798,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8552,6 +8916,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8689,6 +9054,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
