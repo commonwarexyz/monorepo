@@ -361,6 +361,9 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
     lines.extend(
         [
             "",
+            "<details>",
+            "<summary>Benchmark comparison table</summary>",
+            "",
             "| Benchmark | Baseline (main) | Current | Delta | Threshold | Status |",
             "|---|---:|---:|---:|---:|---|",
         ]
@@ -401,6 +404,7 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
             if item["baseline"] and item["baseline"].get("commit")
         }
     )
+    lines.extend(["", "</details>"])
     if commits:
         lines.extend(["", f"Baseline commit(s): `{', '.join(commits)}`"])
     lines.append("")
