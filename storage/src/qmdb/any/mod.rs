@@ -799,7 +799,7 @@ pub(crate) mod test {
             &historical_proof,
             start_loc,
             &historical_ops,
-            &root_hash
+            &root_hash,
         ));
 
         // Add more operations to the database
@@ -827,7 +827,7 @@ pub(crate) mod test {
             &historical_proof2,
             start_loc,
             &historical_ops2,
-            &root_hash
+            &root_hash,
         ));
 
         db.destroy().await.unwrap();
@@ -884,7 +884,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -898,7 +898,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -914,7 +914,7 @@ pub(crate) mod test {
                     &proof,
                     Location::new(1),
                     &tampered_ops,
-                    &root_hash
+                    &root_hash,
                 ));
             }
         }
@@ -929,7 +929,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &tampered_ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -941,7 +941,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(2),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -953,7 +953,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &ops,
-                &invalid_root
+                &invalid_root,
             ));
         }
 
@@ -967,7 +967,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 

@@ -235,7 +235,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, test_name: &str) {
                     if start_loc >= oldest_retained_loc && start_loc < op_count {
                         if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
                             let root = db.root();
-                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root));
+                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root,));
                         }
                     }
                 }

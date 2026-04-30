@@ -756,7 +756,7 @@ pub(crate) mod tests {
         let root = db.root();
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root,));
         assert_eq!(ops.len() as u64, 1 + ELEMENTS + 1);
 
         let (proof, ops) = db.proof(Location::new(10), NZU64!(5)).await.unwrap();
@@ -765,7 +765,7 @@ pub(crate) mod tests {
             &proof,
             Location::new(10),
             &ops,
-            &root
+            &root,
         ));
         assert_eq!(ops.len(), 5);
 
@@ -1340,7 +1340,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert!(
-                verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &root),
+                verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &root,),
                 "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
             );
             let expected_ops = std::cmp::min(max_ops, *db.bounds().await.end - start_loc);
@@ -1352,7 +1352,7 @@ pub(crate) mod tests {
                 &proof,
                 Location::new(start_loc),
                 &ops,
-                &wrong_root
+                &wrong_root,
             ));
             if start_loc > 0 {
                 assert!(!verify_proof(
@@ -1360,7 +1360,7 @@ pub(crate) mod tests {
                     &proof,
                     Location::new(start_loc - 1),
                     &ops,
-                    &root
+                    &root,
                 ));
             }
         }
@@ -1423,7 +1423,7 @@ pub(crate) mod tests {
                 continue;
             }
             let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
-            assert!(verify_proof(&hasher, &proof, start_loc, &ops, &root));
+            assert!(verify_proof(&hasher, &proof, start_loc, &ops, &root,));
         }
 
         let aggressive_prune: Location<F> = Location::new(150);
@@ -1431,7 +1431,7 @@ pub(crate) mod tests {
 
         let new_oldest = db.bounds().await.start;
         let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, new_oldest, &ops, &root));
+        assert!(verify_proof(&hasher, &proof, new_oldest, &ops, &root,));
 
         let almost_all = db.bounds().await.end - 5;
         db.prune(almost_all).await.unwrap();
@@ -1443,7 +1443,7 @@ pub(crate) mod tests {
                 &final_proof,
                 final_oldest,
                 &final_ops,
-                &root
+                &root,
             ));
         }
 
@@ -1677,7 +1677,7 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root,));
         assert_eq!(db.bounds().await.end, 1 + BATCHES * (APPENDS_PER_BATCH + 1));
 
         db.destroy().await.unwrap();
@@ -1782,7 +1782,7 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root,));
         assert_eq!(db.bounds().await.end, 1 + N + 1);
 
         db.destroy().await.unwrap();

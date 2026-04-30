@@ -889,7 +889,7 @@ mod tests {
                         &verifier,
                         &b4,
                         loc + 1,
-                        &grafted_root
+                        &grafted_root,
                     ));
 
                     // Wrong chunk element in the verifier.
@@ -920,7 +920,7 @@ mod tests {
                         &verifier,
                         &range,
                         Location::new(0),
-                        &grafted_root
+                        &grafted_root,
                     ));
 
                     // Fails with incomplete chunk elements.
@@ -930,7 +930,7 @@ mod tests {
                         &verifier,
                         &range,
                         Location::new(0),
-                        &grafted_root
+                        &grafted_root,
                     ));
                 }
             }

@@ -6,8 +6,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, hasher::Standard as StandardHasher, storage::Storage as MerkleStorage, Graftable,
-        Location, Position, Readable,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
+        mem::Mem, storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
         any::{
@@ -198,13 +198,13 @@ impl<
     }
 }
 
-/// Layers a [`merkle::batch::MerkleizedBatch`] over a [`merkle::mem::Mem`] for node resolution.
+/// Layers a [`GenericMerkleizedBatch`] over a [`Mem`] for node resolution.
 ///
-/// [`merkle::batch::MerkleizedBatch::get_node`] only covers the batch chain; committed positions
+/// [`GenericMerkleizedBatch::get_node`] only covers the batch chain; committed positions
 /// return `None`. This adapter falls through to the committed Mem for those positions.
 struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy = Sequential> {
-    batch: &'a merkle::batch::MerkleizedBatch<F, D, S>,
-    mem: &'a merkle::mem::Mem<F, D>,
+    batch: &'a GenericMerkleizedBatch<F, D, S>,
+    mem: &'a Mem<F, D>,
 }
 
 impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S> {

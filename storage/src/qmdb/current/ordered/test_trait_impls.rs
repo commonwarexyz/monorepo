@@ -180,7 +180,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable,
+        F: Graftable + Bagging,
         E: Context,
         K: Key,
         V: VariableValue,

@@ -120,7 +120,7 @@ where
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S] fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
-        F: Graftable,
+        F: Graftable + Bagging,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
