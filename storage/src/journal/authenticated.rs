@@ -1004,7 +1004,7 @@ mod tests {
         hasher: &StandardHasher<Sha256>,
     ) -> bool {
         let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
-        proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root, 0)
+        proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
     }
 
     /// Verify that new() creates an empty authenticated journal.

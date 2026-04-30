@@ -3675,8 +3675,7 @@ pub mod tests {
                 &proof,
                 Location::new(0),
                 &ops,
-                &ops_root,
-                proof.inactive_peaks,
+                &ops_root
             ));
 
             assert!(!verify_proof(
@@ -3684,8 +3683,7 @@ pub mod tests {
                 &proof,
                 Location::new(0),
                 &ops,
-                &ops_root,
-                proof.inactive_peaks,
+                &ops_root
             ));
 
             db.destroy().await.unwrap();

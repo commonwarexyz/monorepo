@@ -50,8 +50,7 @@ mod tests {
             &[start.to_be_bytes()],
             Location::new(start),
             &pinned,
-            &root,
-            0,
+            &root
         ));
     }
 
@@ -94,8 +93,7 @@ mod tests {
                     &hasher,
                     &loc.to_be_bytes(),
                     Location::new(loc),
-                    &root,
-                    0,
+                    &root
                 ),
                 "n={n}: verification failed"
             );

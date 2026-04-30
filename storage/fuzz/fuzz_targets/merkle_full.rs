@@ -206,7 +206,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 if let Ok(proof) = merkle.proof(&hasher, location, 0).await {
                                     let root = merkle.root(&hasher, 0).unwrap();
                                     assert!(proof.verify_element_inclusion(
-                                        &hasher, element, location, &root, 0,
+                                        &hasher, element, location, &root
                                     ));
                                 }
                             }
@@ -232,8 +232,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                         &hasher,
                                         &leaves[range.to_usize_range()],
                                         Location::<F>::new(start_loc),
-                                        &root,
-                                        0,
+                                        &root
                                     ));
                                 }
                             }
@@ -263,8 +262,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                     &verify_hasher,
                                     &leaves[range.to_usize_range()],
                                     range.start,
-                                    &expected_root,
-                                    0,
+                                    &expected_root
                                 ));
                             }
                             Err(Error::RangeOutOfBounds(_)) => {

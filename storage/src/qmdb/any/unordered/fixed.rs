@@ -586,8 +586,7 @@ pub(crate) mod test {
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
-                &root_hash,
-                historical_proof.inactive_peaks,
+                &root_hash
             ));
 
             // Add more operations to the database
@@ -610,8 +609,7 @@ pub(crate) mod test {
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
-                &root_hash,
-                historical_proof.inactive_peaks,
+                &root_hash
             ));
 
             // Try to get historical proof with op_count > number of operations and confirm it
@@ -653,9 +651,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root,
-                proof.inactive_peaks,
-            ));
+                &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -735,8 +731,7 @@ pub(crate) mod test {
                     &historical_proof,
                     start_loc,
                     &historical_ops,
-                    &root,
-                    historical_proof.inactive_peaks,
+                    &root
                 ));
             }
 
@@ -748,8 +743,7 @@ pub(crate) mod test {
                 &full_proof,
                 start_loc,
                 &full_ops,
-                &full_root,
-                full_proof.inactive_peaks,
+                &full_root
             ));
 
             db.destroy().await.unwrap();

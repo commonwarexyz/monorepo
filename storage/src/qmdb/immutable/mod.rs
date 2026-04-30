@@ -846,14 +846,7 @@ pub(super) mod test {
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
         let hasher = F::default_hasher::<Sha256>();
-        assert!(verify_proof(
-            &hasher,
-            &proof,
-            Location::new(0),
-            &ops,
-            &root,
-            proof.inactive_peaks,
-        ));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         db.destroy().await.unwrap();
     }
@@ -994,14 +987,7 @@ pub(super) mod test {
         let max_ops = NZU64!(5);
         for i in 0..*db.bounds().await.end {
             let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
-            assert!(verify_proof(
-                &hasher,
-                &proof,
-                Location::new(i),
-                &log,
-                &root,
-                proof.inactive_peaks,
-            ));
+            assert!(verify_proof(&hasher, &proof, Location::new(i), &log, &root));
         }
 
         db.destroy().await.unwrap();
@@ -1777,14 +1763,7 @@ pub(super) mod test {
         // Verify proof over the full range.
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(10000)).await.unwrap();
-        assert!(verify_proof(
-            &hasher,
-            &proof,
-            Location::new(0),
-            &ops,
-            &root,
-            proof.inactive_peaks,
-        ));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         // Expected: 1 initial commit + BATCHES * (KEYS_PER_BATCH + 1 commit).
         let expected = 1 + BATCHES * (KEYS_PER_BATCH + 1);
@@ -1922,14 +1901,7 @@ pub(super) mod test {
         // Verify proof over the full range.
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(
-            &hasher,
-            &proof,
-            Location::new(0),
-            &ops,
-            &root,
-            proof.inactive_peaks,
-        ));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         // Expected: 1 initial commit + N sets + 1 commit.
         assert_eq!(db.bounds().await.end, 1 + N + 1);

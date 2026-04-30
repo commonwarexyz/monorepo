@@ -8,7 +8,7 @@ use crate::{
     merkle::{
         self,
         full::{self, Merkle},
-        Family, Location, Proof,
+        Family, Location,
     },
     qmdb::{
         any::ValueEncoding,
@@ -140,13 +140,6 @@ where
         self.root()
     }
 
-    fn proof_inactive_peaks(
-        _config: &Self::Config,
-        proof: &Proof<Self::Family, Self::Digest>,
-    ) -> usize {
-        proof.inactive_peaks
-    }
-
     fn root_bagging(_config: &Self::Config) -> merkle::Bagging {
         <F as FamilyBagging>::BAGGING
     }
@@ -217,10 +210,6 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    fn proof_inactive_peaks(proof: &Proof<Self::Family, Self::Digest>) -> usize {
-        proof.inactive_peaks
     }
 
     fn root_bagging() -> merkle::Bagging {

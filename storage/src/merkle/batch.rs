@@ -751,8 +751,7 @@ mod tests {
                 &hasher,
                 &element,
                 loc,
-                &batch_root(&applied, &merkleized, &hasher),
-                0,
+                &batch_root(&applied, &merkleized, &hasher)
             ));
         });
     }
@@ -837,8 +836,7 @@ mod tests {
                     &hasher,
                     &element,
                     loc,
-                    &batch_root(&applied, &mb, &hasher),
-                    0,
+                    &batch_root(&applied, &mb, &hasher)
                 ));
             }
         });
@@ -943,8 +941,7 @@ mod tests {
                 &hasher,
                 &element,
                 loc,
-                &batch_root(&applied, &m, &hasher),
-                0,
+                &batch_root(&applied, &m, &hasher)
             ));
             let range = Location::<F>::new(50)..Location::new(55);
             let rp = applied.range_proof(&hasher, range.clone(), 0).unwrap();
@@ -955,8 +952,7 @@ mod tests {
                 &hasher,
                 &elements,
                 range.start,
-                &batch_root(&applied, &m, &hasher),
-                0,
+                &batch_root(&applied, &m, &hasher)
             ));
         });
     }
@@ -1039,7 +1035,7 @@ mod tests {
             let loc = Location::<F>::new(80);
             let element = hasher.digest(&80u64.to_be_bytes());
             let proof = applied.proof(&hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root, 0));
+            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
             assert!(matches!(
                 applied.proof(&hasher, Location::new(0), 0),
                 Err(Error::ElementPruned(_))

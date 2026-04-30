@@ -702,7 +702,6 @@ where
             && self.pinned_nodes.is_none()
             && !self.local_target_state_available
             && start_loc == self.target.range.start();
-        let inactive_peaks = DB::proof_inactive_peaks(&self.config, &proof);
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
@@ -712,16 +711,9 @@ where
                 start_loc,
                 nodes,
                 target_root,
-                inactive_peaks,
             )
         } else {
-            proof.verify_range_inclusion(
-                &self.hasher,
-                &elements,
-                start_loc,
-                target_root,
-                inactive_peaks,
-            )
+            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
         };
 
         // Report success or failure to the resolver.

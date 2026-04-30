@@ -234,8 +234,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, test_name: &str) {
                     if start_loc >= oldest_retained_loc && start_loc < op_count {
                         if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
                             let root = db.root();
-                            let spec = proof.inactive_peaks;
-                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root, spec,));
+                            assert!(verify_proof(&hasher, &proof, start_loc, &log, &root));
                         }
                     }
                 }
@@ -275,8 +274,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, test_name: &str) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        let spec = proof.inactive_peaks;
-                        assert!(verify_proof(&hasher, &proof, start_loc, &log, root, spec));
+                        assert!(verify_proof(&hasher, &proof, start_loc, &log, root));
                     }
                 }
 

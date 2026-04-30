@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::{self, full, hasher::Standard as StandardHasher, Location, Proof},
+    merkle::{self, full, hasher::Standard as StandardHasher, Location},
     qmdb::{
         self,
         any::{
@@ -207,13 +207,6 @@ macro_rules! impl_sync_database {
 
             fn root(&self) -> Self::Digest {
                 crate::qmdb::any::db::Db::root(self)
-            }
-
-            fn proof_inactive_peaks(
-                _config: &Self::Config,
-                proof: &Proof<Self::Family, Self::Digest>,
-            ) -> usize {
-                proof.inactive_peaks
             }
 
             fn root_bagging(config: &Self::Config) -> merkle::Bagging {

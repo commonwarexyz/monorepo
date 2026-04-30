@@ -434,8 +434,7 @@ pub(crate) mod test {
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
-                let spec = proof.inactive_peaks;
-                assert!(verify_proof(&hasher, &proof, loc, &log, &root, spec));
+                assert!(verify_proof(&hasher, &proof, loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -683,8 +682,7 @@ pub(crate) mod test {
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
-                &root_hash,
-                historical_proof.inactive_peaks,
+                &root_hash
             ));
 
             // Add more operations to the database
@@ -707,8 +705,7 @@ pub(crate) mod test {
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
-                &root_hash,
-                historical_proof.inactive_peaks,
+                &root_hash
             ));
 
             db.destroy().await.unwrap();
@@ -742,9 +739,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root,
-                proof.inactive_peaks,
-            ));
+                &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -821,8 +816,7 @@ pub(crate) mod test {
                     &historical_proof,
                     start_loc,
                     &historical_ops,
-                    &root,
-                    historical_proof.inactive_peaks,
+                    &root
                 ));
             }
 

@@ -69,8 +69,7 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
                                         &hasher,
                                         &elements[range.to_usize_range()],
                                         range.start,
-                                        &root,
-                                        0,
+                                        &root
                                     ));
                                 }
                             })

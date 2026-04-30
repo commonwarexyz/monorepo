@@ -1189,14 +1189,12 @@ mod tests {
             &hasher,
             &[] as &[Digest],
             Location::<F>::new(0),
-            &root,
-            0,
+            &root
         ));
         assert!(empty_proof.verify_multi_inclusion(
             &hasher,
             &[] as &[(Digest, Location<F>)],
-            &root,
-            0,
+            &root
         ));
 
         // Confirm empty proof no longer verifies after adding an element.
@@ -1208,14 +1206,12 @@ mod tests {
             &hasher,
             &[] as &[Digest],
             Location::<F>::new(0),
-            &root,
-            0,
+            &root
         ));
         assert!(!empty_proof.verify_multi_inclusion(
             &hasher,
             &[] as &[(Digest, Location<F>)],
-            &root,
-            0,
+            &root
         ));
 
         mmr.destroy().await.unwrap();
@@ -1361,8 +1357,7 @@ mod tests {
             &hasher,
             &leaves[TEST_ELEMENT],
             test_element_loc,
-            &root,
-            0,
+            &root
         ));
 
         // Sync the structure, make sure it flushes the in-mem structure as expected.
@@ -1380,8 +1375,7 @@ mod tests {
             &hasher,
             &leaves[range.to_usize_range()],
             test_element_loc,
-            &root,
-            0,
+            &root
         ));
 
         mmr.destroy().await.unwrap();
@@ -1782,8 +1776,7 @@ mod tests {
             &hasher,
             &elements[2..6],
             Location::<F>::new(2),
-            &root,
-            0,
+            &root
         ));
         let regular_proof = mmr
             .range_proof(&hasher, Location::<F>::new(2)..Location::<F>::new(6), 0)
@@ -1898,8 +1891,7 @@ mod tests {
             &hasher,
             &elements[35..39],
             Location::<F>::new(35),
-            &historical_root,
-            0,
+            &historical_root
         ));
 
         ref_mmr.destroy().await.unwrap();
@@ -1986,7 +1978,6 @@ mod tests {
             &elements[range.to_usize_range()],
             range.start,
             &expected_root, // Compare to historical (reference) root
-            0,
         ));
 
         ref_mmr.destroy().await.unwrap();
@@ -2033,8 +2024,7 @@ mod tests {
             &hasher,
             &[element],
             Location::<F>::new(0),
-            &root,
-            0,
+            &root
         ));
 
         mmr.destroy().await.unwrap();

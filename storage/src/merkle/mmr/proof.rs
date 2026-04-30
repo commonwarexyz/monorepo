@@ -39,13 +39,7 @@ mod tests {
             .range_proof(&hasher, Location::new(0)..mmr.leaves(), 0)
             .unwrap();
         let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &elements,
-                Location::new(0),
-                &root,
-                0,
-            )
+            .verify_range_inclusion_and_extract_digests(&hasher, &elements, Location::new(0), &root)
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
@@ -60,8 +54,7 @@ mod tests {
                 &hasher,
                 &elements,
                 Location::new(0),
-                &wrong_root,
-                0,
+                &wrong_root
             ),
             Err(Error::RootMismatch)
         ));
@@ -76,7 +69,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                0,
             )
             .unwrap();
         assert!(single_digests.len() > 1);
@@ -92,7 +84,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                0,
             )
             .unwrap();
         assert!(mid_digests.len() > 1);
@@ -108,7 +99,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                0,
             )
             .unwrap();
         assert!(!last_digests.is_empty());
@@ -123,7 +113,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                0,
             )
             .unwrap();
         // Verify that we get digests for the range elements and their ancestors
@@ -139,7 +128,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range_start,
                 &root,
-                0,
             )
             .unwrap();
         let num_elements = range.end - range.start;
@@ -333,14 +321,7 @@ mod tests {
 
         // Correct pinned nodes must verify.
         assert!(
-            proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &elements[1..],
-                start_loc,
-                &pinned,
-                &root,
-                0
-            ),
+            proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &pinned, &root),
             "valid pinned nodes should verify"
         );
 
@@ -352,8 +333,7 @@ mod tests {
                 &elements[1..],
                 start_loc,
                 &bad_pinned,
-                &root,
-                0,
+                &root
             ),
             "wrong pinned digest should fail"
         );
@@ -366,15 +346,14 @@ mod tests {
                 &elements[1..],
                 start_loc,
                 &extra_pinned,
-                &root,
-                0,
+                &root
             ),
             "extra pinned node should fail"
         );
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], &root, 0),
+            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], &root),
             "missing pinned nodes should fail"
         );
     }
@@ -406,14 +385,7 @@ mod tests {
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(
-            proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &elements[8..],
-                start_loc,
-                &pinned,
-                &root,
-                0
-            ),
+            proof.verify_proof_and_pinned_nodes(&hasher, &elements[8..], start_loc, &pinned, &root),
             "valid fold-prefix pinned nodes should verify"
         );
 
@@ -424,8 +396,7 @@ mod tests {
                 &elements[8..],
                 start_loc,
                 &[test_digest(99)],
-                &root,
-                0,
+                &root
             ),
             "wrong fold-prefix digest should fail"
         );

@@ -34,7 +34,7 @@ use crate::{
     merkle::{
         full::{self, Merkle},
         hasher::Standard as StandardHasher,
-        Bagging, Graftable, Location, Proof,
+        Bagging, Graftable, Location,
     },
     qmdb::{
         self,
@@ -313,13 +313,6 @@ macro_rules! impl_current_sync_database {
             /// batches against the ops tree.
             fn root(&self) -> Self::Digest {
                 self.any.root()
-            }
-
-            fn proof_inactive_peaks(
-                _config: &Self::Config,
-                _proof: &Proof<Self::Family, Self::Digest>,
-            ) -> usize {
-                0
             }
 
             fn root_bagging(_config: &Self::Config) -> Bagging {

@@ -54,8 +54,9 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
                             let hasher = StandardHasher::<Sha256>::new();
                             for (loc, element) in samples {
                                 let proof = mem.proof(&hasher, loc, 0).unwrap();
-                                assert!(proof
-                                    .verify_element_inclusion(&hasher, &element, loc, &root, 0));
+                                assert!(
+                                    proof.verify_element_inclusion(&hasher, &element, loc, &root)
+                                );
                             }
                         });
                     },

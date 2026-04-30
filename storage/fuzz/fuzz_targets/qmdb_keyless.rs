@@ -424,9 +424,7 @@ fn fuzz_family<F: Family + Bagging>(input: &FuzzInput, suffix: &str) {
                                     &proof,
                                     start_loc,
                                     &ops,
-                                    &root,
-                                    proof.inactive_peaks,
-                                ),
+                                    &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
@@ -465,9 +463,7 @@ fn fuzz_family<F: Family + Bagging>(input: &FuzzInput, suffix: &str) {
                                     &proof,
                                     start_loc,
                                     &ops,
-                                    &root,
-                                    proof.inactive_peaks,
-                                ),
+                                    &root),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }

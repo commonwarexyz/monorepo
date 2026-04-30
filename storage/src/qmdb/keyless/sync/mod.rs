@@ -6,7 +6,7 @@ use crate::{
     },
     merkle::{
         full::{self, Merkle},
-        Bagging, Family, Location, Proof,
+        Bagging, Family, Location,
     },
     qmdb::{
         self,
@@ -118,13 +118,6 @@ where
         self.root()
     }
 
-    fn proof_inactive_peaks(
-        _config: &Self::Config,
-        proof: &Proof<Self::Family, Self::Digest>,
-    ) -> usize {
-        proof.inactive_peaks
-    }
-
     fn root_bagging(_config: &Self::Config) -> Bagging {
         <F as qmdb::Bagging>::BAGGING
     }
@@ -194,10 +187,6 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    fn proof_inactive_peaks(proof: &Proof<Self::Family, Self::Digest>) -> usize {
-        proof.inactive_peaks
     }
 
     fn root_bagging() -> Bagging {

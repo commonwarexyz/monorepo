@@ -180,9 +180,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(data: &FuzzInput, suffix: &str) {
                                 &proof,
                                 adjusted_start,
                                 &log,
-                                &current_root,
-                                proof.inactive_peaks,
-                            ),
+                                &current_root),
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
                         );
                     }

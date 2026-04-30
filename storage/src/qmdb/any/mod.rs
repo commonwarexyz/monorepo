@@ -706,8 +706,7 @@ pub(crate) mod test {
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            let spec = proof.inactive_peaks;
-            assert!(verify_proof(&hasher, &proof, loc, &ops, &root, spec));
+            assert!(verify_proof(&hasher, &proof, loc, &ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -797,8 +796,7 @@ pub(crate) mod test {
             &historical_proof,
             start_loc,
             &historical_ops,
-            &root_hash,
-            historical_proof.inactive_peaks,
+            &root_hash
         ));
 
         // Add more operations to the database
@@ -826,8 +824,7 @@ pub(crate) mod test {
             &historical_proof2,
             start_loc,
             &historical_ops2,
-            &root_hash,
-            historical_proof2.inactive_peaks,
+            &root_hash
         ));
 
         db.destroy().await.unwrap();
@@ -873,7 +870,6 @@ pub(crate) mod test {
         assert_eq!(ops.len(), expected_ops_len);
 
         let hasher = StandardHasher::<Sha256>::new();
-        let inactive_peaks = proof.inactive_peaks;
 
         // Changing the proof digests should cause verification to fail
         {
@@ -885,8 +881,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash,
-                inactive_peaks,
+                &root_hash
             ));
         }
 
@@ -900,8 +895,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash,
-                inactive_peaks,
+                &root_hash
             ));
         }
 
@@ -917,8 +911,7 @@ pub(crate) mod test {
                     &proof,
                     Location::new(1),
                     &tampered_ops,
-                    &root_hash,
-                    inactive_peaks,
+                    &root_hash
                 ));
             }
         }
@@ -933,8 +926,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &tampered_ops,
-                &root_hash,
-                inactive_peaks,
+                &root_hash
             ));
         }
 
@@ -946,8 +938,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(2),
                 &ops,
-                &root_hash,
-                inactive_peaks,
+                &root_hash
             ));
         }
 
@@ -959,8 +950,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &ops,
-                &invalid_root,
-                inactive_peaks,
+                &invalid_root
             ));
         }
 
@@ -974,8 +964,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash,
-                inactive_peaks,
+                &root_hash
             ));
         }
 

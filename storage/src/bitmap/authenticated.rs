@@ -251,7 +251,7 @@ impl<E: Context, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
 
         let loc = Location::new(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root, 0);
+            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
 
         if proof.digests.is_empty() {
@@ -280,7 +280,7 @@ impl<E: Context, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc, 0) {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");

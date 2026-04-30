@@ -570,10 +570,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 debug!("verification failed, unexpected grafted prefix metadata");
                 return false;
             }
-            match self
-                .proof
-                .reconstruct_root(&verifier, &elements, start_loc, 0)
-            {
+            match self.proof.reconstruct_root(&verifier, &elements, start_loc) {
                 Ok(root) => root,
                 Err(error) => {
                     debug!(?error, "invalid proof input");

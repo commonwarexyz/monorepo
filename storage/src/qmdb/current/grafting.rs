@@ -845,13 +845,13 @@ mod tests {
 
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root, 0));
+                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
                     let loc = Location::new(1);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root, 0));
+                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
 
                     let loc = Location::new(2);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
@@ -859,13 +859,13 @@ mod tests {
                         .unwrap();
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root, 0));
+                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
                     let loc = Location::new(3);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root, 0));
+                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
@@ -876,32 +876,31 @@ mod tests {
                         .unwrap();
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root, 0));
+                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root, 0));
+                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
                     // Wrong root.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root, 0));
+                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root));
 
                     // Wrong position.
                     assert!(!proof.verify_element_inclusion(
                         &verifier,
                         &b4,
                         loc + 1,
-                        &grafted_root,
-                        0,
+                        &grafted_root
                     ));
 
                     // Wrong chunk element in the verifier.
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root, 0));
+                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
                     // Wrong chunk index in the verifier.
                     let verifier =
                         Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 2, vec![&c2]);
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root, 0));
+                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
                 }
 
                 // Verify range proofs.
@@ -921,8 +920,7 @@ mod tests {
                         &verifier,
                         &range,
                         Location::new(0),
-                        &grafted_root,
-                        0,
+                        &grafted_root
                     ));
 
                     // Fails with incomplete chunk elements.
@@ -932,8 +930,7 @@ mod tests {
                         &verifier,
                         &range,
                         Location::new(0),
-                        &grafted_root,
-                        0,
+                        &grafted_root
                     ));
                 }
             }
@@ -977,14 +974,14 @@ mod tests {
                 .unwrap();
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root, 0));
+            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let loc = Location::new(4);
             let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                 .await
                 .unwrap();
-            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root, 0));
+            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
         });
     }
 

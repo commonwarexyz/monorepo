@@ -728,13 +728,7 @@ mod tests {
                 .proof(&hasher, Location::new(i), 0)
                 .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
             assert!(
-                proof.verify_element_inclusion(
-                    &hasher,
-                    &i.to_be_bytes(),
-                    Location::new(i),
-                    &root,
-                    0
-                ),
+                proof.verify_element_inclusion(&hasher, &i.to_be_bytes(), Location::new(i), &root),
                 "loc={i}: proof should verify"
             );
         }
@@ -755,7 +749,7 @@ mod tests {
                     let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
 
                     assert!(
-                        proof.verify_range_inclusion(&hasher, &elements, range.start, &root, 0),
+                        proof.verify_range_inclusion(&hasher, &elements, range.start, &root),
                         "n={n}, range={start}..{end}: range proof should verify"
                     );
                 }
@@ -820,8 +814,7 @@ mod tests {
                     &hasher,
                     &loc.to_be_bytes(),
                     Location::new(loc),
-                    &root,
-                    0,
+                    &root
                 ),
                 "loc={loc}: proof should verify after append on pruned structure"
             );
@@ -855,8 +848,7 @@ mod tests {
                 &hasher,
                 b"updated-5",
                 Location::new(5),
-                &plain_root(&mem, &hasher),
-                0,
+                &plain_root(&mem, &hasher)
             ),
             "updated leaf should verify with new data"
         );
@@ -866,8 +858,7 @@ mod tests {
                 &hasher,
                 &5u64.to_be_bytes(),
                 Location::new(5),
-                &plain_root(&mem, &hasher),
-                0,
+                &plain_root(&mem, &hasher)
             ),
             "old data should not verify"
         );
@@ -879,8 +870,7 @@ mod tests {
                     &hasher,
                     &i.to_be_bytes(),
                     Location::new(i),
-                    &plain_root(&mem, &hasher),
-                    0,
+                    &plain_root(&mem, &hasher)
                 ),
                 "leaf {i} should still verify with original data"
             );
@@ -908,8 +898,7 @@ mod tests {
                     &hasher,
                     b"new-value",
                     Location::new(update_loc),
-                    &plain_root(&mem, &hasher),
-                    0,
+                    &plain_root(&mem, &hasher)
                 ),
                 "update at {update_loc} should verify"
             );
@@ -962,8 +951,7 @@ mod tests {
             &hasher,
             b"updated-3",
             Location::new(3),
-            &plain_root(&mem, &hasher),
-            0,
+            &plain_root(&mem, &hasher)
         ));
 
         let proof = mem.proof(&hasher, Location::new(8), 0).unwrap();
@@ -971,8 +959,7 @@ mod tests {
             &hasher,
             &100u64.to_be_bytes(),
             Location::new(8),
-            &plain_root(&mem, &hasher),
-            0,
+            &plain_root(&mem, &hasher)
         ));
     }
 
@@ -1018,8 +1005,7 @@ mod tests {
                 &hasher,
                 b"updated-0",
                 Location::new(0),
-                &plain_root(&mem, &hasher),
-                0,
+                &plain_root(&mem, &hasher)
             ),
             "updated leaf should verify"
         );
@@ -1054,8 +1040,7 @@ mod tests {
                             &hasher,
                             b"new",
                             Location::new(update_loc),
-                            &plain_root(&m, &hasher),
-                            0,
+                            &plain_root(&m, &hasher)
                         ),
                         "n={n} prune={prune_to} update={update_loc}: proof should verify"
                     );

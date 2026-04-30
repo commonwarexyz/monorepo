@@ -160,36 +160,18 @@ fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         for (leaf, element) in digests.iter().enumerate() {
             let loc = Location::<F>::new(leaf as u64);
             let original_proof = merkle.proof(&hasher, loc, inactive_peaks).unwrap();
-            assert!(original_proof.verify_element_inclusion(
-                &hasher,
-                element,
-                loc,
-                &root,
-                inactive_peaks
-            ));
+            assert!(original_proof.verify_element_inclusion(&hasher, element, loc, &root));
 
             let mut mutated_proof = original_proof.clone();
             mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
             assert_ne!(mutated_proof, original_proof);
-            assert!(!mutated_proof.verify_element_inclusion(
-                &hasher,
-                element,
-                loc,
-                &root,
-                inactive_peaks
-            ));
+            assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, &root));
 
             for mutation in &input.mutations {
                 let mut mutated_proof = original_proof.clone();
                 mutate_proof_bytes(&mut mutated_proof, mutation, &256);
                 if mutated_proof != original_proof {
-                    assert!(!mutated_proof.verify_element_inclusion(
-                        &hasher,
-                        element,
-                        loc,
-                        &root,
-                        inactive_peaks
-                    ));
+                    assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, &root));
                 }
             }
         }
@@ -226,12 +208,12 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         return;
     };
     let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
-    assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root, 0));
+    assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
 
     let mut mutated_proof = original_proof.clone();
     mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
     assert_ne!(mutated_proof, original_proof);
-    assert!(!mutated_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root, 0));
+    assert!(!mutated_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
 
     for mutation in &input.mutations {
         let mut mutated_proof = original_proof.clone();
@@ -241,8 +223,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
                 &hasher,
                 &range_elements,
                 start_loc,
-                &root,
-                0,
+                &root
             ));
         }
     }
@@ -259,24 +240,12 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         )) else {
             continue;
         };
-        assert!(original_proof.verify_range_inclusion(
-            &hasher,
-            &range_elements,
-            start_loc,
-            &root,
-            inactive_peaks,
-        ));
+        assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
 
         let mut mutated_proof = original_proof.clone();
         mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
         assert_ne!(mutated_proof, original_proof);
-        assert!(!mutated_proof.verify_range_inclusion(
-            &hasher,
-            &range_elements,
-            start_loc,
-            &root,
-            inactive_peaks,
-        ));
+        assert!(!mutated_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
 
         for mutation in &input.mutations {
             let mut mutated_proof = original_proof.clone();
@@ -286,8 +255,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
                     &hasher,
                     &range_elements,
                     start_loc,
-                    &root,
-                    inactive_peaks,
+                    &root
                 ));
             }
         }

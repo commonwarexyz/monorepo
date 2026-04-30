@@ -242,7 +242,6 @@ where
         &[commit_op_bytes.as_slice()],
         last_commit_loc,
         &root,
-        inactive_peaks,
     ) {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }

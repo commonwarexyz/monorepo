@@ -269,14 +269,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, suffix: &str) {
                             last_commit_loc = Some(db.bounds().await.end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
-                                let _ = verify_proof(
-                                    &hasher,
-                                    &proof,
-                                    safe_start,
-                                    &ops,
-                                    &root,
-                                    proof.inactive_peaks,
-                                );
+                                let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
                             }
                         }
                     }

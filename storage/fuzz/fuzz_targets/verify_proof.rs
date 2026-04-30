@@ -72,13 +72,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput<F>) {
     }
 
     let root = Digest::from(input.root);
-    let _ = verify_multi_proof(
-        &hasher,
-        &proof,
-        operations.as_slice(),
-        &root,
-        proof.inactive_peaks,
-    );
+    let _ = verify_multi_proof(&hasher, &proof, operations.as_slice(), &root);
 }
 
 fuzz_target!(|data: &[u8]| {

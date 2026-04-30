@@ -264,9 +264,6 @@ pub trait Database: Sized + Send {
     /// Get the root digest for final verification.
     fn root(&self) -> Self::Digest;
 
-    /// Return the inactive_peaks count for verifying the final commit proof.
-    fn proof_inactive_peaks(proof: &Proof<Self::Family, Self::Digest>) -> usize;
-
     /// Bagging policy used by this database when computing roots.
     fn root_bagging() -> merkle::Bagging;
 
@@ -338,7 +335,6 @@ where
         last_commit_loc,
         std::slice::from_ref(&state.last_commit_op),
         &target.root,
-        DB::proof_inactive_peaks(&state.last_commit_proof),
     ) {
         return Err(Error::Engine(EngineError::InvalidProof));
     }

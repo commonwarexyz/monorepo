@@ -43,7 +43,7 @@ pub struct ProofStore<F: Family, D> {
 
 impl<F: Family, D: Digest> ProofStore<F, D> {
     /// Create a [ProofStore] from a [Proof] of inclusion of the provided range of elements from
-    /// the structure with root `root`, using `spec` to determine peak bagging. The resulting store
+    /// the structure with root `root`, using the bagging carried by `hasher`. The resulting store
     /// can be used to generate range proofs over any sub-range of the original range. Returns an
     /// error if the proof is invalid or could not be verified against the given root.
     ///
@@ -56,23 +56,14 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         elements: &[E],
         start_loc: Location<F>,
         root: &D,
-        inactive_peaks: usize,
     ) -> Result<Self, Error<F>>
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if proof.inactive_peaks != inactive_peaks {
-            return Err(Error::InvalidProof);
-        }
         let bagging = hasher.root_bagging();
-        let digests = proof.verify_range_inclusion_and_extract_digests(
-            hasher,
-            elements,
-            start_loc,
-            root,
-            inactive_peaks,
-        )?;
+        let digests =
+            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
         let map: HashMap<Position<F>, D> = digests.into_iter().collect();
 
         let size = Position::try_from(proof.leaves)?;
@@ -435,37 +426,6 @@ mod tests {
             mmr.apply_batch(&batch).unwrap();
             let root = mmr.root(&hasher, 0).unwrap();
 
-            let inactive_peaks = 1usize;
-            let inactive_root = mmr.root(&hasher, inactive_peaks).unwrap();
-            let inactive_range = Location::new(32)..Location::new(49);
-            let inactive_proof = historical_range_proof(
-                &hasher,
-                &mmr,
-                mmr.leaves(),
-                inactive_range.clone(),
-                inactive_peaks,
-            )
-            .await
-            .unwrap();
-            assert!(ProofStore::new(
-                &hasher,
-                &inactive_proof,
-                &elements[inactive_range.to_usize_range()],
-                inactive_range.start,
-                &inactive_root,
-                0,
-            )
-            .is_err());
-            assert!(ProofStore::new(
-                &hasher,
-                &inactive_proof,
-                &elements[inactive_range.to_usize_range()],
-                inactive_range.start,
-                &inactive_root,
-                inactive_peaks,
-            )
-            .is_ok());
-
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
             let mut range_start = Location::new(0);
@@ -479,7 +439,6 @@ mod tests {
                     &elements[range.to_usize_range()],
                     range_start,
                     &root,
-                    0,
                 )
                 .unwrap();
 
@@ -497,8 +456,7 @@ mod tests {
                         &hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
-                        &root,
-                        0,
+                        &root
                     ));
                     subrange_start += 1;
                     subrange_end -= 1;
@@ -539,7 +497,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                0,
             )
             .unwrap();
 
@@ -553,8 +510,7 @@ mod tests {
                             &hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
-                            &root,
-                            0,
+                            &root
                         ),
                         "sub-proof should verify for range {start}..{end}"
                     );
@@ -591,7 +547,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                0,
             )
             .unwrap();
 
@@ -604,8 +559,7 @@ mod tests {
                             &hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
-                            &root,
-                            0,
+                            &root
                         ),
                         "sub-proof should verify for MMB range {start}..{end}"
                     );
@@ -644,7 +598,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                inactive_peaks,
             )
             .unwrap();
 
@@ -653,8 +606,7 @@ mod tests {
                 &hasher,
                 &elements[range.to_usize_range()],
                 range.start,
-                &root,
-                inactive_peaks,
+                &root
             ));
             assert!(matches!(
                 proof_store.range_proof(&hasher, MmbLocation::new(64)..MmbLocation::new(65)),
@@ -709,9 +661,7 @@ mod tests {
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
-                &root,
-                inactive_peaks,
-            )
+                &root)
             .unwrap();
 
             // Every sub-range of the active region round-trips through the store.
@@ -724,9 +674,7 @@ mod tests {
                             &hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
-                            &root,
-                            inactive_peaks,
-                        ),
+                            &root),
                         "sub-proof should verify for MMB range {start}..{end} with split_backward({inactive_peaks})"
                     );
                 }
@@ -778,7 +726,7 @@ mod tests {
             let direct = multi_proof(&mmb, inactive_peaks, Bagging::BackwardFold, &target)
                 .await
                 .unwrap();
-            assert!(direct.verify_multi_inclusion(&hasher, &selected, &root, inactive_peaks));
+            assert!(direct.verify_multi_inclusion(&hasher, &selected, &root));
 
             // Build a ProofStore from a backward-folded range proof over a single leaf.
             // The other ~6 active peaks are folded into one synthetic suffix accumulator.
@@ -793,7 +741,6 @@ mod tests {
                 &elements[range.to_usize_range()],
                 range.start,
                 &root,
-                inactive_peaks,
             )
             .unwrap();
 
@@ -827,7 +774,7 @@ mod tests {
                 .map(|&pos| (pos, mmb.get_node(pos).unwrap()))
                 .collect();
             let derived = proof_store.multi_proof(&target, &peaks).unwrap();
-            assert!(derived.verify_multi_inclusion(&hasher, &selected, &root, inactive_peaks));
+            assert!(derived.verify_multi_inclusion(&hasher, &selected, &root));
         });
     }
 }

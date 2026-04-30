@@ -74,27 +74,19 @@ fn fuzz_family<F: MerkleFamily + QmdbBagging>(input: &FuzzInput<F>) {
     let start_loc = Location::<F>::new(input.start_loc);
     let root = Digest::from(input.root);
     let range = Location::<F>::new(input.range.start)..Location::<F>::new(input.range.end);
-    let root_spec = proof.inactive_peaks;
 
-    let Ok(proof_store) = ProofStore::new(
-        &hasher,
-        &proof,
-        &input.elements,
-        start_loc,
-        &root,
-        root_spec,
-    ) else {
+    let Ok(proof_store) = ProofStore::new(&hasher, &proof, &input.elements, start_loc, &root)
+    else {
         return;
     };
 
     if let Ok(proof) = proof_store.range_proof(&hasher, range) {
-        let _ = proof.verify_range_inclusion(&hasher, &input.elements, start_loc, &root, root_spec);
+        let _ = proof.verify_range_inclusion(&hasher, &input.elements, start_loc, &root);
         let _ = proof.verify_range_inclusion_and_extract_digests(
             &hasher,
             &input.elements,
             start_loc,
             &root,
-            root_spec,
         );
     }
 
@@ -118,7 +110,6 @@ fn fuzz_family<F: MerkleFamily + QmdbBagging>(input: &FuzzInput<F>) {
                 .map(|loc| (loc.encode(), *loc))
                 .collect::<Vec<_>>(),
             &root,
-            root_spec,
         );
 
         let _ = proof.verify_range_inclusion_and_extract_digests(
@@ -126,7 +117,6 @@ fn fuzz_family<F: MerkleFamily + QmdbBagging>(input: &FuzzInput<F>) {
             &input.elements,
             start_loc,
             &root,
-            root_spec,
         );
     }
 }
