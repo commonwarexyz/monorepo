@@ -739,7 +739,9 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
     });
 }
 
-fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_twin_mutator<P: simplex::Simplex>(mut input: FuzzInput) {
+    input.partition = Partition::Connected;
+
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -987,7 +989,7 @@ where
             let _ = simplex_node::run::<P>(&mut context, &input).await;
         });
     } else {
-        panic!("unsupported mode for node fuzzing");
+        panic!("unsupported mode for node fuzz_node");
     }
 }
 
@@ -1048,7 +1050,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::Twin => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
         })),
-        Mode::WithRecovery => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
+        Mode::WithRecovery => {
+            panic!("unsupported mode for fuzz")
+        }
     };
     match run_result {
         Ok(()) => {}
