@@ -244,7 +244,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
 
                     let wrapped_src = Arc::new(db);
                     let _result = test_sync(
-                        context.child("storage"),
+                        context.child("storage").with_attribute("sync", sync_id),
                         wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
