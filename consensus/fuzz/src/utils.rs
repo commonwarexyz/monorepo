@@ -160,7 +160,7 @@ pub async fn apply_partition<P: PublicKey, E: Clock>(
             if i1 == i2 {
                 continue;
             }
-            let want = partition.map_or(true, |p| p.connected(i1, i2));
+            let want = partition.is_none_or(|p| p.connected(i1, i2));
             oracle.remove_link(v1.clone(), v2.clone()).await.ok();
             if want {
                 oracle
