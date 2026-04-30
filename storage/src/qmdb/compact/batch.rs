@@ -68,7 +68,7 @@ impl<F: Family, D: Digest> Batch<F, D> {
         leaves.push(hasher.leaf_digest(pos, &commit_op.encode()));
 
         let bounds =
-            Bounds::from_item_count(base_size, committed_size, leaves.len() - 1, commit_floor);
+            Bounds::from_data_ops(base_size, committed_size, leaves.len() - 1, commit_floor);
         Self::from_leaf_digests(parent, mem, hasher, &leaves, bounds)
     }
 

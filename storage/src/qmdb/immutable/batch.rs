@@ -18,6 +18,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use std::{
     collections::BTreeMap,
+    iter,
     sync::{Arc, Weak},
 };
 
@@ -256,6 +257,8 @@ where
         journal_batch = journal_batch.add(Operation::Commit(metadata, inactivity_floor));
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
+        // Walk parent chain. The first parent is a strong Arc (held by UnmerkleizedBatch),
+        // subsequent parents are Weak refs.
         let (ancestor_diffs, ancestor_bounds) = self.parent.as_ref().map_or_else(
             || (Vec::new(), Vec::new()),
             |parent| {
@@ -267,7 +270,7 @@ where
             },
         );
         let bounds =
-            Bounds::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
+            Bounds::from_data_ops(self.base_size, self.db_size, item_count, inactivity_floor);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
@@ -288,7 +291,7 @@ where
     /// weak ref fails to upgrade.
     fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        core::iter::from_fn(move || {
+        iter::from_fn(move || {
             let batch = next.take()?;
             next = batch.parent.as_ref().and_then(Weak::upgrade);
             Some(batch)
@@ -354,7 +357,7 @@ where
                 continue;
             }
 
-            // Walk ancestor diffs captured when this batch was merkleized.
+            // Check ancestor diffs.
             let mut found = false;
             for batch in self.ancestors() {
                 if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {

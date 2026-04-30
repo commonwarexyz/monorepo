@@ -9,7 +9,10 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
-use std::sync::{Arc, Weak};
+use std::{
+    iter,
+    sync::{Arc, Weak},
+};
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -68,9 +71,9 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
 where
     Operation<F, V>: EncodeShared,
 {
-    // Each batch's items range [size - items.len(), size). We compute the range from the
-    // journal (strong Arcs, always intact).
     let self_end = batch.journal_batch.size();
+    // The journal batch owns this batch's local operations, which occupy the final
+    // `items().len()` locations before `size()`.
     let self_base = self_end - batch.journal_batch.items().len() as u64;
     if loc >= self_base && loc < self_end {
         return Some(batch.journal_batch.items()[(loc - self_base) as usize].clone());
@@ -246,13 +249,15 @@ where
         journal_batch = journal_batch.add(Operation::Commit(metadata, inactivity_floor));
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
+        // Walk parent chain. The first parent is a strong Arc (held by UnmerkleizedBatch),
+        // subsequent parents are Weak refs.
         let ancestor_bounds = self.parent.as_ref().map_or_else(Vec::new, |parent| {
             let mut bounds = vec![parent.bounds];
             bounds.extend(parent.ancestor_bounds.iter().copied());
             bounds
         });
         let bounds =
-            Bounds::from_item_count(self.base_size, self.db_size, item_count, inactivity_floor);
+            Bounds::from_data_ops(self.base_size, self.db_size, item_count, inactivity_floor);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
@@ -271,7 +276,7 @@ where
     /// weak ref fails to upgrade.
     fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        core::iter::from_fn(move || {
+        iter::from_fn(move || {
             let batch = next.take()?;
             next = batch.parent.as_ref().and_then(Weak::upgrade);
             Some(batch)

@@ -41,18 +41,18 @@ impl<F: Family> Bounds<F> {
         }
     }
 
-    /// Build bounds for `item_count` data ops plus one trailing commit leaf.
-    /// `new_size` becomes `base_size + item_count + 1`.
-    pub(crate) const fn from_item_count(
+    /// Build bounds for `data_ops` data operations plus one trailing commit leaf.
+    /// `new_size` becomes `base_size + data_ops + 1`.
+    pub(crate) const fn from_data_ops(
         base_size: u64,
         committed_size: u64,
-        item_count: usize,
+        data_ops: usize,
         commit_floor: Location<F>,
     ) -> Self {
         Self {
             base_size,
             committed_size,
-            new_size: base_size + item_count as u64 + 1,
+            new_size: base_size + data_ops as u64 + 1,
             commit_floor,
         }
     }
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn batch_bounds_validates_stale_sizes() {
-        let bounds = Bounds::<F>::from_item_count(10, 10, 2, Location::new(12));
+        let bounds = Bounds::<F>::from_data_ops(10, 10, 2, Location::new(12));
 
         assert!(bounds.validate_stale(10, []).is_ok());
         assert!(bounds.validate_stale(12, [12]).is_ok());
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn batch_bounds_validates_floor_monotonicity() {
-        let bounds = Bounds::<F>::from_item_count(10, 10, 2, Location::new(8));
+        let bounds = Bounds::<F>::from_data_ops(10, 10, 2, Location::new(8));
 
         assert!(bounds
             .validate_floors(Location::new(5), 10, [(12, Location::new(7))])
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn batch_bounds_rejects_floor_beyond_commit() {
-        let bounds = Bounds::<F>::from_item_count(10, 10, 2, Location::new(13));
+        let bounds = Bounds::<F>::from_data_ops(10, 10, 2, Location::new(13));
 
         let err = bounds
             .validate_floors(Location::new(5), 10, [])
@@ -291,8 +291,8 @@ mod tests {
             next_last_commit_loc: Location::new(12),
             next_inactivity_floor_loc: Location::new(8),
         };
-        let applied = Bounds::<F>::from_item_count(7, 7, 2, Location::new(8));
-        let unapplied = Bounds::<F>::from_item_count(10, 10, 2, Location::new(8));
+        let applied = Bounds::<F>::from_data_ops(7, 7, 2, Location::new(8));
+        let unapplied = Bounds::<F>::from_data_ops(10, 10, 2, Location::new(8));
 
         assert_eq!(plan.committed_size(), 10);
         assert!(!plan.is_unapplied(&applied));

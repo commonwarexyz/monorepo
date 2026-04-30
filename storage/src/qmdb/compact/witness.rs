@@ -93,6 +93,28 @@ pub(crate) struct Witness<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Witness<F, D> {
+    /// Validate an authenticated compact state and assemble the serve cache.
+    pub(crate) fn new(
+        root: D,
+        leaf_count: Location<F>,
+        inactivity_floor_loc: Location<F>,
+        commit_op_bytes: Vec<u8>,
+        commit_proof: Proof<F, D>,
+        pinned_nodes: Vec<D>,
+    ) -> Result<Self, Error<F>> {
+        if leaf_count == 0 {
+            return Err(Error::DataCorrupted("missing final commit"));
+        }
+        validate_inactivity_floor(inactivity_floor_loc, Self::last_commit_loc_from(leaf_count))?;
+        Ok(Self {
+            root,
+            leaf_count,
+            pinned_nodes,
+            commit_op_bytes,
+            commit_proof,
+        })
+    }
+
     /// Convert the cached witness into the compact-sync target this source can currently serve.
     ///
     /// Compact sources only serve their current committed tip, so the target is just the root plus
@@ -102,6 +124,15 @@ impl<F: Family, D: Digest> Witness<F, D> {
             root: self.root,
             leaf_count: self.leaf_count,
         }
+    }
+
+    /// Return the location of the commit authenticated by this witness.
+    pub(crate) fn last_commit_loc(&self) -> Location<F> {
+        Self::last_commit_loc_from(self.leaf_count)
+    }
+
+    fn last_commit_loc_from(leaf_count: Location<F>) -> Location<F> {
+        Location::new(*leaf_count - 1)
     }
 }
 
@@ -139,10 +170,7 @@ pub(crate) fn validate_inactivity_floor<F: Family>(
 }
 
 /// `(metadata, inactivity_floor)` extracted from a commit operation.
-type CommitFields<Op> = (
-    Option<<Op as CompactCommit>::Metadata>,
-    Location<<Op as CompactCommit>::Family>,
-);
+type CommitFields<'a, F, M> = (Option<&'a M>, Location<F>);
 
 /// `(serve cache, last commit metadata, inactivity floor)` rebuilt from a persisted witness.
 type LoadedWitness<F, D, M> = (Witness<F, D>, Option<M>, Location<F>);
@@ -156,12 +184,8 @@ pub(crate) trait CompactCommit: Sized {
     /// Build a commit op with the given metadata and inactivity floor.
     fn build_commit(metadata: Option<Self::Metadata>, floor: Location<Self::Family>) -> Self;
 
-    /// Whether this op is a commit. Used by the compact-serving path to validate the shape of
-    /// a decoded op without consuming it (so the typed op can still be returned to callers).
-    fn is_commit(&self) -> bool;
-
-    /// Extract `(metadata, inactivity_floor)` if this op is a commit; otherwise return `None`.
-    fn into_commit_fields(self) -> Option<CommitFields<Self>>;
+    /// Return `(metadata, inactivity_floor)` if this op is a commit.
+    fn as_commit(&self) -> Option<CommitFields<'_, Self::Family, Self::Metadata>>;
 }
 
 /// Rebuild the in-memory serve cache from the active slot's persisted witness.
@@ -224,9 +248,10 @@ where
     });
     let op = Op::decode_cfg(commit_op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid persisted commit operation"))?;
-    let (last_commit_metadata, inactivity_floor_loc) = op.into_commit_fields().ok_or(
+    let (last_commit_metadata, inactivity_floor_loc) = op.as_commit().ok_or(
         Error::DataCorrupted("persisted last operation was not a commit"),
     )?;
+    let last_commit_metadata = last_commit_metadata.cloned();
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     let serve_state = Witness {
         root,
@@ -236,39 +261,6 @@ where
         commit_proof,
     };
     Ok((serve_state, last_commit_metadata, inactivity_floor_loc))
-}
-
-/// Validate caller-supplied compact-sync state and assemble it into a serve cache.
-///
-/// Used on the compact-sync init path where the caller has already authenticated the supplied
-/// commit proof against the requested target root, but the leaf count and floor still need to be
-/// checked locally. Returns `(last_commit_loc, cache)`.
-#[allow(clippy::type_complexity)]
-pub(crate) fn validate_witness<F, D>(
-    root: D,
-    leaf_count: Location<F>,
-    inactivity_floor_loc: Location<F>,
-    commit_op_bytes: Vec<u8>,
-    commit_proof: Proof<F, D>,
-    pinned_nodes: Vec<D>,
-) -> Result<(Location<F>, Witness<F, D>), Error<F>>
-where
-    F: Family,
-    D: Digest,
-{
-    if leaf_count == 0 {
-        return Err(Error::DataCorrupted("missing final commit"));
-    }
-    let last_commit_loc = Location::<F>::new(*leaf_count - 1);
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-    let serve_state = Witness {
-        root,
-        leaf_count,
-        pinned_nodes,
-        commit_op_bytes,
-        commit_proof,
-    };
-    Ok((last_commit_loc, serve_state))
 }
 
 /// Bootstrap the first persisted witness for a brand-new compact db.

@@ -26,7 +26,7 @@ use crate::{
     qmdb::{
         any::value::ValueEncoding,
         batch::{Bounds, Plan},
-        compact::{Batch as CompactBatch, CompactCommit, CompactDbInner},
+        compact::{Batch as CompactBatch, CompactCommit, Db as CompactDb},
         operation::Key,
         sync::compact as compact_sync,
         Error,
@@ -60,7 +60,7 @@ where
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    inner: CompactDbInner<F, E, H, Operation<F, K, V>, C>,
+    inner: CompactDb<F, E, H, Operation<F, K, V>, C>,
 }
 
 impl<F, K, V> CompactCommit for Operation<F, K, V>
@@ -79,15 +79,11 @@ where
         Self::Commit(metadata, floor)
     }
 
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_, _))
-    }
-
-    fn into_commit_fields(self) -> Option<(Option<Self::Metadata>, Location<Self::Family>)> {
+    fn as_commit(&self) -> Option<(Option<&Self::Metadata>, Location<Self::Family>)> {
         let Self::Commit(metadata, floor) = self else {
             return None;
         };
-        Some((metadata, floor))
+        Some((metadata.as_ref(), *floor))
     }
 }
 
@@ -249,9 +245,9 @@ where
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    /// Borrow the shared compact-db inner state. Used by sync-engine plumbing that needs to
+    /// Borrow the shared compact db state. Used by sync-engine plumbing that needs to
     /// reach the witness machinery directly.
-    pub(crate) const fn inner(&self) -> &CompactDbInner<F, E, H, Operation<F, K, V>, C> {
+    pub(crate) const fn inner(&self) -> &CompactDb<F, E, H, Operation<F, K, V>, C> {
         &self.inner
     }
 
@@ -270,7 +266,7 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let inner = CompactDbInner::init_from_verified_state(
+        let inner = CompactDb::init_from_verified_state(
             merkle,
             commit_codec_config,
             last_commit_metadata,
@@ -290,7 +286,7 @@ where
         merkle: compact_merkle::Merkle<F, E, H::Digest>,
         commit_codec_config: C,
     ) -> Result<Self, Error<F>> {
-        let inner = CompactDbInner::init_from_merkle(merkle, commit_codec_config).await?;
+        let inner = CompactDb::init_from_merkle(merkle, commit_codec_config).await?;
         Ok(Self { inner })
     }
 

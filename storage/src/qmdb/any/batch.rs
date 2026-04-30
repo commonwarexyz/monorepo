@@ -695,7 +695,7 @@ where
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestor_bounds: Vec<_> = self.ancestors.iter().map(|a| a.bounds).collect();
-        let bounds = Bounds::from_item_count(self.base_size, self.db_size, op_count - 1, floor);
+        let bounds = Bounds::from_data_ops(self.base_size, self.db_size, op_count - 1, floor);
         debug_assert_eq!(bounds.commit_loc(), commit_loc);
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");

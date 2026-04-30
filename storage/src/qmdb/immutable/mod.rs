@@ -603,8 +603,7 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different-size fork returns [`Error::StaleBatch`]. Equal-size orphaned branches cannot be
-    /// distinguished by the size-based staleness check and must not be applied.
+    /// different-size fork returns [`Error::StaleBatch`].
     ///
     /// Returns the range of locations written.
     ///
@@ -2304,7 +2303,7 @@ pub(super) mod test {
             .set(key3, v3)
             .merkleize(&db, None, Location::new(0));
 
-        // Drop A and B without committing. C's strong ancestor refs preserve their diffs.
+        // Drop A and B without committing. C retains their diff payloads.
         drop(a);
         drop(b);
 

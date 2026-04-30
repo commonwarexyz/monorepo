@@ -1,17 +1,17 @@
-//! Shared compact-db inner state.
+//! Shared compact-db state.
 //!
 //! Both [`crate::qmdb::keyless::CompactDb`] and [`crate::qmdb::immutable::CompactDb`] hold the
 //! same set of fields (compact merkle, commit-pointer trio, codec config, persisted witness) and
 //! delegate the same set of methods (`init_from_*`, `rewind`, `sync`, `commit`, `destroy`,
 //! `current_target`, `compact_state`, all the trivial accessors, and the `WitnessSource` impl).
-//! [`CompactDbInner`] holds those shared fields; the per-variant `Db` types are thin wrappers.
+//! [`Db`] holds those shared fields; the per-variant `Db` types are thin wrappers.
 //!
 //! Variant-specific bits stay at the wrapper:
 //!   * the `MerkleizedBatch` payload (typed `commit_metadata` and any schema-specific fields)
 //!   * the `merkleize` body's data-op construction (`Append(value)` vs `Set(key, value)`)
 //!   * the `apply_batch` body's metadata cache write
 //!
-//! The inner is parameterized over `Op: CompactCommit` rather than `V`, so it does not need to
+//! The db is parameterized over `Op: CompactCommit` rather than `V`, so it does not need to
 //! know the value-encoding shape; metadata flows as `Op::Metadata`.
 
 use crate::{
@@ -29,8 +29,8 @@ use commonware_codec::{Decode as _, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_utils::sync::RwLock;
 
-/// Shared inner state for compact QMDB variants. See module docs.
-pub(crate) struct CompactDbInner<F, E, H, Op, C>
+/// Shared db state for compact QMDB variants. See module docs.
+pub(crate) struct Db<F, E, H, Op, C>
 where
     F: Family,
     E: Context,
@@ -49,7 +49,7 @@ where
     pub(crate) witness: RwLock<Witness<F, H::Digest>>,
 }
 
-impl<F, E, H, Op, C> CompactDbInner<F, E, H, Op, C>
+impl<F, E, H, Op, C> Db<F, E, H, Op, C>
 where
     F: Family,
     E: Context,
@@ -57,7 +57,7 @@ where
     Op: CompactCommit<Family = F, CommitCfg = C> + Encode + Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    /// Build an inner from already-verified compact state.
+    /// Build a db from already-verified compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and authenticated the supplied
     /// witness/root pair. This seeds the in-memory serve cache from that verified witness but
@@ -72,7 +72,7 @@ where
         commit_proof: Proof<F, H::Digest>,
         pinned_nodes: Vec<H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let (last_commit_loc, witness) = compact::validate_witness(
+        let witness = Witness::new(
             merkle.root(),
             merkle.leaves(),
             inactivity_floor_loc,
@@ -80,6 +80,7 @@ where
             commit_proof,
             pinned_nodes,
         )?;
+        let last_commit_loc = witness.last_commit_loc();
 
         Ok(Self {
             merkle,
@@ -91,7 +92,7 @@ where
         })
     }
 
-    /// Open an inner from persisted compact state and rebuild its serve cache. Bootstraps the
+    /// Open a db from persisted compact state and rebuild its serve cache. Bootstraps the
     /// initial commit and witness on first open so every later reopen and rewind can assume "the
     /// active slot has a complete servable compact state."
     pub(crate) async fn init_from_merkle(
@@ -158,7 +159,7 @@ where
                     "invalid cached commit operation",
                 ))
             })?;
-        if !op.is_commit() {
+        if op.as_commit().is_none() {
             return Err(compact_sync::ServeError::Database(Error::DataCorrupted(
                 "cached last operation was not a commit",
             )));
@@ -195,7 +196,7 @@ where
     }
 }
 
-impl<F, E, H, Op, C> WitnessSource<F, E, H> for CompactDbInner<F, E, H, Op, C>
+impl<F, E, H, Op, C> WitnessSource<F, E, H> for Db<F, E, H, Op, C>
 where
     F: Family,
     E: Context,
