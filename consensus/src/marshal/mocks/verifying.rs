@@ -18,7 +18,7 @@ use std::{marker::PhantomData, sync::Arc};
 /// A mock application that implements `VerifyingApplication` for testing.
 ///
 /// This mock:
-/// - Returns the provided genesis block from `genesis()`
+/// - Returns the provided genesis block from `genesis(epoch)`
 /// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
 #[derive(Clone)]

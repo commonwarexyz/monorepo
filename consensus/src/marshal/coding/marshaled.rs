@@ -1028,7 +1028,7 @@ where
     if parent_commitment == genesis_commitment {
         Either::Left(ready(Ok(CodedBlock::<B, C, H>::new_trusted(
             genesis,
-            parent_commitment,
+            genesis_commitment,
         ))))
     } else {
         Either::Right(
