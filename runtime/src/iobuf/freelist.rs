@@ -1199,11 +1199,12 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
 
             // Two producers return different slots that live in the same bitmap
-            // word. Their Release `fetch_or` operations must merge the bits:
+            // word. Their atomic `fetch_or` operations must merge the bits:
             // neither producer may overwrite the other's publication.
             //
             // The consumer runs after both producers finish so this test
-            // isolates lost producer updates from consumer-side claim races.
+            // isolates lost producer updates from consumer-side claim races and
+            // from the publish/claim visibility tests below.
             let first = {
                 let set = Arc::clone(&set);
                 thread::spawn(move || set.put(0, buffer()))
@@ -1740,6 +1741,52 @@ mod loom_tests {
             drainer.join().unwrap();
 
             assert_eq!(drained.load(Ordering::Relaxed), 2);
+            assert_eq!(set.drain(), 0);
+        });
+    }
+
+    #[test]
+    fn puts_and_take_scan_across_stripes() {
+        loom::model(|| {
+            let set = Arc::new(striped_freelist());
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            // Publish one slot per bitmap word using the single-entry `put`
+            // path. The reader uses repeated `take` calls, not `take_batch`, so
+            // this checks that the single-slot scan path reaches every stripe
+            // and that each independent Release publication synchronizes with
+            // the later Acquire claim for that slot.
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || {
+                    for slot in 0..4 {
+                        set.put(slot, buffer());
+                    }
+                })
+            };
+
+            let reader = {
+                let set = Arc::clone(&set);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    while seen.load(Ordering::Relaxed) != 0b1111 {
+                        if let Some((slot, buffer)) = set.take() {
+                            assert!(slot < 4);
+                            drop(buffer);
+                            let mask = 1usize << slot;
+                            let previous = seen.fetch_or(mask, Ordering::Relaxed);
+                            assert_eq!(previous & mask, 0);
+                        } else {
+                            thread::yield_now();
+                        }
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            reader.join().unwrap();
+
+            assert_eq!(seen.load(Ordering::Relaxed), 0b1111);
             assert_eq!(set.drain(), 0);
         });
     }
