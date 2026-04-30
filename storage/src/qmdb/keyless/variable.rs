@@ -40,8 +40,13 @@ pub type Config<C, S = Sequential> = super::Config<JournalConfig<C>, S>;
 /// Configuration for a variable-size [keyless](super) compact db.
 pub type CompactConfig<C, S = Sequential> = super::CompactConfig<C, S>;
 
-impl<F: Family + Bagging, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Db<F, E, V, H, S>
+impl<
+        F: Family + Bagging,
+        E: Storage + Clock + Metrics,
+        V: VariableValue,
+        H: Hasher,
+        S: Strategy,
+    > Db<F, E, V, H, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.

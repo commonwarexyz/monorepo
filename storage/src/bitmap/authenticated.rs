@@ -722,7 +722,7 @@ mod tests {
             let mut bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "inactive_peaks_canonical",
-                None,
+                Sequential,
                 &hasher,
             )
             .await

@@ -513,10 +513,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     ///
     /// 3. **Error**: existing_size > range.end
     ///    - Returns [crate::journal::Error::ItemOutOfRange]
-    pub async fn init_sync(
-        context: E,
-        cfg: SyncConfig<F, D, S>,
-    ) -> Result<Self, Error<F>> {
+    pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S>) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
         let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {

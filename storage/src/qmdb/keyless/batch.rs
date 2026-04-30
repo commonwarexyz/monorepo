@@ -47,8 +47,12 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy = Sequential>
-where
+pub struct MerkleizedBatch<
+    F: Family + Bagging,
+    D: Digest,
+    V: ValueEncoding,
+    S: Strategy = Sequential,
+> where
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal batch (Merkle state + local items).
@@ -82,8 +86,7 @@ where
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
-impl<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy>
-    MerkleizedBatch<F, D, V, S>
+impl<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -330,8 +333,7 @@ where
     }
 }
 
-impl<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy>
-    MerkleizedBatch<F, D, V, S>
+impl<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {

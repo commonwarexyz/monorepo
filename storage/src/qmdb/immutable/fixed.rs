@@ -72,8 +72,7 @@ impl<
         V: FixedValue,
         H: Hasher,
         S: Strategy,
-    >
-    CompactDb<F, E, K, V, H, S>
+    > CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
