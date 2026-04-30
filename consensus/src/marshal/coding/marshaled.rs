@@ -322,177 +322,143 @@ where
         prefetched_block: Option<CodedBlock<B, C, H>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
+        let mut marshal = self.marshal.clone();
+        let mut application = self.application.clone();
+        let epocher = self.epocher.clone();
+        let verify_duration = self.verify_duration.clone();
+        let cached_genesis = self.cached_genesis.clone();
+
         let context = self
             .context
             .lock()
             .await
             .child("deferred_verify")
             .with_attribute("round", consensus_context.round);
-        spawn_deferred_verify(
-            context,
-            self.application.clone(),
-            self.marshal.clone(),
-            self.epocher.clone(),
-            self.verify_duration.clone(),
-            self.cached_genesis.clone(),
-            consensus_context,
-            commitment,
-            prefetched_block,
-            stage,
-        )
-    }
-}
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn spawn_deferred_verify<E, A, B, C, H, Sch, ES>(
-    context: E,
-    mut application: A,
-    mut marshal: core::Mailbox<Sch, Coding<B, C, H, <Sch as CertificateScheme>::PublicKey>>,
-    epocher: ES,
-    verify_duration: Timed,
-    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
-    consensus_context: Context<Commitment, <Sch as CertificateScheme>::PublicKey>,
-    commitment: Commitment,
-    prefetched_block: Option<CodedBlock<B, C, H>>,
-    stage: Stage,
-) -> oneshot::Receiver<bool>
-where
-    E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = Sch,
-        Context = Context<Commitment, <Sch as CertificateScheme>::PublicKey>,
-    >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
-    C: CodingScheme,
-    H: Hasher,
-    Sch: Scheme<Commitment>,
-    ES: Epocher,
-{
-    let (mut tx, rx) = oneshot::channel();
-    context.spawn(move |runtime_context| async move {
-        let round = consensus_context.round;
+        let (mut tx, rx) = oneshot::channel();
+        context.spawn(move |runtime_context| async move {
+                let round = consensus_context.round;
 
-        // Fetch parent block
-        let (parent_view, parent_commitment) = consensus_context.parent;
-        let parent_request = fetch_parent(
-            parent_commitment,
-            // We are guaranteed that the parent round for any `consensus_context` is
-            // in the same epoch (recall, the boundary block of the previous epoch
-            // is the genesis block of the current epoch).
-            Some(Round::new(consensus_context.epoch(), parent_view)),
-            &mut application,
-            &mut marshal,
-            cached_genesis,
-        )
-        .await;
-
-        // Get block either from prefetched or by subscribing
-        let (parent, block) = if let Some(block) = prefetched_block {
-            // We have a prefetched block, just fetch the parent
-            let parent = select! {
-                _ = tx.closed() => {
-                    debug!(
-                        reason = "consensus dropped receiver",
-                        "skipping verification"
-                    );
-                    return;
-                },
-                result = parent_request => match result {
-                    Ok(parent) => parent,
-                    Err(_) => {
-                        debug!(reason = "failed to fetch parent", "skipping verification");
-                        return;
-                    }
-                },
-            };
-            (parent, block)
-        } else {
-            // No prefetched block, fetch both parent and block
-            let block_request = marshal
-                .subscribe_by_commitment(Some(round), commitment)
+                // Fetch parent block
+                let (parent_view, parent_commitment) = consensus_context.parent;
+                let parent_request = fetch_parent(
+                    parent_commitment,
+                    // We are guaranteed that the parent round for any `consensus_context` is
+                    // in the same epoch (recall, the boundary block of the previous epoch
+                    // is the genesis block of the current epoch).
+                    Some(Round::new(consensus_context.epoch(), parent_view)),
+                    &mut application,
+                    &mut marshal,
+                    cached_genesis,
+                )
                 .await;
-            let block_requests = try_join(parent_request, block_request);
 
-            select! {
-                _ = tx.closed() => {
+                // Get block either from prefetched or by subscribing
+                let (parent, block) = if let Some(block) = prefetched_block {
+                    // We have a prefetched block, just fetch the parent
+                    let parent = select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping verification"
+                            );
+                            return;
+                        },
+                        result = parent_request => match result {
+                            Ok(parent) => parent,
+                            Err(_) => {
+                                debug!(reason = "failed to fetch parent", "skipping verification");
+                                return;
+                            }
+                        },
+                    };
+                    (parent, block)
+                } else {
+                    // No prefetched block, fetch both parent and block
+                    let block_request = marshal
+                        .subscribe_by_commitment(Some(round), commitment)
+                        .await;
+                    let block_requests = try_join(parent_request, block_request);
+
+                    select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping verification"
+                            );
+                            return;
+                        },
+                        result = block_requests => match result {
+                            Ok(results) => results,
+                            Err(_) => {
+                                debug!(
+                                    reason = "failed to fetch parent or block",
+                                    "skipping verification"
+                                );
+                                return;
+                            }
+                        },
+                    }
+                };
+
+                if let Err(err) = validate_block::<H, _, _>(
+                    &epocher,
+                    &block,
+                    &parent,
+                    &consensus_context,
+                    commitment,
+                    parent_commitment,
+                ) {
                     debug!(
-                        reason = "consensus dropped receiver",
-                        "skipping verification"
+                        ?err,
+                        expected_commitment = %commitment,
+                        block_commitment = %block.commitment(),
+                        expected_parent_commitment = %parent_commitment,
+                        parent_commitment = %parent.commitment(),
+                        expected_parent = %parent.digest(),
+                        block_parent = %block.parent(),
+                        parent_height = %parent.height(),
+                        block_height = %block.height(),
+                        "block failed coded invariant validation"
                     );
+                    tx.send_lossy(false);
                     return;
-                },
-                result = block_requests => match result {
-                    Ok(results) => results,
-                    Err(_) => {
+                }
+
+                let ancestry_stream = AncestorStream::new(
+                    marshal.clone(),
+                    [block.clone().into_inner(), parent.into_inner()],
+                );
+                let validity_request = application.verify(
+                    (
+                        runtime_context.child("app_verify"),
+                        consensus_context.clone(),
+                    ),
+                    ancestry_stream,
+                );
+
+                // If consensus drops the receiver, we can stop work early.
+                let timer = verify_duration.timer(&runtime_context);
+                let application_valid = select! {
+                    _ = tx.closed() => {
                         debug!(
-                            reason = "failed to fetch parent or block",
+                            reason = "consensus dropped receiver",
                             "skipping verification"
                         );
                         return;
-                    }
-                },
-            }
-        };
+                    },
+                    is_valid = validity_request => is_valid,
+                };
+                timer.observe(&runtime_context);
+                if application_valid && !stage.store(&mut marshal, round, block).await {
+                    debug!(?round, "marshal unable to accept block");
+                    return;
+                }
+                tx.send_lossy(application_valid);
+        });
 
-        if let Err(err) = validate_block::<H, _, _>(
-            &epocher,
-            &block,
-            &parent,
-            &consensus_context,
-            commitment,
-            parent_commitment,
-        ) {
-            debug!(
-                ?err,
-                expected_commitment = %commitment,
-                block_commitment = %block.commitment(),
-                expected_parent_commitment = %parent_commitment,
-                parent_commitment = %parent.commitment(),
-                expected_parent = %parent.digest(),
-                block_parent = %block.parent(),
-                parent_height = %parent.height(),
-                block_height = %block.height(),
-                "block failed coded invariant validation"
-            );
-            tx.send_lossy(false);
-            return;
-        }
-
-        let ancestry_stream = AncestorStream::new(
-            marshal.clone(),
-            [block.clone().into_inner(), parent.into_inner()],
-        );
-        let validity_request = application.verify(
-            (
-                runtime_context.child("app_verify"),
-                consensus_context.clone(),
-            ),
-            ancestry_stream,
-        );
-
-        // If consensus drops the receiver, we can stop work early.
-        let timer = verify_duration.timer(&runtime_context);
-        let application_valid = select! {
-            _ = tx.closed() => {
-                debug!(
-                    reason = "consensus dropped receiver",
-                    "skipping verification"
-                );
-                return;
-            },
-            is_valid = validity_request => is_valid,
-        };
-        timer.observe(&runtime_context);
-        if application_valid && !stage.store(&mut marshal, round, block).await {
-            debug!(?round, "marshal unable to accept block");
-            return;
-        }
-        tx.send_lossy(application_valid);
-    });
-
-    rx
+        rx
+    }
 }
 
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
@@ -952,11 +918,7 @@ where
             .marshal
             .subscribe_by_commitment(Some(round), payload)
             .await;
-        let marshal = self.marshal.clone();
-        let application = self.application.clone();
-        let epocher = self.epocher.clone();
-        let verify_duration = self.verify_duration.clone();
-        let cached_genesis = self.cached_genesis.clone();
+        let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -965,7 +927,7 @@ where
             .await
             .child("certify")
             .with_attribute("round", round);
-        context.spawn(move |runtime_context| async move {
+        context.spawn(move |_| async move {
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -997,7 +959,7 @@ where
                 // 3. Same epoch (re-proposals don't cross epoch boundaries)
                 let embedded_context = block.context();
                 let is_reproposal = is_inferred_reproposal_at_certify(
-                    &epocher,
+                    &marshaled.epocher,
                     block.height(),
                     embedded_context.round,
                     round,
@@ -1006,7 +968,7 @@ where
                     // Certifier holds a notarization for this block, so route
                     // the write to the notarized cache. `certified` is
                     // idempotent, so crash-recovery double-invocation is safe.
-                    if !marshal.certified(round, block).await {
+                    if !marshaled.marshal.certified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
@@ -1025,20 +987,9 @@ where
 
                 // Use the block's embedded context for verification, passing the
                 // prefetched block to avoid fetching it again inside deferred_verify.
-                let verify_rx = spawn_deferred_verify(
-                    runtime_context
-                        .child("deferred_verify")
-                        .with_attribute("round", round),
-                    application,
-                    marshal,
-                    epocher,
-                    verify_duration,
-                    cached_genesis,
-                    embedded_context,
-                    payload,
-                    Some(block),
-                    Stage::Certified,
-                );
+                let verify_rx = marshaled
+                    .deferred_verify(embedded_context, payload, Some(block), Stage::Certified)
+                    .await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
