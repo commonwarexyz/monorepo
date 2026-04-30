@@ -1,0 +1,155 @@
+name: Benchmark Tracking
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      config:
+        description: Path to the benchmark tracking config JSON
+        required: false
+        default: .github/benchmark-tracking.json
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: benchmark-tracking-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark-tracking:
+    name: Run benchmark tracking
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest-8
+    timeout-minutes: 180
+    env:
+      BENCHMARK_TRACKING_CONFIG: ${{ github.event.inputs.config || '.github/benchmark-tracking.json' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Find latest main benchmark artifact
+        id: baseline
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner,
+              repo,
+              workflow_id: 'benchmark-tracking.yml',
+              branch: 'main',
+              status: 'success',
+              per_page: 100,
+            });
+            for (const run of runs) {
+              if (run.id === context.runId) {
+                continue;
+              }
+              const artifacts = await github.paginate(
+                github.rest.actions.listWorkflowRunArtifacts,
+                {owner, repo, run_id: run.id, per_page: 100},
+              );
+              const artifact = artifacts.find((candidate) =>
+                candidate.name === 'benchmark-tracking-results' && !candidate.expired
+              );
+              if (artifact) {
+                core.setOutput('found', 'true');
+                core.setOutput('run_id', String(run.id));
+                return;
+              }
+            }
+            core.warning('No benchmark-tracking artifact found for main');
+            core.setOutput('found', 'false');
+
+      - name: Download main benchmark artifact
+        if: steps.baseline.outputs.found == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchmark-tracking-results
+          path: benchmark-tracking-baseline
+          run-id: ${{ steps.baseline.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        with:
+          toolchain: nightly
+
+      - name: Run setup
+        uses: ./.github/actions/setup
+
+      - name: Run benchmark tracking
+        id: run
+        run: |
+          baseline_args=()
+          if [ -f benchmark-tracking-baseline/current.json ]; then
+            baseline_args=(--baseline benchmark-tracking-baseline/current.json)
+          fi
+          python3 .github/scripts/benchmark-tracking.py \
+            --config "$BENCHMARK_TRACKING_CONFIG" \
+            --output-dir benchmark-tracking-results \
+            "${baseline_args[@]}"
+
+      - name: Upload benchmark results
+        if: always() && steps.run.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-tracking-results
+          path: benchmark-tracking-results
+          if-no-files-found: error
+
+      - name: Add benchmark summary
+        if: always() && steps.run.outcome == 'success'
+        run: cat benchmark-tracking-results/comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on pull request
+        if: always() && github.event_name == 'pull_request' && steps.run.outcome == 'success'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- commonware-benchmark-tracking-results -->';
+            const body = fs.readFileSync('benchmark-tracking-results/comment.md', 'utf8');
+            const {owner, repo} = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const previous = comments.find((comment) =>
+              comment.user.type === 'Bot' && comment.body.includes(marker)
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }
+
+      - name: Fail on benchmark regression
+        if: always() && github.event_name == 'pull_request' && steps.run.outcome == 'success'
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open('benchmark-tracking-results/summary.json', encoding='utf-8') as f:
+              summary = json.load(f)
+          regressions = summary.get('regression_count', 0)
+          if regressions:
+              print(f'{regressions} benchmark(s) exceeded the configured threshold')
+              sys.exit(1)
+          PY
