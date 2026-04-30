@@ -350,13 +350,18 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
     ]
     if regression_count:
         lines.append(
-            f"❌ **FAILED**: {regression_count} benchmark(s) exceeded the regression threshold."
+            f"> [!CAUTION]\n>\n> {regression_count} benchmark(s) exceeded the regression threshold."
         )
     else:
-        lines.append("✅ **PASSED**: No benchmark exceeded the regression threshold.")
-    if missing_count:
         lines.append(
-            f"⚠️ **WARNING**: {missing_count} benchmark(s) had no uploaded main-branch baseline."
+            "> [!TIP]\n>\n> ✅ **PASSED**: No benchmark exceeded the regression threshold."
+        )
+    if missing_count:
+        lines.extend(
+            [
+                "",
+                f"> [!WARNING]\n>\n> {missing_count} benchmark(s) had no uploaded main-branch baseline.",
+            ]
         )
     lines.extend(
         [
