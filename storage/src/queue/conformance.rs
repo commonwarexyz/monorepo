@@ -35,10 +35,12 @@ impl Conformance for QueueConformance {
     async fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
-            let mut queue =
-                Queue::<_, Vec<u8>>::init(context.child("queue"), config(seed, &context))
-                    .await
-                    .unwrap();
+            let mut queue = Queue::<_, Vec<u8>>::init(
+                context.child("queue").with_attribute("index", 0),
+                config(seed, &context),
+            )
+            .await
+            .unwrap();
 
             // Enqueue random variable-length items across multiple sections
             let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
@@ -65,7 +67,7 @@ impl Conformance for QueueConformance {
 
             // Re-open and verify surviving items are readable
             let mut queue = Queue::<_, Vec<u8>>::init(
-                context.child("queue").with_attribute("index", 2),
+                context.child("queue").with_attribute("index", 1),
                 config(seed, &context),
             )
             .await
