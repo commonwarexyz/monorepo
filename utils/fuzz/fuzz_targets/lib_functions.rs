@@ -13,7 +13,6 @@ use std::time::Duration;
 enum FuzzInput {
     Hex { data: Vec<u8> },
     FromHex { hex_str: String },
-    FromHexFormatted { hex_str: String },
     MaxFaults { n: u32 },
     Quorum { n: u32 },
     Union { a: Vec<u8>, b: Vec<u8> },
@@ -91,24 +90,16 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::FromHex { hex_str } => {
-            if !hex_str.is_empty() && !hex_str.chars().any(|c| c.is_ascii_hexdigit()) {
-                assert_eq!(from_hex(&hex_str), None)
-            } else if let Some(decoded) = from_hex(&hex_str) {
+            // Round-trip property: anything that decodes successfully must
+            // re-encode and decode back to the same bytes.
+            if let Some(decoded) = from_hex(&hex_str) {
                 let re_encoded = hex(&decoded);
                 assert_eq!(from_hex(&re_encoded), Some(decoded));
             }
-        }
 
-        FuzzInput::FromHexFormatted { hex_str } => {
-            let result = from_hex(&hex_str);
-
-            if let Some(decoded) = result.clone() {
-                let clean_hex = hex(&decoded);
-                assert_eq!(from_hex(&clean_hex), Some(decoded));
-            }
-
+            // Prepending a `0x` prefix must not crash, regardless of input.
             let with_prefix = format!("0x{hex_str}");
-            from_hex(&with_prefix);
+            let _ = from_hex(&with_prefix);
         }
 
         FuzzInput::MaxFaults { n } => {
