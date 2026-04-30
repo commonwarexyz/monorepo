@@ -23,9 +23,9 @@
 //!    its proof on every serve.
 
 use crate::{
-    merkle::{compact, hasher::Standard as StandardHasher, Family, Location, Proof},
+    merkle::{compact, Family, Location, Proof},
     metadata::Metadata,
-    qmdb::{sync::compact::Target, Error, RootSpec},
+    qmdb::{sync::compact::Target, Bagging, Error},
     Context,
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize};
@@ -201,7 +201,7 @@ pub(crate) async fn load_serve_state<F, E, H, S, C, M, DecodeCommitOp>(
     decode_commit_op: DecodeCommitOp,
 ) -> Result<(CachedServeState<F, H::Digest>, M, Location<F>), Error<F>>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     E: Context,
     H: Hasher,
     S: Strategy,
@@ -235,16 +235,16 @@ where
 
     let inactive_peaks =
         F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
-    let hasher = StandardHasher::<H>::new();
+    let hasher = F::default_hasher::<H>();
     let root = merkle
-        .root(&hasher, F::root_spec(inactive_peaks))
+        .root(&hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
     if !commit_proof.verify_range_inclusion(
         &hasher,
         &[commit_op_bytes.as_slice()],
         last_commit_loc,
         &root,
-        F::root_spec(inactive_peaks),
+        inactive_peaks,
     ) {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
@@ -274,12 +274,12 @@ pub(crate) async fn bootstrap_initial_commit<F, E, H, S>(
     commit_op_bytes: Vec<u8>,
 ) -> Result<(), Error<F>>
 where
-    F: Family + RootSpec,
+    F: Family + Bagging,
     E: Context,
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = F::default_hasher::<H>();
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &commit_op_bytes);
         merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
@@ -292,8 +292,8 @@ where
     merkle
         .sync_with_witness(
             |mem| {
-                let root = mem.root(&hasher, F::root_spec(inactive_peaks))?;
-                let proof = mem.proof(&hasher, Location::new(0), F::root_spec(inactive_peaks))?;
+                let root = mem.root(&hasher, inactive_peaks)?;
+                let proof = mem.proof(&hasher, Location::new(0), inactive_peaks)?;
                 Ok(CachedServeState {
                     root,
                     leaf_count: Location::new(1),
@@ -360,12 +360,12 @@ where
 pub(crate) async fn persist_witness<W, F, E, H, S>(source: &W) -> Result<(), Error<F>>
 where
     W: WitnessSource<F, E, H, S>,
-    F: Family + RootSpec,
+    F: Family + Bagging,
     E: Context,
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = F::default_hasher::<H>();
     let last_commit_loc = source.last_commit_loc();
     let inactivity_floor_loc = source.inactivity_floor_loc();
     let commit_op_bytes = source.encode_current_commit_op();
@@ -380,12 +380,11 @@ where
                 }
                 let inactive_peaks =
                     F::inactive_peaks(F::location_to_position(mem_leaves), inactivity_floor_loc);
-                let mem_root = mem.root(&hasher, F::root_spec(inactive_peaks))?;
+                let mem_root = mem.root(&hasher, inactive_peaks)?;
                 let pinned_nodes = F::nodes_to_pin(mem_leaves)
                     .map(|pos| *mem.get_node_unchecked(pos))
                     .collect::<Vec<_>>();
-                let commit_proof =
-                    mem.proof(&hasher, last_commit_loc, F::root_spec(inactive_peaks))?;
+                let commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
                 Ok(CachedServeState {
                     root: mem_root,
                     leaf_count: mem_leaves,

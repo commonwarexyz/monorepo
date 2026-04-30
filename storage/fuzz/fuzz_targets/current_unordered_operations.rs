@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
     qmdb::{
         current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
-        RootSpec,
+        Bagging,
     },
     translator::TwoCap,
 };
@@ -80,7 +80,7 @@ const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
-async fn commit_pending<F: Graftable + RootSpec>(
+async fn commit_pending<F: Graftable + Bagging>(
     db: &mut Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
@@ -98,7 +98,7 @@ async fn commit_pending<F: Graftable + RootSpec>(
     committed_state.extend(pending_expected.drain());
 }
 
-fn fuzz_family<F: Graftable + RootSpec>(data: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: Graftable + Bagging>(data: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     let suffix = suffix.to_string();

@@ -46,7 +46,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 /// Harness that abstracts per-family details so the generic tests below can operate on
 /// any immutable database.
 pub(crate) trait SyncTestHarness: Sized + 'static {
-    type Family: merkle::Family + qmdb::RootSpec;
+    type Family: merkle::Family + qmdb::Bagging;
     type Db: qmdb::sync::Database<
             Family = Self::Family,
             Context = deterministic::Context,
@@ -895,7 +895,7 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn variable_create_ops_seeded<F: Family + qmdb::RootSpec>(
+    fn variable_create_ops_seeded<F: Family + qmdb::Bagging>(
         n: usize,
         seed: u64,
     ) -> Vec<Operation<F, sha256::Digest, sha256::Digest>> {
@@ -909,7 +909,7 @@ pub(crate) mod harnesses {
         ops
     }
 
-    async fn variable_apply_ops<F: Family + qmdb::RootSpec>(
+    async fn variable_apply_ops<F: Family + qmdb::Bagging>(
         db: VariableDb<F>,
         ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
@@ -921,7 +921,7 @@ pub(crate) mod harnesses {
         variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
     }
 
-    async fn variable_apply_ops_with_floor<F: Family + qmdb::RootSpec>(
+    async fn variable_apply_ops_with_floor<F: Family + qmdb::Bagging>(
         mut db: VariableDb<F>,
         ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
@@ -948,7 +948,7 @@ pub(crate) mod harnesses {
 
     pub(crate) struct VariableHarness<F>(std::marker::PhantomData<F>);
 
-    impl<F: Family + qmdb::RootSpec> SyncTestHarness for VariableHarness<F> {
+    impl<F: Family + qmdb::Bagging> SyncTestHarness for VariableHarness<F> {
         type Family = F;
         type Db = VariableDb<F>;
         type Key = sha256::Digest;

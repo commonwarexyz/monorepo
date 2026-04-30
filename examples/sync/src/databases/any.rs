@@ -17,7 +17,7 @@ use commonware_storage::{
             FixedConfig as Config,
         },
         operation::Committable,
-        RootSpec,
+        Bagging,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -50,7 +50,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
         },
         translator: Translator::default(),
         split_root: true,
-        root_bagging: <mmr::Family as RootSpec>::root_spec(0).bagging(),
+        root_bagging: <mmr::Family as Bagging>::BAGGING,
     }
 }
 

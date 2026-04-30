@@ -24,7 +24,7 @@ use crate::{
         batch,
         hasher::Hasher,
         mem::{Config as MemConfig, Mem},
-        Error, Family, Location, Position, RootSpec,
+        Error, Family, Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     Context,
@@ -280,8 +280,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Return the root digest of the current committed state.
-    pub fn root(&self, hasher: &impl Hasher<F, Digest = D>, spec: RootSpec) -> Result<D, Error<F>> {
-        self.inner.read().root(hasher, spec)
+    pub fn root(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        inactive_peaks: usize,
+    ) -> Result<D, Error<F>> {
+        self.inner.read().root(hasher, inactive_peaks)
     }
 
     /// Return the total number of nodes (MMR position count, not leaf count).
@@ -531,7 +535,7 @@ mod tests {
             merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
         };
         merkle.apply_batch(&batch).unwrap();
-        let root_before = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root_before = merkle.root(&hasher, 0).unwrap();
         let leaves_before = merkle.leaves();
         merkle.sync().await.unwrap();
         drop(merkle);
@@ -539,10 +543,7 @@ mod tests {
         let mut reopened = TestMerkle::<F>::init(context.with_label("second"), cfg)
             .await
             .unwrap();
-        assert_eq!(
-            reopened.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            root_before
-        );
+        assert_eq!(reopened.root(&hasher, 0).unwrap(), root_before);
         assert_eq!(reopened.leaves(), leaves_before);
 
         let batch = {
@@ -575,20 +576,14 @@ mod tests {
         let mut merkle = open::<F>(context, partition).await;
 
         append_and_sync(&mut merkle, &[b"a", b"b"]).await;
-        let root_after_first = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+        let root_after_first = merkle.root(&hasher, 0).unwrap();
         let leaves_after_first = merkle.leaves();
 
         append_and_sync(&mut merkle, &[b"c"]).await;
-        assert_ne!(
-            merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            root_after_first
-        );
+        assert_ne!(merkle.root(&hasher, 0).unwrap(), root_after_first);
 
         merkle.rewind().await.unwrap();
-        assert_eq!(
-            merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-            root_after_first
-        );
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root_after_first);
         assert_eq!(merkle.leaves(), leaves_after_first);
 
         merkle.destroy().await.unwrap();
@@ -636,7 +631,7 @@ mod tests {
 
             append_and_sync(&mut merkle, &[b"a"]).await;
             append_and_sync(&mut merkle, &[b"b"]).await;
-            let root_after_two = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root_after_two = merkle.root(&hasher, 0).unwrap();
             let leaves_after_two = merkle.leaves();
 
             // Apply a batch but do not sync. State is ahead of the last persisted slot.
@@ -645,18 +640,12 @@ mod tests {
                 merkle.with_mem(|mem| b.merkleize(mem, &hasher))
             };
             merkle.apply_batch(&batch).unwrap();
-            assert_ne!(
-                merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-                root_after_two
-            );
+            assert_ne!(merkle.root(&hasher, 0).unwrap(), root_after_two);
 
             // Rewind reverts to the state as of the sync before the most recent sync, discarding
             // both the uncommitted append and the most recent sync.
             merkle.rewind().await.unwrap();
-            assert_ne!(
-                merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-                root_after_two
-            );
+            assert_ne!(merkle.root(&hasher, 0).unwrap(), root_after_two);
             assert_ne!(merkle.leaves(), leaves_after_two);
 
             merkle.destroy().await.unwrap();
@@ -675,7 +664,7 @@ mod tests {
 
             let mut merkle = open::<mmr::Family>(context.with_label("first"), partition).await;
             append_and_sync(&mut merkle, &[b"a"]).await;
-            let root_after_first = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root_after_first = merkle.root(&hasher, 0).unwrap();
             append_and_sync(&mut merkle, &[b"b"]).await;
             merkle.rewind().await.unwrap();
             drop(merkle);
@@ -684,10 +673,7 @@ mod tests {
                 Merkle::<mmr::Family, _, _>::init(context.with_label("second"), cfg)
                     .await
                     .unwrap();
-            assert_eq!(
-                reopened.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-                root_after_first
-            );
+            assert_eq!(reopened.root(&hasher, 0).unwrap(), root_after_first);
             reopened.destroy().await.unwrap();
         });
     }
@@ -714,23 +700,17 @@ mod tests {
             let mut merkle = open::<mmr::Family>(context, "rewind-resumable").await;
 
             append_and_sync(&mut merkle, &[b"a"]).await;
-            let root_after_first = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root_after_first = merkle.root(&hasher, 0).unwrap();
             append_and_sync(&mut merkle, &[b"b"]).await;
             merkle.rewind().await.unwrap();
-            assert_eq!(
-                merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-                root_after_first
-            );
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root_after_first);
 
             // Now sync a different branch. Rewind should restore `root_after_first` again.
             append_and_sync(&mut merkle, &[b"c"]).await;
-            let root_abc = merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let root_abc = merkle.root(&hasher, 0).unwrap();
             assert_ne!(root_abc, root_after_first);
             merkle.rewind().await.unwrap();
-            assert_eq!(
-                merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap(),
-                root_after_first
-            );
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root_after_first);
 
             merkle.destroy().await.unwrap();
         });

@@ -12,7 +12,7 @@ use crate::{
     qmdb::{
         any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error, RootSpec,
+        Bagging, Error,
     },
     translator::Translator,
     Context,
@@ -38,7 +38,7 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
 >;
 
 impl<
-        F: Family + RootSpec,
+        F: Family + Bagging,
         E: Context,
         K: Key,
         V: VariableValue,
@@ -73,7 +73,7 @@ pub mod partitioned {
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error, RootSpec,
+            Bagging, Error,
         },
         translator::Translator,
         Context,
@@ -103,7 +103,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family + RootSpec,
+            F: Family + Bagging,
             E: Context,
             K: Key,
             V: VariableValue,
@@ -198,7 +198,7 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             split_root: true,
-            root_bagging: <mmr::Family as crate::qmdb::RootSpec>::root_spec(0).bagging(),
+            root_bagging: <mmr::Family as crate::qmdb::Bagging>::BAGGING,
         }
     }
 

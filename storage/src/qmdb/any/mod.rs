@@ -159,11 +159,14 @@ where
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
+    let split_root = cfg.split_root;
+    let root_bagging = cfg.root_bagging;
     let mut log = J::init::<F, H, S>(
         context.with_label("log"),
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
+        root_bagging,
     )
     .await?;
 
@@ -174,8 +177,6 @@ where
         log.sync().await?;
     }
 
-    let split_root = cfg.split_root;
-    let root_bagging = cfg.root_bagging;
     let index = I::new(context.with_label("index"), cfg.translator);
     db::Db::init_from_log(index, log, bitmap, split_root, root_bagging).await
 }
@@ -215,7 +216,7 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(crate) fn fixed_db_config<F: qmdb::RootSpec, T: Translator + Default>(
+    pub(crate) fn fixed_db_config<F: qmdb::Bagging, T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
@@ -237,11 +238,11 @@ pub(crate) mod test {
             },
             translator: T::default(),
             split_root: true,
-            root_bagging: F::root_spec(0).bagging(),
+            root_bagging: <F as qmdb::Bagging>::BAGGING,
         }
     }
 
-    pub(crate) fn variable_db_config<F: qmdb::RootSpec, T: Translator + Default>(
+    pub(crate) fn variable_db_config<F: qmdb::Bagging, T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ())> {
@@ -265,7 +266,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             split_root: true,
-            root_bagging: F::root_spec(0).bagging(),
+            root_bagging: <F as qmdb::Bagging>::BAGGING,
         }
     }
 
@@ -641,10 +642,7 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::{
-            mmr::StandardHasher,
-            qmdb::{verify_proof, RootSpec as _},
-        };
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
 
         const ELEMENTS: u64 = 1000;
 
@@ -712,7 +710,7 @@ pub(crate) mod test {
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            let spec = mmr::Family::root_spec(proof.inactive_peaks);
+            let spec = proof.inactive_peaks;
             assert!(verify_proof(&hasher, &proof, loc, &ops, &root, spec));
         }
 
@@ -767,10 +765,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::{
-            mmr::StandardHasher,
-            qmdb::{verify_proof, RootSpec as _},
-        };
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -807,7 +802,7 @@ pub(crate) mod test {
             start_loc,
             &historical_ops,
             &root_hash,
-            mmr::Family::root_spec(historical_proof.inactive_peaks),
+            historical_proof.inactive_peaks,
         ));
 
         // Add more operations to the database
@@ -836,7 +831,7 @@ pub(crate) mod test {
             start_loc,
             &historical_ops2,
             &root_hash,
-            mmr::Family::root_spec(historical_proof2.inactive_peaks),
+            historical_proof2.inactive_peaks,
         ));
 
         db.destroy().await.unwrap();
@@ -851,10 +846,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::{
-            mmr::StandardHasher,
-            qmdb::{verify_proof, RootSpec as _},
-        };
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
 
         // Apply two single-write batches and capture the commit-boundary size after the
@@ -885,8 +877,7 @@ pub(crate) mod test {
         assert_eq!(ops.len(), expected_ops_len);
 
         let hasher = StandardHasher::<Sha256>::new();
-
-        let spec = mmr::Family::root_spec(proof.inactive_peaks);
+        let inactive_peaks = proof.inactive_peaks;
 
         // Changing the proof digests should cause verification to fail
         {
@@ -899,7 +890,7 @@ pub(crate) mod test {
                 Location::new(1),
                 &ops,
                 &root_hash,
-                spec,
+                inactive_peaks,
             ));
         }
 
@@ -914,7 +905,7 @@ pub(crate) mod test {
                 Location::new(1),
                 &ops,
                 &root_hash,
-                spec,
+                inactive_peaks,
             ));
         }
 
@@ -931,7 +922,7 @@ pub(crate) mod test {
                     Location::new(1),
                     &tampered_ops,
                     &root_hash,
-                    spec,
+                    inactive_peaks,
                 ));
             }
         }
@@ -947,7 +938,7 @@ pub(crate) mod test {
                 Location::new(1),
                 &tampered_ops,
                 &root_hash,
-                spec,
+                inactive_peaks,
             ));
         }
 
@@ -960,7 +951,7 @@ pub(crate) mod test {
                 Location::new(2),
                 &ops,
                 &root_hash,
-                spec,
+                inactive_peaks,
             ));
         }
 
@@ -973,7 +964,7 @@ pub(crate) mod test {
                 Location::new(1),
                 &ops,
                 &invalid_root,
-                spec,
+                inactive_peaks,
             ));
         }
 
@@ -988,7 +979,7 @@ pub(crate) mod test {
                 Location::new(1),
                 &ops,
                 &root_hash,
-                spec,
+                inactive_peaks,
             ));
         }
 

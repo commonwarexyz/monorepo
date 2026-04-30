@@ -330,8 +330,7 @@ fn any_fix_cfg(
         translator: EightCap,
         split_root: true,
         root_bagging:
-            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -346,8 +345,7 @@ fn any_var_cfg(
         translator: EightCap,
         split_root: true,
         root_bagging:
-            <commonware_storage::mmr::Family as commonware_storage::qmdb::RootSpec>::root_spec(0)
-                .bagging(),
+            <commonware_storage::mmr::Family as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 

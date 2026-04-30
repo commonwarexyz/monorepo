@@ -338,15 +338,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let size = Position::<F>::try_from(leaves)?;
         let needs_grafted_peak_fold =
             proof_needs_grafted_peak_fold(&layout, size, grafting_height, complete_chunks);
-        let proof = merkle::verification::historical_range_proof_using_policy(
-            &std_hasher,
-            storage,
-            leaves,
-            0,
-            merkle::Bagging::ForwardFold,
-            range,
-        )
-        .await?;
+        let proof =
+            merkle::verification::historical_range_proof(&std_hasher, storage, leaves, range, 0)
+                .await?;
         let mut pre_prefix_acc: Option<D> = None;
         let mut unfolded_prefix_peaks = Vec::new();
         if needs_grafted_peak_fold {
@@ -576,12 +570,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 debug!("verification failed, unexpected grafted prefix metadata");
                 return false;
             }
-            match self.proof.reconstruct_root_using_policy(
-                &verifier,
-                &elements,
-                start_loc,
-                merkle::Bagging::ForwardFold,
-            ) {
+            match self
+                .proof
+                .reconstruct_root(&verifier, &elements, start_loc, 0)
+            {
                 Ok(root) => root,
                 Err(error) => {
                     debug!(?error, "invalid proof input");
@@ -590,12 +582,11 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             }
         } else {
             let mut collected = Vec::new();
-            if let Err(error) = self.proof.reconstruct_root_collecting_using_policy(
+            if let Err(error) = self.proof.reconstruct_root_inner(
                 &verifier,
                 &elements,
                 start_loc,
                 Some(&mut collected),
-                merkle::Bagging::ForwardFold,
             ) {
                 debug!(?error, "invalid proof input");
                 return false;
@@ -708,7 +699,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mem, mem::Mem, RootSpec},
+        merkle::{conformance::build_test_mem, mem::Mem},
         mmb,
         mmr::StandardHasher,
         qmdb::current::{db, grafting},
@@ -760,7 +751,7 @@ mod tests {
                 status.push(true);
             }
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let ops_root = ops.root(&hasher, 0).unwrap();
 
             let chunk_inputs: Vec<_> =
                 (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
@@ -865,7 +856,7 @@ mod tests {
                 status.push(true);
             }
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let ops_root = ops.root(&hasher, 0).unwrap();
 
             let chunk_inputs: Vec<_> =
                 (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
@@ -974,7 +965,7 @@ mod tests {
                 status.push(true);
             }
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let ops_root = ops.root(&hasher, 0).unwrap();
 
             let chunk_inputs: Vec<_> =
                 (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
@@ -1060,7 +1051,7 @@ mod tests {
                 status.push(true);
             }
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let ops_root = ops.root(&hasher, 0).unwrap();
 
             let chunk_inputs: Vec<_> =
                 (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
@@ -1172,7 +1163,7 @@ mod tests {
                 status.push(true);
             }
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let ops_root = ops.root(&hasher, 0).unwrap();
 
             let chunk_inputs: Vec<_> =
                 (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))

@@ -6,7 +6,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Error, Family as MerkleFamily, Location,
-    LocationRangeExt as _, Position, RootSpec,
+    LocationRangeExt as _, Position,
 };
 use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -102,7 +102,7 @@ fn historical_root<F: MerkleFamily>(
         batch.merkleize(&mem, &hasher)
     };
     mem.apply_batch(&batch).unwrap();
-    mem.root(&hasher, RootSpec::FULL_FORWARD).unwrap()
+    mem.root(&hasher, 0).unwrap()
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
@@ -204,18 +204,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             if bounds.contains(&location) {
                                 let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                                if let Ok(proof) = merkle
-                                    .proof(&hasher, location, RootSpec::FULL_FORWARD)
-                                    .await
-                                {
-                                    let root =
-                                        merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+                                if let Ok(proof) = merkle.proof(&hasher, location, 0).await {
+                                    let root = merkle.root(&hasher, 0).unwrap();
                                     assert!(proof.verify_element_inclusion(
-                                        &hasher,
-                                        element,
-                                        location,
-                                        &root,
-                                        RootSpec::FULL_FORWARD,
+                                        &hasher, element, location, &root, 0,
                                     ));
                                 }
                             }
@@ -233,18 +225,16 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 && end_loc < merkle.leaves()
                                 && merkle.bounds().contains(&range.start)
                             {
-                                if let Ok(proof) = merkle
-                                    .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
-                                    .await
+                                if let Ok(proof) =
+                                    merkle.range_proof(&hasher, range.clone(), 0).await
                                 {
-                                    let root =
-                                        merkle.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+                                    let root = merkle.root(&hasher, 0).unwrap();
                                     assert!(proof.verify_range_inclusion(
                                         &hasher,
                                         &leaves[range.to_usize_range()],
                                         Location::<F>::new(start_loc),
                                         &root,
-                                        RootSpec::FULL_FORWARD,
+                                        0,
                                     ));
                                 }
                             }
@@ -265,12 +255,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let expected_root = historical_root::<F>(&leaves, requested_leaves);
 
                         let result = merkle
-                            .historical_range_proof(
-                                &hasher,
-                                requested_leaves,
-                                range.clone(),
-                                RootSpec::FULL_FORWARD,
-                            )
+                            .historical_range_proof(&hasher, requested_leaves, range.clone(), 0)
                             .await;
                         match result {
                             Ok(historical_proof) => {
@@ -280,7 +265,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                     &leaves[range.to_usize_range()],
                                     range.start,
                                     &expected_root,
-                                    RootSpec::FULL_FORWARD,
+                                    0,
                                 ));
                             }
                             Err(Error::RangeOutOfBounds(_)) => {
@@ -315,7 +300,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     Operation::GetRoot => {
-                        let _ = merkle.root(&hasher, RootSpec::FULL_FORWARD);
+                        let _ = merkle.root(&hasher, 0);
                     }
 
                     Operation::GetSize => {

@@ -55,7 +55,7 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
-    type Family: merkle::Family + qmdb::RootSpec;
+    type Family: merkle::Family + qmdb::Bagging;
 
     fn destroy(
         self,
@@ -64,7 +64,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible once for the generic full Merkle type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl<F: merkle::Family + qmdb::RootSpec> Destructible
+impl<F: merkle::Family + qmdb::Bagging> Destructible
     for crate::merkle::full::Merkle<F, deterministic::Context, Digest>
 {
     type Family = F;
@@ -3027,7 +3027,7 @@ sync_tests_for_harness!(
 /// after follow-on commits push `inactive_peaks` past zero.
 ///
 /// Pre-fix, `qmdb::any::sync::build_db` hardcoded `split_root=true` and family-canonical bagging,
-/// and `proof_spec` derived the spec from `F::root_spec(...)` rather than the caller's policy. As
+/// and `proof_spec` derived the spec from `...` rather than the caller's policy. As
 /// long as `inactive_peaks==0` at sync time, `Split { inactive_peaks: 0, .. }` is byte-equivalent
 /// to the corresponding `Full { .. }` root, so the mismatch was silent. Once subsequent commits
 /// grew the inactive prefix the source and replica would diverge.

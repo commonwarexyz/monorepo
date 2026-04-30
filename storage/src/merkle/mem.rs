@@ -6,7 +6,7 @@
 
 use crate::merkle::{
     batch, hasher::Hasher, proof as merkle_proof, Error, Family, Location, Position, Proof,
-    Readable, RootSpec,
+    Readable,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -37,7 +37,8 @@ pub struct Config<F: Family, D: Digest> {
 /// Mutations go through the batch API: create an
 /// [`UnmerkleizedBatch`](batch::UnmerkleizedBatch) via [`Self::new_batch`], accumulate changes,
 /// merkleize, then apply the result via [`Self::apply_batch`]. Roots are computed explicitly with
-/// [`Self::root`] from a caller-supplied [`RootSpec`].
+/// [`Self::root`] from a caller-supplied `inactive_peaks` count, with the bagging policy carried
+/// by the supplied [`Hasher`].
 #[derive(Clone, Debug)]
 pub struct Mem<F: Family, D: Digest> {
     /// The retained nodes, starting at `pruning_boundary`.
@@ -143,14 +144,19 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
     }
 
-    /// Compute the root digest for this structure using `spec`.
-    pub fn root(&self, hasher: &impl Hasher<F, Digest = D>, spec: RootSpec) -> Result<D, Error<F>> {
+    /// Compute the root digest for this structure using `inactive_peaks` and the bagging carried by
+    /// `hasher`.
+    pub fn root(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        inactive_peaks: usize,
+    ) -> Result<D, Error<F>> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("invalid merkle size");
         let peaks: Vec<&D> = F::peaks(size)
             .map(|(p, _)| self.get_node_unchecked(p))
             .collect();
-        hasher.root(leaves, spec, peaks)
+        hasher.root(leaves, inactive_peaks, peaks)
     }
 
     /// Return the total number of nodes, irrespective of any pruning.
@@ -269,12 +275,12 @@ impl<F: Family, D: Digest> Mem<F, D> {
         &self,
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
-        self.range_proof(hasher, loc..loc + 1, spec)
+        self.range_proof(hasher, loc..loc + 1, inactive_peaks)
             .map_err(|e| match e {
                 Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
                 _ => e,
@@ -294,12 +300,12 @@ impl<F: Family, D: Digest> Mem<F, D> {
         &self,
         hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
-        spec: RootSpec,
+        inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
         merkle_proof::build_range_proof(
             hasher,
             self.leaves(),
-            spec,
+            inactive_peaks,
             range,
             |pos| self.get_node(pos),
             Error::ElementPruned,
@@ -454,7 +460,7 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, Bagging, Error, Location, Position, RootSpec};
+    use crate::merkle::{hasher::Standard, Bagging, Error, Location, Position};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
@@ -464,7 +470,7 @@ mod tests {
     type H = Standard<Sha256>;
 
     fn plain_root<F: Family>(mem: &Mem<F, D>, hasher: &H) -> D {
-        mem.root(hasher, RootSpec::FULL_FORWARD).unwrap()
+        mem.root(hasher, 0).unwrap()
     }
 
     fn build<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
@@ -550,28 +556,16 @@ mod tests {
             let hasher: H = Standard::new();
             let mem = Mem::<F, D>::new();
             assert!(matches!(
-                mem.range_proof(
-                    &hasher,
-                    Location::new(0)..Location::new(1),
-                    RootSpec::FULL_FORWARD
-                ),
+                mem.range_proof(&hasher, Location::new(0)..Location::new(1), 0),
                 Err(Error::RangeOutOfBounds(_))
             ));
             let mem = build::<F>(&hasher, 10);
             assert!(matches!(
-                mem.range_proof(
-                    &hasher,
-                    Location::new(5)..Location::new(11),
-                    RootSpec::FULL_FORWARD
-                ),
+                mem.range_proof(&hasher, Location::new(5)..Location::new(11), 0),
                 Err(Error::RangeOutOfBounds(_))
             ));
             assert!(mem
-                .range_proof(
-                    &hasher,
-                    Location::new(5)..Location::new(10),
-                    RootSpec::FULL_FORWARD
-                )
+                .range_proof(&hasher, Location::new(5)..Location::new(10), 0)
                 .is_ok());
         });
     }
@@ -582,17 +576,15 @@ mod tests {
             let hasher: H = Standard::new();
             let mem = Mem::<F, D>::new();
             assert!(matches!(
-                mem.proof(&hasher, Location::new(0), RootSpec::FULL_FORWARD),
+                mem.proof(&hasher, Location::new(0), 0),
                 Err(Error::LeafOutOfBounds(_))
             ));
             let mem = build::<F>(&hasher, 10);
             assert!(matches!(
-                mem.proof(&hasher, Location::new(10), RootSpec::FULL_FORWARD),
+                mem.proof(&hasher, Location::new(10), 0),
                 Err(Error::LeafOutOfBounds(_))
             ));
-            assert!(mem
-                .proof(&hasher, Location::new(9), RootSpec::FULL_FORWARD)
-                .is_ok());
+            assert!(mem.proof(&hasher, Location::new(9), 0).is_ok());
         });
     }
 
@@ -740,7 +732,7 @@ mod tests {
         let root = plain_root(&mem, &hasher);
         for i in 0u64..16 {
             let proof = mem
-                .proof(&hasher, Location::new(i), RootSpec::FULL_FORWARD)
+                .proof(&hasher, Location::new(i), 0)
                 .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
             assert!(
                 proof.verify_element_inclusion(
@@ -748,7 +740,7 @@ mod tests {
                     &i.to_be_bytes(),
                     Location::new(i),
                     &root,
-                    RootSpec::FULL_FORWARD
+                    0
                 ),
                 "loc={i}: proof should verify"
             );
@@ -765,18 +757,12 @@ mod tests {
                 for end in start + 1..=n {
                     let range = Location::new(start)..Location::new(end);
                     let proof = mem
-                        .range_proof(&hasher, range.clone(), RootSpec::FULL_FORWARD)
+                        .range_proof(&hasher, range.clone(), 0)
                         .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: {e:?}"));
                     let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
 
                     assert!(
-                        proof.verify_range_inclusion(
-                            &hasher,
-                            &elements,
-                            range.start,
-                            &root,
-                            RootSpec::FULL_FORWARD
-                        ),
+                        proof.verify_range_inclusion(&hasher, &elements, range.start, &root, 0),
                         "n={n}, range={start}..{end}: range proof should verify"
                     );
                 }
@@ -799,13 +785,11 @@ mod tests {
             );
             assert_eq!(mem.bounds().start, prune_loc);
             assert!(
-                mem.proof(&hasher, prune_loc, RootSpec::FULL_FORWARD)
-                    .is_ok(),
+                mem.proof(&hasher, prune_loc, 0).is_ok(),
                 "boundary leaf {prune_loc} should remain provable"
             );
             assert!(
-                mem.proof(&hasher, mem.leaves() - 1, RootSpec::FULL_FORWARD)
-                    .is_ok(),
+                mem.proof(&hasher, mem.leaves() - 1, 0).is_ok(),
                 "latest leaf should remain provable after pruning to {prune_loc}"
             );
         }
@@ -836,7 +820,7 @@ mod tests {
         let root = plain_root(&mem, &hasher);
         for loc in *mem.bounds().start..*mem.leaves() {
             let proof = mem
-                .proof(&hasher, Location::new(loc), RootSpec::FULL_FORWARD)
+                .proof(&hasher, Location::new(loc), 0)
                 .unwrap_or_else(|e| panic!("loc={loc}: {e:?}"));
             assert!(
                 proof.verify_element_inclusion(
@@ -844,7 +828,7 @@ mod tests {
                     &loc.to_be_bytes(),
                     Location::new(loc),
                     &root,
-                    RootSpec::FULL_FORWARD,
+                    0,
                 ),
                 "loc={loc}: proof should verify after append on pruned structure"
             );
@@ -872,16 +856,14 @@ mod tests {
         );
         assert_eq!(*mem.leaves(), 11);
 
-        let proof = mem
-            .proof(&hasher, Location::new(5), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let proof = mem.proof(&hasher, Location::new(5), 0).unwrap();
         assert!(
             proof.verify_element_inclusion(
                 &hasher,
                 b"updated-5",
                 Location::new(5),
                 &plain_root(&mem, &hasher),
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             "updated leaf should verify with new data"
         );
@@ -892,22 +874,20 @@ mod tests {
                 &5u64.to_be_bytes(),
                 Location::new(5),
                 &plain_root(&mem, &hasher),
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             "old data should not verify"
         );
 
         for i in [0u64, 3, 7, 10] {
-            let p = mem
-                .proof(&hasher, Location::new(i), RootSpec::FULL_FORWARD)
-                .unwrap();
+            let p = mem.proof(&hasher, Location::new(i), 0).unwrap();
             assert!(
                 p.verify_element_inclusion(
                     &hasher,
                     &i.to_be_bytes(),
                     Location::new(i),
                     &plain_root(&mem, &hasher),
-                    RootSpec::FULL_FORWARD,
+                    0,
                 ),
                 "leaf {i} should still verify with original data"
             );
@@ -929,16 +909,14 @@ mod tests {
             };
             mem.apply_batch(&batch).unwrap();
 
-            let proof = mem
-                .proof(&hasher, Location::new(update_loc), RootSpec::FULL_FORWARD)
-                .unwrap();
+            let proof = mem.proof(&hasher, Location::new(update_loc), 0).unwrap();
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
                     b"new-value",
                     Location::new(update_loc),
                     &plain_root(&mem, &hasher),
-                    RootSpec::FULL_FORWARD,
+                    0,
                 ),
                 "update at {update_loc} should verify"
             );
@@ -986,26 +964,22 @@ mod tests {
 
         assert_eq!(*mem.leaves(), 10);
 
-        let proof = mem
-            .proof(&hasher, Location::new(3), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let proof = mem.proof(&hasher, Location::new(3), 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
             b"updated-3",
             Location::new(3),
             &plain_root(&mem, &hasher),
-            RootSpec::FULL_FORWARD,
+            0,
         ));
 
-        let proof = mem
-            .proof(&hasher, Location::new(8), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let proof = mem.proof(&hasher, Location::new(8), 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
             &100u64.to_be_bytes(),
             Location::new(8),
             &plain_root(&mem, &hasher),
-            RootSpec::FULL_FORWARD,
+            0,
         ));
     }
 
@@ -1045,16 +1019,14 @@ mod tests {
             "roots must match"
         );
 
-        let proof = mem
-            .proof(&hasher, Location::new(0), RootSpec::FULL_FORWARD)
-            .unwrap();
+        let proof = mem.proof(&hasher, Location::new(0), 0).unwrap();
         assert!(
             proof.verify_element_inclusion(
                 &hasher,
                 b"updated-0",
                 Location::new(0),
                 &plain_root(&mem, &hasher),
-                RootSpec::FULL_FORWARD,
+                0,
             ),
             "updated leaf should verify"
         );
@@ -1083,16 +1055,14 @@ mod tests {
                     };
                     m.apply_batch(&batch).unwrap();
 
-                    let proof = m
-                        .proof(&hasher, Location::new(update_loc), RootSpec::FULL_FORWARD)
-                        .unwrap();
+                    let proof = m.proof(&hasher, Location::new(update_loc), 0).unwrap();
                     assert!(
                         proof.verify_element_inclusion(
                             &hasher,
                             b"new",
                             Location::new(update_loc),
                             &plain_root(&m, &hasher),
-                            RootSpec::FULL_FORWARD,
+                            0,
                         ),
                         "n={n} prune={prune_to} update={update_loc}: proof should verify"
                     );
@@ -1201,21 +1171,16 @@ mod tests {
         let peaks: Vec<_> = F::peaks(plain.size())
             .map(|(pos, _)| plain.get_node(pos).expect("peak should be present"))
             .collect();
-        let expected = crate::merkle::hasher::Hasher::root_with_inactive_prefix(
+        let expected = <crate::merkle::hasher::Standard<commonware_cryptography::Sha256> as crate::merkle::hasher::Hasher<F>>::root(
             &hasher,
             plain.leaves(),
             inactive_peaks,
-            Bagging::ForwardFold,
             peaks.iter(),
         )
         .unwrap();
 
-        assert_eq!(
-            plain
-                .root(&hasher, RootSpec::split_forward(inactive_peaks))
-                .unwrap(),
-            expected
-        );
+        assert_eq!(plain.root(&hasher, inactive_peaks).unwrap(), expected);
+        let _ = Bagging::ForwardFold;
     }
 
     // --- MMR tests ---

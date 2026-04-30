@@ -15,7 +15,7 @@ use crate::{
     qmdb::{
         any::{ordered::fixed::Operation, value::FixedEncoding, FixedValue},
         current::FixedConfig as Config,
-        Error, RootSpec,
+        Bagging, Error,
     },
     translator::Translator,
     Context,
@@ -37,7 +37,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S = Sequential> = super::db::Db<
 >;
 
 impl<
-        F: Graftable + RootSpec,
+        F: Graftable + Bagging,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -80,7 +80,7 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable + RootSpec,
+            F: Graftable + Bagging,
             E: Context,
             K: Array,
             V: FixedValue,

@@ -45,100 +45,11 @@ pub enum Bagging {
     BackwardFold,
 }
 
-/// Fully specifies how to compute a Merkle root from the current peak set.
-///
-/// Generic Merkle storage does not cache roots or remember this value. Callers choose a
-/// concrete spec whenever they compute a root or construct a proof.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum RootSpec {
-    /// Bag every peak with `bagging`. No inactive prefix.
-    Full {
-        /// Bagging applied to the full peak list.
-        bagging: Bagging,
-    },
-    /// Forward-fold the inactive prefix, then bag the remaining peaks with `bagging`.
-    ///
-    /// The inactive prefix bagging is not configurable: it always uses forward bagging
-    /// (left-folded) into a single accumulator. Only the remaining peak bagging is selectable.
-    /// The inactive boundary is committed into the root.
-    ///
-    /// When `inactive_peaks == 0`, no boundary is committed. For an empty inactive prefix, a
-    /// split root is byte-equivalent to the corresponding full root with the same bagging.
-    Split {
-        /// Number of oldest peaks included in the inactive prefix.
-        inactive_peaks: usize,
-        /// Bagging applied to the remaining peaks after the inactive prefix has been folded.
-        bagging: Bagging,
-    },
-}
-
-impl RootSpec {
-    /// `Full { bagging: ForwardFold }`: the default for plain Merkle structures.
-    pub const FULL_FORWARD: Self = Self::Full {
-        bagging: Bagging::ForwardFold,
-    };
-
-    /// `Split { inactive_peaks, bagging: ForwardFold }`.
-    pub const fn split_forward(inactive_peaks: usize) -> Self {
-        Self::Split {
-            inactive_peaks,
-            bagging: Bagging::ForwardFold,
-        }
-    }
-
-    /// `Split { inactive_peaks, bagging: BackwardFold }`.
-    pub const fn split_backward(inactive_peaks: usize) -> Self {
-        Self::Split {
-            inactive_peaks,
-            bagging: Bagging::BackwardFold,
-        }
-    }
-
-    /// Build a spec from a `(split_root, bagging)` policy plus the runtime `inactive_peaks` count.
-    /// `inactive_peaks` is ignored when `split_root` is false.
-    pub const fn from_split_policy(
-        split_root: bool,
-        bagging: Bagging,
-        inactive_peaks: usize,
-    ) -> Self {
-        if split_root {
-            Self::Split {
-                inactive_peaks,
-                bagging,
-            }
-        } else {
-            Self::Full { bagging }
-        }
-    }
-
-    /// True if this spec splits an inactive prefix off from the remaining peaks.
-    pub const fn has_inactive_prefix(self) -> bool {
-        matches!(self, Self::Split { .. })
-    }
-
-    /// Number of inactive peaks committed into the root.
-    pub const fn inactive_peaks(self) -> usize {
-        match self {
-            Self::Full { .. } => 0,
-            Self::Split { inactive_peaks, .. } => inactive_peaks,
-        }
-    }
-
-    /// The bagging policy applied to the bag step. For `Full`, this bags every peak; for
-    /// `Split`, this bags only the remaining peaks (the inactive prefix uses forward bagging
-    /// separately and unconditionally).
-    pub const fn bagging(self) -> Bagging {
-        match self {
-            Self::Full { bagging } | Self::Split { bagging, .. } => bagging,
-        }
-    }
-}
-
 /// Marker trait for Merkle-family data structures.
 ///
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures). Families capture structural topology
-/// only; bagging is owned by [`RootSpec`] and supplied by the consumer.
+/// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
 pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
@@ -387,15 +298,6 @@ pub enum Error<F: Family> {
     /// The root does not match the computed root.
     #[error("root mismatch")]
     RootMismatch,
-
-    /// A proof or cached value was used with a different root spec than expected.
-    #[error("root spec mismatch: expected {expected:?}, actual {actual:?}")]
-    RootSpecMismatch {
-        /// Expected root spec.
-        expected: RootSpec,
-        /// Actual root spec.
-        actual: RootSpec,
-    },
 
     /// A required digest is missing.
     #[error("missing digest: {0}")]

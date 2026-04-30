@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
     qmdb::{
         any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
-        RootSpec,
+        Bagging,
     },
     translator::OneCap,
 };
@@ -77,7 +77,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config<F: RootSpec>(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
+fn test_config<F: Bagging>(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
@@ -96,7 +96,7 @@ fn test_config<F: RootSpec>(name: &str, pooler: &impl BufferPooler) -> Config<On
         },
         translator: OneCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: <F as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -112,7 +112,7 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn fuzz_family<F: MerkleFamily + RootSpec>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {

@@ -6,10 +6,10 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{full::Config as MerkleConfig, hasher::Standard, mmb, mmr, Family, Location},
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
         keyless::variable::{Config, Db as Keyless},
-        verify_proof, Error, RootSpec,
+        verify_proof, Bagging, Error,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -26,7 +26,7 @@ enum BadFloorExpect {
     BeyondSize,
 }
 
-fn assert_bad_floor_error<F: Family + RootSpec>(err: &Error<F>, kind: BadFloorExpect) {
+fn assert_bad_floor_error<F: Family + Bagging>(err: &Error<F>, kind: BadFloorExpect) {
     match (err, kind) {
         (Error::FloorRegressed(_, _), BadFloorExpect::Regression) => {}
         (Error::FloorBeyondSize(_, _), BadFloorExpect::BeyondSize) => {}
@@ -212,11 +212,11 @@ fn test_config(
     }
 }
 
-fn fuzz_family<F: Family + RootSpec>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: Family + Bagging>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = Standard::<Sha256>::new();
+        let hasher = F::default_hasher::<Sha256>();
         let cfg = test_config(suffix, &context);
         let mut db: Db<F> = Db::init(context.clone(), cfg)
             .await
@@ -426,7 +426,7 @@ fn fuzz_family<F: Family + RootSpec>(input: &FuzzInput, suffix: &str) {
                                     start_loc,
                                     &ops,
                                     &root,
-                                    F::root_spec(proof.inactive_peaks),
+                                    proof.inactive_peaks,
                                 ),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
@@ -467,7 +467,7 @@ fn fuzz_family<F: Family + RootSpec>(input: &FuzzInput, suffix: &str) {
                                     start_loc,
                                     &ops,
                                     &root,
-                                    F::root_spec(proof.inactive_peaks),
+                                    proof.inactive_peaks,
                                 ),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );

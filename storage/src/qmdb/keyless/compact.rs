@@ -22,15 +22,12 @@
 
 use super::operation::Operation;
 use crate::{
-    merkle::{
-        batch, compact as compact_merkle, hasher::Standard as StandardHasher, Family, Location,
-        Proof,
-    },
+    merkle::{batch, compact as compact_merkle, Family, Location, Proof},
     qmdb::{
         any::value::ValueEncoding,
         compact_witness::{self, CachedServeState, WitnessSource},
         sync::compact as compact_sync,
-        Error, RootSpec,
+        Bagging, Error,
     },
     Context,
 };
@@ -190,12 +187,12 @@ where
         inactivity_floor: Location<F>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
     where
-        F: RootSpec,
+        F: Bagging,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        let hasher = StandardHasher::<H>::new();
+        let hasher = F::default_hasher::<H>();
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
             ops.push(Operation::Append(value));
@@ -217,7 +214,7 @@ where
         );
         let root = db
             .merkle
-            .with_mem(|mem| merkle.root(mem, &hasher, F::root_spec(inactive_peaks)))
+            .with_mem(|mem| merkle.root(mem, &hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_batch_ends = Vec::new();
@@ -292,7 +289,7 @@ where
         Error<F>,
     >
     where
-        F: RootSpec,
+        F: Bagging,
     {
         compact_witness::load_serve_state::<F, E, H, S, _, _, _>(
             merkle,
@@ -352,7 +349,7 @@ where
         commit_codec_config: C,
     ) -> Result<Self, Error<F>>
     where
-        F: RootSpec,
+        F: Bagging,
         Operation<F, V>: Read<Cfg = C>,
     {
         // Bootstrap: append an initial Commit(None, 0) on first open. This establishes the
@@ -390,15 +387,15 @@ where
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest
     where
-        F: RootSpec,
+        F: Bagging,
     {
-        let hasher = StandardHasher::<H>::new();
+        let hasher = F::default_hasher::<H>();
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(*self.last_commit_loc + 1)),
             self.inactivity_floor_loc,
         );
         self.merkle
-            .root(&hasher, F::root_spec(inactive_peaks))
+            .root(&hasher, inactive_peaks)
             .expect("compact Merkle root should not fail")
     }
 
@@ -490,7 +487,7 @@ where
     /// intentionally not consulted here.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
     where
-        F: RootSpec,
+        F: Bagging,
     {
         let committed_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
@@ -561,7 +558,7 @@ where
     /// witness when the current state has already been persisted.
     pub async fn sync(&self) -> Result<(), Error<F>>
     where
-        F: RootSpec,
+        F: Bagging,
     {
         compact_witness::persist_witness(self).await
     }
@@ -569,7 +566,7 @@ where
     /// Durably persist the current db state to disk (alias for [`Self::sync`]).
     pub async fn commit(&self) -> Result<(), Error<F>>
     where
-        F: RootSpec,
+        F: Bagging,
     {
         self.sync().await
     }
@@ -600,7 +597,7 @@ where
     /// after any `Err` from `rewind` and reopen from storage.
     pub async fn rewind(&mut self) -> Result<(), Error<F>>
     where
-        F: RootSpec,
+        F: Bagging,
     {
         self.merkle.rewind().await?;
         // Reload the witness from the reverted slot as well, so compact serving stays aligned with
@@ -658,7 +655,7 @@ mod tests {
     use crate::{
         merkle::mmr,
         metadata::{Config as MConfig, Metadata},
-        qmdb::{any::value::FixedEncoding, RootSpec},
+        qmdb::{any::value::FixedEncoding, Bagging},
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
@@ -668,7 +665,7 @@ mod tests {
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256>;
 
-    async fn open_db<F: Family + RootSpec>(
+    async fn open_db<F: Family + Bagging>(
         context: deterministic::Context,
         partition: &str,
     ) -> TestDb<F> {

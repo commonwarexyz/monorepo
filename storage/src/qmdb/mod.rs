@@ -48,7 +48,7 @@ use crate::{
         contiguous::{Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{self, Family, Location, RootSpec as MerkleRootSpec},
+    merkle::{self, Family, Location},
     qmdb::operation::Operation,
 };
 use commonware_utils::NZUsize;
@@ -69,7 +69,7 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 
-/// Per-family root spec used by QMDB databases.
+/// Per-family default bagging policy used by QMDB databases.
 ///
 /// QMDB chooses different active-region bagging per family: MMR uses forward bagging and MMB uses
 /// backward bagging (so the active suffix can collapse into a single accumulator under MMB's
@@ -77,20 +77,23 @@ pub mod verify;
 ///
 /// This trait isolates that consumer choice from the family's structural topology — `Family` itself
 /// stays bagging-agnostic.
-pub trait RootSpec: Family {
-    fn root_spec(inactive_peaks: usize) -> MerkleRootSpec;
-}
+pub trait Bagging: Family {
+    /// The default bagging policy for this family in QMDB databases.
+    const BAGGING: merkle::Bagging;
 
-impl RootSpec for merkle::mmr::Family {
-    fn root_spec(inactive_peaks: usize) -> MerkleRootSpec {
-        MerkleRootSpec::split_forward(inactive_peaks)
+    /// Construct a [`merkle::hasher::Standard`] hasher pre-configured with this family's default
+    /// bagging.
+    fn default_hasher<H: commonware_cryptography::Hasher>() -> merkle::hasher::Standard<H> {
+        merkle::hasher::Standard::with_bagging(Self::BAGGING)
     }
 }
 
-impl RootSpec for merkle::mmb::Family {
-    fn root_spec(inactive_peaks: usize) -> MerkleRootSpec {
-        MerkleRootSpec::split_backward(inactive_peaks)
-    }
+impl Bagging for merkle::mmr::Family {
+    const BAGGING: merkle::Bagging = merkle::Bagging::ForwardFold;
+}
+
+impl Bagging for merkle::mmb::Family {
+    const BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 }
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,

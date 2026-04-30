@@ -19,7 +19,7 @@ use crate::{
             verification, Error, Location, Position, Proof,
         },
         storage::Storage,
-        Family as _, RootSpec,
+        Family as _,
     },
     metadata::{Config as MConfig, Metadata},
     Context,
@@ -256,13 +256,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
 
         let loc = Location::new(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
-            return mmr_proof.verify_element_inclusion(
-                hasher,
-                chunk,
-                loc,
-                root,
-                RootSpec::FULL_FORWARD,
-            );
+            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root, 0);
         }
 
         if proof.digests.is_empty() {
@@ -291,14 +285,13 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root =
-            match mmr_proof.reconstruct_root(hasher, &[chunk], loc, RootSpec::FULL_FORWARD) {
-                Ok(root) => root,
-                Err(error) => {
-                    debug!(error = ?error, "invalid proof input");
-                    return false;
-                }
-            };
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc, 0) {
+            Ok(root) => root,
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
+            }
+        };
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
@@ -341,7 +334,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
         } as usize;
         if pruned_chunks == 0 {
             let mmr = Mmr::new();
-            let cached_root = mmr.root(hasher, RootSpec::FULL_FORWARD)?;
+            let cached_root = mmr.root(hasher, 0)?;
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
                 authenticated_len: 0,
@@ -378,7 +371,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
 
         let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned_chunks should never overflow");
-        let cached_root = mmr.root(hasher, RootSpec::FULL_FORWARD)?;
+        let cached_root = mmr.root(hasher, 0)?;
         Ok(Self {
             bitmap,
             // Pruned chunks are already authenticated in the MMR
@@ -495,15 +488,14 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
                 Proof {
                     leaves: Location::new(self.len()),
                     inactive_peaks: 0,
-                    digests: vec![self.mmr.root(hasher, RootSpec::FULL_FORWARD)?],
+                    digests: vec![self.mmr.root(hasher, 0)?],
                 },
                 chunk,
             ));
         }
 
         let range = chunk_loc..chunk_loc + 1;
-        let mut proof =
-            verification::range_proof(hasher, &self.mmr, range, RootSpec::FULL_FORWARD).await?;
+        let mut proof = verification::range_proof(hasher, &self.mmr, range, 0).await?;
         proof.leaves = Location::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
@@ -615,7 +607,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
         self.mmr.apply_batch(&batch)?;
 
         // Compute the bitmap root.
-        let mmr_root = self.mmr.root(hasher, RootSpec::FULL_FORWARD)?;
+        let mmr_root = self.mmr.root(hasher, 0)?;
         let cached_root = if self.bitmap.is_chunk_aligned() {
             mmr_root
         } else {
@@ -873,7 +865,7 @@ mod tests {
 
             let bitmap = dirty.merkleize(&hasher).unwrap();
             let root = bitmap.root();
-            let inner_root = bitmap.mmr.root(&hasher, RootSpec::FULL_FORWARD).unwrap();
+            let inner_root = bitmap.mmr.root(&hasher, 0).unwrap();
             assert_eq!(root, inner_root);
 
             {

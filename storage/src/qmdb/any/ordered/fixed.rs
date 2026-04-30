@@ -10,7 +10,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Error, RootSpec,
+        Bagging, Error,
     },
     translator::Translator,
     Context,
@@ -36,7 +36,7 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
 >;
 
 impl<
-        F: Family + RootSpec,
+        F: Family + Bagging,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -65,7 +65,7 @@ pub mod partitioned {
         merkle::{Family, Location},
         qmdb::{
             any::{FixedConfig as Config, FixedValue},
-            Error, RootSpec,
+            Bagging, Error,
         },
         translator::Translator,
         Context,
@@ -95,7 +95,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family + RootSpec,
+            F: Family + Bagging,
             E: Context,
             K: Array,
             V: FixedValue,
@@ -147,7 +147,7 @@ pub(crate) mod test {
                 },
                 test::fixed_db_config,
             },
-            verify_proof, RootSpec,
+            verify_proof, Bagging,
         },
         translator::{OneCap, TwoCap},
     };
@@ -181,7 +181,7 @@ pub(crate) mod test {
         Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
-    async fn open_db_generic<F: Family + RootSpec>(
+    async fn open_db_generic<F: Family + Bagging>(
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<mmr::Family, TwoCap>("partition", &context);
@@ -456,7 +456,7 @@ pub(crate) mod test {
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
-                let spec = mmr::Family::root_spec(proof.inactive_peaks);
+                let spec = proof.inactive_peaks;
                 assert!(verify_proof(&hasher, &proof, loc, &log, &root, spec));
             }
 
@@ -706,7 +706,7 @@ pub(crate) mod test {
                 Location::new(5),
                 &historical_ops,
                 &root_hash,
-                mmr::Family::root_spec(historical_proof.inactive_peaks),
+                historical_proof.inactive_peaks,
             ));
 
             // Add more operations to the database
@@ -730,7 +730,7 @@ pub(crate) mod test {
                 Location::new(5),
                 &historical_ops,
                 &root_hash,
-                mmr::Family::root_spec(historical_proof.inactive_peaks),
+                historical_proof.inactive_peaks,
             ));
 
             db.destroy().await.unwrap();
@@ -765,7 +765,7 @@ pub(crate) mod test {
                 Location::new(1),
                 &proof_ops,
                 &root,
-                mmr::Family::root_spec(proof.inactive_peaks),
+                proof.inactive_peaks,
             ));
 
             // historical_proof at full size should match proof.
@@ -844,7 +844,7 @@ pub(crate) mod test {
                     start_loc,
                     &historical_ops,
                     &root,
-                    mmr::Family::root_spec(historical_proof.inactive_peaks),
+                    historical_proof.inactive_peaks,
                 ));
             }
 
@@ -1226,7 +1226,7 @@ pub(crate) mod test {
     }
 
     /// Helper: commit a batch of key-value writes and return the applied range (generic).
-    async fn commit_writes_generic<F: Family + RootSpec>(
+    async fn commit_writes_generic<F: Family + Bagging>(
         db: &mut AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
@@ -1243,7 +1243,7 @@ pub(crate) mod test {
 
     // -- Generic inner functions for parameterized batch tests --
 
-    async fn batch_empty_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn batch_empty_inner<F: Family + Bagging>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let root_before = db.root();
 
@@ -1257,7 +1257,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_metadata_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn batch_metadata_inner<F: Family + Bagging>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let metadata = val(42);
 
@@ -1271,7 +1271,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_get_read_through_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn batch_get_read_through_inner<F: Family + Bagging>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1299,7 +1299,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_get_on_merkleized_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn batch_get_on_merkleized_inner<F: Family + Bagging>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1325,7 +1325,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_stacked_get_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn batch_stacked_get_inner<F: Family + Bagging>(context: deterministic::Context) {
         let db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1352,7 +1352,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_stacked_delete_recreate_inner<F: Family + RootSpec>(
+    async fn batch_stacked_delete_recreate_inner<F: Family + Bagging>(
         context: deterministic::Context,
     ) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
@@ -1382,9 +1382,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_apply_returns_range_inner<F: Family + RootSpec>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_apply_returns_range_inner<F: Family + Bagging>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1400,7 +1398,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_speculative_root_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn batch_speculative_root_inner<F: Family + Bagging>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let mut batch = db.new_batch();
@@ -1416,7 +1414,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn log_replay_inner<F: Family + RootSpec>(context: deterministic::Context) {
+    async fn log_replay_inner<F: Family + Bagging>(context: deterministic::Context) {
         let db_context = context.with_label("db");
         let mut db = open_db_generic::<F>(db_context.clone()).await;
 

@@ -141,7 +141,7 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config<F: qmdb::RootSpec>(
+fn any_fixed_config<F: qmdb::Bagging>(
     suffix: &str,
     pooler: &impl BufferPooler,
 ) -> any::FixedConfig<OneCap> {
@@ -151,11 +151,11 @@ fn any_fixed_config<F: qmdb::RootSpec>(
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: <F as crate::qmdb::Bagging>::BAGGING,
     }
 }
 
-fn any_variable_config<F: qmdb::RootSpec>(
+fn any_variable_config<F: qmdb::Bagging>(
     suffix: &str,
     pooler: &impl BufferPooler,
 ) -> any::VariableConfig<OneCap, ((), ())> {
@@ -165,7 +165,7 @@ fn any_variable_config<F: qmdb::RootSpec>(
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         split_root: true,
-        root_bagging: F::root_spec(0).bagging(),
+        root_bagging: <F as crate::qmdb::Bagging>::BAGGING,
     }
 }
 

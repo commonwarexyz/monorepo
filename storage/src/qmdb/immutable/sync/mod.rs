@@ -6,8 +6,9 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
+        self,
         full::{self, Merkle},
-        Family, Location, Proof, RootSpec as MerkleRootSpec,
+        Family, Location, Proof,
     },
     qmdb::{
         any::ValueEncoding,
@@ -15,7 +16,7 @@ use crate::{
         immutable::{self, CompactDb, Operation},
         operation::{Key, Operation as _},
         sync::{self},
-        Error, RootSpec,
+        Bagging as FamilyBagging, Error,
     },
     translator::Translator,
     Context, Persistable,
@@ -25,11 +26,9 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 
-type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
-
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
-    F: Family + RootSpec,
+    F: Family + FamilyBagging,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -74,7 +73,7 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
-        let hasher = StandardHasher::new();
+        let hasher = F::default_hasher();
 
         // Initialize Merkle structure for sync
         let merkle = Merkle::<F, _, _, S>::init_sync(
@@ -125,7 +124,7 @@ where
             F::location_to_position(Location::new(*last_commit_loc + 1)),
             inactivity_floor_loc,
         );
-        let root = journal.root(F::root_spec(inactive_peaks))?;
+        let root = journal.root(inactive_peaks)?;
 
         let db = Self {
             journal,
@@ -143,17 +142,21 @@ where
         self.root()
     }
 
-    fn proof_spec(
+    fn proof_inactive_peaks(
         _config: &Self::Config,
         proof: &Proof<Self::Family, Self::Digest>,
-    ) -> MerkleRootSpec {
-        F::root_spec(proof.inactive_peaks)
+    ) -> usize {
+        proof.inactive_peaks
+    }
+
+    fn root_bagging(_config: &Self::Config) -> merkle::Bagging {
+        <F as FamilyBagging>::BAGGING
     }
 }
 
 impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
-    F: Family + RootSpec,
+    F: Family + FamilyBagging,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -190,7 +193,7 @@ where
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let hasher = StandardHasher::<H>::new();
+        let hasher = F::default_hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.with_label("merkle"),
             config.merkle,
@@ -201,7 +204,7 @@ where
         let inactive_peaks =
             F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
         let root = merkle
-            .root(&hasher, F::root_spec(inactive_peaks))
+            .root(&hasher, inactive_peaks)
             .map_err(|_| Error::DataCorrupted("failed to compute compact state root"))?;
         Self::init_from_verified_state(
             merkle,
@@ -219,8 +222,12 @@ where
         self.root()
     }
 
-    fn proof_spec(proof: &Proof<Self::Family, Self::Digest>) -> MerkleRootSpec {
-        F::root_spec(proof.inactive_peaks)
+    fn proof_inactive_peaks(proof: &Proof<Self::Family, Self::Digest>) -> usize {
+        proof.inactive_peaks
+    }
+
+    fn root_bagging() -> merkle::Bagging {
+        <F as FamilyBagging>::BAGGING
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {

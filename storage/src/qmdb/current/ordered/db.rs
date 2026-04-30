@@ -14,7 +14,7 @@ use crate::{
         },
         current::proof::OperationProof,
         operation::Key,
-        Error, RootSpec,
+        Bagging, Error,
     },
     Context,
 };
@@ -39,7 +39,7 @@ pub type Db<F, E, C, K, V, I, H, const N: usize, S = Sequential> =
 
 // Shared read-only functionality.
 impl<
-        F: merkle::Graftable + RootSpec,
+        F: merkle::Graftable + Bagging,
         E: Context,
         C: Contiguous<Item = Operation<F, K, V>>,
         K: Key,
@@ -136,7 +136,7 @@ where
 }
 
 impl<
-        F: merkle::Graftable + RootSpec,
+        F: merkle::Graftable + Bagging,
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
         K: Key,
