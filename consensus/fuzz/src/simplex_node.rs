@@ -1475,7 +1475,7 @@ where
             fault_rounds: 1,
             fault_rounds_bound: 1,
         },
-        honest_messages_drop_percent: 0,
+        messaging_faults: Vec::new(),
     };
 
     let (oracle, participants, schemes, mut registrations) =

@@ -65,8 +65,13 @@ pub(crate) const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 1;
 const MAX_REQUIRED_CONTAINERS: u64 = 30;
-const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
-const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
+/// Per-view honest-message drop rate range used by `Mode::FaultyMessaging`.
+/// Bounded conservatively so finalization remains reachable across the run -
+/// `FaultyMessaging` waits for finalization (`Partition::Connected` is enforced),
+/// and unbounded loss would let pathological schedules hang the deterministic
+/// runtime. Increase only if a complementary timeout is added to the wait loop.
+pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
+pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
@@ -140,7 +145,11 @@ pub struct FuzzInput {
     pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
-    pub honest_messages_drop_percent: u8,
+    /// Round-indexed schedule of honest-message drop rates, used only by
+    /// `Mode::FaultyMessaging`. Each entry `(view, rate)` activates an
+    /// `rate%` honest-message drop while the reference reporter is in `view`;
+    /// the rate reverts to 0 outside scheduled views.
+    pub messaging_faults: Vec<(View, u8)>,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -197,10 +206,10 @@ impl Arbitrary<'_> for FuzzInput {
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
 
-        // Only used by `Mode::FaultyMessaging`.
-        let honest_messages_drop_ratio =
-            u.int_in_range(MIN_HONEST_MESSAGES_DROP_RATIO..=MAX_HONEST_MESSAGES_DROP_RATIO)?;
-
+        // The messaging-fault schedule (for `Mode::FaultyMessaging`) is generated
+        // at runtime by `Strategy::messaging_faults` from the deterministic
+        // FuzzRng, mirroring the `Adaptive` partition path - keeps schedule
+        // density tied to the chosen byzantine strategy.
         Ok(Self {
             raw_bytes,
             partition,
@@ -208,7 +217,7 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             strategy,
-            honest_messages_drop_percent: honest_messages_drop_ratio,
+            messaging_faults: Vec::new(),
         })
     }
 }
@@ -558,6 +567,77 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
         });
 }
 
+/// Look up the rate scheduled for view 1 (the initial executing view), or `0`
+/// if no entry matches. Used to seed the drop-rate cell synchronously *before*
+/// validators run, so that very early view-1 traffic sees the scheduled rate.
+fn initial_drop_rate(schedule: &[(View, u8)]) -> u8 {
+    schedule
+        .iter()
+        .find_map(|(view, rate)| (*view == View::new(1)).then_some(*rate))
+        .unwrap_or(0)
+}
+
+/// Drives the per-view honest-message drop rate for `Mode::FaultyMessaging`.
+/// Subscribes to the first reporter's view monitor and updates the shared
+/// [`network::DropRateCell`] when the active *executing* view's scheduled rate
+/// differs from the current one. No-op when the schedule is empty or no
+/// reporters were spawned.
+///
+/// `initial_rate` must equal the value the caller already wrote to `drop_rate`
+/// before spawning validators (i.e., the rate for view 1). The scheduler uses
+/// it to seed `active`, avoiding a redundant first-iteration write.
+///
+/// Clock-source note: the reporter's monitor reports the most recent
+/// **finalized** view (see `consensus/src/simplex/mocks/reporter.rs::handle`).
+/// When `monitor` fires with view `k`, the protocol has just finalized `k` and
+/// the validators have already moved on to view `k + 1`. To realize the intent
+/// "fault view v while consensus is executing view v" the lookup uses
+/// `executing_view = finalized_view + 1`. The initial pre-recv lookup with
+/// `finalized_view = 0` therefore covers view 1.
+async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
+    context: &deterministic::Context,
+    reporters: &mut [reporter::Reporter<
+        deterministic::Context,
+        P::Scheme,
+        P::Elector,
+        Sha256Digest,
+    >],
+    schedule: Vec<(View, u8)>,
+    required_containers: u64,
+    drop_rate: network::DropRateCell,
+    initial_rate: u8,
+) {
+    if schedule.is_empty() || reporters.is_empty() {
+        return;
+    }
+    let (mut latest, mut monitor) = reporters[0].subscribe().await;
+    context
+        .with_label("messaging_fault_scheduler")
+        .spawn(move |_| async move {
+            let mut active: u8 = initial_rate;
+            let mut finalized_view = latest.get();
+            loop {
+                let executing_view = finalized_view.saturating_add(1);
+                let target: u8 = schedule
+                    .iter()
+                    .find_map(|(view, rate)| (*view == View::new(executing_view)).then_some(*rate))
+                    .unwrap_or(0);
+                if target != active {
+                    *drop_rate.lock() = target;
+                    active = target;
+                }
+                if executing_view > required_containers {
+                    break;
+                }
+                let Some(next) = monitor.recv().await else {
+                    break;
+                };
+                latest = next;
+                finalized_view = latest.get();
+            }
+        });
+}
+
 fn network_faults(
     strategy: StrategyChoice,
     required_containers: u64,
@@ -581,6 +661,32 @@ fn network_faults(
             fault_rounds_bound,
         }
         .network_faults(required_containers, rng),
+    }
+}
+
+fn messaging_faults(
+    strategy: StrategyChoice,
+    required_containers: u64,
+    rng: &mut impl rand::Rng,
+) -> Vec<(View, u8)> {
+    match strategy {
+        StrategyChoice::SmallScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => SmallScope {
+            fault_rounds,
+            fault_rounds_bound,
+        }
+        .messaging_faults(required_containers, rng),
+        StrategyChoice::AnyScope => AnyScope.messaging_faults(required_containers, rng),
+        StrategyChoice::FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        }
+        .messaging_faults(required_containers, rng),
     }
 }
 
@@ -670,20 +776,41 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
 }
 
 fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
-    // Partition will be connected, but we will randomly delete messages in the faulty messaging wrapper.
+    // FaultyMessaging is a transport-layer fault axis; topology is always fully
+    // connected. Network-layer fault axes (`Static` / `Adaptive` partitions,
+    // degraded link) are explicitly disabled here so the only adversarial
+    // delivery effects come from the per-view messaging schedule below.
     input.partition = Partition::Connected;
+    input.configuration = N4F1C3;
+    input.degraded_network = false;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
+        // Populate the messaging-fault schedule from the chosen strategy
+        // using the deterministic FuzzRng (mirrors `Adaptive` partition path).
+        input.messaging_faults =
+            messaging_faults(input.strategy, input.required_containers, &mut context);
+
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+
+        // Per-view drop-rate cell shared with every router. We seed it
+        // SYNCHRONOUSLY with the rate scheduled for view 1 (the initial
+        // executing view) *before* any validator is spawned: validators may
+        // emit view-1 traffic on their first poll, before the async
+        // `messaging_fault_scheduler` task ever runs. The scheduler picks up
+        // from view 2 onward and is told `initial_rate` so it doesn't issue a
+        // redundant write on its first iteration.
+        let drop_rate = network::drop_rate_cell();
+        let initial_rate = initial_drop_rate(&input.messaging_faults);
+        *drop_rate.lock() = initial_rate;
         let byzantine_router = network::Router::new(
             context.clone(),
             participants
@@ -691,7 +818,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 .take(config.faults as usize)
                 .cloned()
                 .collect::<Vec<_>>(),
-            input.honest_messages_drop_percent,
+            drop_rate.clone(),
         );
 
         // Spawn Byzantine nodes (Disrupters only)
@@ -721,6 +848,18 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
             );
             reporters.push(reporter);
         }
+
+        // Spawn a per-view messaging-fault scheduler that updates the shared
+        // drop-rate cell as the reference reporter advances.
+        spawn_messaging_fault_scheduler::<P>(
+            &context,
+            &mut reporters,
+            input.messaging_faults.clone(),
+            input.required_containers,
+            drop_rate.clone(),
+            initial_rate,
+        )
+        .await;
 
         // Wait for finalization or timeout
         if input.partition.is_connected() && config.is_valid() {
@@ -1253,9 +1392,20 @@ impl FuzzMode for TwinsCampaign {
 
 /// **FaultyMessaging mode** - message-delivery faults at the transport layer.
 ///
-/// Topology is fully connected, but a `ByzantineFirstReceiver` reorders
-/// incoming messages (byzantine senders served first) and a configurable
-/// percentage of honest messages are dropped (`input.honest_messages_drop_percent`).
+/// Topology is fully connected (`Partition::Connected` is enforced).
+///
+/// Two transport-layer effects are layered on top of the full mesh:
+/// - **Byzantine-first ordering** (uniform, always-on): `ByzantineFirstReceiver`
+///   reorders the receive queue so byzantine-origin messages are processed
+///   before honest ones whenever both are available. This effect does not
+///   vary per view.
+/// - **Honest-message drop rate** (round-indexed): a per-view schedule
+///   generated by `Strategy::messaging_faults` from the deterministic
+///   FuzzRng drives the shared [`network::DropRateCell`] consulted on every
+///   routing decision. Outside scheduled views the rate is 0. The view-1
+///   rate is written synchronously before validators are spawned so the
+///   scheduled rate takes effect from the protocol's first message; the
+///   async scheduler task picks up from view 2 onward.
 ///
 /// Use this to fuzz consensus under hostile message ordering and lossy
 /// honest-message delivery, independent of network partitioning.

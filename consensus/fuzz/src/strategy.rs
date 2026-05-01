@@ -1,4 +1,7 @@
-use crate::{utils::SetPartition, EPOCH, FAULT_INJECTION_RATIO};
+use crate::{
+    utils::SetPartition, EPOCH, FAULT_INJECTION_RATIO, MAX_HONEST_MESSAGES_DROP_RATIO,
+    MIN_HONEST_MESSAGES_DROP_RATIO,
+};
 use commonware_consensus::{
     simplex::types::Proposal,
     types::{Epoch, Round, View},
@@ -80,6 +83,13 @@ pub trait Strategy: Send + Sync {
         rng: &mut impl Rng,
     ) -> Vec<(View, SetPartition)>;
 
+    /// Round-indexed honest-message drop schedule for `Mode::FaultyMessaging`.
+    /// Each entry `(view, rate)` activates an `rate%` honest-message drop while
+    /// the reference reporter is in `view`; the rate reverts to 0 outside
+    /// scheduled views. Mirrors `network_faults` shape but produces drop rates
+    /// instead of set partitions.
+    fn messaging_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Vec<(View, u8)>;
+
     fn fault_bounds(&self) -> Option<(u64, u64)>;
 }
 
@@ -124,6 +134,33 @@ fn sample_faults(
 fn sample_network_fault(rng: &mut impl Rng) -> SetPartition {
     let idx = rng.gen_range(1..15);
     SetPartition::n4(idx)
+}
+
+/// Schedule sampler for `Mode::FaultyMessaging`. Mirrors [`sample_faults`]:
+/// picks `count` distinct views from `[min_view, max_view]` via partial
+/// Fisher-Yates and pairs each with a uniformly-sampled drop rate in
+/// `[MIN_HONEST_MESSAGES_DROP_RATIO, MAX_HONEST_MESSAGES_DROP_RATIO]`.
+fn sample_messaging_faults(
+    count: u64,
+    min_view: u64,
+    max_view: u64,
+    rng: &mut impl Rng,
+) -> Vec<(View, u8)> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let mut entries = Vec::with_capacity(count as usize);
+    let mut views = (min_view..=max_view).collect::<Vec<_>>();
+    let count = (count as usize).min(views.len());
+    for i in 0..count {
+        let idx = rng.gen_range(i..views.len());
+        views.swap(i, idx);
+        let view = views[i];
+        let rate = rng.gen_range(MIN_HONEST_MESSAGES_DROP_RATIO..=MAX_HONEST_MESSAGES_DROP_RATIO);
+        entries.push((View::new(view), rate));
+    }
+    entries
 }
 
 pub struct SmallScope {
@@ -300,6 +337,12 @@ impl Strategy for SmallScope {
         // boundary, even if a caller constructs SmallScope with `fault_rounds = 0`.
         let d = self.fault_rounds.max(1).min(bound);
         sample_faults(d, 1, bound, rng)
+    }
+
+    fn messaging_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Vec<(View, u8)> {
+        let bound = self.fault_rounds_bound.min(required_containers).max(1);
+        let d = self.fault_rounds.max(1).min(bound);
+        sample_messaging_faults(d, 1, bound, rng)
     }
 
     fn fault_bounds(&self) -> Option<(u64, u64)> {
@@ -512,6 +555,12 @@ impl Strategy for AnyScope {
         sample_faults(d, 1, required_containers, rng)
     }
 
+    fn messaging_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Vec<(View, u8)> {
+        let max_d = (required_containers / FAULT_INJECTION_RATIO).max(1);
+        let d = rng.gen_range(1..=max_d);
+        sample_messaging_faults(d, 1, required_containers, rng)
+    }
+
     fn fault_bounds(&self) -> Option<(u64, u64)> {
         None
     }
@@ -675,6 +724,17 @@ impl Strategy for FutureScope {
         // boundary, even if a caller constructs FutureScope with `fault_rounds = 0`.
         let d = self.fault_rounds.max(1).min(window);
         sample_faults(d, start, required_containers, rng)
+    }
+
+    fn messaging_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Vec<(View, u8)> {
+        let start = self
+            .fault_rounds_bound
+            .saturating_add(1)
+            .min(required_containers)
+            .max(1);
+        let window = required_containers - start + 1;
+        let d = self.fault_rounds.max(1).min(window);
+        sample_messaging_faults(d, start, required_containers, rng)
     }
 
     fn fault_bounds(&self) -> Option<(u64, u64)> {
