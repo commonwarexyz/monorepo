@@ -17,9 +17,10 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
+use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
-use commonware_utils::{hex, ordered::Map, Array, Span, TryCollect, TryFromIterator};
+use commonware_utils::{ordered::Map, Array, Span, TryCollect, TryFromIterator};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},

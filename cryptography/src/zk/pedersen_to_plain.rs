@@ -39,7 +39,11 @@
 //! #     transcript::Transcript,
 //! #     zk::pedersen_to_plain::{prove, verify, Setup, Witness},
 //! # };
-//! # use commonware_math::algebra::{CryptoGroup, HashToGroup};
+//! # use commonware_math::{
+//! #     algebra::{Additive, CryptoGroup, HashToGroup},
+//! #     synthetic::Synthetic,
+//! # };
+//! # use commonware_parallel::Sequential;
 //! # use commonware_utils::test_rng;
 //! # type F = Scalar;
 //! # type G = G1;
@@ -51,7 +55,10 @@
 //!     ),
 //! };
 //!
-//! let witness = Witness::new(F::from(3u64), F::from(5u64));
+//! let witness = Witness {
+//!     value: F::from(3u64),
+//!     blinding: F::from(5u64),
+//! };
 //! let claim = witness.claim(&setup);
 //!
 //! let mut prover_rng = test_rng();
@@ -65,9 +72,25 @@
 //!     &witness,
 //! );
 //!
+//! let mut verifier_rng = test_rng();
 //! let mut verifier_transcript = Transcript::new(b"pedersen-to-plain-example");
 //! verifier_transcript.commit(b"context".as_slice());
-//! let valid = verify(&mut verifier_transcript, &setup, &claim, proof);
+//! let [g, h] = Synthetic::<F, G>::generators_array();
+//! let synthetic_setup = Setup {
+//!     value_generator: g,
+//!     blinding_generator: h,
+//! };
+//! let valid = verify(
+//!     &mut verifier_rng,
+//!     &mut verifier_transcript,
+//!     &synthetic_setup,
+//!     &claim,
+//!     proof,
+//! )
+//! .eval(
+//!     &[setup.value_generator, setup.blinding_generator],
+//!     &Sequential,
+//! ) == G::zero();
 //! assert!(valid);
 //! ```
 
