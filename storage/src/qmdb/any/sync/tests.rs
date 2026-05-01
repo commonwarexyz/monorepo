@@ -3022,15 +3022,8 @@ sync_tests_for_harness!(
     unordered_variable_mmb
 );
 
-/// Regression: a database opened with non-default ops-root policy (`split_root=false`,
-/// `Bagging::ForwardFold`) must yield a replica that agrees with the source on `root()` even
-/// after follow-on commits push `inactive_peaks` past zero.
-///
-/// Pre-fix, `qmdb::any::sync::build_db` hardcoded `split_root=true` and family-canonical bagging,
-/// and proof verification derived its root shape from that hardcoded policy rather than the
-/// caller's policy. As long as `inactive_peaks == 0` at sync time, committing a zero inactive
-/// boundary is byte-equivalent to the corresponding full root, so the mismatch was silent. Once
-/// subsequent commits grew the inactive prefix the source and replica would diverge.
+/// Regression: sync preserves caller-selected ops-root bagging after later commits make the
+/// inactivity floor visible in the root.
 #[commonware_macros::test_traced("WARN")]
 fn test_any_sync_preserves_non_default_policy() {
     use crate::{
@@ -3075,16 +3068,14 @@ fn test_any_sync_preserves_non_default_policy() {
 
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        // 1. Open the source with non-default policy and write one round of fresh keys. Keep
-        //    the workload small so `inactive_peaks == 0` at sync time and the engine's pre-fix
-        //    zero-inactive split root is byte-equivalent to the source's full-root proofs.
+        // Keep the initial workload small so the sync-time root has no inactive peaks.
         let source_cfg = config("src", &context);
         let mut source = Db::init(context.with_label("source"), source_cfg.clone())
             .await
             .unwrap();
         churn(&mut source, 0, 8).await;
 
-        // 2. Sync a replica.
+        // Sync a replica.
         let lower = source.sync_boundary();
         let upper = source.bounds().await.end;
         let sync_root = source.root();
@@ -3111,13 +3102,10 @@ fn test_any_sync_preserves_non_default_policy() {
         let mut source =
             Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("source still shared"));
 
-        // Roots must agree at sync completion (true even pre-fix because `inactive_peaks==0`
-        // makes split byte-equivalent to full).
+        // Roots must agree at sync completion.
         assert_eq!(replica.root(), source.root());
 
-        // 3. Drive many overwrite rounds on both sides. Re-writing the same keys retires old
-        //    ops and advances the inactivity floor far enough for `inactive_peaks` to grow
-        //    past zero.
+        // Drive enough overwrites for `inactive_peaks` to grow past zero.
         for version in 1..40u64 {
             churn(&mut source, version, 8).await;
             churn(&mut replica, version, 8).await;
@@ -3132,8 +3120,7 @@ fn test_any_sync_preserves_non_default_policy() {
             "test setup must drive inactive_peaks > 0",
         );
 
-        // 4. Source and replica must still agree. Pre-fix this assertion would fail because
-        //    the replica was rebuilt with `split_root=true` and the family-canonical bagging.
+        // Source and replica must still agree after the inactive boundary affects the root.
         assert_eq!(
             replica.root(),
             source.root(),

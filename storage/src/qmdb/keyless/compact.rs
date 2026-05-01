@@ -742,11 +742,8 @@ mod tests {
         });
     }
 
-    /// Regression: `to_batch()` must reflect the live in-memory state, not the lagging durable
-    /// serve-state cache. Compact dbs intentionally keep the serve-state cache behind unsynced
-    /// mutations, so a snapshot built without `sync()` / `commit()` between
-    /// `apply_batch()` and `to_batch()` previously bound its cached root to the stale serve
-    /// state.
+    /// Regression: `to_batch()` must snapshot the live in-memory state, not the durable serve
+    /// cache.
     #[test_traced("INFO")]
     fn test_compact_to_batch_reflects_live_state() {
         deterministic::Runner::default().start(|context| async move {
@@ -769,8 +766,7 @@ mod tests {
             ))
             .unwrap();
 
-            // Deliberately skip `sync()` / `commit()` so the durable serve-state cache lags the
-            // live merkle state.
+            // Leave the durable serve cache behind the live Merkle state.
             let live_root = db.root();
             assert_ne!(
                 live_root, pre_apply_root,

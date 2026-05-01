@@ -8,10 +8,7 @@ use core::ops::Range;
 /// Read-only interface for a merkleized data structure.
 ///
 /// This trait covers structural reads (size, leaves, retained nodes, pruning boundary). Proof
-/// construction is intentionally *not* part of the trait: every concrete implementation exposes
-/// inherent `proof` / `range_proof` methods that take an explicit `inactive_peaks` count and read
-/// the bagging policy from the supplied [`crate::merkle::hasher::Hasher`], so callers cannot
-/// accidentally pair a split root with a forward-fold proof from the same state.
+/// construction stays on concrete types because it depends on caller-selected bagging.
 pub trait Readable: Send + Sync {
     /// The Merkle family implemented by this structure.
     type Family: Family;

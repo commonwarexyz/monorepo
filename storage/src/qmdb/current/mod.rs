@@ -3641,9 +3641,7 @@ pub mod tests {
         });
     }
 
-    /// Regression: a `current::Db` over `mmb::Family` commits its ops root with full-forward
-    /// bagging, so `verify_proof` must be invoked with a forward hasher (not the family-default
-    /// backward hasher) to accept proofs returned by `ops_historical_proof`.
+    /// Regression: MMB current-db ops proofs verify against the full-forward ops root.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_full_forward_bagging() {
         use crate::{merkle::hasher::Standard, qmdb::verify_proof};

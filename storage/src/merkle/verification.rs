@@ -618,11 +618,8 @@ mod tests {
         });
     }
 
-    /// Pyramid-MMB deployments commit the canonical sync root with `split_backward(k)` for
-    /// `k > 0`: the oldest `k` peaks are forward-folded into the inactive prefix accumulator and
-    /// the active suffix is backward-folded. Exercises sub-range proof construction across
-    /// every sub-range of the active region and asserts that sub-ranges into the inactive
-    /// prefix are correctly rejected as unrecoverable.
+    /// Regression: ProofStore can derive sub-range proofs from a split-backward proof over the
+    /// active region, while rejecting ranges hidden in the folded inactive prefix.
     #[test_traced]
     fn test_verification_proof_store_with_backward_fold_inactive_prefix_mmb() {
         let executor = deterministic::Runner::default();
@@ -639,10 +636,7 @@ mod tests {
             };
             mmb.apply_batch(&batch).unwrap();
 
-            // Choose a non-zero inactive prefix and locate the first active leaf as the sum of
-            // the leading peaks' leaf capacities. The proven range covers the entire active
-            // region so the inactive prefix is forward-folded into the prefix accumulator and
-            // any subsequent backward-fold suffix is empty (no peaks past the proven range).
+            // Prove the entire active region so the inactive prefix is folded and no suffix remains.
             let inactive_peaks = 2;
             let active_start: u64 = crate::mmb::Family::peaks(mmb.size())
                 .take(inactive_peaks)
@@ -692,14 +686,8 @@ mod tests {
         });
     }
 
-    /// Backward-folded `BackwardFold` proofs collapse the active suffix peaks into a synthetic
-    /// accumulator. `multi_proof()` over a covered location must distinguish "needed digest is
-    /// hidden behind that accumulator" from "needed digest is genuinely pruned" so callers know
-    /// the witness is recoverable. Validates three cases:
-    /// 1. A multi-proof built directly from the source structure (full witness) verifies.
-    /// 2. A multi-proof derived from a backward-folded `ProofStore` returns `CompressedDigest`
-    ///    (not `ElementPruned`) when suffix peak digests aren't supplied.
-    /// 3. Supplying the missing suffix peaks via `peaks` unblocks verification.
+    /// Regression: ProofStore reports suffix peaks hidden behind a backward-fold accumulator as
+    /// recoverable compressed digests, not genuinely pruned nodes.
     #[test_traced]
     fn test_verification_proof_store_multi_proof_backward_fold_suffix_peaks() {
         let executor = deterministic::Runner::default();
@@ -725,7 +713,7 @@ mod tests {
                 .map(|&loc| (elements[*loc as usize], loc))
                 .collect();
 
-            // Case 1: multi-proof built from the source structure with the full witness verifies.
+            // Direct multi-proof with the full witness verifies.
             let direct = multi_proof(&mmb, inactive_peaks, Bagging::BackwardFold, &target)
                 .await
                 .unwrap();
@@ -754,8 +742,7 @@ mod tests {
                 "backward-folded proof over a partial range should have hidden suffix peaks"
             );
 
-            // Case 2: without the missing peaks, multi_proof reports them as
-            // CompressedDigest (recoverable) rather than ElementPruned (data lost).
+            // Missing hidden peaks are recoverable compressed digests.
             let result = proof_store.multi_proof(&target, &[]);
             assert!(
                 !matches!(result, Err(Error::ElementPruned(_))),
@@ -770,8 +757,7 @@ mod tests {
                 "{missing_pos:?} should be one of {hidden:?}"
             );
 
-            // Case 3: supplying every hidden peak via the `peaks` slice produces a verifying
-            // multi-proof.
+            // Supplying every hidden peak produces a verifying multi-proof.
             let peaks: Vec<(_, _)> = hidden
                 .iter()
                 .map(|&pos| (pos, mmb.get_node(pos).unwrap()))

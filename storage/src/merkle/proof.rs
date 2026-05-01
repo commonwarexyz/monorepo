@@ -53,13 +53,10 @@ pub enum ReconstructionError {
 /// 4. The sibling digests needed to reconstruct each range-peak digest from the proven elements,
 ///    in depth-first (forward consumption) order for each range peak.
 ///
-/// Multi-proofs use a different layout: `digests` contains the sorted set of node digests required
-/// by the requested `inactive_peaks` and bagging policy, including individual prefix peak digests
-/// rather than a folded prefix accumulator. This layout is intentionally position-keyed: every
-/// multi-proof digest corresponds to a concrete Merkle node position. For `BackwardFold`, this may
-/// include active suffix peaks that a single range proof could collapse into a smaller synthetic
-/// suffix accumulator. We keep the extra active peaks so multi-proofs and proof stores can stay
-/// simple and derive witnesses from positions alone.
+/// Multi-proofs use a different, position-keyed layout: `digests` contains the sorted set of node
+/// digests required by the requested `inactive_peaks` and bagging policy. For `BackwardFold`, this
+/// may include active suffix peaks that a single range proof could collapse into a synthetic suffix
+/// accumulator.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<F: Family, D: Digest> {
     /// The total number of leaves in the data structure. For MMR proofs, this is the number of

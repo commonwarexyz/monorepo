@@ -146,8 +146,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 /// A single `Standard<H>` implements `Hasher<F>` for every Merkle family `F`, so
 /// one instance can be used with MMR, MMB, or any future family.
 ///
-/// The `bagging` field selects how peaks are folded into the root; pick at construction time and
-/// keep the same hasher for the lifetime of any structure or proof that depends on root identity.
+/// The `bagging` field selects how peaks are folded into the root.
 #[derive(Clone)]
 pub struct Standard<H: CHasher> {
     _hasher: PhantomData<H>,
@@ -211,9 +210,6 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     }
 }
 
-// This intentionally forwards only `hash` and `root_bagging`: the default `Hasher` methods are all
-// expressed in terms of `hash`. If a future hasher specializes other methods, forward those here as
-// well.
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     type Digest = T::Digest;
 

@@ -311,12 +311,7 @@ where
     Ok(())
 }
 
-// Shared hook for persisting and reloading the current servable witness for compact immutable and
-// keyless databases.
-//
-// This trait is intentionally narrow. It is not trying to abstract "all compact databases"; it
-// only centralizes the small amount of logic needed to capture, cache, persist, and restore the
-// authenticated tip witness that compact sync serves.
+// Shared hook for persisting and reloading the authenticated tip witness served by compact sync.
 pub(crate) trait WitnessSource<F, E, H, S = Sequential>
 where
     F: Family,
