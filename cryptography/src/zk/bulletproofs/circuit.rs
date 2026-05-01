@@ -55,7 +55,7 @@
 //! #         ipa,
 //! #     },
 //! # };
-//! # use commonware_math::algebra::{CryptoGroup, Random, Ring};
+//! # use commonware_math::algebra::{Additive, CryptoGroup, Random, Ring};
 //! # use commonware_parallel::Sequential;
 //! # use commonware_utils::test_rng;
 //! # type F = Scalar;
@@ -1368,7 +1368,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         })
         .collect::<Vec<_>>();
     g_x.extend_from_slice(&omega_minus_y[circuit.internal_vars..]);
-    let witness = ipa::Witness::new(f_x.into_iter().zip(g_x.into_iter()))?;
+    let witness = ipa::Witness::new(f_x.into_iter().zip(g_x))?;
     let ipa_proof = ipa::prove(transcript, &setup.ipa, &ipa_claim, witness, strategy)?;
     Some(Proof {
         m_big,

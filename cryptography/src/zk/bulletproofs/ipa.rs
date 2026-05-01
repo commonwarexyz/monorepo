@@ -74,7 +74,7 @@
 //! #     transcript::Transcript,
 //! #     zk::bulletproofs::ipa::{prove, verify, Setup, Witness},
 //! # };
-//! # use commonware_math::algebra::CryptoGroup;
+//! # use commonware_math::algebra::{Additive, CryptoGroup, Ring};
 //! # use commonware_parallel::Sequential;
 //! # type F = Scalar;
 //! # type G = G1;

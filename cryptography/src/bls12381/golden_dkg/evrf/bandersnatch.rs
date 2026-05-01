@@ -249,7 +249,7 @@ impl Debug for G {
         write!(
             f,
             "bandersnatch::G({})",
-            commonware_utils::hex(&self.to_bytes())
+            commonware_formatting::hex(&self.to_bytes())
         )
     }
 }
@@ -621,7 +621,7 @@ mod tests {
             let padded = internal.next_power_of_two();
             eprintln!(
                 "receivers={n:2} internal_vars={internal} padded={padded} (per_receiver={})",
-                if n == 0 { 0 } else { internal / n },
+                internal.checked_div(n).unwrap_or_default()
             );
         }
     }
