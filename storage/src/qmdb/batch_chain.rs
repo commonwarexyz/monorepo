@@ -186,7 +186,7 @@ mod tests {
     struct TestBatch {
         id: u8,
         bounds: Bounds<F>,
-        parent: Option<Weak<TestBatch>>,
+        parent: Option<Weak<Self>>,
     }
 
     const fn loc(n: u64) -> Location<F> {
