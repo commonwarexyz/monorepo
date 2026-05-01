@@ -6,8 +6,9 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::{CryptoGroup, Random};
-use commonware_utils::{hex, ordered::Map, union_unique, Array, Span, TryCollect};
+use commonware_utils::{ordered::Map, union_unique, Array, Span, TryCollect};
 use core::{
     fmt::{Debug, Display},
     hash::Hash,
@@ -223,13 +224,13 @@ impl Deref for PublicKey {
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(self))
+        write!(f, "{}", Hex(&**self))
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(self))
+        write!(f, "{}", Hex(&**self))
     }
 }
 
