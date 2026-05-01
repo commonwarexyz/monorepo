@@ -131,7 +131,13 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))
+    let floor = floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))?;
+    if floor > Location::new(last_op) {
+        return Err(Error::DataCorrupted(
+            "inactivity floor exceeds commit location",
+        ));
+    }
+    Ok(floor)
 }
 
 /// Compute the inactive peak count for a historical operation count.

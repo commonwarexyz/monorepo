@@ -140,14 +140,6 @@ mod tests {
         Standard::new()
     }
 
-    fn qmdb_root<F: Family + Bagging>(
-        merkle: &Mem<F, Digest>,
-        hasher: &Standard<Sha256>,
-        inactive_peaks: usize,
-    ) -> Digest {
-        merkle.root(hasher, inactive_peaks).unwrap()
-    }
-
     fn qmdb_range_proof<F: Family + Bagging>(
         hasher: &Standard<Sha256>,
         merkle: &Mem<F, Digest>,
@@ -182,7 +174,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Generate proof for all operations
         let proof = qmdb_range_proof(
@@ -255,7 +247,7 @@ mod tests {
             merkle.apply_batch(&batch).unwrap();
         }
         let start_loc = Location::<F>::new(5u64);
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
         let proof = qmdb_range_proof(
             &hasher,
             &merkle,
@@ -303,7 +295,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
         let range = Location::<F>::new(1)..Location::<F>::new(4);
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
@@ -359,7 +351,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
         let range = Location::<F>::new(0)..Location::<F>::new(3);
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
@@ -457,7 +449,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Create proof for full range
         let proof = qmdb_range_proof(
@@ -523,7 +515,7 @@ mod tests {
             merkle.apply_batch(&batch).unwrap();
         }
         let inactive_peaks = 1;
-        let root = qmdb_root(&merkle, &hasher, inactive_peaks);
+        let root = merkle.root(&hasher, inactive_peaks).unwrap();
 
         // Proof store starts at 32, so the first peak is folded into the proof prefix.
         let range = Location::<F>::new(32)..Location::<F>::new(49);
@@ -653,7 +645,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Generate multi-proof via range proof -> proof store -> multi-proof
         let target_locations = vec![
@@ -721,7 +713,7 @@ mod tests {
     fn multi_proof_empty_inner<F: Family + Bagging>() {
         let hasher = test_hasher();
         let empty_merkle = Mem::<F, Digest>::new();
-        let empty_root = qmdb_root(&empty_merkle, &hasher, 0);
+        let empty_root = empty_merkle.root(&hasher, 0).unwrap();
 
         // Empty proof should verify against an empty merkle structure.
         let empty_proof = Proof::default();
@@ -743,7 +735,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
         let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
             create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
@@ -780,7 +772,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = qmdb_root(&merkle, &hasher, 0);
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Create proof store for all elements
         let proof = qmdb_range_proof(

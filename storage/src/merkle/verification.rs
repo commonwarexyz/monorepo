@@ -273,8 +273,9 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     }
 }
 
-/// Return a range proof for the nodes corresponding to the given location range, using `spec`
-/// to determine peak bagging.
+/// Return a range proof for the nodes corresponding to the given location range.
+///
+/// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
 ///
 /// # Errors
 ///
@@ -345,8 +346,10 @@ pub async fn historical_range_proof<
     )
 }
 
-/// Return an inclusion proof for the elements at the specified locations using `spec`. This is
-/// analogous to range_proof but supports non-contiguous locations.
+/// Return an inclusion proof for the elements at the specified locations. This is analogous to
+/// range_proof but supports non-contiguous locations.
+///
+/// The proof commits to `inactive_peaks`; peak bagging is supplied by `bagging`.
 ///
 /// The order of positions does not affect the output (sorted internally).
 ///

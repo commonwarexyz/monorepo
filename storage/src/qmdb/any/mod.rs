@@ -847,7 +847,7 @@ pub(crate) mod test {
 
         // Apply two single-write batches and capture the commit-boundary size after the
         // first batch. `historical_proof` requires the historical size to land on a commit
-        // boundary when the db uses a split-root spec.
+        // boundary when the db commits to an inactive peak boundary.
         let mut historical_op_count = Location::new(0);
         for i in 0u64..2 {
             let k = Sha256::hash(&i.to_be_bytes());
@@ -987,7 +987,7 @@ pub(crate) mod test {
 
         // Apply a sequence of single-write batches and record the commit-boundary size
         // reached after each. `historical_proof` requires the historical size to be a
-        // commit boundary when the db uses a split-root spec, so we anchor each test on
+        // commit boundary when the db commits to an inactive peak boundary, so we anchor each test on
         // one of the boundaries we recorded here rather than hardcoding sizes that depend
         // on internal floor-raising behavior.
         let initial_size = db.bounds().await.end;

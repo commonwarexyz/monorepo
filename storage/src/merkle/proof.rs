@@ -54,12 +54,12 @@ pub enum ReconstructionError {
 ///    in depth-first (forward consumption) order for each range peak.
 ///
 /// Multi-proofs use a different layout: `digests` contains the sorted set of node digests required
-/// by the selected root spec, including individual prefix peak digests rather than a folded prefix
-/// accumulator. This layout is intentionally position-keyed: every multi-proof digest corresponds
-/// to a concrete Merkle node position. For `BackwardFold`, this may include active suffix peaks that
-/// a single range proof could collapse into a smaller synthetic suffix accumulator. We keep the
-/// extra active peaks so multi-proofs and proof stores can stay simple and derive witnesses from
-/// positions alone.
+/// by the requested `inactive_peaks` and bagging policy, including individual prefix peak digests
+/// rather than a folded prefix accumulator. This layout is intentionally position-keyed: every
+/// multi-proof digest corresponds to a concrete Merkle node position. For `BackwardFold`, this may
+/// include active suffix peaks that a single range proof could collapse into a smaller synthetic
+/// suffix accumulator. We keep the extra active peaks so multi-proofs and proof stores can stay
+/// simple and derive witnesses from positions alone.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<F: Family, D: Digest> {
     /// The total number of leaves in the data structure. For MMR proofs, this is the number of
@@ -68,10 +68,6 @@ pub struct Proof<F: Family, D: Digest> {
     /// of bits in the bitmap within this field.
     pub leaves: Location<F>,
     /// The number of inactive peaks in the structure when this proof was generated.
-    ///
-    /// This value is committed into inactive-prefix roots, so mutating it invalidates the proof.
-    /// Public verification methods reject any nonzero value to force callers through a
-    /// policy-aware path that supplies the structure's canonical bagging policy.
     pub inactive_peaks: usize,
     /// The digests necessary for proving inclusion.
     pub digests: Vec<D>,
@@ -175,7 +171,11 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Returns true if this proof's `inactive_peaks` field matches the canonical value derived
     /// from `size` and `inactivity_floor`.
-    pub fn matches_canonical_spec(&self, size: Position<F>, inactivity_floor: Location<F>) -> bool {
+    pub fn matches_canonical_inactive_peaks(
+        &self,
+        size: Position<F>,
+        inactivity_floor: Location<F>,
+    ) -> bool {
         self.inactive_peaks == F::inactive_peaks(size, inactivity_floor)
     }
 
@@ -343,7 +343,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         Ok(collected_digests)
     }
 
-    /// Verify this proof and the pinned nodes against `root` using `spec`.
+    /// Verify this proof and the pinned nodes against `root`.
+    ///
+    /// The proof's `inactive_peaks` field commits to the split boundary; peak bagging is selected
+    /// by `hasher`.
     ///
     /// The `pinned_nodes` are the peak digests of the sub-structure at `start_loc`, in the order
     /// returned by `Family::nodes_to_pin`. The proof authenticates the prefix `[0, start_loc)` via:
@@ -1171,24 +1174,24 @@ mod tests {
         Standard::with_bagging(bagging)
     }
 
-    fn push_unique_spec(specs: &mut Vec<(Bagging, usize)>, spec: (Bagging, usize)) {
-        if !specs.contains(&spec) {
-            specs.push(spec);
+    fn push_unique_shape(shapes: &mut Vec<(Bagging, usize)>, shape: (Bagging, usize)) {
+        if !shapes.contains(&shape) {
+            shapes.push(shape);
         }
     }
 
-    fn supported_root_specs<F: Family>(leaves: Location<F>) -> Vec<(Bagging, usize)> {
+    fn supported_root_shapes<F: Family>(leaves: Location<F>) -> Vec<(Bagging, usize)> {
         let peak_count = F::peaks(F::location_to_position(leaves)).count();
-        let mut specs = Vec::new();
+        let mut shapes = Vec::new();
 
-        push_unique_spec(&mut specs, (Bagging::ForwardFold, 0));
-        push_unique_spec(&mut specs, (Bagging::BackwardFold, 0));
+        push_unique_shape(&mut shapes, (Bagging::ForwardFold, 0));
+        push_unique_shape(&mut shapes, (Bagging::BackwardFold, 0));
         for inactive_peaks in 0..=peak_count {
-            push_unique_spec(&mut specs, (Bagging::ForwardFold, inactive_peaks));
-            push_unique_spec(&mut specs, (Bagging::BackwardFold, inactive_peaks));
+            push_unique_shape(&mut shapes, (Bagging::ForwardFold, inactive_peaks));
+            push_unique_shape(&mut shapes, (Bagging::BackwardFold, inactive_peaks));
         }
 
-        specs
+        shapes
     }
 
     fn inactive_leaf_floor<F: Family>(leaves: Location<F>, inactive_peaks: usize) -> u64 {
@@ -1198,7 +1201,7 @@ mod tests {
             .sum()
     }
 
-    fn active_start_for_spec<F: Family>(
+    fn active_start_for_shape<F: Family>(
         leaves: Location<F>,
         inactive_peaks: usize,
         width: u64,
@@ -1210,13 +1213,13 @@ mod tests {
         Location::new(*leaves - width)
     }
 
-    fn range_proofs_verify_for_supported_root_specs<F: Family>() {
+    fn range_proofs_verify_for_supported_root_shapes<F: Family>() {
         let mem = build_raw::<F>(&H::new(), 123);
         let leaves = mem.leaves();
 
-        for (bagging, inactive_peaks) in supported_root_specs::<F>(leaves) {
+        for (bagging, inactive_peaks) in supported_root_shapes::<F>(leaves) {
             let hasher = hasher_for_bagging(bagging);
-            let range_start = active_start_for_spec::<F>(leaves, inactive_peaks, 3);
+            let range_start = active_start_for_shape::<F>(leaves, inactive_peaks, 3);
             let range = range_start..range_start + 3;
             let root = mem.root(&hasher, inactive_peaks).unwrap();
             let elements: Vec<_> = (*range.start..*range.end)
@@ -1257,13 +1260,13 @@ mod tests {
         }
     }
 
-    fn multi_proofs_verify_for_supported_root_specs<F: Family>() {
+    fn multi_proofs_verify_for_supported_root_shapes<F: Family>() {
         let mem = build_raw::<F>(&H::new(), 123);
         let leaves = mem.leaves();
 
-        for (bagging, inactive_peaks) in supported_root_specs::<F>(leaves) {
+        for (bagging, inactive_peaks) in supported_root_shapes::<F>(leaves) {
             let hasher = hasher_for_bagging(bagging);
-            let first = active_start_for_spec::<F>(leaves, inactive_peaks, 12);
+            let first = active_start_for_shape::<F>(leaves, inactive_peaks, 12);
             let locations = [first, first + 5, first + 11];
             let nodes = nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, &locations)
                 .expect("test locations valid");
@@ -1358,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn full_backward_root_spec_proves_like_split_zero() {
+    fn full_backward_root_proves_like_split_zero() {
         let hasher: H = Standard::backward();
         let mem = build_raw::<mmb::Family>(&hasher, 123);
         let range = Location::new(2)..Location::new(3);
@@ -1403,7 +1406,7 @@ mod tests {
             &full_backward_root,
         ));
 
-        // Split { inactive_peaks: 0 } is byte-identical to Full when inactive_peaks == 0.
+        // A zero inactive boundary is byte-identical to the corresponding full root.
         let split_root_value = mem.root(&hasher, 0).unwrap();
         assert_eq!(full_backward_root, split_root_value);
         let split_proof: Result<Proof<mmb::Family, D>, Error<mmb::Family>> = build_range_proof(
@@ -2549,12 +2552,12 @@ mod tests {
         range_proof_reconstruction::<mmr::Family>();
     }
     #[test]
-    fn mmr_range_proofs_verify_for_supported_root_specs() {
-        range_proofs_verify_for_supported_root_specs::<mmr::Family>();
+    fn mmr_range_proofs_verify_for_supported_root_shapes() {
+        range_proofs_verify_for_supported_root_shapes::<mmr::Family>();
     }
     #[test]
-    fn mmr_multi_proofs_verify_for_supported_root_specs() {
-        multi_proofs_verify_for_supported_root_specs::<mmr::Family>();
+    fn mmr_multi_proofs_verify_for_supported_root_shapes() {
+        multi_proofs_verify_for_supported_root_shapes::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_element_inclusion() {
@@ -2642,12 +2645,12 @@ mod tests {
         range_proof_reconstruction::<mmb::Family>();
     }
     #[test]
-    fn mmb_range_proofs_verify_for_supported_root_specs() {
-        range_proofs_verify_for_supported_root_specs::<mmb::Family>();
+    fn mmb_range_proofs_verify_for_supported_root_shapes() {
+        range_proofs_verify_for_supported_root_shapes::<mmb::Family>();
     }
     #[test]
-    fn mmb_multi_proofs_verify_for_supported_root_specs() {
-        multi_proofs_verify_for_supported_root_specs::<mmb::Family>();
+    fn mmb_multi_proofs_verify_for_supported_root_shapes() {
+        multi_proofs_verify_for_supported_root_shapes::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_element_inclusion() {

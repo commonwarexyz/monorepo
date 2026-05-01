@@ -3027,10 +3027,10 @@ sync_tests_for_harness!(
 /// after follow-on commits push `inactive_peaks` past zero.
 ///
 /// Pre-fix, `qmdb::any::sync::build_db` hardcoded `split_root=true` and family-canonical bagging,
-/// and `proof_spec` derived the spec from `...` rather than the caller's policy. As
-/// long as `inactive_peaks==0` at sync time, `Split { inactive_peaks: 0, .. }` is byte-equivalent
-/// to the corresponding `Full { .. }` root, so the mismatch was silent. Once subsequent commits
-/// grew the inactive prefix the source and replica would diverge.
+/// and proof verification derived its root shape from that hardcoded policy rather than the
+/// caller's policy. As long as `inactive_peaks == 0` at sync time, committing a zero inactive
+/// boundary is byte-equivalent to the corresponding full root, so the mismatch was silent. Once
+/// subsequent commits grew the inactive prefix the source and replica would diverge.
 #[commonware_macros::test_traced("WARN")]
 fn test_any_sync_preserves_non_default_policy() {
     use crate::{
@@ -3077,7 +3077,7 @@ fn test_any_sync_preserves_non_default_policy() {
     executor.start(|mut context| async move {
         // 1. Open the source with non-default policy and write one round of fresh keys. Keep
         //    the workload small so `inactive_peaks == 0` at sync time and the engine's pre-fix
-        //    `Split { 0, .. }` spec is byte-equivalent to the source's `Full { .. }` proofs.
+        //    zero-inactive split root is byte-equivalent to the source's full-root proofs.
         let source_cfg = config("src", &context);
         let mut source = Db::init(context.with_label("source"), source_cfg.clone())
             .await

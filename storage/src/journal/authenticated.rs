@@ -95,14 +95,21 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
 
     /// Merkleize the batch.
     /// `base` provides committed node data as fallback during hash computation.
-    pub fn merkleize(mut self, base: &Mem<F, H::Digest>) -> MerkleizedBatchArc<F, H, Item, S> {
-        let items = Arc::new(core::mem::take(&mut self.items));
-        let merkle = self.inner.merkleize(base, &self.hasher);
-        let ancestor_items = Self::collect_ancestor_items(&self.parent);
+    pub fn merkleize(self, base: &Mem<F, H::Digest>) -> MerkleizedBatchArc<F, H, Item, S> {
+        let Self {
+            inner,
+            hasher,
+            items,
+            parent,
+        } = self;
+
+        let items = Arc::new(items);
+        let merkle = inner.merkleize(base, &hasher);
+        let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
             items,
-            parent: self.parent.as_ref().map(Arc::downgrade),
+            parent: parent.as_ref().map(Arc::downgrade),
             ancestor_items,
         })
     }
@@ -593,7 +600,7 @@ where
     }
 
     /// Generate a historical proof with respect to the state of the Merkle structure when it had
-    /// `historical_leaves` leaves, using `spec` to determine peak bagging.
+    /// `historical_leaves` leaves.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
     /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.

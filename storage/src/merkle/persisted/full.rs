@@ -243,7 +243,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
     /// Read-only peek at the persisted structure's root and boundaries.
     ///
-    /// The root spec must match the spec used by the caller for the persisted structure.
+    /// `inactive_peaks` and `hasher.root_bagging()` must match the root shape expected by the
+    /// caller for the persisted structure.
     ///
     /// Returns `Ok(None)` when:
     /// - Journal size is structurally invalid and would require a rewind (i.e.
@@ -994,7 +995,9 @@ impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
 
 impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
-    /// state with `leaves` leaves, using `spec` to determine peak bagging.
+    /// state with `leaves` leaves.
+    ///
+    /// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
     ///
     /// # Errors
     ///
@@ -1019,7 +1022,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     }
 
     /// Return an inclusion proof for the elements in `range` against a historical state with
-    /// `leaves` leaves, using `spec` to determine peak bagging.
+    /// `leaves` leaves.
+    ///
+    /// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
     ///
     /// # Errors
     ///
@@ -1050,7 +1055,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     }
 
     /// Return an inclusion proof for the element at the location `loc` that can be verified against
-    /// the current root, using `spec` to determine peak bagging.
+    /// the current root.
+    ///
+    /// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
     ///
     /// Unlike the in-memory `Mem::proof`, this async method can read from the backing journal for
     /// nodes that have been synced out of memory.
@@ -1074,8 +1081,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         self.range_proof(hasher, loc..loc + 1, inactive_peaks).await
     }
 
-    /// Return an inclusion proof for the elements within the specified location range, using
-    /// `spec` to determine peak bagging.
+    /// Return an inclusion proof for the elements within the specified location range.
+    ///
+    /// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
     ///
     /// Unlike the in-memory `Mem::range_proof`, this async method can read from the backing
     /// journal for nodes that have been synced out of memory.

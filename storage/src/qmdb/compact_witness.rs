@@ -227,7 +227,8 @@ where
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
 
-    // Decode the commit op to get the inactivity floor, which is needed to compute the root spec.
+    // Decode the commit op to get the inactivity floor, which determines the inactive peak
+    // boundary used for root computation.
     let last_commit_loc = Location::new(*leaf_count - 1);
     let (last_commit_metadata, inactivity_floor_loc) =
         decode_commit_op(commit_op_bytes.as_ref(), commit_codec_config)?;

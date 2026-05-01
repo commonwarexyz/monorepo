@@ -340,8 +340,8 @@ where
     ///
     /// When this database is configured with `split_root: true`, `historical_size` must be a
     /// commit-boundary size: the operation at `historical_size - 1` must itself be a commit
-    /// op declaring the governing inactivity floor. With `split_root: false` the spec does
-    /// not depend on the floor and any retained `historical_size` works.
+    /// op declaring the governing inactivity floor. With `split_root: false`, historical proof
+    /// roots do not depend on the floor and any retained `historical_size` works.
     ///
     /// # Errors
     ///

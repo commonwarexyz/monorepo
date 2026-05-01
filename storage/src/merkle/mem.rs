@@ -264,7 +264,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
         self.pruning_boundary = pos;
     }
 
-    /// Return an inclusion proof for the element at location `loc` using an explicit root spec.
+    /// Return an inclusion proof for the element at location `loc`.
+    ///
+    /// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
     ///
     /// # Errors
     ///
@@ -287,8 +289,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
             })
     }
 
-    /// Return an inclusion proof for all elements within the provided `range` of locations
-    /// using an explicit root spec.
+    /// Return an inclusion proof for all elements within the provided `range` of locations.
+    ///
+    /// The proof commits to `inactive_peaks`; peak bagging is selected by `hasher`.
     ///
     /// # Errors
     ///
@@ -1149,7 +1152,7 @@ mod tests {
         );
     }
 
-    fn split_root_spec_matches_recompute<F: Family>() {
+    fn split_root_matches_recompute<F: Family>() {
         let hasher: H = Standard::new();
         let plain = build::<F>(&hasher, 49);
         let inactive_peaks = 1;
@@ -1263,8 +1266,8 @@ mod tests {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
     #[test]
-    fn mmr_split_root_spec_matches_recompute() {
-        split_root_spec_matches_recompute::<crate::mmr::Family>();
+    fn mmr_split_root_matches_recompute() {
+        split_root_matches_recompute::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -1362,7 +1365,7 @@ mod tests {
         apply_batch_overwrite_only_ancestor::<crate::mmb::Family>();
     }
     #[test]
-    fn mmb_split_root_spec_matches_recompute() {
-        split_root_spec_matches_recompute::<crate::mmb::Family>();
+    fn mmb_split_root_matches_recompute() {
+        split_root_matches_recompute::<crate::mmb::Family>();
     }
 }
