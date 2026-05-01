@@ -199,6 +199,24 @@ where
     S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
 {
+    let byzantine: HashSet<usize> = (0..faults).collect();
+    check_vote_invariants_with_byzantine(&byzantine, reporters);
+}
+
+/// Like [`check_vote_invariants`], but accepts an explicit set of Byzantine
+/// participant indices instead of assuming a positional `0..faults` prefix.
+///
+/// Used by twins-style harnesses where the compromised set is sampled by the
+/// scenario generator and may occupy arbitrary indices.
+pub fn check_vote_invariants_with_byzantine<E, S, L>(
+    byzantine: &HashSet<usize>,
+    reporters: &[Reporter<E, S, L, Sha256Digest>],
+) where
+    E: CryptoRngCore,
+    S: Scheme<Sha256Digest>,
+    S::PublicKey: Eq + Hash + Clone,
+    L: Elector<S>,
+{
     // Invariant: no_vote_equivocation
     // A correct node cannot both nullify and finalize in the same view.
     // Aggregate across all reporters to get a global view of who sent what.
@@ -212,7 +230,7 @@ where
                 if reporter
                     .participants
                     .index(pk)
-                    .is_some_and(|idx| usize::from(idx) >= faults)
+                    .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
                 {
                     entry.insert(pk.clone());
                 }
@@ -231,7 +249,7 @@ where
                     if reporter
                         .participants
                         .index(pk)
-                        .is_some_and(|idx| usize::from(idx) >= faults)
+                        .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
                     {
                         entry.insert(pk.clone());
                     }

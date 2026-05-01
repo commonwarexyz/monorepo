@@ -1,5 +1,5 @@
 //! Helpers for preferential delivery of Byzantine messages in fuzz tests emulating
-//! an adversarial network.
+//! a faulty messaging layer (`FuzzMode::FaultyMessaging`).
 //!
 //! This module provides a simple wrapper around the simulated p2p receiver split
 //! functionality.
@@ -26,10 +26,21 @@ use std::{
     sync::Arc,
 };
 
-/// A filtering split-router that routes messages by origin public key.
+/// Shared cell holding the currently-active honest-message drop rate (0..=90).
+/// Updated by the `FaultyMessaging` scheduler on view boundaries; read on every
+/// routing decision via [`Router::route`].
+pub type DropRateCell = Arc<Mutex<u8>>;
+
+/// Construct a fresh drop-rate cell initialized to 0 (no drop).
+pub fn drop_rate_cell() -> DropRateCell {
+    Arc::new(Mutex::new(0))
+}
+
+/// A filtering split-router that routes messages by origin public key, with a
+/// shared cell controlling the per-view honest-message drop rate.
 pub struct Router<P: PublicKey, E: CryptoRngCore + Send + 'static> {
     byzantine: Arc<HashSet<P>>,
-    honest_messages_drop_ratio: u8,
+    drop_rate: DropRateCell,
     context: Arc<Mutex<E>>,
 }
 
@@ -37,11 +48,11 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
     pub fn new(
         context: E,
         byzantine: impl IntoIterator<Item = P>,
-        honest_messages_drop_ratio: u8,
+        drop_rate: DropRateCell,
     ) -> Self {
         Self {
             byzantine: Arc::new(byzantine.into_iter().collect()),
-            honest_messages_drop_ratio: honest_messages_drop_ratio.min(90),
+            drop_rate,
             context: Arc::new(Mutex::new(context)),
         }
     }
@@ -52,17 +63,18 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
         if self.byzantine.contains(sender) {
             SplitTarget::Primary
         } else {
-            if self.honest_messages_drop_ratio > 0 && self.should_drop_honest_message() {
+            let rate = (*self.drop_rate.lock()).min(90);
+            if rate > 0 && self.should_drop_honest_message(rate) {
                 return SplitTarget::None;
             }
             SplitTarget::Secondary
         }
     }
 
-    fn should_drop_honest_message(&self) -> bool {
+    fn should_drop_honest_message(&self, rate: u8) -> bool {
         let mut context = self.context.lock();
         let sample = context.gen::<u8>() % 100;
-        sample < self.honest_messages_drop_ratio
+        sample < rate
     }
 }
 
@@ -70,7 +82,7 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Clone for Router<P, E> {
     fn clone(&self) -> Self {
         Self {
             byzantine: self.byzantine.clone(),
-            honest_messages_drop_ratio: self.honest_messages_drop_ratio,
+            drop_rate: self.drop_rate.clone(),
             context: self.context.clone(),
         }
     }

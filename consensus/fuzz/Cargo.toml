@@ -84,8 +84,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_adv"
-path = "fuzz_targets/simplex_ed25519_adv.rs"
+name = "simplex_ed25519_msg"
+path = "fuzz_targets/simplex_ed25519_msg.rs"
 test = false
 doc = false
 bench = false
@@ -168,8 +168,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_secp256r1_adv"
-path = "fuzz_targets/simplex_secp256r1_adv.rs"
+name = "simplex_secp256r1_msg"
+path = "fuzz_targets/simplex_secp256r1_msg.rs"
 test = false
 doc = false
 bench = false
@@ -252,8 +252,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_cert_mock_adv"
-path = "fuzz_targets/simplex_cert_mock_adv.rs"
+name = "simplex_cert_mock_msg"
+path = "fuzz_targets/simplex_cert_mock_msg.rs"
 test = false
 doc = false
 bench = false
@@ -266,8 +266,50 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_msg"
+path = "fuzz_targets/simplex_id_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_faulty_net"
+path = "fuzz_targets/simplex_id_faulty_net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_cert_mock"
 path = "fuzz_targets/simplex_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_faulty_net"
+path = "fuzz_targets/simplex_cert_mock_faulty_net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_faulty_net"
+path = "fuzz_targets/simplex_ed25519_faulty_net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_twins_campaign"
+path = "fuzz_targets/simplex_ed25519_twins_campaign.rs"
 test = false
 doc = false
 bench = false

@@ -366,8 +366,12 @@ impl certificate::Scheme for Scheme {
         M: Faults,
     {
         let mut entries = Vec::new();
+        let mut seen = HashSet::new();
         for Attestation { signer, signature } in attestations {
             if usize::from(signer) >= self.participants.len() {
+                return None;
+            }
+            if !seen.insert(signer) {
                 return None;
             }
             let signature = signature.get().cloned()?;
