@@ -29,7 +29,7 @@ impl Label {
             name,
             kind: Kind::Task,
             execution: match execution {
-                crate::Execution::Dedicated => Execution::Dedicated,
+                crate::Execution::Dedicated(_) => Execution::Dedicated,
                 crate::Execution::Shared(blocking) => {
                     if blocking {
                         Execution::SharedBlocking

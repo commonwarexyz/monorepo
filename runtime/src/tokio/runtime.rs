@@ -41,7 +41,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::Arc,
+    sync::{mpsc, Arc},
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -559,7 +559,12 @@ impl Context {
 
 impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+        self.execution = Execution::Dedicated(None);
+        self
+    }
+
+    fn pinned(mut self, cpu: usize) -> Self {
+        self.execution = Execution::Dedicated(Some(cpu));
         self
     }
 
@@ -579,7 +584,7 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let past = self.execution;
+        let execution = self.execution;
         let traced = self.traced;
         self.execution = Execution::default();
         self.traced = false;
@@ -607,24 +612,20 @@ impl crate::Spawner for Context {
             Arc::clone(&parent),
         );
 
-        if matches!(past, Execution::Dedicated) {
-            utils::thread::spawn(executor.thread_stack_size, {
-                // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
-                move || {
-                    handle.block_on(f);
-                }
-            });
-        } else if matches!(past, Execution::Shared(true)) {
-            executor.runtime.spawn_blocking({
-                // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
-                move || {
-                    handle.block_on(f);
-                }
-            });
-        } else {
-            executor.runtime.spawn(f);
+        match execution {
+            Execution::Dedicated(cpu) => spawn_dedicated(&executor, &handle, cpu, f),
+            Execution::Shared(true) => {
+                executor.runtime.spawn_blocking({
+                    // Ensure the task can access the tokio runtime
+                    let handle = executor.runtime.handle().clone();
+                    move || {
+                        handle.block_on(f);
+                    }
+                });
+            }
+            Execution::Shared(false) => {
+                executor.runtime.spawn(f);
+            }
         }
 
         // Register the task on the parent
@@ -846,6 +847,67 @@ impl crate::BufferPooler for Context {
 
     fn storage_buffer_pool(&self) -> &BufferPool {
         &self.storage_buffer_pool
+    }
+}
+
+/// Spawn a task on a dedicated thread, optionally pinning it to `cpu`, and
+/// wait for startup to complete before returning.
+///
+/// When `cpu` is `None`, the dedicated thread restores the runtime's baseline
+/// affinity mask before polling the task so it does not inherit a parent
+/// task's temporary CPU pin.
+///
+/// # Panics
+///
+/// Panics if the dedicated thread cannot be created, if pinning to `cpu` fails,
+/// or if the startup handshake breaks before the task begins running.
+fn spawn_dedicated<T, F>(executor: &Executor, handle: &Handle<T>, cpu: Option<usize>, future: F)
+where
+    T: Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
+    // Ensure the task can access the tokio runtime.
+    let runtime_handle = executor.runtime.handle().clone();
+
+    // The dedicated thread reports whether startup succeeded before it begins
+    // polling the task future.
+    let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+
+    if let Err(err) = utils::thread::try_spawn(executor.thread_stack_size, move || {
+        let result = cpu.map_or_else(utils::thread::reset_cpu_affinity, |cpu| {
+            utils::thread::set_cpu_affinity(&[cpu])
+        });
+        let is_ok = result.is_ok();
+        startup_tx
+            .send(result)
+            .expect("startup receiver dropped unexpectedly");
+        if is_ok {
+            runtime_handle.block_on(future);
+        }
+    }) {
+        // Thread startup failed before the task future could be polled, so
+        // abort the handle to release its metrics and supervision state.
+        handle.abort();
+        panic!("failed to spawn thread: {err}");
+    }
+
+    // Wait synchronously so dedicated-thread creation and CPU pinning failures
+    // are surfaced to the spawn caller rather than the spawned task.
+    match startup_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            // Affinity setup failed before the task future started running.
+            handle.abort();
+            match cpu {
+                Some(cpu) => panic!("failed to pin task to cpu {cpu}: {err}"),
+                None => panic!("failed to restore dedicated task affinity: {err}"),
+            }
+        }
+        Err(_) => {
+            // The dedicated thread exited before reporting startup status.
+            handle.abort();
+            panic!("failed to start dedicated task");
+        }
     }
 }
 

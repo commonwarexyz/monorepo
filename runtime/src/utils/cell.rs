@@ -113,6 +113,10 @@ where
         Self::Present(self.into_present().dedicated())
     }
 
+    fn pinned(self, cpu: usize) -> Self {
+        Self::Present(self.into_present().pinned(cpu))
+    }
+
     fn shared(self, blocking: bool) -> Self {
         Self::Present(self.into_present().shared(blocking))
     }
