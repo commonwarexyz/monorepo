@@ -87,9 +87,42 @@ impl Arbitrary<'_> for NodeFuzzInput {
     }
 }
 
-pub struct WithoutRecovery;
+/// Selector for which single-node fuzz path [`crate::fuzz_node`] dispatches to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeMode {
+    WithoutRecovery,
+    WithRecovery,
+}
 
+/// Zero-sized type implemented by every single-node fuzz mode;
+/// [`crate::fuzz_node::<P, M>`] picks the run path via `M::MODE`.
+///
+/// Separate from [`crate::FuzzMode`] (the multi-node trait) so the type system
+/// prevents passing single-node modes to multi-node entry points and vice versa.
+pub trait NodeFuzzMode {
+    const MODE: NodeMode;
+}
+
+/// **WithoutRecovery mode** - single-node fuzzing without unclean-shutdown recovery.
+///
+/// Used only by [`crate::fuzz_node`] to drive `simplex_node::run` against a
+/// scripted [`NodeEvent`] sequence. The runtime starts, the events fire, the
+/// run ends - no checkpoint / restart cycle.
+pub struct WithoutRecovery;
+impl NodeFuzzMode for WithoutRecovery {
+    const MODE: NodeMode = NodeMode::WithoutRecovery;
+}
+
+/// **WithRecovery mode** - single-node fuzzing through an unclean-shutdown cycle.
+///
+/// Used only by [`crate::fuzz_node`]. The runtime drives `simplex_node::run`
+/// to completion, captures a [`Checkpoint`](commonware_runtime::deterministic::Checkpoint),
+/// then re-runs `simplex_node::run_recovery` from that checkpoint to verify
+/// the node restarts cleanly into a consistent state.
 pub struct WithRecovery;
+impl NodeFuzzMode for WithRecovery {
+    const MODE: NodeMode = NodeMode::WithRecovery;
+}
 
 #[derive(Clone, Copy)]
 enum ProgressBranch {

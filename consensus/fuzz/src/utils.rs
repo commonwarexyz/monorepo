@@ -44,7 +44,7 @@ impl SetPartition {
     /// Index 0 is the trivial single-block partition (= fully connected);
     /// index 14 is the all-singleton "Isolated" partition.
     pub const N4: [Self; 15] = [
-        Self([0, 0, 0, 0]), // {{0,1,2,3}}      — trivial / fully connected
+        Self([0, 0, 0, 0]), // {{0,1,2,3}}      - trivial / fully connected
         Self([0, 0, 0, 1]), // {{0,1,2},{3}}
         Self([0, 0, 1, 0]), // {{0,1,3},{2}}
         Self([0, 1, 0, 0]), // {{0,2,3},{1}}
@@ -58,7 +58,7 @@ impl SetPartition {
         Self([0, 1, 1, 2]), // {{0},{1,2},{3}}
         Self([0, 1, 2, 1]), // {{0},{1,3},{2}}
         Self([0, 1, 2, 2]), // {{0},{1},{2,3}}
-        Self([0, 1, 2, 3]), // {{0},{1},{2},{3}} — Isolated
+        Self([0, 1, 2, 3]), // {{0},{1},{2},{3}} - Isolated
     ];
 
     /// Returns the canonical partition at index `idx` in `N4`.

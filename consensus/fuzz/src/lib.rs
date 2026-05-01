@@ -197,7 +197,7 @@ impl Arbitrary<'_> for FuzzInput {
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
 
-        // Only used by `Mode::AdversarialNetwork`.
+        // Only used by `Mode::FaultyMessaging`.
         let honest_messages_drop_ratio =
             u.int_in_range(MIN_HONEST_MESSAGES_DROP_RATIO..=MAX_HONEST_MESSAGES_DROP_RATIO)?;
 
@@ -444,7 +444,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
+fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -669,8 +669,8 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
     });
 }
 
-fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
-    // Partition will be connected, but we will randomly delete messages in the adversarial network wrapper.
+fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
+    // Partition will be connected, but we will randomly delete messages in the faulty messaging wrapper.
     input.partition = Partition::Connected;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
@@ -707,7 +707,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
-            let reporter = spawn_honest_validator_in_adversarial_network::<P>(
+            let reporter = spawn_honest_validator_in_faulty_messaging::<P>(
                 ctx,
                 &oracle,
                 &participants,
@@ -1163,7 +1163,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
     });
 }
 
-fn run_fuzz_node<P: simplex::Simplex, M: FuzzMode>(input: NodeFuzzInput)
+fn run_fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput)
 where
     PublicKeyOf<P>: Send,
 {
@@ -1171,66 +1171,108 @@ where
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
-    if M::MODE == Mode::WithRecovery {
-        let ((participants, schemes), checkpoint) =
-            executor.start_and_recover(|mut context| async move {
-                simplex_node::run::<P>(&mut context, &input).await
+    match M::MODE {
+        simplex_node::NodeMode::WithoutRecovery => {
+            executor.start(|mut context| async move {
+                let _ = simplex_node::run::<P>(&mut context, &input).await;
             });
-        simplex_node::run_recovery::<P>(checkpoint, participants, schemes);
-    } else if M::MODE == Mode::Standard {
-        executor.start(|mut context| async move {
-            let _ = simplex_node::run::<P>(&mut context, &input).await;
-        });
-    } else {
-        panic!("unsupported mode for node fuzz_node");
+        }
+        simplex_node::NodeMode::WithRecovery => {
+            let ((participants, schemes), checkpoint) =
+                executor.start_and_recover(|mut context| async move {
+                    simplex_node::run::<P>(&mut context, &input).await
+                });
+            simplex_node::run_recovery::<P>(checkpoint, participants, schemes);
+        }
     }
 }
 
+/// Selector for which multi-node fuzz harness `fuzz` will dispatch to. Each
+/// variant maps to a `*Mode` zero-sized type below; see those for what each
+/// mode does. Single-node modes live in [`simplex_node::NodeMode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
     Twinable,
     TwinsCampaign,
-    AdversarialNetwork,
+    FaultyMessaging,
     FaultyNet,
-    WithRecovery,
 }
 
+/// Zero-sized type implemented by every multi-node fuzz mode;
+/// `fuzz::<P, M>(...)` picks the run path via `M::MODE`. Separate from
+/// [`simplex_node::NodeFuzzMode`] so the type system prevents passing
+/// single-node modes to `fuzz` (and vice versa).
 pub trait FuzzMode {
     const MODE: Mode;
 }
 
+/// **Standard mode** - the baseline harness.
+///
+/// `f` byzantine validators run as `Disrupter`s (mutating outgoing messages
+/// per `input.strategy`); the remaining validators run honestly. Network
+/// topology follows `input.partition` (`Connected`, a `Static` set partition,
+/// or an `Adaptive` round-indexed schedule).
+///
+/// Use this for general protocol-level fuzzing of consensus under byzantine
+/// message mutations and optional partition faults.
 pub struct Standard;
 impl FuzzMode for Standard {
     const MODE: Mode = Mode::Standard;
 }
 
-/// Twins-mode: it runs a correct node and a Disruptor-based node.
+/// **Twinable mode** - twin pairs with a `Disrupter` on the secondary half.
+///
+/// Each compromised participant (from a sampled `twins::cases` scenario) runs
+/// two halves: a legitimate primary engine and a secondary `Disrupter` that
+/// equivocates per `input.strategy`. The two halves see different network
+/// views per the scenario's per-round partitions, and all engines use the
+/// twins-aware elector for scripted leaders.
+///
+/// Use this to fuzz byzantine *content* mutations layered on top of twins-style
+/// network splits.
 pub struct Twinable;
 impl FuzzMode for Twinable {
     const MODE: Mode = Mode::Twinable;
 }
 
-/// Twins-campaign mode: both halves of every twin pair run as legitimate engines
-/// (no `Disrupter`), exactly as in `consensus/src/simplex/mod.rs::twins_campaign`.
+/// **TwinsCampaign mode** - twin pairs where both halves are full engines.
+///
+/// Mirrors `consensus/src/simplex/mod.rs::twins_campaign`: no `Disrupter`,
+/// both halves run as legitimate engines under the twins-aware elector and
+/// see different network partitions per round. Liveness counts finalizations
+/// only past the adversarial prefix; safety invariants run only over honest
+/// reporters.
+///
+/// Use this to fuzz the pure twins setting (scenario-driven adversarial
+/// network only, no byzantine content mutations).
 pub struct TwinsCampaign;
 impl FuzzMode for TwinsCampaign {
     const MODE: Mode = Mode::TwinsCampaign;
 }
 
-impl FuzzMode for simplex_node::WithoutRecovery {
-    const MODE: Mode = Mode::Standard;
+/// **FaultyMessaging mode** - message-delivery faults at the transport layer.
+///
+/// Topology is fully connected, but a `ByzantineFirstReceiver` reorders
+/// incoming messages (byzantine senders served first) and a configurable
+/// percentage of honest messages are dropped (`input.honest_messages_drop_percent`).
+///
+/// Use this to fuzz consensus under hostile message ordering and lossy
+/// honest-message delivery, independent of network partitioning.
+pub struct FaultyMessaging;
+impl FuzzMode for FaultyMessaging {
+    const MODE: Mode = Mode::FaultyMessaging;
 }
 
-impl FuzzMode for simplex_node::WithRecovery {
-    const MODE: Mode = Mode::WithRecovery;
-}
-
-pub struct AdversarialNetwork;
-impl FuzzMode for AdversarialNetwork {
-    const MODE: Mode = Mode::AdversarialNetwork;
-}
-
+/// **FaultyNet mode** - round-indexed set-partition faults at the network layer.
+///
+/// Coerces `input.partition` to `Adaptive(_)` so the per-view fault scheduler
+/// activates a sampled `SetPartition` for each scheduled view, reverting to
+/// fully connected outside scheduled views. Each strategy guarantees at least
+/// one entry, so every run exercises an actual partition window.
+///
+/// Use this to fuzz consensus under transient network partitions
+/// (ByzzFuzz-style `d` budget over set partitions of `{0..n}`).
 pub struct FaultyNet;
 impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
@@ -1240,8 +1282,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
-        Mode::AdversarialNetwork => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_adversarial_network::<P>(input)
+        Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_faulty_messaging::<P>(input)
         })),
         Mode::FaultyNet => {
             // We run only fuzzing with network faults
@@ -1255,9 +1297,6 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)
         })),
-        Mode::WithRecovery => {
-            panic!("unsupported mode for fuzz")
-        }
     };
     match run_result {
         Ok(()) => {}
@@ -1268,7 +1307,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     }
 }
 
-pub fn fuzz_node<P: simplex::Simplex, M: FuzzMode>(input: NodeFuzzInput) {
+pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));
     if let Err(payload) = run_result {

@@ -268,7 +268,7 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        fuzz, strategy::StrategyChoice, utils::Partition, AdversarialNetwork, FuzzInput, Standard,
+        fuzz, strategy::StrategyChoice, utils::Partition, FaultyMessaging, FuzzInput, Standard,
         Twinable, N4F1C3,
     };
     use commonware_macros::{test_group, test_traced};
@@ -298,8 +298,8 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_ed25519_adv_connected() {
-        fuzz::<SimplexEd25519, AdversarialNetwork>(test_input(SEED, TEST_CONTAINERS));
+    fn test_ed25519_faulty_messaging_connected() {
+        fuzz::<SimplexEd25519, FaultyMessaging>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
@@ -365,8 +365,8 @@ mod tests {
 
         #[test_group("slow")]
         #[test]
-        fn property_test_ed25519_adv_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, AdversarialNetwork>(input);
+        fn property_test_ed25519_faulty_messaging_connected(input in property_test_strategy()) {
+            fuzz::<SimplexEd25519, FaultyMessaging>(input);
         }
 
         #[test_group("slow")]

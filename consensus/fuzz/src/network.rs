@@ -1,5 +1,5 @@
 //! Helpers for preferential delivery of Byzantine messages in fuzz tests emulating
-//! an adversarial network.
+//! a faulty messaging layer (`FuzzMode::FaultyMessaging`).
 //!
 //! This module provides a simple wrapper around the simulated p2p receiver split
 //! functionality.
