@@ -63,7 +63,7 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
         if self.byzantine.contains(sender) {
             SplitTarget::Primary
         } else {
-            let rate = (*self.drop_rate.lock()).min(90);
+            let rate = *self.drop_rate.lock();
             if rate > 0 && self.should_drop_honest_message(rate) {
                 return SplitTarget::None;
             }
