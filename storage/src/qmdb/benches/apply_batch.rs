@@ -68,6 +68,27 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
     elapsed
 }
 
+async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Duration {
+    let mut db = open_db(ctx).await;
+    seed_db(&mut db, NUM_KEYS).await;
+
+    let mut rng = StdRng::seed_from_u64(7);
+    let parent = write_updates(db.new_batch(), updates, &mut rng);
+    let parent = parent.merkleize(&db, None).await.unwrap();
+
+    let child = write_updates(parent.new_batch(), updates, &mut rng);
+    let child = child.merkleize(&db, None).await.unwrap();
+
+    db.apply_batch(parent).await.unwrap();
+
+    let start = Instant::now();
+    db.apply_batch(child).await.unwrap();
+    let elapsed = start.elapsed();
+
+    db.destroy().await.unwrap();
+    elapsed
+}
+
 fn bench_apply_batch(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
 
@@ -100,6 +121,23 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         total += bench_apply_with_uncommitted_ancestor(&ctx, updates).await;
+                    }
+                    total
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!(
+                "{}/case=committed_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += bench_apply_with_committed_ancestor(&ctx, updates).await;
                     }
                     total
                 });
