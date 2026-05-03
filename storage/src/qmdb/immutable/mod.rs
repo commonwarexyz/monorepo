@@ -96,6 +96,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
+use commonware_parallel::{Sequential, Strategy};
 use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -114,9 +115,9 @@ pub use operation::Operation;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J> {
+pub struct Config<T: Translator, J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub log: J,
@@ -142,11 +143,12 @@ pub struct Immutable<
     C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
     H: CHasher,
     T: Translator,
+    S: Strategy = Sequential,
 > where
     C::Item: EncodeShared,
 {
     /// Authenticated journal of operations.
-    pub(crate) journal: authenticated::Journal<F, E, C, H>,
+    pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -164,7 +166,7 @@ pub struct Immutable<
 }
 
 // Shared read-only functionality.
-impl<F, E, K, V, C, H, T> Immutable<F, E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -174,13 +176,14 @@ where
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
+    S: Strategy,
 {
     /// Initialize from a pre-constructed authenticated journal.
     ///
     /// Seeds an initial commit if the journal is empty, builds the in-memory snapshot,
     /// and returns the initialized database.
     pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H>,
+        mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
         translator: T,
     ) -> Result<Self, Error<F>> {
@@ -493,11 +496,11 @@ where
         // handle may be internally diverged and must be dropped by the caller.
         self.journal.rewind(rewind_size).await?;
 
-        // Remove suffix keys from the snapshot. After reopen, the snapshot may
-        // have been rebuilt from a higher floor, so some suffix keys might not
-        // be present -- use remove() which is tolerant of missing keys.
+        // Remove keys that were set in the range [rewind_size, current_size) from the snapshot.
+        let rewind_loc = Location::<F>::new(rewind_size);
         for key in &rewound_keys {
-            self.snapshot.remove(key);
+            // Filter by location to make sure we don't also prune keys that happen to collide.
+            self.snapshot.prune(key, |loc| *loc >= rewind_loc);
         }
 
         // If the rewind target has a lower floor than the current snapshot was
@@ -522,6 +525,11 @@ where
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest {
         self.journal.root()
+    }
+
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.journal.strategy()
     }
 
     /// Return the pinned Merkle nodes at the given location.
@@ -560,7 +568,7 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V, S> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
@@ -593,7 +601,7 @@ where
     /// [`Immutable::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
-        batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
+        batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size
@@ -1323,6 +1331,51 @@ pub(super) mod test {
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
         assert_eq!(db.get(&key3).await.unwrap(), None);
         assert_eq!(db.get(&key4).await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Regression: a key Set before the rewind boundary that translator-collides with a key in the
+    /// rewound suffix must survive rewind. Earlier the snapshot remove pruned the entire translated
+    /// bucket and dropped the retained key.
+    pub(crate) async fn test_immutable_rewind_preserves_collision_bucket<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        // Two keys sharing the first two bytes collide under TwoCap.
+        let mut k1_bytes = [0u8; 32];
+        let mut k2_bytes = [0u8; 32];
+        k1_bytes[0] = 0xAA;
+        k1_bytes[1] = 0xBB;
+        k2_bytes[0] = 0xAA;
+        k2_bytes[1] = 0xBB;
+        k1_bytes[31] = 0x01;
+        k2_bytes[31] = 0x02;
+        let key1 = Digest::from(k1_bytes);
+        let key2 = Digest::from(k2_bytes);
+        let value1 = Sha256::fill(11u8);
+        let value2 = Sha256::fill(22u8);
+
+        commit_sets(&mut db, [(key1, value1)], None).await;
+        let size_after_first = db.bounds().await.end;
+        commit_sets(&mut db, [(key2, value2)], None).await;
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
+
+        db.rewind(size_after_first).await.unwrap();
+
+        // The retained key must still be readable; pre-fix this returned None because the
+        // translator bucket was wiped by the suffix-key remove.
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }

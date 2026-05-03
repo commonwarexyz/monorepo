@@ -106,7 +106,7 @@ impl<T: Read> Lazy<T> {
                 }
             } else {
                 Self {
-                    value: T::decode_cfg(bytes.clone(), &cfg).ok(),
+                    value: T::decode_cfg(bytes.as_ref(), &cfg).ok(),
                     pending: Some(Pending { bytes, cfg }),
                 }
             }
@@ -130,7 +130,7 @@ impl<T: Read> Lazy<T> {
                             .pending
                             .as_ref()
                             .expect("Lazy should have pending if value is not initialized");
-                        T::decode_cfg(bytes.clone(), cfg).ok()
+                        T::decode_cfg(bytes.as_ref(), cfg).ok()
                     })
                     .as_ref()
             } else {

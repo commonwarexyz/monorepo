@@ -1,5 +1,5 @@
 use super::{Error, Signature};
-use commonware_utils::hex;
+use commonware_formatting::Hex;
 use core::convert::{TryFrom, TryInto};
 use curve25519_dalek::{
     edwards::{CompressedEdwardsY, EdwardsPoint},
@@ -37,7 +37,7 @@ impl VerificationKeyBytes {
 impl core::fmt::Debug for VerificationKeyBytes {
     fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fmt.debug_tuple("VerificationKeyBytes")
-            .field(&hex(&self.0))
+            .field(&Hex(&self.0))
             .finish()
     }
 }
@@ -119,7 +119,7 @@ impl core::hash::Hash for VerificationKey {
 impl core::fmt::Debug for VerificationKey {
     fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fmt.debug_tuple("VerificationKey")
-            .field(&hex(&self.A_bytes.0))
+            .field(&Hex(&self.A_bytes.0))
             .finish()
     }
 }

@@ -160,7 +160,7 @@ mod tests {
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let pool = context.create_thread_pool(NZUsize!(4)).unwrap();
+            let strategy = context.create_strategy(NZUsize!(4)).unwrap();
             let hasher: Standard<Sha256> = Standard::new();
 
             let mut mmr = Mmr::init(
@@ -174,7 +174,7 @@ mod tests {
             .unwrap();
 
             let batch = {
-                let mut batch = mmr.new_batch().with_pool(Some(pool));
+                let mut batch = mmr.new_batch_with_strategy(strategy);
                 for i in 0u64..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&hasher, &element);

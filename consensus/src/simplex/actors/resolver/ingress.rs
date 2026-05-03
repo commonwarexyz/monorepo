@@ -68,7 +68,6 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
-    type Failure = ();
 
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
         self.sender
@@ -81,10 +80,6 @@ impl Consumer for Handler {
                 false,
             )
             .await
-    }
-
-    async fn failed(&mut self, _: Self::Key, _: Self::Failure) {
-        // We don't need to do anything on failure, the resolver will retry.
     }
 }
 

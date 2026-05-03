@@ -1,5 +1,5 @@
 use super::Error;
-use commonware_utils::hex;
+use commonware_formatting::Hex;
 use core::convert::TryFrom;
 
 /// An Ed25519 signature.
@@ -13,8 +13,8 @@ pub struct Signature {
 impl core::fmt::Debug for Signature {
     fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fmt.debug_struct("Signature")
-            .field("R_bytes", &hex(&self.R_bytes))
-            .field("s_bytes", &hex(&self.s_bytes))
+            .field("R_bytes", &Hex(&self.R_bytes))
+            .field("s_bytes", &Hex(&self.s_bytes))
             .finish()
     }
 }

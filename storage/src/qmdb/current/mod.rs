@@ -266,6 +266,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
 
@@ -280,9 +281,9 @@ pub mod unordered;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J> {
+pub struct Config<T: Translator, J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -294,8 +295,8 @@ pub struct Config<T: Translator, J> {
     pub translator: T,
 }
 
-impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
-    fn from(cfg: Config<T, J>) -> Self {
+impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
+    fn from(cfg: Config<T, J, S>) -> Self {
         Self {
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
@@ -305,16 +306,16 @@ impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
 }
 
 /// Configuration for a `Current` authenticated db with fixed-size values.
-pub type FixedConfig<T> = Config<T, FConfig>;
+pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 
 /// Configuration for a `Current` authenticated db with variable-sized values.
-pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
+pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize a `Current` authenticated db from the given config.
-pub(super) async fn init<F, E, U, H, T, I, J, const N: usize>(
+pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
     context: E,
-    config: Config<T, J::Config>,
-) -> Result<db::Db<F, E, J, I, H, U, N>, crate::qmdb::Error<F>>
+    config: Config<T, J::Config, S>,
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
     E: Context,
@@ -323,6 +324,7 @@ where
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
@@ -339,7 +341,7 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let thread_pool = config.merkle_config.thread_pool.clone();
+    let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
@@ -357,12 +359,12 @@ where
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::new();
-    let grafted_tree = db::build_grafted_tree::<F, H, N>(
+    let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
-        thread_pool.as_ref(),
+        &strategy,
     )
     .await?;
 
@@ -388,7 +390,7 @@ where
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
-        thread_pool,
+        strategy,
         root,
     })
 }
@@ -423,6 +425,7 @@ pub mod tests {
         },
         translator::Translator,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -457,7 +460,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -483,7 +486,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: VConfig {

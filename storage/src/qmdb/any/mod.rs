@@ -80,6 +80,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -94,13 +95,13 @@ pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
 
-const BITMAP_CHUNK_BYTES: usize = 64;
+pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J> {
+pub struct Config<T: Translator, J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -110,16 +111,16 @@ pub struct Config<T: Translator, J> {
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T> = Config<T, FConfig>;
+pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
+pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J>(
+pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config>,
-) -> Result<db::Db<F, E, J, I, H, U>, crate::qmdb::Error<F>>
+    cfg: Config<T, J::Config, S>,
+) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
@@ -128,18 +129,19 @@ where
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
-pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config>,
+    cfg: Config<T, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
-) -> Result<db::Db<F, E, J, I, H, U, N>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
@@ -148,9 +150,10 @@ where
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    let mut log = J::init::<F, H>(
+    let mut log = J::init::<F, H, S>(
         context.with_label("log"),
         cfg.merkle_config,
         cfg.journal_config,
@@ -212,7 +215,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -236,7 +239,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: VConfig {

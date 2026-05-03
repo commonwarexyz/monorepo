@@ -24,7 +24,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
     range::NonEmptyRange,
@@ -45,11 +45,11 @@ use tracing::{debug, error, warn};
 /// the in-memory layer but never flushed, so they would be silently lost on crash recovery. This
 /// wrapper prevents that by exposing only append and merkleize operations, hiding `update_leaf*`
 /// at compile time.
-pub struct UnmerkleizedBatch<F: Family, D: Digest> {
-    inner: batch::UnmerkleizedBatch<F, D>,
+pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
+    inner: batch::UnmerkleizedBatch<F, D, S>,
 }
 
-impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
+impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Hash `element` and add it as a leaf.
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         Self {
@@ -69,12 +69,9 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         self.inner.leaves()
     }
 
-    /// Set a thread pool for parallel merkleization.
-    #[cfg(feature = "std")]
-    pub fn with_pool(self, pool: Option<ThreadPool>) -> Self {
-        Self {
-            inner: self.inner.with_pool(pool),
-        }
+    /// Return a reference to the batch's strategy.
+    pub fn strategy(&self) -> &S {
+        self.inner.strategy()
     }
 
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] with computed root.
@@ -83,7 +80,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
-    ) -> Arc<batch::MerkleizedBatch<F, D>> {
+    ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         self.inner.merkleize(base, hasher)
     }
 }
@@ -102,7 +99,7 @@ pub(crate) struct Inner<F: Family, D: Digest> {
 
 /// Configuration for a journal-backed Merkle structure.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<S: Strategy = Sequential> {
     /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
     /// the nodes.
     pub journal_partition: String,
@@ -118,8 +115,8 @@ pub struct Config {
     /// The size of the write buffer to use for each blob in the backing journal.
     pub write_buffer: NonZeroUsize,
 
-    /// Optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
+    /// Strategy used to parallelize batch operations.
+    pub strategy: S,
 
     /// The page cache to use for caching data.
     pub page_cache: CacheRef,
@@ -131,9 +128,9 @@ pub struct Config {
 /// - **Fresh Start**: Existing data < range start -> discard and start fresh
 /// - **Prune and Reuse**: range contains existing data -> prune and reuse
 /// - **Error**: existing data > range end
-pub struct SyncConfig<F: Family, D: Digest> {
+pub struct SyncConfig<F: Family, D: Digest, S: Strategy = Sequential> {
     /// Base configuration (journal, metadata, etc.)
-    pub config: Config,
+    pub config: Config<S>,
 
     /// Sync range expressed as leaf-aligned bounds.
     pub range: NonEmptyRange<Location<F>>,
@@ -145,7 +142,7 @@ pub struct SyncConfig<F: Family, D: Digest> {
 }
 
 /// A Merkle structure backed by a fixed-item-length journal.
-pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
+pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy = Sequential> {
     /// Lock-protected mutable state.
     pub(crate) inner: RwLock<Inner<F, D>>,
 
@@ -160,8 +157,8 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
     /// Serializes concurrent sync calls.
     pub(crate) sync_lock: AsyncMutex<()>,
 
-    /// The thread pool to use for parallelization.
-    pub(crate) pool: Option<ThreadPool>,
+    /// The strategy to use for parallelization.
+    pub(crate) strategy: S,
 }
 
 /// Prefix used for nodes in the metadata prefixed U8 key.
@@ -170,7 +167,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
 pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return the total number of nodes in the structure, irrespective of any pruning. The next
     /// added element's position will have this value.
     pub fn size(&self) -> Position<F> {
@@ -252,7 +249,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     ///   probe).
     pub async fn peek_root(
         context: E,
-        cfg: Config,
+        cfg: Config<S>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Option<(Location<F>, Location<F>, D)>, Error<F>> {
         let journal_cfg = JConfig {
@@ -328,7 +325,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     pub async fn init(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
-        cfg: Config,
+        cfg: Config<S>,
     ) -> Result<Self, Error<F>> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
@@ -365,7 +362,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
                 journal,
                 metadata,
                 sync_lock: AsyncMutex::new(()),
-                pool: cfg.thread_pool,
+                strategy: cfg.strategy,
             });
         }
 
@@ -499,7 +496,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
             journal,
             metadata,
             sync_lock: AsyncMutex::new(()),
-            pool: cfg.thread_pool,
+            strategy: cfg.strategy,
         })
     }
 
@@ -519,7 +516,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     ///    - Returns [crate::journal::Error::ItemOutOfRange]
     pub async fn init_sync(
         context: E,
-        cfg: SyncConfig<F, D>,
+        cfg: SyncConfig<F, D, S>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
@@ -627,7 +624,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
             journal,
             metadata,
             sync_lock: AsyncMutex::new(()),
-            pool: cfg.config.thread_pool,
+            strategy: cfg.config.strategy,
         })
     }
 
@@ -850,7 +847,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     /// chain was created, or if only ancestors of this batch have been applied.
     /// Already-committed ancestors are skipped automatically.
     /// Applying a batch from a different fork returns [`Error::StaleBatch`].
-    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
+    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
         self.inner.get_mut().mem.apply_batch(batch)?;
         Ok(())
     }
@@ -859,14 +856,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     ///
     /// The batch has no data (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D>> {
+    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         let inner = self.inner.read();
-        let mut batch = batch::MerkleizedBatch::from_mem(&inner.mem);
-        #[cfg(feature = "std")]
-        if let Some(pool) = &self.pool {
-            Arc::get_mut(&mut batch).expect("just created").pool = Some(pool.clone());
-        }
-        batch
+        batch::MerkleizedBatch::from_mem_with_strategy(&inner.mem, self.strategy.clone())
     }
 
     /// Borrow the committed Mem through the read lock. Holds the lock for
@@ -877,19 +869,16 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
     }
 
     /// Create a new speculative batch with this structure as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, D> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
         let inner = self.inner.read();
-        let root = batch::MerkleizedBatch::from_mem(&inner.mem);
-        drop(inner);
         UnmerkleizedBatch {
-            inner: root.new_batch(),
+            inner: inner.mem.new_batch_with_strategy(self.strategy.clone()),
         }
-        .with_pool(self.pool())
     }
 
-    /// Return the thread pool, if any.
-    pub fn pool(&self) -> Option<ThreadPool> {
-        self.pool.clone()
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        &self.strategy
     }
 
     /// Rewind the structure by the given number of leaves.
@@ -971,7 +960,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
 /// be tighter than the journal's prune boundary reported by [`Merkle::bounds`]). This means
 /// batch operations like `update_leaf` will correctly reject leaves that have been synced out of
 /// memory with [`Error::ElementPruned`].
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Merkle<F, E, D> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Readable
+    for Merkle<F, E, D, S>
+{
     type Family = F;
     type Digest = D;
     type Error = Error<F>;
@@ -1028,8 +1019,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Merkle<F,
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::storage::Storage<F>
-    for Merkle<F, E, D>
+impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
+    crate::merkle::storage::Storage<F> for Merkle<F, E, D, S>
 {
     type Digest = D;
 
@@ -1042,7 +1033,7 @@ impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Merkle<F, E, D> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///
@@ -1168,7 +1159,7 @@ mod tests {
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -1527,7 +1518,7 @@ mod tests {
             metadata_partition: "unpruned-metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: cfg_pruned.page_cache.clone(),
         };
         let mut mmr =
@@ -1869,7 +1860,7 @@ mod tests {
                 metadata_partition: "ref-metadata-pruned".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -1932,7 +1923,7 @@ mod tests {
                 metadata_partition: "server-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -1961,7 +1952,7 @@ mod tests {
                 metadata_partition: "client-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -2441,7 +2432,7 @@ mod tests {
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 

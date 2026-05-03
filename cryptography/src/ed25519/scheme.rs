@@ -6,8 +6,9 @@ use crate::{
 use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{hex, union_unique, Array, Span};
+use commonware_utils::{union_unique, Array, Span};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -206,13 +207,13 @@ impl From<VerificationKey> for PublicKey {
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(self))
+        write!(f, "{}", Hex(self))
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(self))
+        write!(f, "{}", Hex(self))
     }
 }
 
@@ -310,13 +311,13 @@ impl From<ed_core::Signature> for Signature {
 
 impl Debug for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", Hex(&self.raw))
     }
 }
 
 impl Display for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", Hex(&self.raw))
     }
 }
 
@@ -411,7 +412,7 @@ mod tests {
 
     fn parse_private_key(private_key: &str) -> PrivateKey {
         PrivateKey::decode(
-            commonware_utils::from_hex_formatted(private_key)
+            commonware_formatting::from_hex(private_key)
                 .unwrap()
                 .as_ref(),
         )
@@ -420,7 +421,7 @@ mod tests {
 
     fn parse_public_key(public_key: &str) -> PublicKey {
         PublicKey::decode(
-            commonware_utils::from_hex_formatted(public_key)
+            commonware_formatting::from_hex(public_key)
                 .unwrap()
                 .as_ref(),
         )
@@ -428,12 +429,7 @@ mod tests {
     }
 
     fn parse_signature(signature: &str) -> Signature {
-        Signature::decode(
-            commonware_utils::from_hex_formatted(signature)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap()
+        Signature::decode(commonware_formatting::from_hex(signature).unwrap().as_ref()).unwrap()
     }
 
     fn vector_1() -> (PrivateKey, PublicKey, Vec<u8>, Signature) {
@@ -585,7 +581,7 @@ mod tests {
             0816ed13ba3303ac5deb911548908025
             ",
         );
-        let message = hex!("0xaf82");
+        let message = commonware_formatting::hex!("0xaf82");
         let signature = parse_signature(
             "
             6291d657deec24024827e69c3abe01a3
@@ -611,7 +607,7 @@ mod tests {
             ceffbf2b2428c9c51fef7c597f1d426e
             ",
         );
-        let message = commonware_utils::from_hex_formatted(
+        let message = commonware_formatting::from_hex(
             "
             08b8b2b733424243760fe426a4b54908
             632110a66c2f6591eabd3345e3e4eb98
@@ -693,21 +689,21 @@ mod tests {
 
     #[test]
     fn rfc8032_test_vector_sha() {
-        let private_key = commonware_utils::from_hex_formatted(
+        let private_key = commonware_formatting::from_hex(
             "
             833fe62409237b9d62ec77587520911e
             9a759cec1d19755b7da901b96dca3d42
             ",
         )
         .unwrap();
-        let public_key = commonware_utils::from_hex_formatted(
+        let public_key = commonware_formatting::from_hex(
             "
             ec172b93ad5e563bf4932c70e1245034
             c35467ef2efd4d64ebf819683467e2bf
             ",
         )
         .unwrap();
-        let message = commonware_utils::from_hex_formatted(
+        let message = commonware_formatting::from_hex(
             "
             ddaf35a193617abacc417349ae204131
             12e6fa4e89a97ea20a9eeee64b55d39a
@@ -716,7 +712,7 @@ mod tests {
             ",
         )
         .unwrap();
-        let signature = commonware_utils::from_hex_formatted(
+        let signature = commonware_formatting::from_hex(
             "
             dc2a4459e7369633a52b1bf277839a00
             201009a3efbf3ecb69bea2186c26b589

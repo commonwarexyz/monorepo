@@ -14,9 +14,10 @@
 pub use crate::merkle::full::Config;
 pub use crate::merkle::full::UnmerkleizedBatch;
 use crate::merkle::mmb::Family;
+use commonware_parallel::Sequential;
 
 /// Configuration for initializing a full MMB for synchronization.
-pub type SyncConfig<D> = crate::merkle::full::SyncConfig<Family, D>;
+pub type SyncConfig<D, S = Sequential> = crate::merkle::full::SyncConfig<Family, D, S>;
 
 /// An MMB backed by a fixed-item-length journal.
-pub type Mmb<E, D> = crate::merkle::full::Merkle<Family, E, D>;
+pub type Mmb<E, D, S = Sequential> = crate::merkle::full::Merkle<Family, E, D, S>;

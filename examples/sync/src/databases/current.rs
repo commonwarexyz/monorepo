@@ -17,6 +17,7 @@
 use crate::{Hasher, Key, Translator, Value};
 use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256, Hasher as CryptoHasher};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -51,7 +52,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {

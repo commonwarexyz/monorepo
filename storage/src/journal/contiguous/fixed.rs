@@ -1020,16 +1020,20 @@ impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> for Journal<E, A> {
     type Config = Config;
 
-    async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
+    async fn init<
+        F: crate::merkle::Family,
+        H: commonware_cryptography::Hasher,
+        S: commonware_parallel::Strategy,
+    >(
         context: E,
-        merkle_cfg: crate::merkle::full::Config,
+        merkle_cfg: crate::merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
     ) -> Result<
-        crate::journal::authenticated::Journal<F, E, Self, H>,
+        crate::journal::authenticated::Journal<F, E, Self, H, S>,
         crate::journal::authenticated::Error<F>,
     > {
-        crate::journal::authenticated::Journal::<F, E, Self, H>::new(
+        crate::journal::authenticated::Journal::<F, E, Self, H, S>::new(
             context,
             merkle_cfg,
             journal_cfg,

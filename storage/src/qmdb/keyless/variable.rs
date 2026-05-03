@@ -17,34 +17,39 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for variable-length values.
 pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
 
 /// A keyless authenticated database for variable-length data.
-pub type Db<F, E, V, H> =
-    super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H>;
+pub type Db<F, E, V, H, S = Sequential> =
+    super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
-pub type CompactDb<F, E, V, H, C> = super::CompactDb<F, E, VariableEncoding<V>, H, C>;
+pub type CompactDb<F, E, V, H, C, S = Sequential> =
+    super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
 
-type Journal<F, E, V, H> = authenticated::Journal<F, E, variable::Journal<E, Operation<F, V>>, H>;
+type Journal<F, E, V, H, S> =
+    authenticated::Journal<F, E, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// Configuration for a variable-size [keyless](super) authenticated db.
-pub type Config<C> = super::Config<JournalConfig<C>>;
+pub type Config<C, S = Sequential> = super::Config<JournalConfig<C>, S>;
 
 /// Configuration for a variable-size [keyless](super) compact db.
-pub type CompactConfig<C> = super::CompactConfig<C>;
+pub type CompactConfig<C, S = Sequential> = super::CompactConfig<C, S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Db<F, E, V, H> {
+impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
+    Db<F, E, V, H, S>
+{
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: Config<<Operation<F, V> as Read>::Cfg>,
+        cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H> =
+        let journal: Journal<F, E, V, H, S> =
             Journal::new(context, cfg.merkle, cfg.log, Operation::<F, V>::is_commit).await?;
         Self::init_from_journal(journal).await
     }
@@ -56,12 +61,13 @@ impl<
         V: VariableValue,
         H: Hasher,
         C: Clone + Send + Sync + 'static,
-    > CompactDb<F, E, V, H, C>
+        S: Strategy,
+    > CompactDb<F, E, V, H, C, S>
 where
     Operation<F, V>: Read<Cfg = C>,
 {
     /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<C>) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
         let merkle =
             crate::merkle::compact::Merkle::init(context, &StandardHasher::<H>::new(), cfg.merkle)
                 .await?;
@@ -78,6 +84,7 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
@@ -99,7 +106,7 @@ mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {
@@ -141,7 +148,7 @@ mod test {
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-keyless-variable".into(),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };

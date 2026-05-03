@@ -22,12 +22,14 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<F, E, C, H> = authenticated::Journal<F, E, C, H>;
+pub(crate) type AuthenticatedLog<F, E, C, H, S = Sequential> =
+    authenticated::Journal<F, E, C, H, S>;
 
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
@@ -63,6 +65,7 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize = BITMAP_CHUNK_BYTES,
+    S: Strategy = Sequential,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -71,7 +74,7 @@ pub struct Db<
     ///
     /// - The log is never pruned beyond the inactivity floor.
     /// - There is always at least one commit operation in the log.
-    pub(crate) log: AuthenticatedLog<F, E, C, H>,
+    pub(crate) log: AuthenticatedLog<F, E, C, H, S>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -109,7 +112,7 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -117,6 +120,7 @@ where
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -147,6 +151,11 @@ where
 
     pub fn root(&self) -> H::Digest {
         self.log.root()
+    }
+
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.log.strategy()
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -254,7 +263,7 @@ where
 }
 
 // Functionality requiring Mutable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -262,6 +271,7 @@ where
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
@@ -490,7 +500,7 @@ where
 }
 
 // Functionality requiring Mutable + Persistable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -498,6 +508,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
@@ -510,7 +521,7 @@ where
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
     pub(crate) async fn init_from_log(
         mut index: I,
-        log: AuthenticatedLog<F, E, C, H>,
+        log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
@@ -613,7 +624,7 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize> Persistable for Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -621,6 +632,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     type Error = crate::qmdb::Error<F>;

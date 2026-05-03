@@ -1,10 +1,8 @@
 use super::Header;
 use crate::{BufferPool, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
-use commonware_utils::{
-    hex,
-    sync::{Mutex, RwLock},
-};
+use commonware_formatting::hex;
+use commonware_utils::sync::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 

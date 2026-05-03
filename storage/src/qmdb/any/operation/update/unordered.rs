@@ -9,8 +9,9 @@ use crate::qmdb::{
 use commonware_codec::{
     Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
+use commonware_formatting::hex;
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::{hex, Array};
+use commonware_utils::Array;
 use std::fmt;
 
 #[derive(Clone, PartialEq, Debug, Eq)]

@@ -8,6 +8,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic::{self, Context},
@@ -103,7 +104,7 @@ fn make_config(
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
             items_per_blob: NZU64!(merkle_items_per_blob),
             write_buffer,
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: VConfig {

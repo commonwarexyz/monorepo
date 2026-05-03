@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     index::unordered::Index,
@@ -94,7 +95,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
+                    strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
                 journal_config: FConfig {

@@ -18,26 +18,28 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Type alias for a variable-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
 
 /// Type alias for the variable-size immutable database.
-pub type Db<F, E, K, V, H, T> =
-    Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T>;
+pub type Db<F, E, K, V, H, T, S = Sequential> =
+    Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, C> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C>;
+pub type CompactDb<F, E, K, V, H, C, S = Sequential> =
+    super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
 
-type Journal<F, E, K, V, H> =
-    authenticated::Journal<F, E, variable::Journal<E, Operation<F, K, V>>, H>;
+type Journal<F, E, K, V, H, S> =
+    authenticated::Journal<F, E, variable::Journal<E, Operation<F, K, V>>, H, S>;
 
 /// Configuration for a variable-size immutable authenticated db.
-pub type Config<T, C> = BaseConfig<T, JournalConfig<C>>;
+pub type Config<T, C, S = Sequential> = BaseConfig<T, JournalConfig<C>, S>;
 
 /// Configuration for a variable-size compact immutable db.
-pub type CompactConfig<C> = super::CompactConfig<C>;
+pub type CompactConfig<C, S = Sequential> = super::CompactConfig<C, S>;
 
 impl<
         F: Family,
@@ -46,15 +48,16 @@ impl<
         V: VariableValue,
         H: Hasher,
         T: Translator,
-    > Db<F, E, K, V, H, T>
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: Config<T, <Operation<F, K, V> as Read>::Cfg>,
+        cfg: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H> = Journal::new(
+        let journal: Journal<F, E, K, V, H, S> = Journal::new(
             context.clone(),
             cfg.merkle_config,
             cfg.log,
@@ -72,12 +75,13 @@ impl<
         V: VariableValue,
         H: Hasher,
         C: Clone + Send + Sync + 'static,
-    > CompactDb<F, E, K, V, H, C>
+        S: Strategy,
+    > CompactDb<F, E, K, V, H, C, S>
 where
     Operation<F, K, V>: Read<Cfg = C>,
 {
     /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<C>) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
         let merkle = crate::merkle::compact::Merkle::init(
             context,
             &crate::merkle::hasher::Standard::<H>::new(),
@@ -99,6 +103,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -115,7 +120,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {
@@ -143,7 +148,7 @@ mod tests {
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-immutable-variable".into(),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: ((), ()),
         };
@@ -790,6 +795,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_rewind_recovery(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_variable_rewind_preserves_collision_bucket_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_preserves_collision_bucket(ctx, open::<mmb::Family>).await;
         });
     }
 

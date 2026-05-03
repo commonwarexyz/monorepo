@@ -18,17 +18,33 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = unordered::Operation<F, K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T> =
-    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
+pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
+    F,
+    E,
+    Journal<E, Operation<F, K, V>>,
+    Index<T, Location<F>>,
+    H,
+    Update<K, V>,
+    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+    S,
+>;
 
-impl<F: merkle::Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator>
-    Db<F, E, K, V, H, T>
+impl<
+        F: merkle::Family,
+        E: Context,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -36,7 +52,7 @@ where
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
+        cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg).await
     }
@@ -63,6 +79,7 @@ pub mod partitioned {
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
+    use commonware_parallel::{Sequential, Strategy};
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -73,13 +90,15 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<F, E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+    pub type Db<F, E, K, V, H, T, const P: usize, S = Sequential> = crate::qmdb::any::unordered::Db<
         F,
         E,
         Journal<E, Operation<F, K, V>>,
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        S,
     >;
 
     impl<
@@ -90,7 +109,8 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<F, E, K, V, H, T, P>
+            S: Strategy,
+        > Db<F, E, K, V, H, T, P, S>
     where
         Operation<F, K, V>: Codec,
     {
@@ -98,7 +118,7 @@ pub mod partitioned {
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(
             context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
@@ -106,14 +126,16 @@ pub mod partitioned {
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
+        use super::Sequential;
         /// Variable-value DB with 256 partitions.
-        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 1>;
+        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
+        use super::Sequential;
         /// Variable-value DB with 65,536 partitions.
-        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 2>;
+        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 2, S>;
     }
 }
 
@@ -124,6 +146,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -147,7 +170,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{seed}"),
                 items_per_blob: NZU64!(13),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: crate::journal::contiguous::variable::Config {

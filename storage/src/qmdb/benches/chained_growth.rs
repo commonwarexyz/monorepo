@@ -8,6 +8,7 @@
 
 use crate::common::{seed_db, write_random_updates, Digest, WRITE_BUFFER_SIZE};
 use commonware_cryptography::Sha256;
+use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
@@ -43,18 +44,22 @@ const PARTITION: &str = "bench-chained-growth";
 const SMALL_CHUNK_SIZE: usize = 32;
 const LARGE_CHUNK_SIZE: usize = 256;
 
-type CurUFix32Mmb = UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMALL_CHUNK_SIZE>;
-type CurOFix32Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMALL_CHUNK_SIZE>;
-type CurUFix256Mmb = UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
-type CurOFix256Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
+type CurUFix32Mmb =
+    UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMALL_CHUNK_SIZE, Rayon>;
+type CurOFix32Mmb =
+    OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMALL_CHUNK_SIZE, Rayon>;
+type CurUFix256Mmb =
+    UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
+type CurOFix256Mmb =
+    OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
+        strategy: ctx.create_strategy(THREADS).unwrap(),
         page_cache: pc,
     }
 }
@@ -74,7 +79,7 @@ fn pc(ctx: &impl BufferPooler) -> CacheRef {
 
 fn cur_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
+) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),

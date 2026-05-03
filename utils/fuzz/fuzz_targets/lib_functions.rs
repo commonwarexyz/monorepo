@@ -3,10 +3,10 @@
 use arbitrary::Arbitrary;
 use bytes::BytesMut;
 use commonware_codec::{EncodeSize, ReadExt, Write};
+use commonware_formatting::{from_hex, hex, hex_literal};
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, hex_literal, modulo, union, union_unique, Faults, N3f1,
-    N5f1, NZDuration, NZUsize, NonZeroDuration, Participant, SystemTimeExt, NZU16, NZU32, NZU64,
-    NZU8,
+    modulo, union, union_unique, Faults, N3f1, N5f1, NZDuration, NZUsize, NonZeroDuration,
+    Participant, SystemTimeExt, NZU16, NZU32, NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::{Duration, SystemTime};
@@ -17,9 +17,6 @@ enum FuzzInput {
         data: Vec<u8>,
     },
     FromHex {
-        hex_str: String,
-    },
-    FromHexFormatted {
         hex_str: String,
     },
     HexLiteralStripPrefix {
@@ -90,6 +87,9 @@ enum FuzzInput {
     SystemTimeEpochMillis {
         secs_since_epoch: u64,
     },
+    NZDurationMacro {
+        millis: u64,
+    },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -130,24 +130,14 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::FromHex { hex_str } => {
-            let result = from_hex(&hex_str);
-
-            if let Some(decoded) = result {
+            if let Some(decoded) = from_hex(&hex_str) {
                 let re_encoded = hex(&decoded);
                 assert_eq!(from_hex(&re_encoded), Some(decoded));
             }
-        }
 
-        FuzzInput::FromHexFormatted { hex_str } => {
-            let result = from_hex_formatted(&hex_str);
-
-            if let Some(decoded) = result.clone() {
-                let clean_hex = hex(&decoded);
-                assert_eq!(from_hex(&clean_hex), Some(decoded));
-            }
-
+            // Prepending a `0x` prefix must not crash, regardless of input.
             let with_prefix = format!("0x{hex_str}");
-            from_hex_formatted(&with_prefix);
+            let _ = from_hex(&with_prefix);
         }
 
         FuzzInput::HexLiteralStripPrefix { string } => {
@@ -339,6 +329,14 @@ fn fuzz(input: FuzzInput) {
                 assert_eq!(non_zero.get(), duration);
                 assert_eq!(Duration::from(non_zero), duration);
                 assert_eq!(NonZeroDuration::new_panic(duration).get(), duration);
+            }
+        }
+
+        FuzzInput::NZDurationMacro { millis } => {
+            let duration = Duration::from_millis(millis);
+            if duration != Duration::ZERO {
+                let nz = NZDuration!(duration);
+                assert_eq!(nz.get(), duration);
             }
         }
 

@@ -5,9 +5,9 @@ use crate::{
     error::{Error, Result},
 };
 use bytes::Bytes;
-use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 #[cfg(target_os = "linux")]
-use commonware_utils::hex;
+use commonware_formatting::hex;
+use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use rand::Rng;
 use std::{
     fs, io,
