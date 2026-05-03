@@ -1,4 +1,5 @@
 pub mod bounds;
+pub mod byzzfuzz;
 #[cfg(feature = "mocks")]
 pub mod certificate_mock;
 pub mod disrupter;
@@ -72,7 +73,7 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 /// runtime. Increase only if a complementary timeout is added to the wait loop.
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
-const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
+pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
@@ -222,7 +223,7 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
+pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
 
 type NetworkChannels<P> = (
     (
@@ -240,7 +241,7 @@ type NetworkChannels<P> = (
 );
 
 /// Common setup for fuzz tests: network, participants, links.
-async fn setup_network<P: simplex::Simplex>(
+pub(crate) async fn setup_network<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
 ) -> (
@@ -361,7 +362,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
 
 /// Spawn an honest validator with application, reporter, and engine.
 #[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator<
+pub(crate) fn spawn_honest_validator<
     P,
     EC,
     PendingSender,
@@ -638,7 +639,7 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
         });
 }
 
-fn network_faults(
+pub(crate) fn network_faults(
     strategy: StrategyChoice,
     required_containers: u64,
     rng: &mut impl rand::Rng,
@@ -1336,6 +1337,7 @@ pub enum Mode {
     TwinsCampaign,
     FaultyMessaging,
     FaultyNet,
+    Byzzfuzz,
 }
 
 /// Zero-sized type implemented by every multi-node fuzz mode;
@@ -1428,6 +1430,47 @@ impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
+/// **Byzzfuzz mode** - faithful realization of the ByzzFuzz fault model
+/// (Algorithm 1 in the paper). Implementation lives in [`byzzfuzz`].
+///
+/// Runs **4 honest engines** -- no `Disrupter`, no twin halves -- and
+/// installs a per-message strict-replace interception layer on every
+/// validator's outgoing channels:
+///
+/// - **Network faults (`networkFaults`)**: per-channel
+///   [`commonware_p2p::simulated::SplitForwarder`]s on vote, certificate,
+///   and resolver senders. The forwarder consults the active partition
+///   schedule using the *sender's max round* (paper's `rnd(m)` =
+///   "max round in which the sender has sent or received a message"),
+///   tracked by a per-sender atomic (`SenderViewCell`) that the vote /
+///   cert forwarders update on outbound and that `RoundTrackingReceiver`
+///   wrappers update on inbound vote / cert / resolver traffic.
+///   Recipients isolated by the partition at that round are dropped --
+///   including resolver recovery traffic, so partitions are true
+///   partitions.
+/// - **Process faults (`procFaults`)**: for the fixed byzantine identity
+///   (index 0) the same forwarders also enqueue an `Intercept` per
+///   intercepted message + matching `(rnd, recv, seed)` fault and remove
+///   those receivers from the residual original send. The `ByzzFuzzInjector`
+///   consumes the queue, decodes the *actual* intercepted message, runs
+///   the strategy mutator on its content (votes are re-signed; cert /
+///   resolver are byte-mutated), and emits the result to the dropped
+///   subset via cloned senders that bypass the forwarder. Faults marked
+///   `omit` skip the re-emit, realizing Algorithm 1's "or omits them".
+///
+/// Fault density per axis is derived from the chosen `StrategyChoice`,
+/// matching the other adaptive modes. Vote-equivocation invariants exclude
+/// index 0 via [`invariants::check_vote_invariants_with_byzantine`] so the
+/// injector's scripted byzantine equivocation is not flagged.
+///
+/// Use this to fuzz consensus under the combined ByzzFuzz adversary:
+/// transient set-partitions across all three channels plus byzantine
+/// in-flight message mutation / omission by a fixed identity.
+pub struct Byzzfuzz;
+impl FuzzMode for Byzzfuzz {
+    const MODE: Mode = Mode::Byzzfuzz;
+}
+
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
@@ -1447,11 +1490,34 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)
         })),
+        Mode::Byzzfuzz => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
+        }
     };
     match run_result {
-        Ok(()) => {}
+        Ok(()) => {
+            // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
+            // or otherwise) starts clean. This is cheap when the log is empty.
+            if matches!(M::MODE, Mode::Byzzfuzz) {
+                let _ = byzzfuzz::log::take();
+            }
+        }
         Err(payload) => {
             println!("Panicked with raw_bytes: {:?}", raw_bytes);
+            // Dump the on-panic decision log for ByzzFuzz so the operator
+            // sees the schedule + the per-message drop / replace / omit /
+            // deliver trail that led to the failure. Other modes leave the
+            // buffer empty (no pushes), so this is a no-op for them.
+            if matches!(M::MODE, Mode::Byzzfuzz) {
+                let log = byzzfuzz::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- ByzzFuzz decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of ByzzFuzz decision log ----");
+                }
+            }
             panic::resume_unwind(payload);
         }
     }
