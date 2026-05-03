@@ -168,7 +168,7 @@ impl<B: Clone + Send> IntoBlock<B> for B {
     }
 }
 
-/// Implementation for `Arc<B>` to support the coding variant.
+/// Implementation for `Arc<B>` to support shared cache implementations.
 ///
 /// Uses `Arc::unwrap_or_clone` to avoid cloning when the refcount is 1.
 impl<B: Clone + Send + Sync> IntoBlock<B> for Arc<B> {

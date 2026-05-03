@@ -14,7 +14,6 @@ use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::sync::Arc;
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -68,7 +67,7 @@ where
     P: PublicKey,
 {
     type PublicKey = P;
-    type CachedBlock = Arc<CodedBlock<B, C, H>>;
+    type CachedBlock = CodedBlock<B, C, H>;
 
     async fn find_by_digest(
         &self,
