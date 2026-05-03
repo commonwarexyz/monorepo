@@ -25,7 +25,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
-use core::{iter, ops::Range};
+use core::{cmp::Ordering, iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -1586,11 +1586,15 @@ where
 
         let mut committed_entries = 0;
         let mut uncommitted_entries = 0;
+        let mut uncommitted_ancestors = 0;
+        let mut uncommitted_ancestor = None;
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.ancestor_diff_ends[i] <= db_size {
                 committed_entries += ancestor_diff.len();
             } else {
                 uncommitted_entries += ancestor_diff.len();
+                uncommitted_ancestors += 1;
+                uncommitted_ancestor = Some(ancestor_diff.as_slice());
             }
         }
 
@@ -1632,6 +1636,74 @@ where
                         key,
                         entry,
                         base_old_loc(key, entry),
+                    );
+                }
+            } else if committed_locs.is_none() && uncommitted_ancestors == 1 {
+                let ancestor_diff = uncommitted_ancestor.expect("uncommitted ancestor missing");
+                let mut child_idx = 0;
+                let mut ancestor_idx = 0;
+
+                while child_idx < batch.diff.len() && ancestor_idx < ancestor_diff.len() {
+                    let (child_key, child_entry) = &batch.diff[child_idx];
+                    let (ancestor_key, ancestor_entry) = &ancestor_diff[ancestor_idx];
+
+                    match child_key.cmp(ancestor_key) {
+                        Ordering::Less => {
+                            apply_diff(
+                                &mut self.snapshot,
+                                &mut bitmap,
+                                child_key,
+                                child_entry,
+                                child_entry.base_old_loc(),
+                            );
+                            child_idx += 1;
+                        }
+                        Ordering::Equal => {
+                            apply_diff(
+                                &mut self.snapshot,
+                                &mut bitmap,
+                                child_key,
+                                child_entry,
+                                child_entry.base_old_loc(),
+                            );
+                            if let Some(loc) = ancestor_entry.loc() {
+                                debug_assert!(
+                                    !bitmap.get_bit(*loc),
+                                    "farther ancestor location should remain inactive",
+                                );
+                            }
+                            child_idx += 1;
+                            ancestor_idx += 1;
+                        }
+                        Ordering::Greater => {
+                            apply_diff(
+                                &mut self.snapshot,
+                                &mut bitmap,
+                                ancestor_key,
+                                ancestor_entry,
+                                ancestor_entry.base_old_loc(),
+                            );
+                            ancestor_idx += 1;
+                        }
+                    }
+                }
+
+                for (key, entry) in &batch.diff[child_idx..] {
+                    apply_diff(
+                        &mut self.snapshot,
+                        &mut bitmap,
+                        key,
+                        entry,
+                        entry.base_old_loc(),
+                    );
+                }
+                for (key, entry) in &ancestor_diff[ancestor_idx..] {
+                    apply_diff(
+                        &mut self.snapshot,
+                        &mut bitmap,
+                        key,
+                        entry,
+                        entry.base_old_loc(),
                     );
                 }
             } else {
