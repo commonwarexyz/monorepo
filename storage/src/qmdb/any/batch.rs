@@ -1584,53 +1584,93 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        // Build committed_locs: for each key in a committed ancestor batch, record the nearest
-        // (to child) committed ancestor's final state. Some(loc) = Active at loc, None =
-        // Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
-        let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
+        let mut committed_entries = 0;
+        let mut uncommitted_entries = 0;
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.ancestor_diff_ends[i] <= db_size {
-                for (key, entry) in ancestor_diff.iter() {
-                    // parent-first order: .or_insert keeps the nearest committed.
-                    committed_locs.entry(key).or_insert(entry.loc());
-                }
+                committed_entries += ancestor_diff.len();
+            } else {
+                uncommitted_entries += ancestor_diff.len();
             }
         }
+
+        // Build committed_locs only when a partially-applied chain needs fixups from committed
+        // ancestors. Some(loc) = Active at loc, None = Deleted.
+        let committed_locs = if committed_entries == 0 {
+            None
+        } else {
+            let mut locs = HashMap::with_capacity(committed_entries);
+            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                if batch.ancestor_diff_ends[i] > db_size {
+                    continue;
+                }
+                for (key, entry) in ancestor_diff.iter() {
+                    // parent-first order: .or_insert keeps the nearest committed.
+                    locs.entry(key).or_insert(entry.loc());
+                }
+            }
+            Some(locs)
+        };
 
         // Apply diffs to snapshot and bitmap under one write lock (sync, no await).
         {
             let mut bitmap = self.bitmap.write();
             bitmap.extend_to(*batch.new_last_commit_loc + 1);
 
-            // Apply child's diff (child wins via seen set). Safe to use a HashSet here since we
-            // don't rely on iteration order.
-            let mut seen = HashSet::<&U::Key>::new();
-            for (key, entry) in batch.diff.iter() {
-                seen.insert(key);
-                let base_old_loc = committed_locs
-                    .get(key)
-                    .copied()
-                    .unwrap_or_else(|| entry.base_old_loc());
-                apply_diff(&mut self.snapshot, &mut bitmap, key, entry, base_old_loc);
-            }
+            let base_old_loc = |key: &U::Key, entry: &DiffEntry<F, U::Value>| {
+                committed_locs
+                    .as_ref()
+                    .and_then(|locs| locs.get(key).copied())
+                    .unwrap_or_else(|| entry.base_old_loc())
+            };
 
-            // Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
-            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                if batch.ancestor_diff_ends[i] <= db_size {
-                    continue;
+            if uncommitted_entries == 0 {
+                for (key, entry) in batch.diff.iter() {
+                    apply_diff(
+                        &mut self.snapshot,
+                        &mut bitmap,
+                        key,
+                        entry,
+                        base_old_loc(key, entry),
+                    );
                 }
-                for (key, entry) in ancestor_diff.iter() {
-                    if seen.insert(key) {
-                        let base_old_loc = committed_locs
-                            .get(key)
-                            .copied()
-                            .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, base_old_loc);
-                    } else if let Some(loc) = entry.loc() {
-                        debug_assert!(
-                            !bitmap.get_bit(*loc),
-                            "farther ancestor location should remain inactive",
-                        );
+            } else {
+                // Child wins over uncommitted ancestors. Safe to use a HashSet here since we don't
+                // rely on iteration order.
+                let mut seen = HashSet::<&U::Key>::with_capacity(
+                    batch.diff.len().saturating_add(uncommitted_entries),
+                );
+                for (key, entry) in batch.diff.iter() {
+                    seen.insert(key);
+                    apply_diff(
+                        &mut self.snapshot,
+                        &mut bitmap,
+                        key,
+                        entry,
+                        base_old_loc(key, entry),
+                    );
+                }
+
+                // Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
+                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                    if batch.ancestor_diff_ends[i] <= db_size {
+                        continue;
+                    }
+                    for (key, entry) in ancestor_diff.iter() {
+                        if seen.insert(key) {
+                            apply_diff(
+                                &mut self.snapshot,
+                                &mut bitmap,
+                                key,
+                                entry,
+                                base_old_loc(key, entry),
+                            );
+                        } else if let Some(loc) = entry.loc() {
+                            debug_assert!(
+                                !bitmap.get_bit(*loc),
+                                "farther ancestor location should remain inactive",
+                            );
+                        }
                     }
                 }
             }
