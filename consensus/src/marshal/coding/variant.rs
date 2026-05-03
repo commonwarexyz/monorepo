@@ -67,30 +67,29 @@ where
     P: PublicKey,
 {
     type PublicKey = P;
-    type CachedBlock = CodedBlock<B, C, H>;
 
     async fn find_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> Option<Self::CachedBlock> {
+    ) -> Option<CodedBlock<B, C, H>> {
         self.get_by_digest(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: Commitment) -> Option<Self::CachedBlock> {
+    async fn find_by_commitment(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
         self.get(commitment).await
     }
 
     async fn subscribe_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> oneshot::Receiver<Self::CachedBlock> {
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         self.subscribe_by_digest(digest).await
     }
 
     async fn subscribe_by_commitment(
         &self,
         commitment: Commitment,
-    ) -> oneshot::Receiver<Self::CachedBlock> {
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         self.subscribe(commitment).await
     }
 
