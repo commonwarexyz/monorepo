@@ -16,15 +16,14 @@
 //!
 //! Per recipient the closure then decides:
 //!
-//! 1. **drop**     -- if the partition active at `rnd(m)` isolates the
-//!                    sender from that recipient (Algorithm 1 line 15);
-//! 2. **enqueue**  -- if the sender is byzantine and the recipient lies in
-//!                    a matching `procFault.receivers` set: push an
-//!                    [`Intercept`] for the [`ByzzFuzzInjector`] and remove
-//!                    the recipient from the residual original send
-//!                    (Algorithm 1 line 16-18, *replace* half of which lives
-//!                    in the injector);
-//! 3. **deliver**  -- otherwise.
+//! 1. **drop** -- if the partition active at `rnd(m)` isolates the sender
+//!    from that recipient (Algorithm 1 line 15);
+//! 2. **enqueue** -- if the sender is byzantine and the recipient lies in a
+//!    matching `procFault.receivers` set: push an [`Intercept`] for the
+//!    [`ByzzFuzzInjector`] and remove the recipient from the residual
+//!    original send (Algorithm 1 line 16-18, *replace* half of which lives
+//!    in the injector);
+//! 3. **deliver** -- otherwise.
 //!
 //! Honest senders pass an empty procFault schedule and a `None` intercept
 //! sender, degenerating the closure to partition-only filtering. Same closure

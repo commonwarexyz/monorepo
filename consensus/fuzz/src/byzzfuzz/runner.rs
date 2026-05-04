@@ -82,6 +82,11 @@ fn process_faults<P: CryptoPublicKey>(
 
 /// Closed-set enum over the three strategy-keyed [`ByzzFuzzInjector`]
 /// instantiations. Avoids dynamic dispatch / boxing.
+//
+// Variant names intentionally mirror `StrategyChoice::{SmallScope, AnyScope,
+// FutureScope}` so the dispatch reads 1:1 with the strategy it wraps;
+// renaming would break that correspondence.
+#[allow(clippy::enum_variant_names)]
 enum InjectorChoice<P: Simplex> {
     SmallScope(ByzzFuzzInjector<P::Scheme, SmallScope, deterministic::Context>),
     AnyScope(ByzzFuzzInjector<P::Scheme, AnyScope, deterministic::Context>),

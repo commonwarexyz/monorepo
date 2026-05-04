@@ -26,9 +26,9 @@
 //!   the result through unforwarded sender clones to the dropped subset.
 //!
 //! Public surface used from `lib.rs`:
-//! - [`run`]      -- entry point invoked by the `Mode::Byzzfuzz` dispatcher;
-//! - [`log`]      -- on-panic decision-log facility, drained by `fuzz()`'s
-//!                   panic handler.
+//! - [`run`] -- entry point invoked by the `Mode::Byzzfuzz` dispatcher;
+//! - [`log`] -- on-panic decision-log facility, drained by `fuzz()`'s
+//!   panic handler.
 //!
 //! All other items live in private submodules. Cross-submodule references
 //! use direct `crate::byzzfuzz::<sub>::<item>` paths so internals do not
