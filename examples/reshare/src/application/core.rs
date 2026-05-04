@@ -121,7 +121,7 @@ mod tests {
             resolver::handler,
             standard::Standard,
         },
-        simplex::types::Finalization,
+        simplex::types::{Finalization, Finalize, Proposal},
         types::{Epoch, Epocher, FixedEpocher, Round, View, ViewDelta},
         Reporter,
     };
@@ -136,9 +136,10 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
-    use commonware_storage::archive::immutable;
+    use commonware_storage::archive::{immutable, Archive as _};
     use commonware_utils::{
         channel::{mpsc, oneshot},
+        ordered::Set,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU32, NZU64,
     };
@@ -257,11 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn marshal_start_floor_seeds_boundary_block() {
+    fn state_sync_new_epoch_uses_previous_boundary_as_genesis() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
-            let finalizations_by_height: immutable::Archive<
+            let mut finalizations_by_height: immutable::Archive<
                 _,
                 Sha256Digest,
                 Finalization<EdScheme, Sha256Digest>,
@@ -288,14 +289,34 @@ mod tests {
                 .last(Epoch::zero())
                 .unwrap();
             let genesis = genesis::<Sha256, ed25519::PrivateKey, MinSig>();
+            let parent_view = boundary_height
+                .previous()
+                .map(|height| View::new(height.get()))
+                .unwrap_or(View::zero());
             let boundary_context = Context {
                 round: Round::new(Epoch::zero(), View::new(boundary_height.get())),
                 leader: signer.public_key(),
-                parent: (View::zero(), genesis.digest()),
+                parent: (parent_view, genesis.digest()),
             };
             let boundary =
                 TestBlock::new(boundary_context, genesis.digest(), boundary_height, None);
             let boundary_digest = boundary.digest();
+            let dealers = Set::from_iter_dedup([signer.public_key()]);
+            let scheme = EdScheme::signer(b"test", dealers, signer.clone()).unwrap();
+            let proposal = Proposal::new(
+                Round::new(Epoch::zero(), View::new(boundary_height.get())),
+                parent_view,
+                boundary_digest,
+            );
+            let finalize = Finalize::sign(&scheme, proposal).unwrap();
+            let finalizes = [finalize];
+            let finalization =
+                Finalization::from_finalizes(&scheme, finalizes.iter(), &Sequential).unwrap();
+            finalizations_by_height
+                .put_sync(boundary_height.get(), boundary_digest, finalization)
+                .await
+                .expect("failed to store boundary finalization");
+
             let provider = Provider::<EdScheme, ed25519::PrivateKey>::new(
                 b"test".to_vec(),
                 signer.clone(),
@@ -336,6 +357,17 @@ mod tests {
                     .expect("boundary must be in marshal")
                     .digest(),
                 boundary_digest
+            );
+            // The orchestrator uses this lookup to seed epoch 1's Simplex genesis.
+            assert_eq!(
+                marshal.get_info(boundary_height).await,
+                Some((boundary_height, boundary_digest)),
+                "new epoch floor must use the previous epoch boundary block"
+            );
+            assert_ne!(
+                boundary_digest,
+                genesis.digest(),
+                "boundary block should not collapse to height-zero genesis"
             );
 
             marshal_handle.abort();
