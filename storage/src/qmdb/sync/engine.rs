@@ -332,7 +332,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::with_bagging(DB::root_bagging(&config.db_config)),
+            hasher: StandardHasher::<DB::Hasher>::with_bagging(DB::ROOT_BAGGING),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,

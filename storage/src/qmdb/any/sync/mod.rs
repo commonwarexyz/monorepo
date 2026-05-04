@@ -96,11 +96,9 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
-    split_root: bool,
-    root_bagging: merkle::Bagging,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
-    F: merkle::Family,
+    F: qmdb::Bagging,
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
@@ -110,7 +108,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
-    let hasher = StandardHasher::<H>::with_bagging(root_bagging);
+    let hasher = F::default_hasher::<H>();
 
     let merkle = full::Merkle::<F, _, _, S>::init_sync(
         context.with_label("merkle"),
@@ -131,7 +129,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None, split_root).await?;
+    let db = Db::init_from_log(index, log, None, true).await?;
 
     Ok(db)
 }
@@ -143,7 +141,7 @@ macro_rules! impl_sync_database {
      $(; $($where_extra:tt)+)?) => {
         impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
-            F: merkle::Family,
+            F: qmdb::Bagging,
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
@@ -160,6 +158,8 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
+            const ROOT_BAGGING: merkle::Bagging = <F as qmdb::Bagging>::BAGGING;
+
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -170,8 +170,6 @@ macro_rules! impl_sync_database {
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
-                let split_root = config.split_root;
-                let root_bagging = config.root_bagging;
                 build_db::<F, _, $update<K, V>, _, H, _, T, S>(
                     context,
                     merkle_config,
@@ -180,8 +178,6 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
-                    split_root,
-                    root_bagging,
                 )
                 .await
             }
@@ -191,30 +187,22 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
-                let inactive_peaks = if config.split_root {
-                    F::inactive_peaks(
-                        F::location_to_position(target.range.end()),
-                        target.range.start(),
-                    )
-                } else {
-                    0
-                };
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    target.range.start(),
+                );
                 qmdb::any::sync::has_local_target_state::<F, _, H, S>(
                     context,
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,
-                    config.root_bagging,
+                    <F as qmdb::Bagging>::BAGGING,
                 )
                 .await
             }
 
             fn root(&self) -> Self::Digest {
                 crate::qmdb::any::db::Db::root(self)
-            }
-
-            fn root_bagging(config: &Self::Config) -> merkle::Bagging {
-                config.root_bagging
             }
         }
     };

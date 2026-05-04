@@ -17,7 +17,6 @@ use commonware_storage::{
             FixedConfig as Config,
         },
         operation::Committable,
-        Bagging,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -49,8 +48,6 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
             page_cache,
         },
         translator: Translator::default(),
-        split_root: true,
-        root_bagging: <mmr::Family as Bagging>::BAGGING,
     }
 }
 

@@ -48,6 +48,9 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
+    /// Bagging policy used by this database when computing roots/proofs.
+    const ROOT_BAGGING: Bagging;
+
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
         context: Self::Context,
@@ -75,7 +78,4 @@ pub trait Database: Sized + Send {
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
-
-    /// Bagging policy used by this database when computing roots/proofs.
-    fn root_bagging(config: &Self::Config) -> Bagging;
 }

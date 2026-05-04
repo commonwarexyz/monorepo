@@ -130,8 +130,6 @@ fn fuzz_family<F: MerkleFamily + Bagging>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                split_root: true,
-                root_bagging: <F as commonware_storage::qmdb::Bagging>::BAGGING,
             };
 
             let mut db: GenericDb<F> =
