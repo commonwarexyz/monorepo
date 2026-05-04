@@ -274,7 +274,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as UnorderedIndex,
         journal::contiguous::Mutable,
-        merkle::mmr,
+        merkle::{self, mmr},
         qmdb::any::{
             db::Db as AnyDb,
             operation::{update::Update as UpdateTrait, Operation as AnyOperation},
@@ -705,7 +705,7 @@ pub(crate) mod test {
             }
         }
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
@@ -795,7 +795,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         assert!(verify_proof(
             &hasher,
             &historical_proof,
@@ -874,7 +874,7 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         // Changing the proof digests should cause verification to fail
         {
