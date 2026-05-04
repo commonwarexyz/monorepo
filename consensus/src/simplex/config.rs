@@ -1,10 +1,10 @@
 use super::{
     elector::Config as Elector,
-    types::{Activity, Context},
+    types::{Activity, Context, Finalization},
 };
 use crate::{
     types::{Epoch, ViewDelta},
-    CertifiableAutomaton, Relay, Reporter,
+    CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
@@ -31,6 +31,27 @@ pub enum ForwardingPolicy {
     ///
     /// To forward to all participants that did not vote for the proposal, see [ForwardingPolicy::SilentVoters].
     SilentLeader,
+}
+
+/// The certified root from which a Simplex instance starts.
+#[derive(Clone, Debug)]
+pub enum Floor<S: Scheme, D: Digest> {
+    /// Start from the epoch genesis payload at view 0.
+    Genesis(D),
+    /// Start from an already-finalized proposal.
+    Finalized(Finalization<S, D>),
+}
+
+impl<S: Scheme, D: Digest> Floor<S, D> {
+    /// Returns a floor rooted at epoch genesis.
+    pub const fn genesis(payload: D) -> Self {
+        Self::Genesis(payload)
+    }
+
+    /// Returns a floor rooted at a finalized proposal.
+    pub const fn finalized(finalization: Finalization<S, D>) -> Self {
+        Self::Finalized(finalization)
+    }
 }
 
 impl ForwardingPolicy {
@@ -101,6 +122,9 @@ where
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
+
+    /// Certified root for the consensus engine.
+    pub floor: Floor<S, D>,
 
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: NonZeroUsize,
@@ -198,5 +222,16 @@ impl<
             self.fetch_concurrent > 0,
             "it must be possible to fetch from at least one peer at a time"
         );
+        if let Floor::Finalized(finalization) = &self.floor {
+            assert_eq!(
+                finalization.epoch(),
+                self.epoch,
+                "floor finalization must be in the configured epoch"
+            );
+            assert!(
+                !finalization.view().is_zero(),
+                "use Floor::Genesis for the genesis view"
+            );
+        }
     }
 }

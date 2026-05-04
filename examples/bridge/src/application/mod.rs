@@ -6,6 +6,7 @@ use crate::Scheme;
 use commonware_cryptography::Hasher;
 
 mod actor;
+pub use actor::genesis;
 pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};

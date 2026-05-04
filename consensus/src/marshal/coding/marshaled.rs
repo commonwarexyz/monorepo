@@ -453,19 +453,6 @@ where
     type Digest = Commitment;
     type Context = Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>;
 
-    /// Returns the genesis commitment for a given epoch.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (commitment, _) = self
-            .cached_genesis
-            .get_or_insert_with::<E, A, B, _>(
-                &mut self.application,
-                epoch,
-                derive_coded_genesis::<B, C, H>,
-            )
-            .await;
-        commitment
-    }
-
     /// Proposes a new block or re-proposes the epoch boundary block.
     ///
     /// This method builds a new block from the underlying application unless the parent block
@@ -1016,9 +1003,11 @@ where
 /// Fetches the parent block given its digest and optional round.
 ///
 /// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent digest matches the genesis block, it returns the genesis block
-/// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
-/// the parent block's availability.
+/// block. If the parent is already available locally, it returns the parent
+/// directly. This covers state sync floors set above the epoch genesis without
+/// requiring the application to provide the full genesis block. If the parent
+/// commitment matches genesis, it returns the genesis block directly. Otherwise,
+/// it subscribes to the marshal to await the parent block's availability.
 ///
 /// `parent_round` is an optional resolver hint. Callers should only provide a hint when
 /// the source context is trusted/validated. Untrusted paths should pass `None`.
@@ -1041,6 +1030,16 @@ where
     C: CodingScheme,
     H: Hasher,
 {
+    let parent_digest =
+        <Coding<B, C, H, S::PublicKey> as core::Variant>::commitment_to_inner(parent_commitment);
+    if let Some(parent) = marshal.get_block(&parent_digest).await {
+        if <Coding<B, C, H, S::PublicKey> as core::Variant>::commitment(&parent)
+            == parent_commitment
+        {
+            return Either::Left(ready(Ok(parent)));
+        }
+    }
+
     let (genesis_commitment, coded_genesis) = cached_genesis
         .get_or_insert_with::<E, A, B, _>(application, epoch, derive_coded_genesis::<B, C, H>)
         .await;

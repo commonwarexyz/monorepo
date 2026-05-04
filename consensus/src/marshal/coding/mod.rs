@@ -98,7 +98,7 @@ mod tests {
     use std::time::Duration;
 
     #[test_traced("INFO")]
-    fn test_marshaled_propose_after_floor_uses_application_genesis_and_anchor_parent() {
+    fn test_marshaled_propose_after_floor_uses_anchor_parent_without_application_genesis() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -198,9 +198,6 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
-            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_commitment);
-            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_commitment);
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
             let proposed = marshaled
                 .propose(child_ctx)
                 .await
@@ -208,17 +205,7 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, expected_commitment);
             assert!(marshal.get_block(&child_digest).await.is_some());
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
-
-            assert_eq!(
-                marshaled.genesis(epoch.next()).await,
-                epoch_genesis_commitment
-            );
-            assert_eq!(
-                marshaled.genesis(epoch.next()).await,
-                epoch_genesis_commitment
-            );
-            assert_eq!(&*genesis_calls.lock(), &[epoch, epoch.next()]);
+            assert!(genesis_calls.lock().is_empty());
         });
     }
 

@@ -1,22 +1,13 @@
 use commonware_consensus::{
     simplex::{types::Context, Plan},
-    types::Epoch,
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::{mpsc, oneshot};
 
 pub enum Message<D: Digest> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
-    Propose {
-        response: oneshot::Sender<D>,
-    },
-    Verify {
-        response: oneshot::Sender<bool>,
-    },
+    Propose { response: oneshot::Sender<D> },
+    Verify { response: oneshot::Sender<bool> },
 }
 
 /// Mailbox for the application.
@@ -34,15 +25,6 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
-
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
-        receiver.await.expect("Failed to receive genesis")
-    }
 
     async fn propose(
         &mut self,

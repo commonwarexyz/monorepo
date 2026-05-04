@@ -10,6 +10,7 @@ use crate::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal,
         },
+        Floor,
     },
     types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
     Viewable,
@@ -151,6 +152,21 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.genesis = Some(genesis);
         self.enter_view(GENESIS_VIEW.next());
         self.set_leader(GENESIS_VIEW.next(), None);
+    }
+
+    /// Seeds the state machine from the configured floor.
+    pub fn set_floor(&mut self, floor: Floor<S, D>) -> Option<Finalization<S, D>> {
+        match floor {
+            Floor::Genesis(genesis) => {
+                self.set_genesis(genesis);
+                None
+            }
+            Floor::Finalized(finalization) => {
+                let returned = finalization.clone();
+                self.add_finalization(finalization);
+                Some(returned)
+            }
+        }
     }
 
     /// Returns the epoch managed by this state machine.
@@ -779,6 +795,56 @@ mod tests {
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
+    }
+
+    #[test]
+    fn finalized_floor_starts_after_floor_without_genesis() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let epoch = Epoch::new(1);
+            let floor_view = View::new(2);
+            let floor_payload = Sha256Digest::from([8u8; 32]);
+            let floor_proposal =
+                Proposal::new(Rnd::new(epoch, floor_view), GENESIS_VIEW, floor_payload);
+            let finalizes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, floor_proposal.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalizes.iter(), &Sequential)
+                    .expect("finalization");
+
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch,
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+
+            assert_eq!(state.set_floor(Floor::finalized(finalization.clone())), Some(finalization));
+            assert!(state.genesis.is_none());
+            assert_eq!(state.last_finalized(), floor_view);
+            assert_eq!(state.current_view(), floor_view.next());
+            assert_eq!(
+                state.leader_index(floor_view.next()),
+                Some(Participant::new(0))
+            );
+
+            let context = state
+                .try_propose()
+                .expect("leader should build on finalized floor");
+            assert_eq!(context.round, Rnd::new(epoch, floor_view.next()));
+            assert_eq!(context.parent, (floor_view, floor_payload));
+        });
     }
 
     #[test]

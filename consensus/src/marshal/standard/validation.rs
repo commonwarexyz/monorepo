@@ -218,8 +218,11 @@ where
 
 /// Fetches the parent block given its digest and optional round hint.
 ///
-/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability.
+/// If the parent is already available locally, returns it directly. This covers
+/// state sync floors set above the epoch genesis without requiring the
+/// application to provide the full genesis block. If the digest matches genesis,
+/// returns genesis directly. Otherwise, subscribes to marshal for parent
+/// availability.
 ///
 /// `parent_round` is a resolver hint. Callers should only provide a hint when the
 /// source context is trusted/validated. Untrusted paths should pass `None`.
@@ -241,6 +244,10 @@ where
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
+    if let Some(parent) = marshal.get_block(&parent_digest).await {
+        return Either::Left(ready(Ok(parent)));
+    }
+
     let genesis = cached_genesis.get::<E, A>(application, epoch).await;
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))

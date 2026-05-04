@@ -89,6 +89,7 @@ impl<
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
+                floor: cfg.floor,
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,

@@ -1,6 +1,6 @@
 use crate::{
     ordered_broadcast::types::Context,
-    types::{Epoch, Height},
+    types::Height,
     Automaton as A, Relay as R,
 };
 use bytes::Bytes;
@@ -26,10 +26,6 @@ impl<P: PublicKey> Automaton<P> {
 impl<P: PublicKey> A for Automaton<P> {
     type Context = Context<P>;
     type Digest = sha256::Digest;
-
-    async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
-        unimplemented!()
-    }
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();

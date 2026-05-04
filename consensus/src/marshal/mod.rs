@@ -57,12 +57,8 @@
 //! again with the current floor is a no-op.
 //!
 //! A state-sync snapshot must include enough application state to safely continue from the
-//! anchor. In particular, marshaled applications must be able to return the genesis block for
-//! the active epoch via [`crate::Application::genesis`]. Marshal uses that application-provided
-//! block when consensus asks for the epoch genesis digest or when the epoch genesis is the parent
-//! of the next proposal or verification. Applications that need more history than the anchor and
-//! epoch genesis (for example, to reconstruct application-level logs) must include that history in
-//! their own snapshot state.
+//! anchor. Applications that need more history than the anchor (for example, to reconstruct
+//! application-level logs) must include that history in their own snapshot state.
 //!
 //! _Setting a floor prevents this node from backfilling blocks below that floor for peers. This
 //! feature is only appropriate for applications that support state sync and do not require full

@@ -5,6 +5,7 @@
 use commonware_cryptography::Hasher;
 
 mod actor;
+pub use actor::genesis;
 pub use actor::Application;
 mod ingress;
 mod reporter;

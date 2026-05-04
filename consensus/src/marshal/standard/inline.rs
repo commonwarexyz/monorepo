@@ -56,7 +56,7 @@ use crate::{
         Update,
     },
     simplex::{types::Context, Plan},
-    types::{Epoch, Epocher, Round},
+    types::{Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
     VerifyingApplication,
 };
@@ -201,14 +201,6 @@ where
 {
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
-
-    /// Returns the genesis digest for `epoch`.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        self.cached_genesis
-            .get::<E, A>(&mut self.application, epoch)
-            .await
-            .digest()
-    }
 
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
@@ -605,7 +597,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_propose_after_floor_uses_application_genesis_and_anchor_parent() {
+    fn test_propose_after_floor_uses_anchor_parent_without_application_genesis() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -663,9 +655,6 @@ mod tests {
             let genesis_calls = mock_app.genesis_calls();
             let mut inline = Inline::new(context.clone(), mock_app, marshal.clone(), epocher);
 
-            assert_eq!(inline.genesis(epoch).await, epoch_genesis_digest);
-            assert_eq!(inline.genesis(epoch).await, epoch_genesis_digest);
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
             let proposed = inline
                 .propose(child_ctx)
                 .await
@@ -673,11 +662,7 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, child_digest);
             assert!(marshal.get_block(&child_digest).await.is_some());
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
-
-            assert_eq!(inline.genesis(epoch.next()).await, epoch_genesis_digest);
-            assert_eq!(inline.genesis(epoch.next()).await, epoch_genesis_digest);
-            assert_eq!(&*genesis_calls.lock(), &[epoch, epoch.next()]);
+            assert!(genesis_calls.lock().is_empty());
         });
     }
 
