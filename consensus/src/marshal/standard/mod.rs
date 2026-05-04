@@ -1615,25 +1615,21 @@ mod tests {
 
     impl crate::marshal::core::Buffer<Standard<B>> for RecordingBuffer {
         type PublicKey = PublicKey;
-        type CachedBlock = B;
 
-        async fn find_by_digest(&self, _digest: D) -> Option<Self::CachedBlock> {
+        async fn find_by_digest(&self, _digest: D) -> Option<B> {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: D) -> Option<Self::CachedBlock> {
+        async fn find_by_commitment(&self, _commitment: D) -> Option<B> {
             None
         }
 
-        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
+        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
             let (_sender, receiver) = oneshot::channel();
             receiver
         }
 
-        async fn subscribe_by_commitment(
-            &self,
-            _commitment: D,
-        ) -> oneshot::Receiver<Self::CachedBlock> {
+        async fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
             let (_sender, receiver) = oneshot::channel();
             receiver
         }
@@ -1768,8 +1764,7 @@ mod tests {
     )
     where
         R: Reporter<Activity = Update<B>>,
-        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey, CachedBlock = B>
-            + Clone,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
         let config = Config {
             provider,
