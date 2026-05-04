@@ -379,6 +379,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_ancestry_stream_start_floor_waits_for_below_floor_parent() {
+        harness::ancestry_stream_start_floor_waits_for_below_floor_parent::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_finalize_same_height_different_views() {
         harness::finalize_same_height_different_views::<CodingHarness>();
     }

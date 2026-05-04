@@ -4882,6 +4882,101 @@ pub fn ancestry_stream<H: TestHarness>() {
     })
 }
 
+/// Characterize the current interaction between state-sync floors and ancestry.
+///
+/// `Start::Floor` stores the floor anchor and marks it processed, but ancestry still walks toward
+/// height zero. If the parent below the floor is not available, the stream yields the floor anchor
+/// and then waits on the missing parent.
+pub fn ancestry_stream_start_floor_waits_for_below_floor_parent<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+
+        let n = participants.len() as u16;
+        let anchor = H::make_test_block(
+            Sha256::hash(b"missing-parent"),
+            H::genesis_parent_commitment(n),
+            Height::new(2),
+            2,
+            n,
+        );
+        let block = H::make_test_block(
+            H::digest(&anchor),
+            H::commitment(&anchor),
+            Height::new(3),
+            3,
+            n,
+        );
+
+        let me = participants[0].clone();
+        let setup = H::setup_validator_with_start(
+            context.with_label("validator_0"),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::default(),
+            Start::Floor(anchor.clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        let round = Round::new(Epoch::zero(), View::new(3));
+        H::propose(&mut handle, round, &block).await;
+        context.sleep(LINK.latency).await;
+
+        let proposal = Proposal {
+            round,
+            parent: View::new(2),
+            payload: H::commitment(&block),
+        };
+        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+        H::report_finalization(&mut handle.mailbox, finalization).await;
+
+        let start_digest = loop {
+            if let Some((height, digest)) = handle.mailbox.get_info(Identifier::Latest).await {
+                if height == Height::new(3) {
+                    break digest;
+                }
+            }
+            context.sleep(Duration::from_millis(10)).await;
+        };
+
+        let mut ancestry = handle
+            .mailbox
+            .ancestry((None, start_digest))
+            .await
+            .expect("start block should be available");
+        assert_eq!(
+            ancestry.next().await.expect("start block missing").height(),
+            Height::new(3)
+        );
+        assert_eq!(
+            ancestry.next().await.expect("floor anchor missing").height(),
+            Height::new(2)
+        );
+
+        // This is the current behavior under `Start::Floor`: ancestry does not know that height 2
+        // is the floor, so it subscribes to the unavailable height-1 parent and waits.
+        commonware_macros::select! {
+            _ = ancestry.next() => {
+                panic!("ancestry unexpectedly advanced past the floor");
+            },
+            _ = context.sleep(Duration::from_millis(100)) => {},
+        }
+    })
+}
+
 /// Test finalize same height different views.
 pub fn finalize_same_height_different_views<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
