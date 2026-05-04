@@ -1322,11 +1322,6 @@ mod loom_tests {
         }
     }
 
-    // Number of deterministic `ProducerOp` programs to generate per test.
-    const GENERATED_CASES: usize = 8;
-    // Number of operations in each generated `ProducerOp` program.
-    const OPS_PER_PROGRAM: usize = 3;
-
     #[test]
     fn publish_pending_pairing() {
         // `publish` must make the producer's earlier enqueue-side write visible
@@ -1868,7 +1863,7 @@ mod loom_tests {
     #[test]
     fn generated_producer_only_programs() {
         // Generate deterministic producer-only programs before entering loom,
-        // then model each case with four concurrent producers. Each producer
+        // then model each case with two concurrent producers. Each producer
         // runs a short sequence of `publish()` and out-of-band `wake()` calls
         // without any loop thread consuming them.
         //
@@ -1878,12 +1873,13 @@ mod loom_tests {
         // never armed in this test, producers must also leave no wait target
         // armed and must not queue modeled eventfd readiness. A sticky wake bit
         // may remain because there is intentionally no loop to consume it.
+        const CASES: usize = 24;
+        const OPS_PER_PROGRAM: usize = 5;
+
         let mut rng = test_rng();
-        let programs = (0..GENERATED_CASES)
+        let programs = (0..CASES)
             .map(|_| {
                 [
-                    ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
-                    ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
                     ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
                     ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
                 ]
@@ -1933,21 +1929,14 @@ mod loom_tests {
         }
     }
 
-    #[test]
-    fn generated_eventfd_loop_programs() {
-        // Generate deterministic single-producer programs before entering loom,
-        // then model each case with one producer and the eventfd loop simulator.
-        // The producer may interleave out-of-band `wake()` calls before,
-        // between, or after its generated `publish()` calls.
-        //
-        // The loop simulator must eventually observe exactly the generated
-        // publish count, regardless of whether progress arrives through
-        // `pending()` or through the arm, eventfd readiness, and `clear_wait()`
-        // path. Pure wakes are allowed to resume the loop, but they must not
-        // create sequence progress or disturb producer accounting.
+    fn generated_loop_programs(
+        cases: usize,
+        ops_per_program: usize,
+        simulate_loop_until: fn(&Waker, u32, u32) -> u32,
+    ) {
         let mut rng = test_rng();
-        let programs = (0..GENERATED_CASES)
-            .map(|_| ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM))
+        let programs = (0..cases)
+            .map(|_| ProducerOp::generate_program(&mut rng, ops_per_program))
             .collect::<Vec<_>>();
 
         for (iter, program) in programs.into_iter().enumerate() {
@@ -1971,7 +1960,7 @@ mod loom_tests {
                     }
                 });
 
-                let processed = simulate_eventfd_loop_until(&waker, 0, publish_count);
+                let processed = simulate_loop_until(&waker, 0, publish_count);
                 producer.join().unwrap();
 
                 assert_eq!(
@@ -1991,5 +1980,40 @@ mod loom_tests {
                 finish_leftover_wake(&waker);
             });
         }
+    }
+
+    #[test]
+    fn generated_eventfd_loop_programs() {
+        // Generate deterministic single-producer programs before entering loom,
+        // then model each case with one producer and the eventfd loop simulator.
+        // The producer may interleave out-of-band `wake()` calls before,
+        // between, or after its generated `publish()` calls.
+        //
+        // The loop simulator must eventually observe exactly the generated
+        // publish count, regardless of whether progress arrives through
+        // `pending()` or through the arm, eventfd readiness, and `clear_wait()`
+        // path. Pure wakes are allowed to resume the loop, but they must not
+        // create sequence progress or disturb producer accounting.
+        const CASES: usize = 96;
+        const OPS_PER_PROGRAM: usize = 3;
+
+        generated_loop_programs(CASES, OPS_PER_PROGRAM, simulate_eventfd_loop_until);
+    }
+
+    #[test]
+    fn generated_futex_loop_programs() {
+        // Generate deterministic single-producer programs before entering loom,
+        // then model each case with one producer and the futex idle loop
+        // simulator. The producer may interleave out-of-band `wake()` calls
+        // before, between, or after its generated `publish()` calls.
+        //
+        // This is the futex-path counterpart to `generated_eventfd_loop_programs`.
+        // The loop simulator must drain exactly the generated publish count
+        // through `pending()` or `park_idle()`, while pure wakes may resume the
+        // futex wait without creating sequence progress.
+        const CASES: usize = 16;
+        const OPS_PER_PROGRAM: usize = 3;
+
+        generated_loop_programs(CASES, OPS_PER_PROGRAM, simulate_futex_loop_until);
     }
 }
