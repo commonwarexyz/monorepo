@@ -25,7 +25,7 @@ fn buf() -> &'static Mutex<VecDeque<String>> {
     LOG.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-/// Append a line. Bounded -- oldest entries are dropped beyond [`LOG_CAP`].
+/// Append a line. Bounded -- oldest entries are dropped beyond an internal cap.
 pub fn push(line: String) {
     let mut b = buf().lock();
     if b.len() >= LOG_CAP {

@@ -188,7 +188,7 @@ pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
 }
 
 /// Build a `Certificate`-decoding extractor for [`RoundTrackingReceiver`].
-/// Captures `cert_codec` so the closure can run [`Certificate::decode_cfg`].
+/// Captures `cert_codec` so the closure can run `Certificate::decode_cfg`.
 pub fn certificate_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static
@@ -212,7 +212,7 @@ where
 /// [`SenderViewCell`] to `v`, so any subsequent outbound forwarding is
 /// attributed to `max(v, prior)` rather than the stale prior round.
 ///
-/// The wire format ([`commonware_resolver::p2p::wire::Message`]) is private
+/// The wire format (`commonware_resolver::p2p::wire::Message`) is private
 /// to that crate; we hand-decode the small fixed prefix here and only
 /// invoke the canonical [`Certificate`] codec on the response payload, so
 /// no cross-crate visibility change is required.
