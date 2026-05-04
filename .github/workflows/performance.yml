@@ -1,4 +1,4 @@
-name: Benchmark Tracking
+name: Performance
 
 on:
   push:
@@ -13,12 +13,12 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: benchmark-tracking-${{ github.event.pull_request.number || github.ref }}
+  group: regressions-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  benchmark-tracking:
-    name: Run
+  regressions:
+    name: Regressions
     runs-on: ubuntu-latest-8
     timeout-minutes: 180
     env:
