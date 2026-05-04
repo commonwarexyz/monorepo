@@ -447,6 +447,7 @@ where
                             reason = "consensus dropped receiver",
                             "skipping optimistic verification"
                         );
+                        verification_tasks.take(round, digest);
                         return;
                     },
                     result = block_request => match result {
@@ -457,6 +458,7 @@ where
                                 reason = "failed to fetch block for optimistic verification",
                                 "skipping optimistic verification"
                             );
+                            verification_tasks.take(round, digest);
                             return;
                         }
                     },
@@ -478,6 +480,7 @@ where
                 )
                 .await
                 else {
+                    verification_tasks.take(round, digest);
                     return;
                 };
                 let block = match decision {
@@ -1034,6 +1037,82 @@ mod tests {
                 },
             }
         })
+    }
+
+    /// Regression: dropping the optimistic verify receiver before the block is available must not
+    /// leave a closed verification task that prevents `certify` from using its embedded-context
+    /// fallback.
+    #[test_traced("WARN")]
+    fn test_deferred_certify_falls_back_after_dropped_optimistic_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block = B::new::<Sha256>(
+                block_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let digest = block.digest();
+
+            let verify_rx = marshaled.verify(block_context, digest).await;
+            drop(verify_rx);
+
+            // Give the optimistic task a chance to observe the dropped receiver while its
+            // block subscription is still pending.
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(marshal.verified(round, block).await);
+
+            let certify_rx = marshaled.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "certify should fall back to embedded-context verification"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not be blocked by a stale verify task");
+                },
+            }
+        });
     }
 
     /// Regression: `certify` resolving true drives the finalize vote, so it must imply
