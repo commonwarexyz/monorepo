@@ -1327,9 +1327,7 @@ where
     }
 }
 
-/// Selector for which multi-node fuzz harness `fuzz` will dispatch to. Each
-/// variant maps to a `*Mode` zero-sized type below; see those for what each
-/// mode does. Single-node modes live in [`simplex_node::NodeMode`].
+/// Selector for which a fuzz harness will dispatch to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
@@ -1340,17 +1338,13 @@ pub enum Mode {
     Byzzfuzz,
 }
 
-/// Zero-sized type implemented by every multi-node fuzz mode;
-/// `fuzz::<P, M>(...)` picks the run path via `M::MODE`. Separate from
-/// [`simplex_node::NodeFuzzMode`] so the type system prevents passing
-/// single-node modes to `fuzz` (and vice versa).
 pub trait FuzzMode {
     const MODE: Mode;
 }
 
 /// **Standard mode** - the baseline harness.
 ///
-/// `f` byzantine validators run as `Disrupter`s (mutating outgoing messages
+/// Configured byzantine validators run as `Disrupter` (mutating outgoing messages
 /// per `input.strategy`); the remaining validators run honestly. Network
 /// topology follows `input.partition` (`Connected`, a `Static` set partition,
 /// or an `Adaptive` round-indexed schedule).
@@ -1384,9 +1378,6 @@ impl FuzzMode for Twinable {
 /// see different network partitions per round. Liveness counts finalizations
 /// only past the adversarial prefix; safety invariants run only over honest
 /// reporters.
-///
-/// Use this to fuzz the pure twins setting (scenario-driven adversarial
-/// network only, no byzantine content mutations).
 pub struct TwinsCampaign;
 impl FuzzMode for TwinsCampaign {
     const MODE: Mode = Mode::TwinsCampaign;
@@ -1408,9 +1399,6 @@ impl FuzzMode for TwinsCampaign {
 ///   rate is written synchronously before validators are spawned so the
 ///   scheduled rate takes effect from the protocol's first message; the
 ///   async scheduler task picks up from view 2 onward.
-///
-/// Use this to fuzz consensus under hostile message ordering and lossy
-/// honest-message delivery, independent of network partitioning.
 pub struct FaultyMessaging;
 impl FuzzMode for FaultyMessaging {
     const MODE: Mode = Mode::FaultyMessaging;
@@ -1422,35 +1410,28 @@ impl FuzzMode for FaultyMessaging {
 /// activates a sampled `SetPartition` for each scheduled view, reverting to
 /// fully connected outside scheduled views. Each strategy guarantees at least
 /// one entry, so every run exercises an actual partition window.
-///
-/// Use this to fuzz consensus under transient network partitions
-/// (ByzzFuzz-style `d` budget over set partitions of `{0..n}`).
 pub struct FaultyNet;
 impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
-/// **Byzzfuzz mode** - the ByzzFuzz fuzzing model (https://gleissen.github.io/papers/byzzfuzz.pdf).
+/// **Byzzfuzz mode** - implements the fuzzing method described in https://gleissen.github.io/papers/byzzfuzz.pdf.
 ///
-/// Runs 4 honest engines and layers two adversarial axes on top, both
-/// derived from `input.strategy`:
+/// Runs four honest engines and simulate network and process faults derived from the input strategy:
 /// - **Network faults**: a round-indexed schedule of set partitions over
-///   `{0..n}`. While a partition is active, traffic across blocks is
+///   `{0, ..., n-1}`. While a partition is active, traffic across blocks is
 ///   dropped on every protocol channel (vote, certificate, resolver).
 ///   Outside scheduled rounds the topology is fully connected.
 /// - **Process faults**: a fixed byzantine identity, whose outgoing
-///   protocol messages are intercepted and replaced (or omitted) per a
+///   protocol messages are intercepted and corrupted (or omitted) per a
 ///   round-indexed schedule of `(round, receivers, seed)` triples.
-///   Replacements are mutations of the *actual* intercepted message: vote
+///   Corruptions are mutations of the *actual* intercepted message: vote
 ///   variants are re-signed under the byzantine identity; certificate and
 ///   resolver bytes are mutated in place.
 ///
 /// Faults are attributed to the byzantine sender's current protocol round
 /// (the maximum view it has sent or received), so retransmissions of an
 /// old view at a later round inherit the later round's fault window.
-///
-/// Use this to fuzz consensus under transient set-partitions combined with
-/// byzantine in-flight message mutation / omission by a fixed identity.
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
