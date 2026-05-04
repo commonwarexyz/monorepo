@@ -4962,7 +4962,11 @@ pub fn ancestry_stream_start_floor_waits_for_below_floor_parent<H: TestHarness>(
             Height::new(3)
         );
         assert_eq!(
-            ancestry.next().await.expect("floor anchor missing").height(),
+            ancestry
+                .next()
+                .await
+                .expect("floor anchor missing")
+                .height(),
             Height::new(2)
         );
 
