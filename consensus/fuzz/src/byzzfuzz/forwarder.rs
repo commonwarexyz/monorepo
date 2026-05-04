@@ -77,20 +77,27 @@ fn filter_by_partition<P: PublicKey>(
     schedule: &[(View, SetPartition)],
     view: u64,
 ) -> Option<Vec<P>> {
-    let active = schedule
+    // Collect *all* partition faults scheduled for this view. With-replacement
+    // sampling allows duplicates per view, and Algorithm 1 line 15 reads
+    // "drop if any partition fault at rnd(m) isolates sender from receiver".
+    // A receiver is therefore kept iff *every* matching partition keeps
+    // sender/receiver in the same block.
+    let actives: Vec<SetPartition> = schedule
         .iter()
-        .find_map(|(v, p)| (v.get() == view).then_some(*p));
-    let kept: Vec<P> = match active {
-        None => recipients,
-        Some(partition) => recipients
+        .filter_map(|(v, p)| (v.get() == view).then_some(*p))
+        .collect();
+    let kept: Vec<P> = if actives.is_empty() {
+        recipients
+    } else {
+        recipients
             .into_iter()
             .filter(|pk| {
                 let Some(idx) = participants.iter().position(|q| q == pk) else {
                     return true;
                 };
-                partition.connected(sender_idx, idx)
+                actives.iter().all(|p| p.connected(sender_idx, idx))
             })
-            .collect(),
+            .collect()
     };
     if kept.is_empty() {
         None

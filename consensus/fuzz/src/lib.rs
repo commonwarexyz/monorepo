@@ -1417,7 +1417,7 @@ impl FuzzMode for FaultyNet {
 
 /// **Byzzfuzz mode** - implements the fuzzing method described in <https://gleissen.github.io/papers/byzzfuzz.pdf>.
 ///
-/// Runs four honest engines and simulate network and process faults derived from the input strategy:
+/// Runs four honest engines and simulates sampled ByzzFuzz network and process faults:
 /// - **Network faults**: a round-indexed schedule of set partitions over
 ///   `{0, ..., n-1}`. While a partition is active, traffic across blocks is
 ///   dropped on every protocol channel (vote, certificate, resolver).

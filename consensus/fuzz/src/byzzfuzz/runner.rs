@@ -1,147 +1,25 @@
 //! Run a single ByzzFuzz iteration.
-//!
-//! Orchestrates the four pieces in this module:
-//! - schedule sampling (network faults via [`crate::network_faults`],
-//!   process faults via [`process_faults`] over the active strategy);
-//! - per-validator setup with vote/cert/resolver `SplitForwarder`s
-//!   (partition + procFault filtering, byzantine sender additionally
-//!   intercepts to the injector queue);
-//! - the [`ByzzFuzzInjector`] consuming the intercept queue and re-emitting
-//!   the per-message mutation;
-//! - bounded liveness wait + invariant checks with the byzantine identity
-//!   excluded from the equivocation invariant.
 
+use super::BYZANTINE_IDX;
 use crate::{
     byzzfuzz::{
-        fault::{self, ProcessFault},
-        forwarder,
-        injector::ByzzFuzzInjector,
-        intercept, log,
+        fault::ProcessFault, forwarder, injector::ByzzFuzzInjector, intercept, log, ByzzFuzz,
     },
-    invariants, network_faults,
+    invariants,
     simplex::Simplex,
     spawn_honest_validator,
-    strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
+    strategy::SmallScope,
     utils::Partition,
     PublicKeyOf, FAULT_INJECTION_RATIO, MAX_SLEEP_DURATION, N4F0C4,
 };
 use commonware_consensus::{simplex::mocks::relay, types::View, Monitor as _};
-use commonware_cryptography::{
-    certificate::Scheme as CertificateScheme, PublicKey as CryptoPublicKey,
-};
+use commonware_cryptography::certificate::Scheme as CertificateScheme;
 use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, FuzzRng};
 use futures::future::join_all;
+use rand::Rng;
 use std::{collections::HashSet, sync::Arc, time::Duration};
-
-use super::BYZANTINE_IDX;
-
-/// Sample a process-fault schedule. Number of faults and view range are
-/// derived from `strategy` mirroring the network/messaging dispatchers in
-/// `lib.rs` so density is consistent across adaptive modes.
-fn process_faults<P: CryptoPublicKey>(
-    strategy: StrategyChoice,
-    required_containers: u64,
-    participants: &[P],
-    rng: &mut impl rand::Rng,
-) -> Vec<ProcessFault<P>> {
-    let (count, min_view, max_view) = match strategy {
-        StrategyChoice::SmallScope {
-            fault_rounds,
-            fault_rounds_bound,
-        } => {
-            let bound = fault_rounds_bound.min(required_containers).max(1);
-            let d = fault_rounds.max(1).min(bound);
-            (d, 1, bound)
-        }
-        StrategyChoice::AnyScope => {
-            let max_d = (required_containers / FAULT_INJECTION_RATIO).max(1);
-            let d = rng.gen_range(1..=max_d);
-            (d, 1, required_containers.max(1))
-        }
-        StrategyChoice::FutureScope {
-            fault_rounds,
-            fault_rounds_bound,
-        } => {
-            let start = fault_rounds_bound
-                .saturating_add(1)
-                .min(required_containers)
-                .max(1);
-            let window = required_containers.saturating_sub(start).saturating_add(1);
-            let d = fault_rounds.max(1).min(window);
-            (d, start, required_containers.max(start))
-        }
-    };
-    fault::sample(count, min_view, max_view, participants, rng)
-}
-
-/// Closed-set enum over the three strategy-keyed [`ByzzFuzzInjector`]
-/// instantiations. Avoids dynamic dispatch / boxing.
-//
-// Variant names intentionally mirror `StrategyChoice::{SmallScope, AnyScope,
-// FutureScope}` so the dispatch reads 1:1 with the strategy it wraps;
-// renaming would break that correspondence.
-#[allow(clippy::enum_variant_names)]
-enum InjectorChoice<P: Simplex> {
-    SmallScope(ByzzFuzzInjector<P::Scheme, SmallScope, deterministic::Context>),
-    AnyScope(ByzzFuzzInjector<P::Scheme, AnyScope, deterministic::Context>),
-    FutureScope(ByzzFuzzInjector<P::Scheme, FutureScope, deterministic::Context>),
-}
-
-impl<P: Simplex> InjectorChoice<P> {
-    fn build(context: deterministic::Context, scheme: P::Scheme, strategy: StrategyChoice) -> Self {
-        match strategy {
-            StrategyChoice::SmallScope {
-                fault_rounds,
-                fault_rounds_bound,
-            } => Self::SmallScope(ByzzFuzzInjector::new(
-                context,
-                scheme,
-                SmallScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                },
-            )),
-            StrategyChoice::AnyScope => {
-                Self::AnyScope(ByzzFuzzInjector::new(context, scheme, AnyScope))
-            }
-            StrategyChoice::FutureScope {
-                fault_rounds,
-                fault_rounds_bound,
-            } => Self::FutureScope(ByzzFuzzInjector::new(
-                context,
-                scheme,
-                FutureScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                },
-            )),
-        }
-    }
-
-    fn start(
-        self,
-        vote_sender: impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>> + 'static,
-        cert_sender: impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>> + 'static,
-        resolver_sender: impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>> + 'static,
-        intercept_rx: commonware_utils::channel::mpsc::UnboundedReceiver<
-            intercept::Intercept<PublicKeyOf<P>>,
-        >,
-    ) {
-        match self {
-            Self::SmallScope(i) => {
-                i.start(vote_sender, cert_sender, resolver_sender, intercept_rx);
-            }
-            Self::AnyScope(i) => {
-                i.start(vote_sender, cert_sender, resolver_sender, intercept_rx);
-            }
-            Self::FutureScope(i) => {
-                i.start(vote_sender, cert_sender, resolver_sender, intercept_rx);
-            }
-        }
-    }
-}
 
 /// Run the ByzzFuzz fault model on `input`. 4 *honest* engines plus a
 /// per-message strict-replace interception layer (Algorithm 1).
@@ -152,14 +30,12 @@ where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
-    // Force 4-honest topology with no oracle-driven link toggling. Per-channel
-    // forwarders own all network-fault behavior in this mode.
+    // Per-channel forwarders own all network-fault behavior in this mode;
+    // disable oracle-driven topology and Disrupters.
     input.configuration = N4F0C4;
     input.partition = Partition::Connected;
     input.degraded_network = false;
 
-    // Reset the on-panic decision log so a dump only contains entries from
-    // this run. fuzz()'s panic handler flushes the buffer.
     log::clear();
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
@@ -167,24 +43,27 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let network_schedule_vec =
-            network_faults(input.strategy, input.required_containers, &mut context);
+        // Sample the paper's (d, p, c) here rather than threading it through
+        // FuzzInput -- keeps mode-specific state out of the shared input
+        // and reuses the deterministic FuzzRng.
+        let c = context.gen_range(1..=input.required_containers.max(1));
+        let max_per_axis = (c / FAULT_INJECTION_RATIO).max(1);
+        let d = context.gen_range(0..=max_per_axis);
+        let p = context.gen_range(0..=max_per_axis);
+        let byzz = ByzzFuzz::new(d, p, c);
+
+        let network_schedule_vec = byzz.network_faults(&mut context);
 
         let (oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
 
-        let proc_faults = process_faults(
-            input.strategy,
-            input.required_containers,
-            &participants,
-            &mut context,
-        );
+        let proc_faults = byzz.process_faults(&participants, &mut context);
 
         log::push(format!(
-            "byzzfuzz schedule: byzantine_idx={} required_containers={} strategy={:?} network_faults={:?} proc_faults={:?}",
+            "byzzfuzz schedule: byzantine_idx={} required_containers={} byzz={:?} network_faults={:?} proc_faults={:?}",
             BYZANTINE_IDX,
             input.required_containers,
-            input.strategy,
+            byzz,
             network_schedule_vec,
             proc_faults,
         ));
@@ -222,17 +101,8 @@ where
                 injector_resolver_sender = Some(resolver_sender.clone());
             }
 
-            // Per-sender shared cell implementing rnd(m) per the paper:
-            // "max round in which the sender has sent OR received a message".
-            // Outgoing forwarders fold transmitted views in;
-            // RoundTrackingReceiver wrappers (below) fold received views in.
-            // Old-view retransmissions therefore inherit the sender's
-            // current round, not their own stale view.
             let sender_view = intercept::SenderViewCell::new();
 
-            // Non-byzantine senders see an empty procFault schedule -> the
-            // forwarder degenerates to partition-only filtering. Same closure
-            // type for all four senders -> no opaque-type mismatch.
             let proc_for_sender = if i == BYZANTINE_IDX {
                 proc_schedule_arc.clone()
             } else {
@@ -275,11 +145,6 @@ where
                     intercept_for_sender,
                 ));
 
-            // Wrap inbound vote / cert / resolver receivers so received
-            // views also raise this sender's round cell. Resolver wire
-            // messages carry round-relevant data (Request key = U64 view;
-            // Response payload = serialized Certificate), so the resolver
-            // path participates in `rnd(m)` just like vote/cert.
             let vote_receiver = intercept::RoundTrackingReceiver::new(
                 vote_receiver,
                 sender_view.clone(),
@@ -314,15 +179,23 @@ where
             reporters.push(reporter);
         }
 
-        // Drop the local intercept_tx clone so the queue closes once all the
-        // forwarder-held clones are dropped at end of run.
+        // Closes the intercept queue once all forwarder-held clones drop.
         drop(intercept_tx);
 
-        // Spawn the injector. If procFaults are empty, no intercepts will
-        // arrive and the injector exits as soon as `intercept_tx` is dropped.
+        // Mutator is forced to `SmallScope` so byzantine-message edits are
+        // paper-style "small local" changes; `input.strategy` is left to
+        // the other modes' content-mutation choices.
         let injector_ctx = context.with_label("byzzfuzz_injector");
-        let injector =
-            InjectorChoice::<P>::build(injector_ctx, schemes[BYZANTINE_IDX].clone(), input.strategy);
+        let injector = ByzzFuzzInjector::new(
+            injector_ctx,
+            schemes[BYZANTINE_IDX].clone(),
+            // fault_rounds / fault_rounds_bound are unused on the mutate_*
+            // path the injector calls; only network/messaging_faults read them.
+            SmallScope {
+                fault_rounds: 1,
+                fault_rounds_bound: 1,
+            },
+        );
         injector.start(
             injector_vote_sender.expect("byzantine vote sender cloned"),
             injector_cert_sender.expect("byzantine cert sender cloned"),
@@ -349,7 +222,6 @@ where
           _ = context.sleep(MAX_SLEEP_DURATION) => {},
         }
 
-        // Exclude the byzantine replica from the equivocation invariant.
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
         let states = invariants::extract(reporters, config.n as usize);

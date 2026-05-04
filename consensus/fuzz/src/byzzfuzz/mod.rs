@@ -22,14 +22,12 @@ mod injector;
 mod intercept;
 pub mod log;
 mod runner;
+mod sampling;
 
 pub use runner::run;
+pub(crate) use sampling::ByzzFuzz;
 
-/// Index of the byzantine identity in `participants`. Fixed at the lowest
-/// position so every consumer (process-fault sampling in
-/// [`fault::sample`]; sender selection / interception / injector key /
-/// invariant exclusion in [`runner::run`]) reads from a single source of
-/// truth. Several call sites encode this assumption (notably the sampler,
-/// which builds its candidate receiver set as `participants[1..]`);
-/// changing this value requires auditing them.
+/// Byzantine identity in `participants`. Single source of truth for the
+/// sampler (which builds its candidate receiver set as `participants[1..]`)
+/// and the runner (sender selection, injector key, invariant exclusion).
 pub(crate) const BYZANTINE_IDX: usize = 0;
