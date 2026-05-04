@@ -5,14 +5,14 @@ use crate::aws::{
     ec2::{self, *},
     s3::{self, *},
     services::*,
-    utils::{download_file, scp_download, ssh_execute},
+    utils::{download_file, scp_download, ssh_execute_with_timeout},
     Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use std::{
     fs::File,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::Command;
 use tracing::info;
@@ -172,7 +172,13 @@ echo "Profile captured successfully"
         duration = duration,
         "starting profile capture"
     );
-    ssh_execute(private_key, &instance_ip, &profile_script).await?;
+    ssh_execute_with_timeout(
+        private_key,
+        &instance_ip,
+        &profile_script,
+        Duration::from_secs(duration).saturating_add(Duration::from_secs(5 * 60)),
+    )
+    .await?;
     info!("profile capture complete");
 
     // Download the profile locally via scp
