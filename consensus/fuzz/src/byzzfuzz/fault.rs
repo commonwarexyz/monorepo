@@ -4,10 +4,11 @@ use crate::{byzzfuzz::scope::FaultScope, utils::SetPartition};
 use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 
-/// A single ByzzFuzz process fault. At view `view` the byzantine process's
-/// deliveries to anyone in `receivers` whose channel/kind matches `scope`
-/// are replaced by `mutate(_, seed)`. When `omit` is true the mutation is
-/// the empty message set and the injector emits nothing.
+/// A single ByzzFuzz process fault. When the byzantine sender's `rnd(m)`
+/// equals `view`, its deliveries to anyone in `receivers` whose
+/// channel/kind matches `scope` are replaced by `mutate(_, seed)`. When
+/// `omit` is true the mutation is the empty message set and the injector
+/// emits nothing.
 #[derive(Clone, Debug)]
 pub struct ProcessFault<P: PublicKey> {
     pub view: u64,
@@ -17,11 +18,12 @@ pub struct ProcessFault<P: PublicKey> {
     pub scope: FaultScope,
 }
 
-/// A single ByzzFuzz network fault. At view `view`, all messages whose
-/// channel/kind match `scope` are dropped between blocks of `partition`.
+/// A single ByzzFuzz network fault. When the message sender's `rnd(m)`
+/// equals `view`, all messages on every channel are dropped between blocks
+/// of `partition` -- network partitions are total at their round; no
+/// per-channel/kind targeting.
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkFault {
     pub view: View,
     pub partition: SetPartition,
-    pub scope: FaultScope,
 }

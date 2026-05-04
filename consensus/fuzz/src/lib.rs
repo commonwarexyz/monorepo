@@ -1418,20 +1418,25 @@ impl FuzzMode for FaultyNet {
 /// **Byzzfuzz mode** - implements the fuzzing method described in <https://gleissen.github.io/papers/byzzfuzz.pdf>.
 ///
 /// Runs four honest engines and simulates sampled ByzzFuzz network and process faults:
-/// - **Network faults**: a round-indexed schedule of set partitions over
-///   `{0, ..., n-1}`. While a partition is active, traffic across blocks is
-///   dropped on every protocol channel (vote, certificate, resolver).
-///   Outside scheduled rounds the topology is fully connected.
+/// - **Network faults**: a schedule of `(view, partition)` entries over
+///   `{0, ..., n-1}`. At a scheduled view, traffic across partition blocks
+///   is dropped on every channel (vote, certificate, resolver, even
+///   undecodable bytes) -- network partitions are total at their round.
+///   Outside scheduled views the topology is fully connected.
 /// - **Process faults**: a fixed byzantine identity, whose outgoing
 ///   protocol messages are intercepted and corrupted (or omitted) per a
-///   round-indexed schedule of `(round, receivers, seed)` triples.
-///   Corruptions are mutations of the *actual* intercepted message: vote
-///   variants are re-signed under the byzantine identity; certificate and
-///   resolver bytes are mutated in place.
+///   schedule of `(view, receivers, seed, omit, scope)` entries. `scope`
+///   optionally narrows a fault to a specific channel + message kind
+///   (e.g. only Notarize votes); `Any` matches every byzantine outgoing
+///   message at the view. Corruptions are mutations of the *actual*
+///   intercepted message: vote variants are re-signed under the byzantine
+///   identity; certificate and resolver bytes are mutated in place.
 ///
-/// Faults are attributed to the byzantine sender's current protocol round
-/// (the maximum view it has sent or received), so retransmissions of an
-/// old view at a later round inherit the later round's fault window.
+/// Round attribution uses each message sender's current protocol round
+/// (the maximum view that sender has sent or received): network faults
+/// apply per-message-sender, process faults apply per-byzantine-sender.
+/// Retransmissions of an old view at a later round therefore inherit the
+/// later round's fault window.
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
@@ -1471,9 +1476,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Err(payload) => {
             println!("Panicked with raw_bytes: {:?}", raw_bytes);
             // Dump the on-panic decision log for ByzzFuzz so the operator
-            // sees the schedule + the per-message drop / replace / omit /
-            // deliver trail that led to the failure. Other modes leave the
-            // buffer empty (no pushes), so this is a no-op for them.
+            // sees the schedule + the per-message drop / intercept /
+            // replace / omit trail that led to the failure. Other modes
+            // leave the buffer empty (no pushes), so this is a no-op.
             if matches!(M::MODE, Mode::Byzzfuzz) {
                 let log = byzzfuzz::log::take();
                 if !log.is_empty() {

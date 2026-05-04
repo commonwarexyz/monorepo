@@ -1,4 +1,6 @@
-//! Per-fault targeting at `(view, channel, message kind)` granularity.
+//! `FaultScope`: an optional message-kind filter applied to *process* faults
+//! to narrow which intercepted byzantine messages a fault matches.
+//! Network faults are total at their view and do not use this type.
 
 use commonware_consensus::simplex::types::{Certificate, Vote};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
@@ -18,11 +20,11 @@ pub enum CertificateKind {
     Finalization,
 }
 
-/// A fault may target all messages at a view (`Any`) or only one channel +
-/// message kind. The Tendermint reference (`tendermint-byzzfuzz`) targets
-/// individual protocol steps; this is the Simplex equivalent. Resolver
-/// kinds are intentionally not yet sampled (decoder path stable but the
-/// fault model gain is small); when added they will be a third variant.
+/// Process-fault message-kind filter. `Any` matches every byzantine
+/// outgoing message when the sender's `rnd(m)` equals the fault's view;
+/// the typed variants additionally narrow the match to a single
+/// channel + message kind. Resolver kinds are intentionally not yet
+/// sampled.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum FaultScope {
     #[default]

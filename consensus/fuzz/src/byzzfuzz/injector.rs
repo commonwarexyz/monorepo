@@ -6,8 +6,9 @@
 //!
 //! One mutation per intercepted byzantine message -- faithful to
 //! `m' = mutate(m, seed)` rather than synthesizing fresh adversarial
-//! messages. The mutator RNG is keyed only by the per-fault `seed` so a
-//! given seed always produces the same fault.
+//! messages. The mutator RNG is keyed only by the per-fault `seed`, so
+//! given the same intercepted message, observed-value pool, and seed the
+//! produced fault is identical.
 
 use crate::{
     byzzfuzz::{

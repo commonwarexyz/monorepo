@@ -67,10 +67,10 @@ pub struct Intercept<P: PublicKey> {
     pub targets: Vec<P>,
 }
 
-/// Cell holding the byzantine sender's most-recently-seen consensus view.
-/// Updated monotonically by vote/cert forwarders on every successful decode;
-/// read by the resolver forwarder to derive a round attribution for
-/// view-less recovery traffic.
+/// Per-sender cell holding the current `rnd(m)` view.
+/// Updated monotonically by outgoing forwarders when a message carries a
+/// decodable view, and by inbound `RoundTrackingReceiver`s. Read by every
+/// forwarder before applying network/process fault decisions.
 ///
 /// Cheap to clone (Arc).
 #[derive(Clone, Default)]
@@ -112,8 +112,9 @@ pub fn channel<P: PublicKey>() -> (
 
 /// Receiver wrapper that, for every incoming message, decodes the protocol
 /// view and folds it into a shared [`SenderViewCell`]. Used on each
-/// validator's vote and certificate inbound channels so the cell tracks the
-/// "received" half of the paper's `rnd(m) = max round sent or received`.
+/// validator's vote, certificate, and resolver inbound channels so the
+/// cell tracks the "received" half of the paper's
+/// `rnd(m) = max round sent or received`.
 ///
 /// `extract` returns `Some(view)` when the bytes decode to the channel's
 /// expected type and `None` otherwise (undecodable bytes leave the cell

@@ -4,25 +4,29 @@
 //! Each factory produces a closure installed via `Sender::split_with` on a
 //! validator's outgoing channel. The closure recovers `rnd(m)` from the
 //! shared per-sender [`SenderViewCell`] -- the paper's "max round in which
-//! the sender has sent or received a message". All three outgoing
-//! forwarders (vote, cert, resolver) fold the message's carried view into
-//! the cell *before* reading it: vote/cert from `m.view()`, resolver from
-//! the wire `Request(U64)` key or the embedded `Certificate` of a
-//! `Response`. A retransmission of an old view at a later sender round
-//! therefore inherits the sender's current round (matching the paper's
-//! "we apply the same faults to retransmissions sent in the same protocol
-//! round, but allow their nonfaulty delivery if they are repeated in a
-//! later round"). Received vote/cert/resolver traffic feeds the cell via
+//! the sender has sent or received a message". When the outgoing bytes
+//! carry a decodable view (vote/cert via `m.view()`; resolver via the
+//! wire `Request(U64)` key or the `Certificate` embedded in a `Response`),
+//! the forwarder folds that view into the cell *before* reading it; on
+//! undecodable bytes the cell's existing value stands. A retransmission
+//! of an old view at a later sender round therefore inherits the sender's
+//! current round (matching the paper's "we apply the same faults to
+//! retransmissions sent in the same protocol round, but allow their
+//! nonfaulty delivery if they are repeated in a later round"). Received
+//! vote/cert/resolver traffic feeds the cell via
 //! [`super::intercept::RoundTrackingReceiver`].
 //!
 //! Per recipient the closure then decides:
 //!
 //! 1. **drop** -- if the partition active at `rnd(m)` isolates the sender
-//!    from that recipient (Algorithm 1 line 15);
+//!    from that recipient (Algorithm 1 line 15). Network partitions are
+//!    total at their view: every channel (vote, cert, resolver, even
+//!    undecodable bytes) consults the same partition schedule.
 //! 2. **enqueue** -- if the sender is byzantine and the recipient lies in a
-//!    matching `procFault.receivers` set: push an `Intercept` for the
-//!    `ByzzFuzzInjector` and remove the recipient from the residual original
-//!    send (Algorithm 1 line 16-18, *replace* half of which lives in the
+//!    matching `procFault.receivers` set whose [`super::scope::FaultScope`]
+//!    matches this channel/kind: push an `Intercept` for the
+//!    `ByzzFuzzInjector` and remove the recipient from the residual
+//!    original send (Algorithm 1 line 16-18; *replace* half lives in the
 //!    injector);
 //! 3. **deliver** -- otherwise.
 //!
@@ -70,23 +74,23 @@ fn expand<P: PublicKey>(recipients: &Recipients<P>, participants: &[P]) -> Vec<P
     }
 }
 
-/// Drop receivers not in `sender_idx`'s partition block at `view`, considering
-/// only partitions whose scope matches the current channel/kind. Returns
-/// `None` (= drop entirely) when nothing is left.
+/// Drop receivers not in `sender_idx`'s partition block at `view`. Network
+/// partitions are total at their view -- no per-channel/kind filter -- so
+/// every channel (vote, cert, resolver, undecodable) consults this same
+/// function with no scope predicate. Returns `None` (= drop entirely)
+/// when nothing is left.
 fn filter_by_partition<P: PublicKey>(
     recipients: Vec<P>,
     participants: &[P],
     sender_idx: usize,
     schedule: &[NetworkFault],
     view: u64,
-    scope_matches: impl Fn(FaultScope) -> bool,
 ) -> Option<Vec<P>> {
-    // With-replacement sampling allows multiple partitions per view; a
-    // receiver is kept iff *every* matching partition keeps sender/receiver
-    // in the same block.
+    // Without-replacement sampling makes per-view duplicates impossible
+    // for network faults, but we still iterate to be robust.
     let actives: Vec<SetPartition> = schedule
         .iter()
-        .filter(|f| f.view.get() == view && scope_matches(f.scope))
+        .filter(|f| f.view.get() == view)
         .map(|f| f.partition)
         .collect();
     let kept: Vec<P> = if actives.is_empty() {
@@ -179,10 +183,29 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
     pool: Arc<ObservedState>,
 ) -> impl SplitForwarder<S::PublicKey> {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
-        let Ok(msg) = Vote::<S, Sha256Digest>::decode(message.clone()) else {
-            // Undecodable: bypass scope filtering (no kind to match) and
-            // leave the network-layer behavior unchanged.
-            return Some(recipients.clone());
+        let decoded = Vote::<S, Sha256Digest>::decode(message.clone()).ok();
+        let Some(msg) = decoded else {
+            // Undecodable: still apply the network partition (partitions
+            // are total per their view) using sender_view.get(); skip
+            // proc faults because there is no kind to match.
+            let view = sender_view.get();
+            let expanded = expand(recipients, &participants);
+            return match filter_by_partition(
+                expanded.clone(),
+                &participants,
+                sender_idx,
+                &network_schedule,
+                view,
+            ) {
+                None => {
+                    log::push(format!(
+                        "byzzfuzz: drop channel=Vote view={view} sender={sender_idx} recipients={:?} reason=partition_undecodable",
+                        idx_of(&expanded, &participants),
+                    ));
+                    None
+                }
+                Some(kept) => Some(Recipients::Some(kept)),
+            };
         };
         pool.observe_vote::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
@@ -195,7 +218,6 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
             sender_idx,
             &network_schedule,
             view,
-            |s| s.matches_vote(kind),
         ) {
             None => {
                 log::push(format!(
@@ -244,10 +266,30 @@ where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
-        let Ok(msg) =
-            Certificate::<S, Sha256Digest>::decode_cfg(&mut message.as_ref(), &cert_codec)
-        else {
-            return Some(recipients.clone());
+        let decoded =
+            Certificate::<S, Sha256Digest>::decode_cfg(&mut message.as_ref(), &cert_codec).ok();
+        let Some(msg) = decoded else {
+            // Undecodable: still apply the network partition (total per
+            // its view) using sender_view.get(); skip proc faults
+            // because there is no kind to match.
+            let view = sender_view.get();
+            let expanded = expand(recipients, &participants);
+            return match filter_by_partition(
+                expanded.clone(),
+                &participants,
+                sender_idx,
+                &network_schedule,
+                view,
+            ) {
+                None => {
+                    log::push(format!(
+                        "byzzfuzz: drop channel=Cert view={view} sender={sender_idx} recipients={:?} reason=partition_undecodable",
+                        idx_of(&expanded, &participants),
+                    ));
+                    None
+                }
+                Some(kept) => Some(Recipients::Some(kept)),
+            };
         };
         pool.observe_certificate::<S, S::PublicKey>(&msg, message.as_ref());
         sender_view.update(msg.view().get());
@@ -260,7 +302,6 @@ where
             sender_idx,
             &network_schedule,
             view,
-            |s| s.matches_certificate(kind),
         ) {
             None => {
                 log::push(format!(
@@ -293,8 +334,8 @@ where
     }
 }
 
-// Resolver-specific scopes are not yet sampled; only `FaultScope::Any`
-// applies on this channel.
+// Resolver-specific process-fault scopes are not yet sampled; only
+// `FaultScope::Any` matches on this channel.
 #[allow(clippy::too_many_arguments)]
 pub fn make_resolver<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
@@ -356,7 +397,6 @@ where
             sender_idx,
             &network_schedule,
             view,
-            FaultScope::matches_resolver,
         ) {
             None => {
                 log::push(format!(
