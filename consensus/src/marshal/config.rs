@@ -7,6 +7,15 @@ use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+/// Startup anchor for marshal.
+pub enum Start<B: Block> {
+    /// Start from the height-zero genesis block.
+    Genesis(B),
+
+    /// Start from an already-processed floor block.
+    Floor(B),
+}
+
 /// Marshal configuration.
 ///
 /// # Epocher and Provider Coverage
@@ -42,6 +51,12 @@ where
     ///
     /// Must cover every height the marshal will sync.
     pub epocher: ES,
+
+    /// Startup anchor.
+    ///
+    /// `Genesis` seeds the height-zero parent for fresh starts. `Floor` seeds an
+    /// already-processed anchor and starts delivery at `anchor.height() + 1`.
+    pub start: Start<B>,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,

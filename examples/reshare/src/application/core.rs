@@ -1,22 +1,13 @@
 //! Core reshare [Application] implementation.
 
-use crate::{
-    application::{genesis_block, Block},
-    dkg, BLOCKS_PER_EPOCH,
-};
+use crate::{application::Block, dkg};
 use commonware_consensus::{
-    marshal::{
-        ancestry::{AncestorStream, BlockProvider},
-        core::Mailbox as MarshalMailbox,
-        standard::Standard,
-    },
+    marshal::ancestry::{AncestorStream, BlockProvider},
     simplex::types::Context,
-    types::{Epoch, Epocher, FixedEpocher, Round, View},
     Heightable, VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Digest, Hasher,
-    Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Hasher, Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
@@ -33,7 +24,6 @@ where
     V: Variant,
 {
     dkg: dkg::Mailbox<H, C, V>,
-    marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
     _marker: PhantomData<(E, S)>,
 }
 
@@ -45,13 +35,9 @@ where
     C: Signer,
     V: Variant,
 {
-    pub const fn new(
-        dkg: dkg::Mailbox<H, C, V>,
-        marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
-    ) -> Self {
+    pub const fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
         Self {
             dkg,
-            marshal,
             _marker: PhantomData,
         }
     }
@@ -68,32 +54,6 @@ where
     type Context = Context<H::Digest, C::PublicKey>;
     type SigningScheme = S;
     type Block = Block<H, C, V>;
-
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Block {
-        if !epoch.is_zero() {
-            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-            let previous = epoch
-                .previous()
-                .expect("nonzero epoch must have predecessor");
-            let boundary_height = epocher
-                .last(previous)
-                .expect("epoch boundary height must be supported");
-            return self
-                .marshal
-                .get_block(boundary_height)
-                .await
-                .expect("epoch boundary block must be available in marshal");
-        }
-
-        // Create a genesis context with the requested epoch, view 0, and empty parent.
-        // Use a deterministic leader from seed 0 so all validators agree on genesis.
-        let genesis_context = Context {
-            round: Round::new(epoch, View::zero()),
-            leader: C::from_seed(0).public_key(),
-            parent: (View::zero(), <H::Digest as Digest>::EMPTY),
-        };
-        genesis_block::<H, C, V>(genesis_context)
-    }
 
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
@@ -150,16 +110,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::{EdScheme, Provider};
+    use crate::{
+        application::{genesis_block, EdScheme, Provider},
+        BLOCKS_PER_EPOCH,
+    };
     use commonware_consensus::{
         marshal::{
             self,
             core::{Actor as MarshalActor, Buffer},
             resolver::handler,
+            standard::Standard,
         },
         simplex::types::Finalization,
-        types::{Height, ViewDelta},
-        Application as ConsensusApplication, Reporter,
+        types::{Epoch, Epocher, FixedEpocher, Round, View, ViewDelta},
+        Reporter,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::MinSig,
@@ -293,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn genesis_for_nonzero_epoch_returns_boundary_block_from_marshal() {
+    fn marshal_start_floor_seeds_boundary_block() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
@@ -320,40 +284,8 @@ mod tests {
                 .expect("failed to init blocks archive");
 
             let signer = ed25519::PrivateKey::from_seed(1);
-            let provider = Provider::<EdScheme, ed25519::PrivateKey>::new(
-                b"test".to_vec(),
-                signer.clone(),
-                None,
-            );
-            let (marshal_actor, marshal, _) = MarshalActor::init(
-                context.with_label("marshal"),
-                finalizations_by_height,
-                finalized_blocks,
-                marshal::Config {
-                    provider,
-                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                    partition_prefix: "test-marshal".to_string(),
-                    mailbox_size: 16,
-                    view_retention_timeout: ViewDelta::new(10),
-                    prunable_items_per_section: NZU64!(16),
-                    page_cache,
-                    replay_buffer: NZUsize!(1_024),
-                    key_write_buffer: NZUsize!(1_024),
-                    value_write_buffer: NZUsize!(1_024),
-                    block_codec_config: NZU32!(1),
-                    max_repair: NZUsize!(4),
-                    max_pending_acks: NZUsize!(4),
-                    strategy: Sequential,
-                },
-            )
-            .await;
-            let (_resolver_tx, resolver_rx) = mpsc::channel(16);
-            let marshal_handle =
-                marshal_actor.start(NoopReporter, NoopBuffer, (resolver_rx, NoopResolver));
-
-            let epoch = Epoch::new(1);
             let boundary_height = FixedEpocher::new(BLOCKS_PER_EPOCH)
-                .last(epoch.previous().unwrap())
+                .last(Epoch::zero())
                 .unwrap();
             let genesis_context = Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -369,7 +301,39 @@ mod tests {
             let boundary =
                 TestBlock::new(boundary_context, genesis.digest(), boundary_height, None);
             let boundary_digest = boundary.digest();
-            marshal.set_floor(boundary).await;
+            let provider = Provider::<EdScheme, ed25519::PrivateKey>::new(
+                b"test".to_vec(),
+                signer.clone(),
+                None,
+            );
+            let (marshal_actor, marshal, processed_height) = MarshalActor::init(
+                context.with_label("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    start: marshal::Start::Floor(boundary.clone()),
+                    partition_prefix: "test-marshal".to_string(),
+                    mailbox_size: 16,
+                    view_retention_timeout: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(16),
+                    page_cache,
+                    replay_buffer: NZUsize!(1_024),
+                    key_write_buffer: NZUsize!(1_024),
+                    value_write_buffer: NZUsize!(1_024),
+                    block_codec_config: NZU32!(1),
+                    max_repair: NZUsize!(4),
+                    max_pending_acks: NZUsize!(4),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+            assert_eq!(processed_height, boundary_height);
+            let (_resolver_tx, resolver_rx) = mpsc::channel(16);
+            let marshal_handle =
+                marshal_actor.start(NoopReporter, NoopBuffer, (resolver_rx, NoopResolver));
+
             assert_eq!(
                 marshal
                     .get_block(boundary_height)
@@ -378,23 +342,6 @@ mod tests {
                     .digest(),
                 boundary_digest
             );
-
-            let (dkg_sender, _dkg_receiver) = mpsc::channel(1);
-            let mut application = Application::<
-                deterministic::Context,
-                EdScheme,
-                Sha256,
-                ed25519::PrivateKey,
-                MinSig,
-            >::new(dkg::Mailbox::new(dkg_sender), marshal.clone());
-
-            let epoch_zero: TestBlock =
-                ConsensusApplication::genesis(&mut application, Epoch::zero()).await;
-            assert_eq!(epoch_zero.height(), Height::zero());
-
-            let epoch_one: TestBlock = ConsensusApplication::genesis(&mut application, epoch).await;
-            assert_eq!(epoch_one.height(), boundary_height);
-            assert_eq!(epoch_one.digest(), boundary_digest);
 
             marshal_handle.abort();
         });

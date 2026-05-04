@@ -43,7 +43,7 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            config::Config,
+            config::{Config, Start},
             core::{cache, Actor, Mailbox},
             mocks::{
                 application::Application,
@@ -187,6 +187,12 @@ mod tests {
     fn test_standard_set_floor_same_height_preserves_pending_acks() {
         harness::set_floor_same_height_preserves_pending_acks::<InlineHarness>();
         harness::set_floor_same_height_preserves_pending_acks::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_set_floor_after_start_floor_only_advances_when_raised() {
+        harness::set_floor_after_start_floor_only_advances_when_raised::<InlineHarness>();
+        harness::set_floor_after_start_floor_only_advances_when_raised::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -1780,6 +1786,7 @@ mod tests {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(make_raw_block(Sha256::hash(b""), Height::zero(), 0)),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1895,6 +1902,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(make_raw_block(Sha256::hash(b""), Height::zero(), 0)),
                 mailbox_size: 100,
                 view_retention_timeout: ViewDelta::new(10),
                 max_repair: NZUsize!(10),

@@ -10,7 +10,7 @@ use crate::{
             types::{coding_config_for_participants, CodedBlock},
             Coding,
         },
-        config::Config,
+        config::{Config, Start},
         core::{Actor, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
@@ -197,7 +197,8 @@ pub trait TestHarness: 'static + Sized {
     >;
 
     /// The block type used in test operations.
-    type TestBlock: Heightable
+    type TestBlock: crate::Block
+        + Heightable
         + Clone
         + Send
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
@@ -224,6 +225,17 @@ pub trait TestHarness: 'static + Sized {
         provider: P,
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
+    ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
+
+    /// Setup a single validator with a custom startup anchor.
+    fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
     ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
 
     /// Create a test block from parent and height.
@@ -1556,9 +1568,31 @@ impl TestHarness for StandardHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        Self::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            Start::Genesis(make_raw_block(Sha256::hash(b""), Height::zero(), 0)),
+        )
+        .await
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start,
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1794,6 +1828,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(make_raw_block(Sha256::hash(b""), Height::zero(), 0)),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1929,6 +1964,34 @@ impl TestHarness for InlineHarness {
             provider,
             max_pending_acks,
             application,
+        )
+        .await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+            actor_handle: setup.actor_handle,
+        }
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
+        let setup = StandardHarness::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            start,
         )
         .await;
         ValidatorSetup {
@@ -2133,6 +2196,34 @@ impl TestHarness for DeferredHarness {
             provider,
             max_pending_acks,
             application,
+        )
+        .await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+            actor_handle: setup.actor_handle,
+        }
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
+        let setup = InlineHarness::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            start,
         )
         .await;
         ValidatorSetup {
@@ -2359,9 +2450,37 @@ impl TestHarness for CodingHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        Self::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            Start::Genesis(Self::make_test_block(
+                Sha256::hash(b""),
+                genesis_commitment(),
+                Height::zero(),
+                0,
+                NUM_VALIDATORS as u16,
+            )),
+        )
+        .await
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start,
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2630,6 +2749,13 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(Self::make_test_block(
+                Sha256::hash(b""),
+                genesis_commitment(),
+                Height::zero(),
+                0,
+                NUM_VALIDATORS as u16,
+            )),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -3050,6 +3176,81 @@ pub fn set_floor_same_height_preserves_pending_acks<H: TestHarness>() {
             application.pending_ack_heights(),
             vec![Height::new(1), Height::new(2), Height::new(3)]
         );
+    });
+}
+
+/// Test that runtime floor updates after `Start::Floor` only act when the floor advances.
+pub fn set_floor_after_start_floor_only_advances_when_raised<H: TestHarness>() {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(0xF1003)
+            .with_timeout(Some(Duration::from_secs(120))),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+
+        let n = NUM_VALIDATORS as u16;
+        let lower = H::make_test_block(
+            Sha256::hash(b"start-parent"),
+            H::genesis_parent_commitment(n),
+            Height::new(9),
+            9,
+            n,
+        );
+        let start = H::make_test_block(
+            H::digest(&lower),
+            H::commitment(&lower),
+            Height::new(10),
+            10,
+            n,
+        );
+        let higher = H::make_test_block(
+            H::digest(&start),
+            H::commitment(&start),
+            Height::new(12),
+            12,
+            n,
+        );
+
+        let validator = participants[0].clone();
+        let setup = H::setup_validator_with_start(
+            context.with_label("validator_0"),
+            &mut oracle,
+            validator.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::default(),
+            Start::Floor(start.clone()),
+        )
+        .await;
+        assert_eq!(setup.height, Height::new(10));
+        assert!(setup.mailbox.get_block(Height::new(10)).await.is_some());
+
+        setup.mailbox.set_floor(lower.into()).await;
+        assert!(setup.mailbox.get_block(Height::new(9)).await.is_none());
+
+        setup.mailbox.set_floor(start.into()).await;
+        assert!(setup.mailbox.get_block(Height::new(10)).await.is_some());
+
+        setup.mailbox.set_floor(higher.into()).await;
+        assert!(setup.mailbox.get_block(Height::new(12)).await.is_some());
+        setup.actor_handle.abort();
+
+        let restart = H::setup_validator(
+            context.with_label("validator_0_restart"),
+            &mut oracle,
+            validator,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        assert_eq!(restart.height, Height::new(12));
     });
 }
 

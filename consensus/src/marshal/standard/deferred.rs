@@ -73,7 +73,6 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            genesis,
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
@@ -147,7 +146,6 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    cached_genesis: genesis::Cache<B>,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
     build_duration: Timed<E>,
@@ -180,7 +178,6 @@ where
             application,
             marshal,
             epocher,
-            cached_genesis: genesis::Cache::new(),
             verification_tasks: VerificationTasks::new(),
 
             build_duration,
@@ -205,7 +202,6 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let cached_genesis = self.cached_genesis.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("deferred_verify")
@@ -225,7 +221,6 @@ where
                     block,
                     &mut application,
                     &mut marshal,
-                    &cached_genesis,
                     &mut tx,
                     stage,
                 )
@@ -274,7 +269,6 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let cached_genesis = self.cached_genesis.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -322,14 +316,11 @@ where
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
-                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
                     &mut marshal,
-                    &cached_genesis,
                 )
                 .await;
 
@@ -746,7 +737,6 @@ mod tests {
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
-            let genesis_calls = mock_app.genesis_calls();
             let mut marshaled = Deferred::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             let proposed = marshaled
@@ -756,7 +746,6 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, child_digest);
             assert!(marshal.get_block(&child_digest).await.is_some());
-            assert!(genesis_calls.lock().is_empty());
         });
     }
 

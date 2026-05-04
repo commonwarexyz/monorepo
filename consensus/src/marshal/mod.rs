@@ -49,12 +49,12 @@
 //!
 //! ## State Sync
 //!
-//! Marshal can start from an already-processed anchor block rather than from height zero. Calling
-//! [`core::Mailbox::set_floor`] with an anchor at height `H` stores the anchor, marks `H` as
-//! processed, and resumes ordered delivery at `H + 1`. When `H` advances the floor, marshal drops
-//! pending application acknowledgements, persists the new floor, and attempts to prune finalized
-//! block data below `H` when the backing [`store::Blocks`] supports pruning. Calling `set_floor`
-//! again with the current floor is a no-op.
+//! Marshal starts from an explicit [`Start`] anchor. [`Start::Genesis`] seeds the height-zero
+//! block for a fresh node. [`Start::Floor`] seeds an already-processed anchor at height `H`,
+//! marks `H` as processed, and resumes ordered delivery at `H + 1`; this does not require the
+//! epoch genesis block to be available to marshal. Calling [`core::Mailbox::set_floor`] later
+//! can advance the floor with the same semantics. Calling `set_floor` again with the current
+//! floor is a no-op.
 //!
 //! A state-sync snapshot must include enough application state to safely continue from the
 //! anchor. Applications that need more history than the anchor (for example, to reconstruct
@@ -80,7 +80,7 @@ use commonware_storage::archive;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
 mod config;
-pub use config::Config;
+pub use config::{Config, Start};
 
 pub mod ancestry;
 pub mod core;

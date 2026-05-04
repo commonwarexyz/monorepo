@@ -187,7 +187,6 @@ mod tests {
             .commitment();
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
-            let genesis_calls = mock_app.genesis_calls();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -205,7 +204,6 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, expected_commitment);
             assert!(marshal.get_block(&child_digest).await.is_some());
-            assert!(genesis_calls.lock().is_empty());
         });
     }
 
@@ -277,6 +275,11 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_set_floor_same_height_preserves_pending_acks() {
         harness::set_floor_same_height_preserves_pending_acks::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_set_floor_after_start_floor_only_advances_when_raised() {
+        harness::set_floor_after_start_floor_only_advances_when_raised::<CodingHarness>();
     }
 
     #[test_traced("WARN")]

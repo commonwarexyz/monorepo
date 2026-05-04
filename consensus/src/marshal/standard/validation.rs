@@ -2,7 +2,6 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            genesis,
             validation::{
                 has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
                 Stage,
@@ -12,8 +11,8 @@ use crate::{
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epoch, Epocher, Round},
-    Application, Block, Epochable, VerifyingApplication,
+    types::{Epocher, Round},
+    Block, Epochable, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
@@ -128,7 +127,6 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     block: B,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
-    cached_genesis: &genesis::Cache<B>,
     tx: &mut oneshot::Sender<bool>,
     stage: Stage,
 ) -> Option<bool>
@@ -146,14 +144,11 @@ where
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
-        context.epoch(),
         // We are guaranteed that the parent round for any `context` is
         // in the same epoch (recall, the boundary block of the previous epoch
         // is the genesis block of the current epoch).
         Some(Round::new(context.epoch(), parent_view)),
-        application,
         marshal,
-        cached_genesis,
     )
     .await;
     // If consensus drops the receiver, we can stop work early.
@@ -218,11 +213,8 @@ where
 
 /// Fetches the parent block given its digest and optional round hint.
 ///
-/// If the parent is already available locally, returns it directly. This covers
-/// state sync floors set above the epoch genesis without requiring the
-/// application to provide the full genesis block. If the digest matches genesis,
-/// returns genesis directly. Otherwise, subscribes to marshal for parent
-/// availability.
+/// If the parent is already available locally, returns it directly. Otherwise,
+/// subscribes to marshal for parent availability.
 ///
 /// `parent_round` is a resolver hint. Callers should only provide a hint when the
 /// source context is trusted/validated. Untrusted paths should pass `None`.
@@ -230,34 +222,24 @@ where
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.
 #[inline]
-pub(super) async fn fetch_parent<E, S, A, B>(
+pub(super) async fn fetch_parent<S, B>(
     parent_digest: B::Digest,
-    epoch: Epoch,
     parent_round: Option<Round>,
-    application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
-    cached_genesis: &genesis::Cache<B>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
     if let Some(parent) = marshal.get_block(&parent_digest).await {
         return Either::Left(ready(Ok(parent)));
     }
 
-    let genesis = cached_genesis.get::<E, A>(application, epoch).await;
-    if parent_digest == genesis.digest() {
-        Either::Left(ready(Ok(genesis)))
-    } else {
-        Either::Right(
-            marshal
-                .subscribe_by_digest(parent_round, parent_digest)
-                .await,
-        )
-    }
+    Either::Right(
+        marshal
+            .subscribe_by_digest(parent_round, parent_digest)
+            .await,
+    )
 }
 
 #[cfg(test)]

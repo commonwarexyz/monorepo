@@ -6,7 +6,6 @@
 
 use crate::{
     marshal::ancestry::{AncestorStream, BlockProvider},
-    types::Epoch,
     CertifiableBlock, Epochable,
 };
 use commonware_runtime::deterministic;
@@ -19,47 +18,34 @@ use std::{marker::PhantomData, sync::Arc};
 /// A mock application that implements `VerifyingApplication` for testing.
 ///
 /// This mock:
-/// - Returns the provided genesis block from `genesis(epoch)`
 /// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
-    /// The genesis block to return.
-    pub genesis: B,
     /// The block returned by `propose`. If `None`, `propose` returns `None`.
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    genesis_calls: Arc<Mutex<Vec<Epoch>>>,
     _phantom: std::marker::PhantomData<S>,
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
-    /// Create a new mock verifying application with the given genesis block.
-    pub fn new(genesis: B) -> Self {
+    /// Create a new mock verifying application.
+    pub fn new(_genesis: B) -> Self {
         Self {
-            genesis,
             propose_result: None,
             verify_result: true,
-            genesis_calls: Arc::new(Mutex::new(Vec::new())),
             _phantom: std::marker::PhantomData,
         }
     }
 
     /// Create a new mock verifying application with a fixed verify result.
-    pub fn with_verify_result(genesis: B, verify_result: bool) -> Self {
+    pub fn with_verify_result(_genesis: B, verify_result: bool) -> Self {
         Self {
-            genesis,
             propose_result: None,
             verify_result,
-            genesis_calls: Arc::new(Mutex::new(Vec::new())),
             _phantom: std::marker::PhantomData,
         }
-    }
-
-    /// Returns the epochs requested from `genesis`.
-    pub fn genesis_calls(&self) -> Arc<Mutex<Vec<Epoch>>> {
-        self.genesis_calls.clone()
     }
 
     /// Configure the block returned by `propose`.
@@ -78,11 +64,6 @@ where
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
-
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Block {
-        self.genesis_calls.lock().push(epoch);
-        self.genesis.clone()
-    }
 
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
@@ -113,7 +94,6 @@ where
 /// the application verdict races with marshal shutdown.
 #[derive(Clone)]
 pub struct GatedVerifyingApp<B, S> {
-    genesis: B,
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     _phantom: PhantomData<(B, S)>,
@@ -122,12 +102,11 @@ pub struct GatedVerifyingApp<B, S> {
 impl<B, S> GatedVerifyingApp<B, S> {
     /// Returns the gated app, a `started` receiver fired when `verify()` is entered,
     /// and a `release` sender that unblocks `verify()` once signaled.
-    pub fn new(genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    pub fn new(_genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         (
             Self {
-                genesis,
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
                 _phantom: PhantomData,
@@ -147,10 +126,6 @@ where
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
-
-    async fn genesis(&mut self, _epoch: Epoch) -> Self::Block {
-        self.genesis.clone()
-    }
 
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,

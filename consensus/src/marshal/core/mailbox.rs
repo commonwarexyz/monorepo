@@ -137,7 +137,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
     ///
-    /// The default floor is 0.
+    /// The startup floor comes from [`crate::marshal::Config::start`].
     SetFloor {
         /// The candidate floor anchor.
         anchor: V::Block,
@@ -351,7 +351,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.
     ///
-    /// The default floor is 0.
+    /// Use [`crate::marshal::Config::start`] to provide the startup anchor.
     pub async fn set_floor(&self, anchor: V::Block) {
         self.sender.send_lossy(Message::SetFloor { anchor }).await;
     }

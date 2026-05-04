@@ -7,7 +7,7 @@ use crate::{
     marshal::{
         resolver::handler::{self, Request},
         store::{Blocks, Certificates},
-        Config, Identifier as BlockID, Update,
+        Config, Identifier as BlockID, Start, Update,
     },
     simplex::{
         scheme::Scheme,
@@ -284,7 +284,7 @@ where
     pub async fn init(
         context: E,
         finalizations_by_height: FC,
-        finalized_blocks: FB,
+        mut finalized_blocks: FB,
         config: Config<V::Block, P, ES, T>,
     ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
@@ -304,7 +304,7 @@ where
         .await;
 
         // Initialize metadata tracking application progress
-        let application_metadata = Metadata::init(
+        let mut application_metadata = Metadata::init(
             context.with_label("application_metadata"),
             metadata::Config {
                 partition: format!("{}-application-metadata", config.partition_prefix),
@@ -313,10 +313,44 @@ where
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = application_metadata
+        let mut last_processed_height = application_metadata
             .get(&LATEST_KEY)
             .copied()
             .unwrap_or(Height::zero());
+
+        let (anchor, advance) = match config.start {
+            Start::Genesis(anchor) => {
+                assert_eq!(
+                    anchor.height(),
+                    Height::zero(),
+                    "genesis anchor must be at height zero"
+                );
+                (anchor, false)
+            }
+            Start::Floor(anchor) => (anchor, true),
+        };
+        let height = anchor.height();
+        if height < last_processed_height {
+            warn!(
+                %height,
+                existing = %last_processed_height,
+                "startup anchor below existing processed height, ignoring"
+            );
+        } else {
+            if let Err(err) = finalized_blocks.put(anchor.into()).await {
+                panic!("failed to store startup anchor: {err}");
+            }
+            if let Err(err) = finalized_blocks.sync().await {
+                panic!("failed to sync startup anchor: {err}");
+            }
+            if advance && height > last_processed_height {
+                application_metadata.put(LATEST_KEY, height);
+                if let Err(err) = application_metadata.sync().await {
+                    panic!("failed to persist startup floor: {err}");
+                }
+                last_processed_height = height;
+            }
+        }
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -706,13 +740,15 @@ where
                     }
                     Message::SetFloor { anchor } => {
                         let height = anchor.height();
-                        let advanced = self.last_processed_height < height;
                         if height < self.last_processed_height {
                             warn!(
                                 %height,
                                 existing = %self.last_processed_height,
                                 "floor not updated, lower than existing"
                             );
+                            continue;
+                        }
+                        if height == self.last_processed_height {
                             continue;
                         }
 
@@ -725,10 +761,6 @@ where
                             return;
                         }
                         self.notify_subscribers(&anchor);
-
-                        if !advanced {
-                            continue;
-                        }
 
                         // Update the processed height.
                         self.update_processed_height(height, &mut resolver).await;
