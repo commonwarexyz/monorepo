@@ -66,7 +66,6 @@ impl Default for Container {
 
 impl Container {
     /// Creates a new empty container (as an Array).
-    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -81,7 +80,6 @@ impl Container {
     }
 
     /// Returns whether the container is empty.
-    #[inline]
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Array(a) => a.is_empty(),
@@ -91,7 +89,6 @@ impl Container {
     }
 
     /// Checks if the container contains the given value.
-    #[inline]
     pub fn contains(&self, value: u16) -> bool {
         match self {
             Self::Array(a) => a.contains(value),
@@ -106,7 +103,6 @@ impl Container {
     ///
     /// Automatically converts the container type if needed; see the [module
     /// documentation](self) for the full transition table.
-    #[inline]
     pub fn insert(&mut self, value: u16) -> bool {
         match self {
             Self::Array(a) => {
@@ -139,7 +135,6 @@ impl Container {
     ///
     /// Automatically converts the container type if needed; see the [module
     /// documentation](self) for the full transition table.
-    #[inline]
     pub fn insert_range(&mut self, start: u16, end: u16) -> u32 {
         if start >= end {
             return 0;
@@ -193,6 +188,25 @@ impl Container {
         }
     }
 
+    /// Returns an iterator over values in `[start, end)`.
+    pub fn iter_range(&self, start: u16, end: u32) -> RangeIter<'_> {
+        match self {
+            Self::Array(a) => {
+                let values = a.as_slice();
+                let start_pos = values.partition_point(|&value| value < start);
+                let end_pos = if end > u16::MAX as u32 {
+                    values.len()
+                } else {
+                    values.partition_point(|&value| (value as u32) < end)
+                };
+                let end_pos = end_pos.max(start_pos);
+                RangeIter::Array(values[start_pos..end_pos].iter().copied())
+            }
+            Self::Bitmap(b) => RangeIter::Bitmap(b.iter_range(start, end)),
+            Self::Run(r) => RangeIter::Run(r.iter_range(start, end)),
+        }
+    }
+
     /// Returns the minimum value in the container, if any.
     pub fn min(&self) -> Option<u16> {
         match self {
@@ -209,6 +223,170 @@ impl Container {
             Self::Bitmap(b) => b.max(),
             Self::Run(r) => r.max(),
         }
+    }
+
+    /// Copies at most `limit` values from the container.
+    pub fn limit(&self, limit: u64) -> (Self, u64) {
+        let len = self.len() as u64;
+        if len <= limit {
+            return (self.clone(), len);
+        }
+
+        let mut result = Self::new();
+        let mut remaining = limit;
+        for value in self.iter() {
+            if remaining == 0 {
+                break;
+            }
+            result.insert(value);
+            remaining -= 1;
+        }
+        (result, limit - remaining)
+    }
+
+    /// Computes the union of two containers, returning at most `limit` values.
+    pub fn union(&self, other: &Self, limit: u64) -> (Self, u64) {
+        if let (Self::Array(a), Self::Array(b)) = (self, other) {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            let (result, count) = a.union(b, limit);
+            if result.len() > array::MAX_CARDINALITY {
+                let bitmap = Bitmap::from(&result);
+                return (Self::Bitmap(Box::new(bitmap)), count as u64);
+            }
+            return (Self::Array(result), count as u64);
+        }
+
+        if let (Self::Bitmap(a), Self::Bitmap(b)) = (self, other) {
+            let result = Bitmap::or_new(a, b);
+            let len = result.len() as u64;
+            if len <= limit {
+                return (Self::Bitmap(Box::new(result)), len);
+            }
+            return Self::Bitmap(Box::new(result)).limit(limit);
+        }
+
+        let mut result = Self::new();
+        let mut remaining = limit;
+        let mut a_iter = self.iter().peekable();
+        let mut b_iter = other.iter().peekable();
+
+        while remaining > 0 {
+            match (a_iter.peek(), b_iter.peek()) {
+                (Some(&a_value), Some(&b_value)) => {
+                    if a_value < b_value {
+                        result.insert(a_value);
+                        a_iter.next();
+                    } else if b_value < a_value {
+                        result.insert(b_value);
+                        b_iter.next();
+                    } else {
+                        result.insert(a_value);
+                        a_iter.next();
+                        b_iter.next();
+                    }
+                }
+                (Some(&value), None) => {
+                    result.insert(value);
+                    a_iter.next();
+                }
+                (None, Some(&value)) => {
+                    result.insert(value);
+                    b_iter.next();
+                }
+                (None, None) => break,
+            }
+            remaining -= 1;
+        }
+
+        (result, limit - remaining)
+    }
+
+    /// Computes the intersection of two containers, returning at most `limit` values.
+    pub fn intersection(&self, other: &Self, limit: u64) -> (Self, u64) {
+        if let (Self::Array(a), Self::Array(b)) = (self, other) {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            let (result, count) = a.intersection(b, limit);
+            return (Self::Array(result), count as u64);
+        }
+
+        if let (Self::Bitmap(a), Self::Bitmap(b)) = (self, other) {
+            let result = Bitmap::and_new(a, b);
+            let len = result.len() as u64;
+            if len <= limit {
+                return (Self::Bitmap(Box::new(result)), len);
+            }
+            return Self::Bitmap(Box::new(result)).limit(limit);
+        }
+
+        let (smaller, larger) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+
+        let mut result = Self::new();
+        let mut remaining = limit;
+        for value in smaller.iter() {
+            if remaining == 0 {
+                break;
+            }
+            if larger.contains(value) {
+                result.insert(value);
+                remaining -= 1;
+            }
+        }
+
+        (result, limit - remaining)
+    }
+
+    /// Computes the difference `self - other`, returning at most `limit` values.
+    pub fn difference(&self, other: &Self, limit: u64) -> (Self, u64) {
+        if let (Self::Array(a), Self::Array(b)) = (self, other) {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            let (result, count) = a.difference(b, limit);
+            return (Self::Array(result), count as u64);
+        }
+
+        if let (Self::Bitmap(a), Self::Bitmap(b)) = (self, other) {
+            let result = Bitmap::and_not_new(a, b);
+            let len = result.len() as u64;
+            if len <= limit {
+                return (Self::Bitmap(Box::new(result)), len);
+            }
+            return Self::Bitmap(Box::new(result)).limit(limit);
+        }
+
+        let mut result = Self::new();
+        let mut remaining = limit;
+        for value in self.iter() {
+            if remaining == 0 {
+                break;
+            }
+            if !other.contains(value) {
+                result.insert(value);
+                remaining -= 1;
+            }
+        }
+
+        (result, limit - remaining)
+    }
+
+    /// Returns `true` if every value in this container is present in `other`.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        if self.len() > other.len() {
+            return false;
+        }
+        self.iter().all(|value| other.contains(value))
+    }
+
+    /// Returns `true` if the containers share at least one value.
+    pub fn intersects(&self, other: &Self) -> bool {
+        let (smaller, larger) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        smaller.iter().any(|value| larger.contains(value))
     }
 
     /// Returns the approximate total memory footprint of this `Container` in bytes
@@ -301,6 +479,38 @@ impl Iterator for Iter<'_> {
 }
 
 impl ExactSizeIterator for Iter<'_> {}
+
+/// Iterator over a range of values in a container.
+pub enum RangeIter<'a> {
+    /// Iterator over an Array container.
+    Array(core::iter::Copied<core::slice::Iter<'a, u16>>),
+    /// Iterator over a Bitmap container.
+    Bitmap(bitmap::Iter<'a>),
+    /// Iterator over a Run container.
+    Run(run::Iter<'a>),
+}
+
+impl Iterator for RangeIter<'_> {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Array(iter) => iter.next(),
+            Self::Bitmap(iter) => iter.next(),
+            Self::Run(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Array(iter) => iter.size_hint(),
+            Self::Bitmap(iter) => iter.size_hint(),
+            Self::Run(iter) => iter.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for RangeIter<'_> {}
 
 /// Container type tags for serialization.
 const CONTAINER_TYPE_ARRAY: u8 = 0;

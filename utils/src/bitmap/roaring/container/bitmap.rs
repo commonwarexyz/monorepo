@@ -13,7 +13,7 @@
 //! with few gaps converts to Run while a dense one with many isolated
 //! runs stays as Bitmap.
 
-use crate::bitmap::roaring::container::{array, run};
+use super::{array, run};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 
@@ -21,7 +21,7 @@ use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 pub const WORDS: usize = 1024;
 
 /// Total number of bits in a bitmap container.
-pub const BITS: u32 = 65536;
+pub const BITS: u32 = WORDS as u32 * 64;
 
 /// A container that stores values using a fixed-size bit array.
 ///
@@ -91,7 +91,6 @@ impl From<&run::Run> for Bitmap {
 
 impl Bitmap {
     /// Creates an empty bitmap container.
-    #[inline]
     pub const fn new() -> Self {
         Self {
             words: [0; WORDS],
@@ -136,39 +135,26 @@ impl Bitmap {
     /// Used by the [`super::Container`] auto-conversion logic to decide when to switch
     /// to a [`super::Run`] variant. Maintained incrementally on `insert` and recomputed
     /// via a single-pass word scan on bulk operations.
-    #[inline]
     pub const fn run_count(&self) -> u16 {
         self.run_count
     }
 
     /// Returns the number of values in the container.
-    #[inline]
     pub const fn len(&self) -> u32 {
         self.cardinality
     }
 
     /// Returns whether the container is empty.
-    #[inline]
     pub const fn is_empty(&self) -> bool {
         self.cardinality == 0
     }
 
     /// Returns whether the container is fully saturated.
-    #[inline]
     pub const fn is_full(&self) -> bool {
         self.cardinality == BITS
     }
 
-    /// Returns whether this container should be an array container instead.
-    ///
-    /// An array container is more memory-efficient when cardinality <= 4096.
-    #[inline]
-    pub const fn should_be_array(&self) -> bool {
-        (self.cardinality as usize) <= array::MAX_CARDINALITY
-    }
-
     /// Checks if the container contains the given value.
-    #[inline]
     pub const fn contains(&self, value: u16) -> bool {
         let word_idx = (value >> 6) as usize;
         let bit_idx = value & 63;
@@ -179,7 +165,6 @@ impl Bitmap {
     ///
     /// Returns `true` if the value was newly inserted, `false` if it already existed.
     /// Maintains [`run_count`](Self::run_count) incrementally in O(1).
-    #[inline]
     pub const fn insert(&mut self, value: u16) -> bool {
         let word_idx = (value >> 6) as usize;
         let bit_idx = value & 63;
@@ -282,34 +267,46 @@ impl Bitmap {
         Iter {
             words: &self.words,
             word_idx: 0,
+            end_word: WORDS - 1,
+            end_mask: !0u64,
             current_word: self.words[0],
         }
     }
 
+    /// Returns an iterator over values in `[start, end)`.
+    pub fn iter_range(&self, start: u16, end: u32) -> Iter<'_> {
+        let end = end.min(BITS);
+        if start as u32 >= end {
+            return Iter::empty(&self.words);
+        }
+
+        let start_word = (start >> 6) as usize;
+        let end_word = ((end - 1) >> 6) as usize;
+        let start_mask = !0u64 << (start & 63);
+        let end_bit = (end - 1) & 63;
+        let end_mask = if end_bit == 63 {
+            !0u64
+        } else {
+            (1u64 << (end_bit + 1)) - 1
+        };
+
+        let mut current_word = self.words[start_word] & start_mask;
+        if start_word == end_word {
+            current_word &= end_mask;
+        }
+
+        Iter {
+            words: &self.words,
+            word_idx: start_word,
+            end_word,
+            end_mask,
+            current_word,
+        }
+    }
+
     /// Returns the underlying words array.
-    #[inline]
     pub const fn words(&self) -> &[u64; WORDS] {
         &self.words
-    }
-
-    /// Returns a mutable reference to the underlying words array.
-    ///
-    /// # Safety
-    ///
-    /// After modifying words directly, you must call
-    /// [`recalculate_metadata`](Self::recalculate_metadata).
-    #[inline]
-    pub const fn words_mut(&mut self) -> &mut [u64; WORDS] {
-        &mut self.words
-    }
-
-    /// Recomputes both `cardinality` and `run_count` from the words array. Call this
-    /// after modifying words directly via [`words_mut`](Self::words_mut), or after any
-    /// bulk mutation that doesn't maintain these fields incrementally.
-    #[inline]
-    pub fn recalculate_metadata(&mut self) {
-        self.cardinality = self.words.iter().map(|w| w.count_ones()).sum();
-        self.run_count = count_runs(&self.words);
     }
 
     /// Returns the minimum value in the container, if any.
@@ -334,36 +331,8 @@ impl Bitmap {
         None
     }
 
-    /// Performs a bitwise OR with another bitmap container.
-    #[inline]
-    pub fn or(&mut self, other: &Self) {
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a |= *b;
-        }
-        self.recalculate_metadata();
-    }
-
-    /// Performs a bitwise AND with another bitmap container.
-    #[inline]
-    pub fn and(&mut self, other: &Self) {
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a &= *b;
-        }
-        self.recalculate_metadata();
-    }
-
-    /// Performs a bitwise AND-NOT (difference) with another bitmap container.
-    #[inline]
-    pub fn and_not(&mut self, other: &Self) {
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a &= !*b;
-        }
-        self.recalculate_metadata();
-    }
-
     /// Creates a new bitmap that is the OR of two bitmaps.
-    /// More efficient than clone + or since it computes cardinality in one pass.
-    #[inline]
+    /// Computes cardinality in the same pass as the bitwise operation.
     pub fn or_new(a: &Self, b: &Self) -> Self {
         let mut words = [0u64; WORDS];
         let mut cardinality = 0u32;
@@ -387,8 +356,7 @@ impl Bitmap {
     }
 
     /// Creates a new bitmap that is the AND of two bitmaps.
-    /// More efficient than clone + and since it computes cardinality in one pass.
-    #[inline]
+    /// Computes cardinality in the same pass as the bitwise operation.
     pub fn and_new(a: &Self, b: &Self) -> Self {
         let mut words = [0u64; WORDS];
         let mut cardinality = 0u32;
@@ -412,8 +380,7 @@ impl Bitmap {
     }
 
     /// Creates a new bitmap that is a AND-NOT b (difference).
-    /// More efficient than clone + and_not since it computes cardinality in one pass.
-    #[inline]
+    /// Computes cardinality in the same pass as the bitwise operation.
     pub fn and_not_new(a: &Self, b: &Self) -> Self {
         let mut words = [0u64; WORDS];
         let mut cardinality = 0u32;
@@ -448,8 +415,7 @@ impl Bitmap {
 }
 
 /// Counts the number of maximal consecutive `1`-bit sequences in the bitmap, in a single
-/// O(`WORDS`) pass. Used by the `From<[u64; WORDS]>` impl, [`Bitmap::recalculate_metadata`], and
-/// the bulk-mutation paths to keep `run_count` in sync.
+/// O(`WORDS`) pass. Used by the bulk-construction paths to keep `run_count` in sync.
 ///
 /// Algorithm: for each word `w`, treat the bit just below position 0 as the last bit of
 /// the previous word (or `0` for the first word). A run "starts" at any position where
@@ -499,7 +465,21 @@ impl Read for Bitmap {
 pub struct Iter<'a> {
     words: &'a [u64; WORDS],
     word_idx: usize,
+    end_word: usize,
+    end_mask: u64,
     current_word: u64,
+}
+
+impl<'a> Iter<'a> {
+    const fn empty(words: &'a [u64; WORDS]) -> Self {
+        Self {
+            words,
+            word_idx: WORDS,
+            end_word: 0,
+            end_mask: 0,
+            current_word: 0,
+        }
+    }
 }
 
 impl Iterator for Iter<'_> {
@@ -513,23 +493,31 @@ impl Iterator for Iter<'_> {
                 return Some((self.word_idx as u16) << 6 | bit_idx as u16);
             }
 
-            self.word_idx += 1;
-            if self.word_idx >= WORDS {
+            if self.word_idx >= self.end_word {
                 return None;
             }
+
+            self.word_idx += 1;
             self.current_word = self.words[self.word_idx];
+            if self.word_idx == self.end_word {
+                self.current_word &= self.end_mask;
+            }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.word_idx >= WORDS {
+        if self.word_idx >= WORDS || self.word_idx > self.end_word {
             return (0, Some(0));
         }
-        let remaining: u32 = self.current_word.count_ones()
-            + self.words[self.word_idx + 1..]
+
+        let mut remaining = self.current_word.count_ones();
+        if self.word_idx < self.end_word {
+            remaining += self.words[self.word_idx + 1..self.end_word]
                 .iter()
                 .map(|w| w.count_ones())
                 .sum::<u32>();
+            remaining += (self.words[self.end_word] & self.end_mask).count_ones();
+        }
         (remaining as usize, Some(remaining as usize))
     }
 }
@@ -681,20 +669,17 @@ mod tests {
         b.insert(4);
 
         // Test AND
-        let mut result = a.clone();
-        result.and(&b);
+        let result = Bitmap::and_new(&a, &b);
         let values: Vec<_> = result.iter().collect();
         assert_eq!(values, vec![2, 3]);
 
         // Test OR
-        let mut result = a.clone();
-        result.or(&b);
+        let result = Bitmap::or_new(&a, &b);
         let values: Vec<_> = result.iter().collect();
         assert_eq!(values, vec![1, 2, 3, 4]);
 
         // Test AND-NOT (difference)
-        let mut result = a.clone();
-        result.and_not(&b);
+        let result = Bitmap::and_not_new(&a, &b);
         let values: Vec<_> = result.iter().collect();
         assert_eq!(values, vec![1]);
     }
@@ -711,17 +696,6 @@ mod tests {
         assert!(bitmap.contains(5));
         assert!(bitmap.contains(10));
         assert!(bitmap.contains(15));
-    }
-
-    #[test]
-    fn test_should_be_array() {
-        let mut container = Bitmap::new();
-        assert!(container.should_be_array());
-
-        for i in 0..=array::MAX_CARDINALITY as u16 {
-            container.insert(i);
-        }
-        assert!(!container.should_be_array());
     }
 
     #[test]
@@ -929,15 +903,14 @@ mod tests {
     }
 
     #[test]
-    fn test_run_count_recalculate_metadata_matches_scan() {
-        // After mutating words via `words_mut` and calling `recalculate_metadata`,
-        // run_count must equal a fresh scan.
-        let mut b = Bitmap::new();
-        // Set every other bit in the first 64 values directly.
-        b.words_mut()[0] = 0xAAAA_AAAA_AAAA_AAAA;
-        b.recalculate_metadata();
+    fn test_from_words_run_count_matches_scan() {
+        let mut words = [0u64; WORDS];
+        words[0] = 0xAAAA_AAAA_AAAA_AAAA;
+
+        let b = Bitmap::from(words);
         assert_eq!(b.run_count(), super::count_runs(b.words()));
-        // alternating bits: 32 set bits, all isolated → 32 runs.
+
+        // Alternating bits: 32 set bits, all isolated.
         assert_eq!(b.run_count(), 32);
     }
 

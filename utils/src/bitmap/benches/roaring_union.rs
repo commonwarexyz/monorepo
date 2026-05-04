@@ -1,4 +1,4 @@
-use commonware_utils::bitmap::roaring::{union, Bitmap};
+use commonware_utils::bitmap::roaring::Bitmap;
 use criterion::{criterion_group, Criterion};
 use roaring::RoaringTreemap;
 use std::hint::black_box;
@@ -19,7 +19,7 @@ fn benchmark_union(c: &mut Criterion) {
         }
 
         group.bench_function(format!("count={count} impl=ours"), |b| {
-            b.iter(|| black_box(union(&ours_a, &ours_b, u64::MAX)));
+            b.iter(|| black_box(ours_a.union(&ours_b, u64::MAX)));
         });
 
         group.bench_function(format!("count={count} impl=roaring-rs"), |b| {

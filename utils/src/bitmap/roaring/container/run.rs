@@ -93,13 +93,11 @@ impl From<&bitmap::Bitmap> for Run {
 
 impl Run {
     /// Creates an empty run container.
-    #[inline]
     pub const fn new() -> Self {
         Self { runs: Vec::new() }
     }
 
     /// Creates a run container representing a fully saturated container [0, 65535].
-    #[inline]
     pub fn full() -> Self {
         Self {
             runs: Vec::from([(0, u16::MAX)]),
@@ -107,7 +105,6 @@ impl Run {
     }
 
     /// Returns the number of runs in the container.
-    #[inline]
     pub const fn run_count(&self) -> usize {
         self.runs.len()
     }
@@ -121,15 +118,8 @@ impl Run {
     }
 
     /// Returns whether the container is empty.
-    #[inline]
     pub const fn is_empty(&self) -> bool {
         self.runs.is_empty()
-    }
-
-    /// Returns whether the container is fully saturated (contains all 65536 values).
-    #[inline]
-    pub fn is_full(&self) -> bool {
-        self.runs.len() == 1 && self.runs[0] == (0, u16::MAX)
     }
 
     /// Checks if the container contains the given value.
@@ -253,13 +243,12 @@ impl Run {
 
     /// Returns an iterator over the values in sorted order.
     pub fn iter(&self) -> Iter<'_> {
-        let mut runs_iter = self.runs.iter();
-        let current_run = runs_iter.next().copied();
-        Iter {
-            runs_iter,
-            current_run,
-            current_value: current_run.map(|(s, _)| s),
-        }
+        Iter::new(&self.runs, 0, bitmap::BITS)
+    }
+
+    /// Returns an iterator over values in `[start, end)`.
+    pub fn iter_range(&self, start: u16, end: u32) -> Iter<'_> {
+        Iter::new(&self.runs, start, end)
     }
 
     /// Returns an iterator over the runs as (start, end) pairs (inclusive).
@@ -268,13 +257,11 @@ impl Run {
     }
 
     /// Returns the minimum value in the container, if any.
-    #[inline]
     pub fn min(&self) -> Option<u16> {
         self.runs.first().map(|&(start, _)| start)
     }
 
     /// Returns the maximum value in the container, if any.
-    #[inline]
     pub fn max(&self) -> Option<u16> {
         self.runs.last().map(|&(_, end)| end)
     }
@@ -345,18 +332,31 @@ pub struct Iter<'a> {
     runs_iter: core::slice::Iter<'a, (u16, u16)>,
     current_run: Option<(u16, u16)>,
     current_value: Option<u16>,
+    end: u32,
+}
+
+impl<'a> Iter<'a> {
+    fn new(runs: &'a [(u16, u16)], start: u16, end: u32) -> Self {
+        let end = end.min(bitmap::BITS);
+        let mut runs_iter = runs.iter();
+        let (current_run, current_value) = next_run(&mut runs_iter, start, end);
+        Self {
+            runs_iter,
+            current_run,
+            current_value,
+            end,
+        }
+    }
 }
 
 impl Iterator for Iter<'_> {
     type Item = u16;
-
-    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let (_, end) = self.current_run?;
             let value = self.current_value?;
 
-            if value <= end {
+            if value <= end && (value as u32) < self.end {
                 // Advance to next value in current run.
                 if value == u16::MAX {
                     self.current_value = None;
@@ -367,8 +367,7 @@ impl Iterator for Iter<'_> {
             }
 
             // Move to next run.
-            self.current_run = self.runs_iter.next().copied();
-            self.current_value = self.current_run.map(|(s, _)| s);
+            (self.current_run, self.current_value) = next_run(&mut self.runs_iter, 0, self.end);
         }
     }
 
@@ -378,13 +377,20 @@ impl Iterator for Iter<'_> {
         // still holds further runs; counting must continue from `runs_iter` in
         // that state.
         let in_current = match (self.current_run, self.current_value) {
-            (Some((_, end)), Some(value)) if value <= end => (end - value + 1) as usize,
+            (Some((_, run_end)), Some(value)) if value <= run_end => {
+                let end = self.end.min(run_end as u32 + 1);
+                end.saturating_sub(value as u32) as usize
+            }
             _ => 0,
         };
         let in_remaining: usize = self
             .runs_iter
             .clone()
-            .map(|&(s, e)| (e - s + 1) as usize)
+            .take_while(|&&(s, _)| (s as u32) < self.end)
+            .map(|&(s, e)| {
+                let end = self.end.min(e as u32 + 1);
+                end.saturating_sub(s as u32) as usize
+            })
             .sum();
         let remaining = in_current + in_remaining;
         (remaining, Some(remaining))
@@ -392,6 +398,23 @@ impl Iterator for Iter<'_> {
 }
 
 impl ExactSizeIterator for Iter<'_> {}
+
+fn next_run(
+    runs_iter: &mut core::slice::Iter<'_, (u16, u16)>,
+    start: u16,
+    end: u32,
+) -> (Option<(u16, u16)>, Option<u16>) {
+    for &(run_start, run_end) in runs_iter {
+        if run_end < start {
+            continue;
+        }
+        if (run_start as u32) >= end {
+            break;
+        }
+        return (Some((run_start, run_end)), Some(run_start.max(start)));
+    }
+    (None, None)
+}
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Run {
@@ -429,7 +452,6 @@ mod tests {
         assert!(container.is_empty());
         assert_eq!(container.len(), 0);
         assert_eq!(container.run_count(), 0);
-        assert!(!container.is_full());
     }
 
     #[test]
@@ -438,7 +460,6 @@ mod tests {
         assert!(!container.is_empty());
         assert_eq!(container.len(), 65536);
         assert_eq!(container.run_count(), 1);
-        assert!(container.is_full());
     }
 
     #[test]
@@ -626,7 +647,6 @@ mod tests {
         let bm = bitmap::Bitmap::from(words);
         let run = Run::from(&bm);
 
-        assert!(run.is_full());
         assert_eq!(run.run_count(), 1);
         assert_eq!(run.len(), 65536);
     }

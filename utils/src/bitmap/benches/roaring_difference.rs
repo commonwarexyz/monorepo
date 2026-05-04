@@ -1,4 +1,4 @@
-use commonware_utils::bitmap::roaring::{difference, Bitmap};
+use commonware_utils::bitmap::roaring::Bitmap;
 use criterion::{criterion_group, Criterion};
 use roaring::RoaringTreemap;
 use std::hint::black_box;
@@ -19,7 +19,7 @@ fn benchmark_difference(c: &mut Criterion) {
         }
 
         group.bench_function(format!("count={count} impl=ours"), |b| {
-            b.iter(|| black_box(difference(&ours_a, &ours_b, u64::MAX)));
+            b.iter(|| black_box(ours_a.difference(&ours_b, u64::MAX)));
         });
 
         group.bench_function(format!("count={count} impl=roaring-rs"), |b| {

@@ -1,7 +1,6 @@
 use criterion::criterion_main;
 
 mod count_ones;
-mod roaring_bitmap_or;
 mod roaring_contains;
 mod roaring_difference;
 mod roaring_insert;
@@ -19,5 +18,4 @@ criterion_main!(
     roaring_intersection::benches,
     roaring_difference::benches,
     roaring_iteration::benches,
-    roaring_bitmap_or::benches,
 );

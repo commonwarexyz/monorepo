@@ -54,7 +54,7 @@
 //! Containers automatically convert between variants on each `insert` /
 //! `insert_range` to maintain a compact representation. The Bitmap→Run
 //! transition uses a hysteresis band on the bitmap's run count, so a container
-//! that hovers near break-even doesn't thrash between variants. See [`container`]
+//! that hovers near break-even doesn't thrash between variants. See the container module
 //! for the full transition table and threshold values.
 //!
 //! ```text
@@ -67,7 +67,7 @@
 //! * <https://github.com/RoaringBitmap/RoaringFormatSpec>: Roaring Bitmap Format Specification
 //! * <https://github.com/RoaringBitmap/roaring-rs>: roaring-rs Crate
 
-pub mod container;
+mod container;
 #[cfg(any(test, feature = "fuzz"))]
 commonware_macros::stability_mod!(ALPHA, pub mod fuzz);
 mod ops;
@@ -77,8 +77,7 @@ mod prunable;
 use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
-pub use container::{Array, Container, Run};
-pub use ops::{difference, intersection, intersects, is_subset, union};
+use container::Container;
 pub use prunable::Prunable;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
@@ -87,19 +86,16 @@ use std::collections::BTreeMap;
 const MAX_KEY: u64 = (1u64 << 48) - 1;
 
 /// Extracts the high 48 bits (container key) from a 64-bit value.
-#[inline]
 const fn high_bits(value: u64) -> u64 {
     value >> 16
 }
 
 /// Extracts the low 16 bits (container index) from a 64-bit value.
-#[inline]
 const fn low_bits(value: u64) -> u16 {
     value as u16
 }
 
 /// Combines a container key and index into a 64-bit value.
-#[inline]
 const fn combine(key: u64, index: u16) -> u64 {
     (key << 16) | (index as u64)
 }
@@ -134,12 +130,8 @@ pub struct Bitmap {
     containers: BTreeMap<u64, Container>,
 }
 
-impl TryFrom<BTreeMap<u64, Container>> for Bitmap {
-    type Error = CodecError;
-
-    /// Wraps a pre-built container map into a [`Bitmap`], rejecting any key above
-    /// the 48-bit container-key range.
-    fn try_from(containers: BTreeMap<u64, Container>) -> Result<Self, Self::Error> {
+impl Bitmap {
+    fn from_containers(containers: BTreeMap<u64, Container>) -> Result<Self, CodecError> {
         if let Some((&max_key, _)) = containers.last_key_value() {
             if max_key > MAX_KEY {
                 return Err(CodecError::Invalid(
@@ -155,11 +147,8 @@ impl TryFrom<BTreeMap<u64, Container>> for Bitmap {
 
         Ok(Self { containers })
     }
-}
 
-impl Bitmap {
     /// Creates an empty roaring bitmap.
-    #[inline]
     pub const fn new() -> Self {
         Self {
             containers: BTreeMap::new(),
@@ -172,25 +161,21 @@ impl Bitmap {
     }
 
     /// Returns whether the bitmap is empty.
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.containers.is_empty()
     }
 
     /// Returns the number of containers in the bitmap.
-    #[inline]
     pub fn container_count(&self) -> usize {
         self.containers.len()
     }
 
     /// Clears all values from the bitmap.
-    #[inline]
     pub fn clear(&mut self) {
         self.containers.clear();
     }
 
     /// Checks if the bitmap contains the given value.
-    #[inline]
     pub fn contains(&self, value: u64) -> bool {
         let key = high_bits(value);
         let index = low_bits(value);
@@ -200,7 +185,6 @@ impl Bitmap {
     /// Inserts a value into the bitmap.
     ///
     /// Returns `true` if the value was newly inserted, `false` if it already existed.
-    #[inline]
     pub fn insert(&mut self, value: u64) -> bool {
         let key = high_bits(value);
         let index = low_bits(value);
@@ -210,71 +194,38 @@ impl Bitmap {
     /// Inserts a range of values [start, end) into the bitmap.
     ///
     /// Returns the number of values newly inserted.
-    #[inline]
     pub fn insert_range(&mut self, start: u64, end: u64) -> u64 {
         if start >= end {
             return 0;
         }
 
         let start_key = high_bits(start);
-        let end_key = high_bits(end.saturating_sub(1));
-
-        // Fast path: entire range fits in a single container
-        if start_key == end_key {
-            let container_start = low_bits(start);
-            let last_value = low_bits(end.saturating_sub(1));
-
-            // Handle the case where the range ends at u16::MAX
-            // We can't represent container_end = 65536 in u16, so we need
-            // to insert the range [start, 65535) plus 65535 separately
-            if last_value == u16::MAX {
-                let container = self.containers.entry(start_key).or_default();
-                let mut inserted = container.insert_range(container_start, u16::MAX) as u64;
-                if container.insert(u16::MAX) {
-                    inserted += 1;
-                }
-                return inserted;
-            }
-
-            let container_end = last_value.saturating_add(1);
-            return self
-                .containers
-                .entry(start_key)
-                .or_default()
-                .insert_range(container_start, container_end) as u64;
-        }
-
-        // Multi-container case
+        let end_key = high_bits(end - 1);
         let mut inserted = 0u64;
 
         for key in start_key..=end_key {
             let container_start = if key == start_key { low_bits(start) } else { 0 };
-
-            // Determine if this is a "full container" case (insert all 65536 values)
-            // This happens for middle containers, or the end container when end
-            // is exactly on a container boundary (low_bits(end) == 0)
-            let is_full_container = if key == end_key {
-                low_bits(end) == 0
+            let container_end = if key == end_key {
+                let last_value = low_bits(end - 1);
+                if last_value == u16::MAX {
+                    None
+                } else {
+                    Some(last_value + 1)
+                }
             } else {
-                key != start_key
+                None
             };
 
             let container = self.containers.entry(key).or_default();
-            if is_full_container {
-                // Insert full range [container_start, 65535] for this container
-                inserted += container.insert_range(container_start, u16::MAX) as u64;
-                if container.insert(u16::MAX) {
-                    inserted += 1;
+            match container_end {
+                Some(container_end) => {
+                    inserted += container.insert_range(container_start, container_end) as u64;
                 }
-            } else if key == end_key {
-                // End container with partial range
-                let container_end = low_bits(end.saturating_sub(1)).saturating_add(1);
-                inserted += container.insert_range(container_start, container_end) as u64;
-            } else {
-                // Start container (key == start_key && key != end_key already handled)
-                inserted += container.insert_range(container_start, u16::MAX) as u64;
-                if container.insert(u16::MAX) {
-                    inserted += 1;
+                None => {
+                    inserted += container.insert_range(container_start, u16::MAX) as u64;
+                    if container.insert(u16::MAX) {
+                        inserted += 1;
+                    }
                 }
             }
         }
@@ -297,18 +248,20 @@ impl Bitmap {
         } else {
             high_bits(end - 1) + 1
         };
+        let end_key = end_key_exclusive.saturating_sub(1);
 
         self.containers
             .range(start_key..end_key_exclusive)
             .flat_map(move |(&key, container)| {
-                container.iter().filter_map(move |index| {
-                    let value = combine(key, index);
-                    if value >= start && value < end {
-                        Some(value)
-                    } else {
-                        None
-                    }
-                })
+                let container_start = if key == start_key { low_bits(start) } else { 0 };
+                let container_end = if key == end_key {
+                    low_bits(end - 1) as u32 + 1
+                } else {
+                    container::bitmap::BITS
+                };
+                container
+                    .iter_range(container_start, container_end)
+                    .map(move |index| combine(key, index))
             })
     }
 
@@ -325,25 +278,9 @@ impl Bitmap {
             .last_key_value()
             .and_then(|(&key, container)| container.max().map(|index| combine(key, index)))
     }
-
-    /// Returns a reference to the internal containers map.
-    ///
-    /// This is useful for implementing custom operations or serialization.
-    #[inline]
-    pub const fn containers(&self) -> &BTreeMap<u64, Container> {
+    #[cfg(test)]
+    const fn containers(&self) -> &BTreeMap<u64, Container> {
         &self.containers
-    }
-
-    /// Builds a bitmap with a single container at `key`.
-    ///
-    /// Assumes that the provided `key` is not greater than `MAX_KEY`.
-    #[inline]
-    pub(crate) fn from_single_container(key: u64, container: Container) -> Self {
-        debug_assert!(key <= MAX_KEY, "container key exceeds 48-bit range");
-        debug_assert!(!container.is_empty(), "empty container");
-        let mut containers = BTreeMap::new();
-        containers.insert(key, container);
-        Self { containers }
     }
 
     /// Drops all containers whose key is strictly less than `target_key`.
@@ -351,6 +288,22 @@ impl Bitmap {
         // BTreeMap::split_off returns the half with keys >= target_key.
         let kept = self.containers.split_off(&target_key);
         self.containers = kept;
+    }
+
+    /// Returns counts of Array, Bitmap, and Run containers.
+    ///
+    /// Available only for tests and analysis benchmarks.
+    #[cfg(any(test, feature = "analysis"))]
+    pub fn container_variant_counts(&self) -> (usize, usize, usize) {
+        let mut counts = (0, 0, 0);
+        for container in self.containers.values() {
+            match container {
+                Container::Array(_) => counts.0 += 1,
+                Container::Bitmap(_) => counts.1 += 1,
+                Container::Run(_) => counts.2 += 1,
+            }
+        }
+        counts
     }
 
     /// Returns the approximate total memory footprint of this `Bitmap` in bytes
@@ -364,7 +317,7 @@ impl Bitmap {
     #[cfg(any(test, feature = "analysis"))]
     pub fn byte_size(&self) -> usize {
         let mut total = core::mem::size_of::<Self>();
-        for (_, container) in self.containers.iter() {
+        for container in self.containers.values() {
             // container.byte_size() includes size_of::<Container>(), which IS the value
             // stored inline in the BTreeMap leaf — so no double-counting.
             total +=
@@ -417,8 +370,7 @@ impl Read for Bitmap {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         // Use BTreeMap's codec which validates sorted/unique keys and bounds count.
         let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
-        // `TryFrom` enforces the 48-bit key-range invariant.
-        Self::try_from(containers)
+        Self::from_containers(containers)
     }
 }
 
@@ -752,20 +704,10 @@ mod tests {
 
         assert_eq!(bitmap.container_count(), 600);
 
-        // Confirm all three variants are present.
-        let mut has_array = false;
-        let mut has_bitmap = false;
-        let mut has_run = false;
-        for container in bitmap.containers().values() {
-            match container {
-                Container::Array(_) => has_array = true,
-                Container::Bitmap(_) => has_bitmap = true,
-                Container::Run(_) => has_run = true,
-            }
-        }
+        let (arrays, bitmaps, runs) = bitmap.container_variant_counts();
         assert!(
-            has_array && has_bitmap && has_run,
-            "expected all three variants, got A={has_array} B={has_bitmap} R={has_run}"
+            arrays > 0 && bitmaps > 0 && runs > 0,
+            "expected all three variants, got A={arrays} B={bitmaps} R={runs}"
         );
 
         let encoded = bitmap.encode();
@@ -796,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_from_btreemap_rejects_out_of_range_key() {
+    fn test_from_containers_rejects_out_of_range_key() {
         use commonware_codec::Error;
 
         let mut malformed: BTreeMap<u64, Container> = BTreeMap::new();
@@ -804,7 +746,7 @@ mod tests {
         container.insert(0);
         malformed.insert(1u64 << 48, container);
 
-        let result = Bitmap::try_from(malformed);
+        let result = Bitmap::from_containers(malformed);
         assert!(
             matches!(
                 result,
@@ -815,27 +757,27 @@ mod tests {
     }
 
     #[test]
-    fn test_try_from_btreemap_accepts_in_range_keys() {
+    fn test_from_containers_accepts_in_range_keys() {
         let mut map: BTreeMap<u64, Container> = BTreeMap::new();
         let mut container = Container::new();
         container.insert(42);
         map.insert(MAX_KEY, container);
 
-        let bm = Bitmap::try_from(map).unwrap();
+        let bm = Bitmap::from_containers(map).unwrap();
         assert!(bm.contains(combine(MAX_KEY, 42)));
     }
 
     #[test]
-    fn test_try_from_btreemap_rejects_empty_container() {
+    fn test_from_containers_rejects_empty_container() {
         // An empty container has no values to find via iteration, but the key still
         // shows up in `container_count()` and confuses `min`/`max`. Reject at
-        // construction so callers can't smuggle one in via the public TryFrom.
+        // construction before decode can accept it.
         use commonware_codec::Error;
 
         let mut map: BTreeMap<u64, Container> = BTreeMap::new();
         map.insert(0, Container::new());
 
-        let result = Bitmap::try_from(map);
+        let result = Bitmap::from_containers(map);
         assert!(
             matches!(result, Err(Error::Invalid("Bitmap", "empty container"))),
             "expected Invalid(\"Bitmap\", \"empty container\"), got {result:?}"

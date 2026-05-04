@@ -15,7 +15,7 @@
 //! reproduction reported by `minifuzz` (a hex `MINIFUZZ_BRANCH` token) can be
 //! replayed deterministically against the same code path.
 
-use super::{difference, intersection, union, Bitmap, Prunable};
+use super::{super::BitMap, Bitmap, Prunable};
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, EncodeSize, Read, Write};
@@ -152,6 +152,52 @@ fn build_bitmap(values: &[BoundedU64]) -> Bitmap {
     bitmap
 }
 
+fn reference_len(groups: &[&[BoundedU64]]) -> u64 {
+    groups
+        .iter()
+        .flat_map(|values| values.iter().take(MAX_VALUES))
+        .map(|value| value.0)
+        .max()
+        .map_or(0, |value| value + 1)
+}
+
+fn set_reference(reference: &mut BitMap, values: &[BoundedU64]) {
+    for value in values.iter().take(MAX_VALUES) {
+        if value.0 < reference.len() {
+            reference.set(value.0, true);
+        }
+    }
+}
+
+fn build_reference(values: &[BoundedU64], len: u64) -> BitMap {
+    let mut reference = BitMap::zeroes(len);
+    set_reference(&mut reference, values);
+    reference
+}
+
+fn expected_values(reference: &BitMap, limit: u64) -> Vec<u64> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut expected = Vec::new();
+    for value in 0..reference.len() {
+        if reference.get(value) {
+            expected.push(value);
+            if expected.len() as u64 == limit {
+                break;
+            }
+        }
+    }
+    expected
+}
+
+fn assert_matches_reference(result: &Bitmap, reference: &BitMap, limit: u64, op: &str) {
+    let actual: Vec<_> = result.iter().collect();
+    let expected = expected_values(reference, limit);
+    assert_eq!(actual, expected, "{op} mismatch");
+}
+
 impl Plan {
     pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         match self {
@@ -254,7 +300,11 @@ impl Plan {
             } => {
                 let a = build_bitmap(&values_a);
                 let b = build_bitmap(&values_b);
-                let result = union(&a, &b, limit);
+                let result = a.union(&b, limit);
+                let len = reference_len(&[&values_a, &values_b]);
+                let mut reference = build_reference(&values_a, len);
+                set_reference(&mut reference, &values_b);
+                assert_matches_reference(&result, &reference, limit, "union");
 
                 if limit == u64::MAX {
                     for v in a.iter() {
@@ -279,7 +329,16 @@ impl Plan {
             } => {
                 let a = build_bitmap(&values_a);
                 let b = build_bitmap(&values_b);
-                let result = intersection(&a, &b, limit);
+                let result = a.intersection(&b, limit);
+                let len = reference_len(&[&values_a, &values_b]);
+                let b_reference = build_reference(&values_b, len);
+                let mut reference = BitMap::zeroes(len);
+                for value in values_a.iter().take(MAX_VALUES) {
+                    if value.0 < len && b_reference.get(value.0) {
+                        reference.set(value.0, true);
+                    }
+                }
+                assert_matches_reference(&result, &reference, limit, "intersection");
 
                 for v in result.iter() {
                     assert!(a.contains(v), "intersection contains value not in a: {}", v);
@@ -300,7 +359,15 @@ impl Plan {
             } => {
                 let a = build_bitmap(&values_a);
                 let b = build_bitmap(&values_b);
-                let result = difference(&a, &b, limit);
+                let result = a.difference(&b, limit);
+                let len = reference_len(&[&values_a, &values_b]);
+                let mut reference = build_reference(&values_a, len);
+                for value in values_b.iter().take(MAX_VALUES) {
+                    if value.0 < len {
+                        reference.set(value.0, false);
+                    }
+                }
+                assert_matches_reference(&result, &reference, limit, "difference");
 
                 for v in result.iter() {
                     assert!(a.contains(v), "difference contains value not in a: {}", v);

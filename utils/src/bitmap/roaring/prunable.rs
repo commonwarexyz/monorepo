@@ -50,7 +50,6 @@ pub struct Prunable {
 
 impl Prunable {
     /// Creates an empty prunable bitmap with no pruning applied.
-    #[inline]
     pub const fn new() -> Self {
         Self {
             bitmap: Bitmap::new(),
@@ -64,13 +63,11 @@ impl Prunable {
     /// This differs from [`super::super::Prunable::len`] (the dense `BitMap<N>` wrapper),
     /// which preserves length across pruning because positions are meaningful in a sequential
     /// bit array. Here, only present values are counted.
-    #[inline]
     pub fn len(&self) -> u64 {
         self.bitmap.len()
     }
 
     /// Returns whether the bitmap is empty.
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.bitmap.is_empty()
     }
@@ -78,7 +75,6 @@ impl Prunable {
     /// Returns the current pruning watermark.
     ///
     /// Always a multiple of 65536. No value `< pruned_below` exists in the bitmap.
-    #[inline]
     pub const fn pruned_below(&self) -> u64 {
         self.pruned_below
     }
@@ -88,7 +84,6 @@ impl Prunable {
     /// # Panics
     ///
     /// Panics if `value < pruned_below()`.
-    #[inline]
     pub fn insert(&mut self, value: u64) -> bool {
         assert!(
             value >= self.pruned_below,
@@ -104,7 +99,6 @@ impl Prunable {
     /// # Panics
     ///
     /// Panics if `start < pruned_below()`.
-    #[inline]
     pub fn insert_range(&mut self, start: u64, end: u64) -> u64 {
         assert!(
             start >= self.pruned_below,
@@ -119,7 +113,6 @@ impl Prunable {
     /// # Panics
     ///
     /// Panics if `value < pruned_below()`.
-    #[inline]
     pub fn contains(&self, value: u64) -> bool {
         assert!(
             value >= self.pruned_below,
@@ -148,13 +141,11 @@ impl Prunable {
     }
 
     /// Returns the minimum value in the bitmap, if any.
-    #[inline]
     pub fn min(&self) -> Option<u64> {
         self.bitmap.min()
     }
 
     /// Returns the maximum value in the bitmap, if any.
-    #[inline]
     pub fn max(&self) -> Option<u64> {
         self.bitmap.max()
     }
@@ -179,7 +170,6 @@ impl Prunable {
     }
 
     /// Clears all values from the bitmap. Does not reset [`Self::pruned_below`].
-    #[inline]
     pub fn clear(&mut self) {
         self.bitmap.clear();
     }
@@ -247,7 +237,7 @@ impl Read for Prunable {
         let bitmap = Bitmap::read_cfg(buf, cfg)?;
         // Validate invariant: no container key < pruned_below >> 16.
         let target_key = pruned_below >> 16;
-        if let Some((&first_key, _)) = bitmap.containers().iter().next() {
+        if let Some((&first_key, _)) = bitmap.containers.first_key_value() {
             if first_key < target_key {
                 return Err(CodecError::Invalid(
                     "Prunable",

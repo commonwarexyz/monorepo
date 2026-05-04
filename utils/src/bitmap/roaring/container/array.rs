@@ -29,17 +29,8 @@ impl Default for Array {
 
 impl Array {
     /// Creates an empty array container.
-    #[inline]
     pub const fn new() -> Self {
         Self { values: Vec::new() }
-    }
-
-    /// Creates an array container with the given capacity.
-    #[inline]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            values: Vec::with_capacity(capacity.min(MAX_CARDINALITY)),
-        }
     }
 
     /// Creates an array container from a sorted, deduplicated vector.
@@ -48,7 +39,7 @@ impl Array {
     ///
     /// Panics in debug mode if the values are not sorted or contain duplicates,
     /// or if the length exceeds `MAX_CARDINALITY`.
-    #[inline]
+    #[cfg(any(test, feature = "arbitrary"))]
     pub fn from_sorted_vec(values: Vec<u16>) -> Self {
         debug_assert!(
             values.len() <= MAX_CARDINALITY,
@@ -64,25 +55,21 @@ impl Array {
     }
 
     /// Returns the number of values in the container.
-    #[inline]
     pub const fn len(&self) -> usize {
         self.values.len()
     }
 
     /// Returns whether the container is empty.
-    #[inline]
     pub const fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
     /// Returns whether the container is at maximum capacity.
-    #[inline]
     pub const fn is_full(&self) -> bool {
         self.values.len() >= MAX_CARDINALITY
     }
 
     /// Checks if the container contains the given value.
-    #[inline]
     pub fn contains(&self, value: u16) -> bool {
         self.values.binary_search(&value).is_ok()
     }
@@ -95,7 +82,6 @@ impl Array {
     ///
     /// After insertion, check [`is_full`](Self::is_full) to determine if the
     /// container should be converted to a `Bitmap`.
-    #[inline]
     pub fn insert(&mut self, value: u16) -> bool {
         match self.values.binary_search(&value) {
             Ok(_) => false,
@@ -187,31 +173,21 @@ impl Array {
     }
 
     /// Returns an iterator over the values in sorted order.
-    #[inline]
     pub fn iter(&self) -> core::iter::Copied<core::slice::Iter<'_, u16>> {
         self.values.iter().copied()
     }
 
     /// Returns the underlying values as a slice.
-    #[inline]
     pub fn as_slice(&self) -> &[u16] {
         &self.values
     }
 
-    /// Consumes the container and returns the underlying vector.
-    #[inline]
-    pub fn into_vec(self) -> Vec<u16> {
-        self.values
-    }
-
     /// Returns the minimum value in the container, if any.
-    #[inline]
     pub fn min(&self) -> Option<u16> {
         self.values.first().copied()
     }
 
     /// Returns the maximum value in the container, if any.
-    #[inline]
     pub fn max(&self) -> Option<u16> {
         self.values.last().copied()
     }
@@ -219,7 +195,6 @@ impl Array {
     /// Computes the union of two arrays.
     ///
     /// Returns a new array containing all values from both, with optional limit.
-    #[inline]
     pub fn union(&self, other: &Self, limit: usize) -> (Self, usize) {
         let a = &self.values;
         let b = &other.values;
@@ -301,7 +276,6 @@ impl Array {
     /// Computes the intersection of two arrays.
     ///
     /// Returns a new array containing values present in both, with optional limit.
-    #[inline]
     pub fn intersection(&self, other: &Self, limit: usize) -> (Self, usize) {
         let a = &self.values;
         let b = &other.values;
@@ -364,7 +338,6 @@ impl Array {
     /// Computes the difference (self - other).
     ///
     /// Returns a new array containing values in self but not in other, with optional limit.
-    #[inline]
     pub fn difference(&self, other: &Self, limit: usize) -> (Self, usize) {
         let a = &self.values;
         let b = &other.values;
@@ -731,33 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn test_with_capacity() {
-        let a = Array::with_capacity(100);
-        assert!(a.is_empty());
-        assert_eq!(a.len(), 0);
-        // The reservation is observable through byte_size: the requested capacity
-        // contributes to the heap footprint even before any values are inserted.
-        let header = core::mem::size_of::<Array>();
-        assert!(a.byte_size() >= header + 100 * core::mem::size_of::<u16>());
-    }
-
-    #[test]
-    fn test_with_capacity_clamps_to_max_cardinality() {
-        // Capacity above MAX_CARDINALITY is clamped, since the container can never
-        // legally hold more than that. Verify via byte_size: if the clamp were
-        // missing, the heap footprint would be ~4x what we assert here.
-        let a = Array::with_capacity(MAX_CARDINALITY * 4);
-        let header = core::mem::size_of::<Array>();
-        let clamped_upper = header + MAX_CARDINALITY * 2 * core::mem::size_of::<u16>();
-        assert!(
-            a.byte_size() < clamped_upper,
-            "byte_size {} exceeds clamped bound {}; with_capacity may not clamp",
-            a.byte_size(),
-            clamped_upper
-        );
-    }
-
-    #[test]
     fn test_union_disjoint_unlimited() {
         // b is entirely after a: exercises the unlimited fast path's tail-copy
         // of b after a's iterator runs out.
@@ -803,12 +749,6 @@ mod tests {
         let (result, count) = a.union(&b, 4);
         assert_eq!(result.as_slice(), &[1, 2, 3, 4]);
         assert_eq!(count, 4);
-    }
-
-    #[test]
-    fn test_into_vec() {
-        let a = Array::from_sorted_vec(vec![1, 5, 10]);
-        assert_eq!(a.into_vec(), vec![1, 5, 10]);
     }
 
     #[test]

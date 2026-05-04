@@ -22,7 +22,7 @@
 //! comparable axis; it correlates with heap size strongly enough to be informative.
 
 use commonware_codec::EncodeSize;
-use commonware_utils::bitmap::roaring::{Bitmap, Container};
+use commonware_utils::bitmap::roaring::Bitmap;
 use roaring::RoaringTreemap;
 
 /// Builds a near-saturated bitmap: every value in `[0, total)` is present except for
@@ -77,20 +77,6 @@ fn multi_shelf(shelves: u64, count_per_shelf: u64) -> (Bitmap, RoaringTreemap) {
     (ours, theirs)
 }
 
-/// Counts how many containers of each variant the bitmap holds. Diagnostic for the
-/// auto-conversion logic — most useful when comparing pre/post run-optimization.
-fn variant_counts(bm: &Bitmap) -> (usize, usize, usize) {
-    let mut counts = (0usize, 0usize, 0usize);
-    for (_, c) in bm.containers().iter() {
-        match c {
-            Container::Array(_) => counts.0 += 1,
-            Container::Bitmap(_) => counts.1 += 1,
-            Container::Run(_) => counts.2 += 1,
-        }
-    }
-    counts
-}
-
 fn measure(name: &str, ours: &Bitmap, theirs: &RoaringTreemap) {
     assert_eq!(
         ours.len(),
@@ -99,7 +85,7 @@ fn measure(name: &str, ours: &Bitmap, theirs: &RoaringTreemap) {
         ours.len(),
         theirs.len()
     );
-    let (a, b, r) = variant_counts(ours);
+    let (a, b, r) = ours.container_variant_counts();
     let containers = ours.container_count();
     let ours_bytes = ours.byte_size();
     let ours_wire = ours.encode_size();
