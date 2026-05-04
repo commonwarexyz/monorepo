@@ -29,6 +29,7 @@
 use super::Bitmap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use core::ops::Range;
 
 /// Number of values per container. Pruning aligns to multiples of this value.
 const CONTAINER_SIZE: u64 = 1 << 16;
@@ -93,19 +94,19 @@ impl Prunable {
         self.bitmap.insert(value)
     }
 
-    /// Inserts a range of values `[start, end)` into the bitmap. Returns the number of values
-    /// newly inserted.
+    /// Inserts a range of values into the bitmap. Returns the number of values newly inserted.
     ///
     /// # Panics
     ///
     /// Panics if `start < pruned_below()`.
-    pub fn insert_range(&mut self, start: u64, end: u64) -> u64 {
+    pub fn insert_range(&mut self, range: Range<u64>) -> u64 {
+        let Range { start, end } = range;
         assert!(
             start >= self.pruned_below,
             "start pruned: {start} < pruned_below {}",
             self.pruned_below
         );
-        self.bitmap.insert_range(start, end)
+        self.bitmap.insert_range(start..end)
     }
 
     /// Checks if the bitmap contains the given value.
@@ -155,18 +156,19 @@ impl Prunable {
         self.bitmap.iter()
     }
 
-    /// Returns an iterator over the values in `[start, end)` in sorted order.
+    /// Returns an iterator over the values in the range in sorted order.
     ///
     /// # Panics
     ///
     /// Panics if `start < pruned_below()`.
-    pub fn iter_range(&self, start: u64, end: u64) -> impl Iterator<Item = u64> + '_ {
+    pub fn iter_range(&self, range: Range<u64>) -> impl Iterator<Item = u64> + '_ {
+        let Range { start, end } = range;
         assert!(
             start >= self.pruned_below,
             "start pruned: {start} < pruned_below {}",
             self.pruned_below
         );
-        self.bitmap.iter_range(start, end)
+        self.bitmap.iter_range(start..end)
     }
 
     /// Clears all values from the bitmap. Does not reset [`Self::pruned_below`].
@@ -393,7 +395,7 @@ mod tests {
     fn test_panic_on_insert_range_below_pruned() {
         let mut p = Prunable::new();
         p.prune_below(131_072);
-        p.insert_range(50, 100);
+        p.insert_range(50..100);
     }
 
     #[test]
@@ -401,7 +403,7 @@ mod tests {
     fn test_panic_on_iter_range_below_pruned() {
         let mut p = Prunable::new();
         p.prune_below(131_072);
-        let _ = p.iter_range(50, 200_000);
+        let _ = p.iter_range(50..200_000);
     }
 
     #[test]

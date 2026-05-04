@@ -78,6 +78,7 @@ use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use container::Container;
+use core::ops::Range;
 pub use prunable::Prunable;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
@@ -113,7 +114,7 @@ const fn combine(key: u64, index: u16) -> u64 {
 /// let mut bitmap = Bitmap::new();
 /// bitmap.insert(42);
 /// bitmap.insert(100);
-/// bitmap.insert_range(1000, 2000);
+/// bitmap.insert_range(1000..2000);
 ///
 /// assert!(bitmap.contains(42));
 /// assert!(bitmap.contains(1500));
@@ -191,10 +192,11 @@ impl Bitmap {
         self.containers.entry(key).or_default().insert(index)
     }
 
-    /// Inserts a range of values [start, end) into the bitmap.
+    /// Inserts a range of values into the bitmap.
     ///
     /// Returns the number of values newly inserted.
-    pub fn insert_range(&mut self, start: u64, end: u64) -> u64 {
+    pub fn insert_range(&mut self, range: Range<u64>) -> u64 {
+        let Range { start, end } = range;
         if start >= end {
             return 0;
         }
@@ -219,10 +221,10 @@ impl Bitmap {
             let container = self.containers.entry(key).or_default();
             match container_end {
                 Some(container_end) => {
-                    inserted += container.insert_range(container_start, container_end) as u64;
+                    inserted += container.insert_range(container_start..container_end) as u64;
                 }
                 None => {
-                    inserted += container.insert_range(container_start, u16::MAX) as u64;
+                    inserted += container.insert_range(container_start..u16::MAX) as u64;
                     if container.insert(u16::MAX) {
                         inserted += 1;
                     }
@@ -240,8 +242,9 @@ impl Bitmap {
             .flat_map(|(&key, container)| container.iter().map(move |index| combine(key, index)))
     }
 
-    /// Returns an iterator over the values in the range [start, end) in sorted order.
-    pub fn iter_range(&self, start: u64, end: u64) -> impl Iterator<Item = u64> + '_ {
+    /// Returns an iterator over the values in the range in sorted order.
+    pub fn iter_range(&self, range: Range<u64>) -> impl Iterator<Item = u64> + '_ {
+        let Range { start, end } = range;
         let start_key = high_bits(start);
         let end_key_exclusive = if start >= end {
             start_key
@@ -260,7 +263,7 @@ impl Bitmap {
                     container::bitmap::BITS
                 };
                 container
-                    .iter_range(container_start, container_end)
+                    .iter_range(container_start as u32..container_end)
                     .map(move |index| combine(key, index))
             })
     }
@@ -443,7 +446,7 @@ mod tests {
     fn test_insert_range() {
         let mut bitmap = Bitmap::new();
 
-        let inserted = bitmap.insert_range(100, 200);
+        let inserted = bitmap.insert_range(100..200);
         assert_eq!(inserted, 100);
         assert_eq!(bitmap.len(), 100);
 
@@ -461,7 +464,7 @@ mod tests {
         // Insert range that spans multiple containers
         let start = 65530; // Near end of first container
         let end = 65550; // Into second container
-        let inserted = bitmap.insert_range(start, end);
+        let inserted = bitmap.insert_range(start..end);
         assert_eq!(inserted, 20);
 
         for i in start..end {
@@ -488,7 +491,7 @@ mod tests {
             bitmap.insert(i);
         }
 
-        let values: Vec<_> = bitmap.iter_range(25, 75).collect();
+        let values: Vec<_> = bitmap.iter_range(25..75).collect();
         assert_eq!(values.len(), 50);
         assert_eq!(values[0], 25);
         assert_eq!(values[49], 74);
@@ -500,7 +503,9 @@ mod tests {
         bitmap.insert(1);
         bitmap.insert(70_000);
 
-        let values: Vec<_> = bitmap.iter_range(70_000, 10).collect();
+        let start = 70_000;
+        let end = 10;
+        let values: Vec<_> = bitmap.iter_range(start..end).collect();
         assert!(values.is_empty());
     }
 
@@ -647,7 +652,7 @@ mod tests {
         use commonware_codec::{Decode, Encode};
 
         let mut bitmap = Bitmap::new();
-        bitmap.insert_range(0, 5000);
+        bitmap.insert_range(0..5000);
 
         let encoded = bitmap.encode();
         let decoded = Bitmap::decode_cfg(encoded, &(..).into()).unwrap();
@@ -659,8 +664,8 @@ mod tests {
         use commonware_codec::{Decode, Encode};
 
         let mut bitmap = Bitmap::new();
-        bitmap.insert_range(0, 100);
-        bitmap.insert_range(65536, 65636);
+        bitmap.insert_range(0..100);
+        bitmap.insert_range(65536..65636);
         bitmap.insert(1u64 << 40);
 
         let encoded = bitmap.encode();
@@ -699,7 +704,7 @@ mod tests {
         // MAX_CARDINALITY, the single-run state triggers Bitmap→Run.
         for shelf in 400..600u64 {
             let base = shelf * 65_536;
-            bitmap.insert_range(base, base + 50_000);
+            bitmap.insert_range(base..base + 50_000);
         }
 
         assert_eq!(bitmap.container_count(), 600);
@@ -817,7 +822,7 @@ mod tests {
 
         // Test case 1: Range ending at first container boundary (65535)
         let mut bitmap = Bitmap::new();
-        let inserted = bitmap.insert_range(0, 65536);
+        let inserted = bitmap.insert_range(0..65536);
         assert_eq!(inserted, 65536);
         assert_eq!(bitmap.len(), 65536);
         for i in 0u64..65536 {
@@ -827,7 +832,7 @@ mod tests {
 
         // Test case 2: Range ending at container boundary within a single container
         let mut bitmap = Bitmap::new();
-        let inserted = bitmap.insert_range(65000, 65536);
+        let inserted = bitmap.insert_range(65000..65536);
         assert_eq!(inserted, 536);
         assert_eq!(bitmap.len(), 536);
         for i in 65000u64..65536 {
@@ -836,7 +841,7 @@ mod tests {
 
         // Test case 3: Range spanning containers ending at boundary
         let mut bitmap = Bitmap::new();
-        let inserted = bitmap.insert_range(65530, 131072);
+        let inserted = bitmap.insert_range(65530..131072);
         assert_eq!(inserted, 65542);
         assert_eq!(bitmap.len(), 65542);
         for i in 65530u64..131072 {
@@ -850,7 +855,7 @@ mod tests {
         let expected_len = end - start;
 
         let mut bitmap = Bitmap::new();
-        let inserted = bitmap.insert_range(start, end);
+        let inserted = bitmap.insert_range(start..end);
         assert_eq!(inserted, expected_len);
         assert_eq!(bitmap.len(), expected_len);
     }

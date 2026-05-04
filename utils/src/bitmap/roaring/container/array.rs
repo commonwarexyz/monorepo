@@ -7,6 +7,7 @@
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use core::ops::Range;
 
 /// Maximum cardinality before converting to a bitmap container.
 pub const MAX_CARDINALITY: usize = 4096;
@@ -31,27 +32,6 @@ impl Array {
     /// Creates an empty array container.
     pub const fn new() -> Self {
         Self { values: Vec::new() }
-    }
-
-    /// Creates an array container from a sorted, deduplicated vector.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug mode if the values are not sorted or contain duplicates,
-    /// or if the length exceeds `MAX_CARDINALITY`.
-    #[cfg(any(test, feature = "arbitrary"))]
-    pub fn from_sorted_vec(values: Vec<u16>) -> Self {
-        debug_assert!(
-            values.len() <= MAX_CARDINALITY,
-            "array container too large: {} > {}",
-            values.len(),
-            MAX_CARDINALITY
-        );
-        debug_assert!(
-            values.is_empty() || values.windows(2).all(|w| w[0] < w[1]),
-            "values must be sorted and unique"
-        );
-        Self { values }
     }
 
     /// Returns the number of values in the container.
@@ -87,7 +67,7 @@ impl Array {
         }
     }
 
-    /// Inserts a range of values [start, end) into the container.
+    /// Inserts a range of values into the container.
     ///
     /// Returns the number of values newly inserted.
     ///
@@ -95,7 +75,8 @@ impl Array {
     ///
     /// After insertion, convert to `Bitmap` if the cardinality exceeds
     /// [`MAX_CARDINALITY`].
-    pub fn insert_range(&mut self, start: u16, end: u16) -> usize {
+    pub fn insert_range(&mut self, range: Range<u16>) -> usize {
+        let Range { start, end } = range;
         if start >= end {
             return 0;
         }
@@ -189,7 +170,9 @@ impl Array {
 
     /// Computes the union of two arrays.
     ///
-    /// Returns a new array containing all values from both, with optional limit.
+    /// `limit` caps the number of values copied into the result.
+    ///
+    /// Returns the result array and the number of values in it.
     pub fn union(&self, other: &Self, limit: usize) -> (Self, usize) {
         let a = &self.values;
         let b = &other.values;
@@ -270,7 +253,9 @@ impl Array {
 
     /// Computes the intersection of two arrays.
     ///
-    /// Returns a new array containing values present in both, with optional limit.
+    /// `limit` caps the number of values copied into the result.
+    ///
+    /// Returns the result array and the number of values in it.
     pub fn intersection(&self, other: &Self, limit: usize) -> (Self, usize) {
         let a = &self.values;
         let b = &other.values;
@@ -332,7 +317,9 @@ impl Array {
 
     /// Computes the difference (self - other).
     ///
-    /// Returns a new array containing values in self but not in other, with optional limit.
+    /// `limit` caps the number of values copied into the result.
+    ///
+    /// Returns the result array and the number of values in it.
     pub fn difference(&self, other: &Self, limit: usize) -> (Self, usize) {
         let a = &self.values;
         let b = &other.values;
@@ -439,16 +426,31 @@ impl Read for Array {
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let values = Vec::<u16>::read_cfg(buf, &(RangeCfg::new(..=MAX_CARDINALITY), ()))?;
 
-        // Validate sorted and unique
-        if values.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(CodecError::Invalid(
-                "Array",
-                "values must be sorted and unique",
-            ));
-        }
-
+        validate_values(&values)?;
         Ok(Self { values })
     }
+}
+
+impl TryFrom<Vec<u16>> for Array {
+    type Error = CodecError;
+
+    fn try_from(values: Vec<u16>) -> Result<Self, Self::Error> {
+        validate_values(&values)?;
+        Ok(Self { values })
+    }
+}
+
+fn validate_values(values: &[u16]) -> Result<(), CodecError> {
+    if values.len() > MAX_CARDINALITY {
+        return Err(CodecError::InvalidLength(values.len()));
+    }
+    if values.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(CodecError::Invalid(
+            "Array",
+            "values must be sorted and unique",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "arbitrary")]
@@ -465,7 +467,7 @@ impl arbitrary::Arbitrary<'_> for Array {
             min = value as u32 + 1;
         }
 
-        Ok(Self::from_sorted_vec(values))
+        Self::try_from(values).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
@@ -512,7 +514,7 @@ mod tests {
     fn test_insert_range() {
         let mut container = Array::new();
 
-        let inserted = container.insert_range(5, 10);
+        let inserted = container.insert_range(5..10);
         assert_eq!(inserted, 5);
         assert_eq!(container.len(), 5);
 
@@ -520,15 +522,15 @@ mod tests {
         assert_eq!(values, vec![5, 6, 7, 8, 9]);
 
         // Overlapping range
-        let inserted = container.insert_range(8, 12);
+        let inserted = container.insert_range(8..12);
         assert_eq!(inserted, 2); // Only 10, 11 are new
         assert_eq!(container.len(), 7);
     }
 
     #[test]
-    fn test_from_sorted_vec() {
+    fn test_try_from_sorted_vec() {
         let values = vec![1, 5, 10, 100];
-        let container = Array::from_sorted_vec(values.clone());
+        let container = Array::try_from(values.clone()).unwrap();
         assert_eq!(container.len(), 4);
         assert_eq!(container.as_slice(), &values[..]);
     }
@@ -552,8 +554,8 @@ mod tests {
         let values_a = vec![1, 3, 5, 7, 9];
         let values_b = vec![2, 3, 4, 5, 6];
 
-        let container_a = Array::from_sorted_vec(values_a);
-        let container_b = Array::from_sorted_vec(values_b);
+        let container_a = Array::try_from(values_a).unwrap();
+        let container_b = Array::try_from(values_b).unwrap();
 
         // unlimited case
         let (result, count) = container_a.intersection(&container_b, usize::MAX);
@@ -572,8 +574,8 @@ mod tests {
         let values_b = vec![2, 3, 4, 5, 6];
 
         let empty = Array::new();
-        let container_a = Array::from_sorted_vec(values_a.clone());
-        let container_b = Array::from_sorted_vec(values_b);
+        let container_a = Array::try_from(values_a.clone()).unwrap();
+        let container_b = Array::try_from(values_b).unwrap();
 
         // difference with empty: unlimited
         let (result, count) = container_a.difference(&empty, usize::MAX);
@@ -634,7 +636,7 @@ mod tests {
         let mut a = Array::new();
         a.insert(10);
         a.insert(20);
-        let inserted = a.insert_range(100, 105);
+        let inserted = a.insert_range(100..105);
         assert_eq!(inserted, 5);
         assert_eq!(a.as_slice(), &[10, 20, 100, 101, 102, 103, 104]);
     }
@@ -646,7 +648,7 @@ mod tests {
         a.insert(50);
         a.insert(60);
         // end (=20) <= first (=50), so prepend.
-        let inserted = a.insert_range(10, 20);
+        let inserted = a.insert_range(10..20);
         assert_eq!(inserted, 10);
         assert_eq!(
             a.as_slice(),
@@ -661,7 +663,7 @@ mod tests {
         // equality.
         let mut a = Array::new();
         a.insert(5);
-        let inserted = a.insert_range(0, 5);
+        let inserted = a.insert_range(0..5);
         assert_eq!(inserted, 5);
         assert_eq!(a.as_slice(), &[0, 1, 2, 3, 4, 5]);
     }
@@ -680,7 +682,7 @@ mod tests {
         // the general-case main loop (the existing test only exercises the equal arm).
         let mut a = Array::new();
         a.insert(5);
-        let inserted = a.insert_range(3, 8);
+        let inserted = a.insert_range(3..8);
         assert_eq!(inserted, 4); // 3, 4, 6, 7 are new; 5 already existed
         assert_eq!(a.as_slice(), &[3, 4, 5, 6, 7]);
     }
@@ -689,8 +691,8 @@ mod tests {
     fn test_union_disjoint_unlimited() {
         // b is entirely after a: exercises the unlimited fast path's tail-copy
         // of b after a's iterator runs out.
-        let a = Array::from_sorted_vec(vec![1, 2, 3]);
-        let b = Array::from_sorted_vec(vec![10, 11, 12]);
+        let a = Array::try_from(vec![1, 2, 3]).unwrap();
+        let b = Array::try_from(vec![10, 11, 12]).unwrap();
 
         let (result, count) = a.union(&b, usize::MAX);
         assert_eq!(result.as_slice(), &[1, 2, 3, 10, 11, 12]);
@@ -701,8 +703,8 @@ mod tests {
     fn test_union_with_overlap_unlimited() {
         // Equal elements advance both indices and are pushed once; covers the
         // Ordering::Equal arm of the unlimited fast path.
-        let a = Array::from_sorted_vec(vec![1, 3, 5, 7]);
-        let b = Array::from_sorted_vec(vec![3, 5, 9]);
+        let a = Array::try_from(vec![1, 3, 5, 7]).unwrap();
+        let b = Array::try_from(vec![3, 5, 9]).unwrap();
 
         let (result, count) = a.union(&b, usize::MAX);
         assert_eq!(result.as_slice(), &[1, 3, 5, 7, 9]);
@@ -713,8 +715,8 @@ mod tests {
     fn test_union_limited_truncates_during_merge() {
         // Limit is hit while both sides still have elements: the tail-extend
         // blocks are reached but contribute nothing.
-        let a = Array::from_sorted_vec(vec![1, 3, 5]);
-        let b = Array::from_sorted_vec(vec![2, 4, 6]);
+        let a = Array::try_from(vec![1, 3, 5]).unwrap();
+        let b = Array::try_from(vec![2, 4, 6]).unwrap();
 
         let (result, count) = a.union(&b, 3);
         assert_eq!(result.as_slice(), &[1, 2, 3]);
@@ -725,8 +727,8 @@ mod tests {
     fn test_union_limited_one_side_consumed_first() {
         // b runs out before the limit is reached; the remaining capacity is
         // filled by extending from a's tail.
-        let a = Array::from_sorted_vec(vec![1, 2, 3, 4, 5]);
-        let b = Array::from_sorted_vec(vec![1]);
+        let a = Array::try_from(vec![1, 2, 3, 4, 5]).unwrap();
+        let b = Array::try_from(vec![1]).unwrap();
 
         let (result, count) = a.union(&b, 4);
         assert_eq!(result.as_slice(), &[1, 2, 3, 4]);
@@ -741,7 +743,7 @@ mod tests {
         for i in 0..10u16 {
             a.insert(i);
         }
-        let inserted = a.insert_range(2, 5);
+        let inserted = a.insert_range(2..5);
         assert_eq!(inserted, 0);
         assert_eq!(a.len(), 10);
         assert_eq!(a.as_slice(), &(0..10).collect::<Vec<u16>>()[..]);

@@ -13,6 +13,7 @@ use super::bitmap;
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use core::ops::Range;
 
 /// Maximum number of runs in a Run container.
 ///
@@ -26,6 +27,9 @@ pub const MAX_RUNS: usize = 32768;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
     /// Sorted vector of `(start, end)` inclusive ranges.
+    ///
+    /// `Range<u16>` is end-exclusive and cannot represent a run ending at `u16::MAX`
+    /// without widening every stored bound.
     ///
     /// Invariant: for any consecutive entries `(s1, e1)` and `(s2, e2)`, `e1 + 1 < s2`
     /// (non-overlapping AND non-adjacent — adjacent runs would have been merged).
@@ -188,10 +192,11 @@ impl Run {
         true
     }
 
-    /// Inserts a range of values [start, end) into the container.
+    /// Inserts a range of values into the container.
     ///
     /// Returns the number of values newly inserted.
-    pub fn insert_range(&mut self, start: u16, end: u16) -> u32 {
+    pub fn insert_range(&mut self, range: Range<u16>) -> u32 {
+        let Range { start, end } = range;
         if start >= end {
             return 0;
         }
@@ -243,12 +248,12 @@ impl Run {
 
     /// Returns an iterator over the values in sorted order.
     pub fn iter(&self) -> Iter<'_> {
-        Iter::new(&self.runs, 0, bitmap::BITS)
+        Iter::new(&self.runs, 0..bitmap::BITS)
     }
 
-    /// Returns an iterator over values in `[start, end)`.
-    pub fn iter_range(&self, start: u16, end: u32) -> Iter<'_> {
-        Iter::new(&self.runs, start, end)
+    /// Returns an iterator over values in the range.
+    pub fn iter_range(&self, range: Range<u32>) -> Iter<'_> {
+        Iter::new(&self.runs, range)
     }
 
     /// Returns an iterator over the runs as (start, end) pairs (inclusive).
@@ -336,10 +341,20 @@ pub struct Iter<'a> {
 }
 
 impl<'a> Iter<'a> {
-    fn new(runs: &'a [(u16, u16)], start: u16, end: u32) -> Self {
-        let end = end.min(bitmap::BITS);
+    fn new(runs: &'a [(u16, u16)], range: Range<u32>) -> Self {
+        let start = range.start.min(bitmap::BITS);
+        let end = range.end.min(bitmap::BITS);
+        if start >= end {
+            return Self {
+                runs_iter: runs[runs.len()..].iter(),
+                current_run: None,
+                current_value: None,
+                end: 0,
+            };
+        }
+
         let mut runs_iter = runs.iter();
-        let (current_run, current_value) = next_run(&mut runs_iter, start, end);
+        let (current_run, current_value) = next_run(&mut runs_iter, start as u16, end);
         Self {
             runs_iter,
             current_run,
@@ -516,7 +531,7 @@ mod tests {
     fn test_insert_range() {
         let mut container = Run::new();
 
-        let inserted = container.insert_range(5, 10);
+        let inserted = container.insert_range(5..10);
         assert_eq!(inserted, 5);
         assert_eq!(container.run_count(), 1);
         assert_eq!(container.len(), 5);
@@ -529,12 +544,12 @@ mod tests {
     fn test_insert_range_merge() {
         let mut container = Run::new();
 
-        container.insert_range(1, 4); // [1, 2, 3]
-        container.insert_range(6, 9); // [6, 7, 8]
+        container.insert_range(1..4); // [1, 2, 3]
+        container.insert_range(6..9); // [6, 7, 8]
         assert_eq!(container.run_count(), 2);
 
         // Insert overlapping range that bridges
-        container.insert_range(3, 7); // [3, 4, 5, 6]
+        container.insert_range(3..7); // [3, 4, 5, 6]
         assert_eq!(container.run_count(), 1);
         assert_eq!(container.len(), 8);
 
@@ -585,8 +600,8 @@ mod tests {
     #[test]
     fn test_iter_size_hint_within_run() {
         let mut container = Run::new();
-        container.insert_range(10, 14); // run (10, 13)
-        container.insert_range(20, 23); // run (20, 22)
+        container.insert_range(10..14); // run (10, 13)
+        container.insert_range(20..23); // run (20, 22)
 
         let mut iter = container.iter();
         assert_eq!(iter.len(), 4 + 3); // 7 total
@@ -615,11 +630,22 @@ mod tests {
     #[test]
     fn test_runs_iterator() {
         let mut container = Run::new();
-        container.insert_range(1, 4);
-        container.insert_range(10, 13);
+        container.insert_range(1..4);
+        container.insert_range(10..13);
 
         let runs: Vec<_> = container.runs().collect();
         assert_eq!(runs, vec![(1, 3), (10, 12)]);
+    }
+
+    #[test]
+    fn test_iter_range_empty_size_hint() {
+        let mut container = Run::new();
+        container.insert_range(1..4);
+
+        let start = 4;
+        let end = 1;
+        let iter = container.iter_range(start..end);
+        assert_eq!(iter.len(), 0);
     }
 
     #[test]
@@ -661,7 +687,7 @@ mod tests {
         // Insert 5 non-adjacent runs (gaps prevent merging).
         for i in 0..5 {
             let start = i * 100;
-            r.insert_range(start, start + 50);
+            r.insert_range(start..start + 50);
         }
         let s5 = r.byte_size();
         // With Vec storage, capacity may overshoot len due to doubling growth.

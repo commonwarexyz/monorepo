@@ -9,7 +9,7 @@ fn benchmark_insert_range(c: &mut Criterion) {
         group.bench_function(format!("count={count} impl=ours"), |b| {
             b.iter(|| {
                 let mut bitmap = Bitmap::new();
-                bitmap.insert_range(0, count);
+                bitmap.insert_range(0..count);
                 black_box(bitmap)
             });
         });

@@ -226,7 +226,7 @@ impl Plan {
                     return Ok(());
                 }
                 let mut bitmap = Bitmap::new();
-                let inserted = bitmap.insert_range(start, end);
+                let inserted = bitmap.insert_range(start..end);
                 assert_eq!(inserted, expected_len);
                 assert_eq!(bitmap.len(), expected_len);
                 for i in start..end {
@@ -279,7 +279,7 @@ impl Plan {
                     return Ok(());
                 }
                 let mut bitmap = Bitmap::new();
-                bitmap.insert_range(start, end);
+                bitmap.insert_range(start..end);
 
                 let encoded = bitmap.encode();
                 let decoded =
@@ -400,7 +400,7 @@ impl Plan {
                     return Ok(());
                 }
                 let bitmap = build_bitmap(&values);
-                let collected: Vec<_> = bitmap.iter_range(start, end).collect();
+                let collected: Vec<_> = bitmap.iter_range(start..end).collect();
                 for &v in &collected {
                     assert!(
                         v >= start && v < end,
@@ -443,7 +443,7 @@ impl Plan {
                     let start = start.0;
                     let end = start.saturating_add(*len as u64).min(MAX_VALUE);
                     if start < end {
-                        bitmap.insert_range(start, end);
+                        bitmap.insert_range(start..end);
                     }
                 }
                 let encoded = bitmap.encode();
@@ -466,7 +466,7 @@ impl Plan {
                                 let start = start.0;
                                 let end = start.saturating_add(*len as u64).min(MAX_VALUE);
                                 if start < end {
-                                    bitmap.insert_range(start, end);
+                                    bitmap.insert_range(start..end);
                                 }
                             }
                         }
@@ -498,7 +498,7 @@ impl Plan {
                             let s = base + *start as u64;
                             let e = (s + *len as u64).min(base + 65536);
                             if s < e {
-                                bitmap.insert_range(s, e);
+                                bitmap.insert_range(s..e);
                             }
                         }
                     }
@@ -540,7 +540,7 @@ impl Plan {
                             let s = u64::from(*start);
                             let e = s.saturating_add(*len as u64).min(MAX_VALUE);
                             if s >= p.pruned_below() && s < e {
-                                p.insert_range(s, e);
+                                p.insert_range(s..e);
                             }
                         }
                         PrunableOp::PruneBelow(threshold) => {

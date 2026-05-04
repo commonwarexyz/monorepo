@@ -26,10 +26,9 @@
 //! Auto-conversion adds only a constant-time threshold compare per insert in the steady
 //! state, so callers never need to call an explicit `optimize()` — there is no such API.
 //!
-//! Decoded shapes from peer-supplied wire data are *trusted as-is*: a peer-encoded
-//! suboptimal shape is preserved on decode, and the next mutation will auto-correct via
-//! the threshold logic. Codec bounds (per-container `MAX_RUNS`, top-level `RangeCfg`)
-//! enforce DOS resistance independently.
+//! Decoded shapes from peer-supplied wire data are validated and then normalized through the
+//! same threshold rules used by mutation paths. Codec bounds (per-container `MAX_RUNS`,
+//! top-level `RangeCfg`) enforce DOS resistance independently.
 
 pub mod array;
 pub mod bitmap;
@@ -41,6 +40,7 @@ pub use array::Array;
 pub use bitmap::Bitmap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use core::ops::Range;
 pub use run::Run;
 
 /// A container that stores u16 values using the most efficient representation.
@@ -48,7 +48,7 @@ pub use run::Run;
 /// Automatically converts between container types during insertion:
 /// - Array -> Bitmap when cardinality exceeds 4096
 /// - Bitmap -> Run when container becomes fully saturated (65536 values)
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Container {
     /// Sparse container using a sorted array.
     Array(Array),
@@ -129,13 +129,14 @@ impl Container {
         }
     }
 
-    /// Inserts a range of values [start, end) into the container.
+    /// Inserts a range of values into the container.
     ///
     /// Returns the number of values newly inserted.
     ///
     /// Automatically converts the container type if needed; see the [module
     /// documentation](self) for the full transition table.
-    pub fn insert_range(&mut self, start: u16, end: u16) -> u32 {
+    pub fn insert_range(&mut self, range: Range<u16>) -> u32 {
+        let Range { start, end } = range;
         if start >= end {
             return 0;
         }
@@ -149,7 +150,7 @@ impl Container {
                 // 4 bytes vs Array which would be 2 bytes per value.
                 if a.is_empty() && range_len >= 64 {
                     let mut run = Run::new();
-                    let inserted = run.insert_range(start, end);
+                    let inserted = run.insert_range(start..end);
                     *self = Self::Run(run);
                     return inserted;
                 }
@@ -157,20 +158,20 @@ impl Container {
                 // If result would exceed array capacity, convert to bitmap.
                 if a.len() + range_len > array::MAX_CARDINALITY {
                     self.convert_array_to_bitmap();
-                    return self.insert_range(start, end);
+                    return self.insert_range(start..end);
                 }
 
-                a.insert_range(start, end) as u32
+                a.insert_range(start..end) as u32
             }
             Self::Bitmap(b) => {
-                let inserted = b.insert_range(start, end);
+                let inserted = b.insert_range(start..end);
                 if (b.run_count() as usize) < BITMAP_TO_RUN_THRESHOLD {
                     self.convert_bitmap_to_run();
                 }
                 inserted
             }
             Self::Run(r) => {
-                let inserted = r.insert_range(start, end);
+                let inserted = r.insert_range(start..end);
                 if r.run_count() > RUN_TO_BITMAP_THRESHOLD {
                     self.convert_run_to_bitmap();
                 }
@@ -188,22 +189,20 @@ impl Container {
         }
     }
 
-    /// Returns an iterator over values in `[start, end)`.
-    pub fn iter_range(&self, start: u16, end: u32) -> RangeIter<'_> {
+    /// Returns an iterator over values in the range.
+    pub fn iter_range(&self, range: Range<u32>) -> RangeIter<'_> {
+        let start = range.start.min(bitmap::BITS);
+        let end = range.end.min(bitmap::BITS);
         match self {
             Self::Array(a) => {
                 let values = a.as_slice();
-                let start_pos = values.partition_point(|&value| value < start);
-                let end_pos = if end > u16::MAX as u32 {
-                    values.len()
-                } else {
-                    values.partition_point(|&value| (value as u32) < end)
-                };
+                let start_pos = values.partition_point(|&value| (value as u32) < start);
+                let end_pos = values.partition_point(|&value| (value as u32) < end);
                 let end_pos = end_pos.max(start_pos);
                 RangeIter::Array(values[start_pos..end_pos].iter().copied())
             }
-            Self::Bitmap(b) => RangeIter::Bitmap(b.iter_range(start, end)),
-            Self::Run(r) => RangeIter::Run(r.iter_range(start, end)),
+            Self::Bitmap(b) => RangeIter::Bitmap(b.iter_range(start..end)),
+            Self::Run(r) => RangeIter::Run(r.iter_range(start..end)),
         }
     }
 
@@ -226,6 +225,8 @@ impl Container {
     }
 
     /// Copies at most `limit` values from the container.
+    ///
+    /// Returns the truncated container and the number of copied values.
     pub fn limit(&self, limit: u64) -> (Self, u64) {
         let len = self.len() as u64;
         if len <= limit {
@@ -245,6 +246,8 @@ impl Container {
     }
 
     /// Computes the union of two containers, returning at most `limit` values.
+    ///
+    /// Returns the result container and the number of values in it.
     pub fn union(&self, other: &Self, limit: u64) -> (Self, u64) {
         if let (Self::Array(a), Self::Array(b)) = (self, other) {
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -302,6 +305,8 @@ impl Container {
     }
 
     /// Computes the intersection of two containers, returning at most `limit` values.
+    ///
+    /// Returns the result container and the number of values in it.
     pub fn intersection(&self, other: &Self, limit: u64) -> (Self, u64) {
         if let (Self::Array(a), Self::Array(b)) = (self, other) {
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -340,6 +345,8 @@ impl Container {
     }
 
     /// Computes the difference `self - other`, returning at most `limit` values.
+    ///
+    /// Returns the result container and the number of values in it.
     pub fn difference(&self, other: &Self, limit: u64) -> (Self, u64) {
         if let (Self::Array(a), Self::Array(b)) = (self, other) {
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -417,6 +424,14 @@ impl Container {
         }
     }
 
+    /// Converts a Bitmap container to an Array container.
+    fn convert_bitmap_to_array(&mut self) {
+        if let Self::Bitmap(b) = self {
+            let values: Vec<u16> = b.iter().collect();
+            *self = Self::Array(Array::try_from(values).expect("bitmap values are sorted"));
+        }
+    }
+
     /// Converts a Bitmap container to a Run container.
     fn convert_bitmap_to_run(&mut self) {
         if let Self::Bitmap(b) = self {
@@ -431,7 +446,37 @@ impl Container {
             *self = Self::Bitmap(Box::new(Bitmap::from(&*r)));
         }
     }
+
+    /// Applies the same representation thresholds used by mutation paths.
+    fn normalize(&mut self) {
+        if self.is_empty() {
+            *self = Self::Array(Array::new());
+            return;
+        }
+
+        match self {
+            Self::Array(_) => {}
+            Self::Bitmap(b) if b.len() as usize <= array::MAX_CARDINALITY => {
+                self.convert_bitmap_to_array();
+            }
+            Self::Bitmap(b) if (b.run_count() as usize) < BITMAP_TO_RUN_THRESHOLD => {
+                self.convert_bitmap_to_run();
+            }
+            Self::Run(r) if r.run_count() > RUN_TO_BITMAP_THRESHOLD => {
+                self.convert_run_to_bitmap();
+            }
+            _ => {}
+        }
+    }
 }
+
+impl PartialEq for Container {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for Container {}
 
 /// Convert a Bitmap to a Run when the run count drops below this threshold.
 ///
@@ -551,12 +596,14 @@ impl Read for Container {
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let container_type = u8::read(buf)?;
-        match container_type {
+        let mut container = match container_type {
             CONTAINER_TYPE_ARRAY => Ok(Self::Array(Array::read(buf)?)),
             CONTAINER_TYPE_BITMAP => Ok(Self::Bitmap(Box::new(Bitmap::read(buf)?))),
             CONTAINER_TYPE_RUN => Ok(Self::Run(Run::read(buf)?)),
             _ => Err(CodecError::InvalidEnum(container_type)),
-        }
+        }?;
+        container.normalize();
+        Ok(container)
     }
 }
 
@@ -575,6 +622,7 @@ impl arbitrary::Arbitrary<'_> for Container {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{Decode, Encode};
 
     #[test]
     fn test_new_container() {
@@ -598,6 +646,46 @@ mod tests {
         assert!(container.contains(5));
         assert!(container.contains(7));
         assert!(!container.contains(4));
+    }
+
+    #[test]
+    fn test_equality_ignores_representation() {
+        let mut array = Array::new();
+        for value in [1, 3, 5] {
+            array.insert(value);
+        }
+
+        let bitmap = Bitmap::from(&array);
+        let mut run = Run::new();
+        for value in [1, 3, 5] {
+            run.insert(value);
+        }
+
+        assert_eq!(
+            Container::Array(array.clone()),
+            Container::Bitmap(Box::new(bitmap))
+        );
+        assert_eq!(Container::Array(array), Container::Run(run));
+    }
+
+    #[test]
+    fn test_decode_normalizes_sparse_bitmap_container() {
+        let mut bitmap = Bitmap::new();
+        bitmap.insert(1);
+        bitmap.insert(3);
+        bitmap.insert(5);
+        let encoded = Container::Bitmap(Box::new(bitmap)).encode();
+
+        let decoded = Container::decode_cfg(encoded, &()).unwrap();
+        assert!(matches!(decoded, Container::Array(_)));
+    }
+
+    #[test]
+    fn test_decode_normalizes_full_bitmap_container() {
+        let encoded = Container::Bitmap(Box::new(Bitmap::from([!0u64; bitmap::WORDS]))).encode();
+
+        let decoded = Container::decode_cfg(encoded, &()).unwrap();
+        assert!(matches!(decoded, Container::Run(_)));
     }
 
     #[test]
@@ -649,7 +737,7 @@ mod tests {
     fn test_insert_range() {
         let mut container = Container::new();
 
-        let inserted = container.insert_range(5, 10);
+        let inserted = container.insert_range(5..10);
         assert_eq!(inserted, 5);
         assert_eq!(container.len(), 5);
 
@@ -733,7 +821,7 @@ mod tests {
         // insert_range over a contiguous span absorbs all the singletons into one run,
         // dropping run_count to 1 — well under BITMAP_TO_RUN_THRESHOLD. The bitmap should
         // auto-convert to Run.
-        c.insert_range(0, u16::MAX);
+        c.insert_range(0..u16::MAX);
         assert!(matches!(c, Container::Run(_)));
     }
 
@@ -741,7 +829,7 @@ mod tests {
     fn test_run_auto_converts_to_bitmap_when_runs_grow() {
         // Start in Run form via the empty-array + large-range fast path in insert_range.
         let mut c = Container::new();
-        c.insert_range(0, 5_000);
+        c.insert_range(0..5_000);
         assert!(matches!(c, Container::Run(_)));
 
         // Insert ~3000 isolated, non-adjacent values to push run_count past

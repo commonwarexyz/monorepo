@@ -16,6 +16,7 @@
 use super::{array, run};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use core::ops::Range;
 
 /// Number of 64-bit words needed to store 65536 bits.
 pub const WORDS: usize = 1024;
@@ -164,7 +165,6 @@ impl Bitmap {
     /// Inserts a value into the container.
     ///
     /// Returns `true` if the value was newly inserted, `false` if it already existed.
-    /// Maintains [`run_count`](Self::run_count) incrementally in O(1).
     pub const fn insert(&mut self, value: u16) -> bool {
         let word_idx = (value >> 6) as usize;
         let bit_idx = value & 63;
@@ -203,11 +203,11 @@ impl Bitmap {
         true
     }
 
-    /// Inserts a range of values [start, end) into the container.
+    /// Inserts a range of values into the container.
     ///
-    /// Returns the number of values newly inserted. Recomputes [`run_count`](Self::run_count)
-    /// via a single O(WORDS) word scan after the bulk update.
-    pub fn insert_range(&mut self, start: u16, end: u16) -> u32 {
+    /// Returns the number of values newly inserted.
+    pub fn insert_range(&mut self, range: Range<u16>) -> u32 {
+        let Range { start, end } = range;
         if start >= end {
             return 0;
         }
@@ -273,10 +273,11 @@ impl Bitmap {
         }
     }
 
-    /// Returns an iterator over values in `[start, end)`.
-    pub fn iter_range(&self, start: u16, end: u32) -> Iter<'_> {
-        let end = end.min(BITS);
-        if start as u32 >= end {
+    /// Returns an iterator over values in the range.
+    pub fn iter_range(&self, range: Range<u32>) -> Iter<'_> {
+        let start = range.start.min(BITS);
+        let end = range.end.min(BITS);
+        if start >= end {
             return Iter::empty(&self.words);
         }
 
@@ -567,7 +568,7 @@ mod tests {
     fn test_insert_range_single_word() {
         let mut container = Bitmap::new();
 
-        let inserted = container.insert_range(5, 10);
+        let inserted = container.insert_range(5..10);
         assert_eq!(inserted, 5);
         assert_eq!(container.len(), 5);
 
@@ -580,7 +581,7 @@ mod tests {
         let mut container = Bitmap::new();
 
         // Range spanning multiple words (64 bits each)
-        let inserted = container.insert_range(60, 130);
+        let inserted = container.insert_range(60..130);
         assert_eq!(inserted, 70);
         assert_eq!(container.len(), 70);
 
@@ -707,7 +708,7 @@ mod tests {
 
         // Test case 1: Full word range (bits 0-63, num_bits == 64)
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(0, 64);
+        let inserted = container.insert_range(0..64);
         assert_eq!(inserted, 64);
         assert_eq!(container.len(), 64);
         for i in 0..64 {
@@ -716,7 +717,7 @@ mod tests {
 
         // Test case 2: Range ending at bit 63 (end_bit == 63)
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(32, 64);
+        let inserted = container.insert_range(32..64);
         assert_eq!(inserted, 32);
         for i in 32..64 {
             assert!(container.contains(i), "missing value {}", i);
@@ -724,7 +725,7 @@ mod tests {
 
         // Test case 3: Range spanning multiple words ending at word boundary
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(60, 128);
+        let inserted = container.insert_range(60..128);
         assert_eq!(inserted, 68);
         for i in 60..128 {
             assert!(container.contains(i), "missing value {}", i);
@@ -733,7 +734,7 @@ mod tests {
         // Test case 4: Full container range requires inserting up to u16::MAX
         // Since insert_range is [start, end), we insert [0, u16::MAX) then add u16::MAX
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(0, u16::MAX);
+        let inserted = container.insert_range(0..u16::MAX);
         assert_eq!(inserted, 65535);
         container.insert(u16::MAX);
         assert!(container.is_full());
@@ -741,7 +742,7 @@ mod tests {
 
         // Test case 5: Range at end of container (ending at u16::MAX)
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(65500, u16::MAX);
+        let inserted = container.insert_range(65500..u16::MAX);
         assert_eq!(inserted, 35);
         for i in 65500..u16::MAX {
             assert!(container.contains(i), "missing value {}", i);
@@ -749,7 +750,7 @@ mod tests {
 
         // Test case 6: Single full word in middle of container
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(64, 128);
+        let inserted = container.insert_range(64..128);
         assert_eq!(inserted, 64);
         for i in 64..128 {
             assert!(container.contains(i), "missing value {}", i);
@@ -757,14 +758,14 @@ mod tests {
 
         // Test case 7: Range ending exactly at word boundary (last bit of word)
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(0, 64);
+        let inserted = container.insert_range(0..64);
         assert_eq!(inserted, 64);
         // Ensure bit 63 (the last bit of the first word) is set
         assert!(container.contains(63));
 
         // Test case 8: Range from middle to end of a word
         let mut container = Bitmap::new();
-        let inserted = container.insert_range(48, 64);
+        let inserted = container.insert_range(48..64);
         assert_eq!(inserted, 16);
         for i in 48..64 {
             assert!(container.contains(i), "missing value {}", i);
@@ -881,7 +882,7 @@ mod tests {
         }
         assert_eq!(b.run_count(), 100);
         // insert_range over the full span absorbs all the singletons into one run.
-        b.insert_range(0, 200);
+        b.insert_range(0..200);
         assert_eq!(b.run_count(), 1);
     }
 
