@@ -158,7 +158,6 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,

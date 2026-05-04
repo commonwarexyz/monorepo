@@ -223,10 +223,9 @@
 //!
 //! This combines two (or three) components into a single hash:
 //!
-//! - **ops root**: The root of the operations tree computed using the QMDB root spec for
-//!   the Merkle family (the inner [crate::qmdb::any] database's root). Used for state sync,
-//!   where a client downloads operations and verifies each batch against this root using QMDB
-//!   range proofs.
+//! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
+//!   root). Used for state sync, where a client downloads operations and verifies each batch
+//!   against this root using standard Merkle range proofs.
 //!
 //! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
 //!   with ops subtree roots). Used for proofs about operation values and their activity status.
@@ -236,8 +235,8 @@
 //!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
-//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync
-//! engine verifies batches against the ops root, not the canonical root.
+//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
+//! verifies batches against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it.
 //! After sync, the bitmap and grafted tree are reconstructed deterministically from the
@@ -259,6 +258,7 @@ use crate::{
             operation::{Operation, Update},
             Config as AnyConfig,
         },
+        bitmap::Shared,
         operation::Committable,
     },
     translator::Translator,
@@ -353,7 +353,7 @@ where
     // populates it during snapshot rebuild.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(crate::qmdb::bitmap::Shared::<N>::new(bitmap));
+    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
@@ -3638,11 +3638,11 @@ pub mod tests {
         });
     }
 
-    /// Regression: a `current::Db` over `mmb::Family` commits its ops root with the QMDB root spec,
-    /// so [`crate::qmdb::verify_proof`] must use that spec to accept proofs returned by
-    /// `ops_historical_proof`.
+    /// Regression: a `current::Db` over `mmb::Family` bags its ops root with backward-fold, so
+    /// [`crate::qmdb::verify_proof`] must use a hasher with that bagging to accept proofs returned
+    /// by `ops_historical_proof`.
     #[test_traced("INFO")]
-    fn test_current_mmb_ops_historical_proof_verifies_with_qmdb_spec() {
+    fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
         use crate::{merkle::hasher::Standard, qmdb::verify_proof};
         use commonware_utils::NZU64;
 

@@ -944,7 +944,7 @@ mod trait_impls {
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            Self::merkleize(self, db, metadata).await
+            self.merkleize(db, metadata).await
         }
     }
 
@@ -978,7 +978,7 @@ mod trait_impls {
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            Self::merkleize(self, db, metadata).await
+            self.merkleize(db, metadata).await
         }
     }
 
@@ -1020,7 +1020,7 @@ mod trait_impls {
         type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>, N, S>;
 
         fn new_batch(&self) -> Self::Batch {
-            Self::new_batch(self)
+            self.new_batch()
         }
 
         fn apply_batch(
@@ -1028,7 +1028,7 @@ mod trait_impls {
             batch: Self::Merkleized,
         ) -> impl Future<Output = Result<core::ops::Range<Location<F>>, crate::qmdb::Error<F>>>
         {
-            Self::apply_batch(self, batch)
+            self.apply_batch(batch)
         }
     }
 
@@ -1053,7 +1053,7 @@ mod trait_impls {
         type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>, N, S>;
 
         fn new_batch(&self) -> Self::Batch {
-            Self::new_batch(self)
+            self.new_batch()
         }
 
         fn apply_batch(
@@ -1061,7 +1061,7 @@ mod trait_impls {
             batch: Self::Merkleized,
         ) -> impl Future<Output = Result<core::ops::Range<Location<F>>, crate::qmdb::Error<F>>>
         {
-            Self::apply_batch(self, batch)
+            self.apply_batch(batch)
         }
     }
 }

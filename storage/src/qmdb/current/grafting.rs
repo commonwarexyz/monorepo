@@ -186,7 +186,7 @@ pub(super) fn transformed_inactive_peaks<F: Family, D>(
     )
 }
 
-/// Compute a grafted root according to `spec`.
+/// Compute a grafted root using the hasher's peak-bagging policy.
 ///
 /// The grafting transform is applied before final peak bagging. Any inactive boundary must be
 /// representable by whole transformed grafted peaks; otherwise the request is rejected.
