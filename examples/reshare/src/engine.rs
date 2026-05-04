@@ -1,7 +1,7 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{genesis_block, Application, Block, EpochProvider, Provider},
+    application::{genesis, Application, Block, EpochProvider, Provider},
     dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
@@ -15,12 +15,8 @@ use commonware_consensus::{
         resolver::handler,
         standard::{Deferred, Standard},
     },
-    simplex::{
-        elector::Config as Elector,
-        scheme::Scheme,
-        types::{Context, Finalization},
-    },
-    types::{Epoch, FixedEpocher, Round, View, ViewDelta},
+    simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
+    types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
@@ -28,7 +24,7 @@ use commonware_cryptography::{
         primitives::{group, variant::Variant},
     },
     ed25519::Batch,
-    BatchVerifier, Digest, Hasher, Signer,
+    BatchVerifier, Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -264,12 +260,6 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-        let genesis_context = Context {
-            round: Round::new(Epoch::zero(), View::zero()),
-            leader: C::from_seed(0).public_key(),
-            parent: (View::zero(), <H::Digest as Digest>::EMPTY),
-        };
-        let genesis = genesis_block::<H, C, V>(genesis_context);
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.with_label("marshal"),
             finalizations_by_height,
@@ -277,7 +267,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: marshal::Start::Genesis(genesis),
+                start: marshal::Start::Genesis(genesis::<H, C, V>()),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(

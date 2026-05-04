@@ -111,7 +111,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        application::{genesis_block, EdScheme, Provider},
+        application::{genesis, EdScheme, Provider},
         BLOCKS_PER_EPOCH,
     };
     use commonware_consensus::{
@@ -130,7 +130,7 @@ mod tests {
         certificate::Scheme as CertificateScheme,
         ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
-        Digest, Digestible, Signer,
+        Digestible, Signer,
     };
     use commonware_p2p::Recipients;
     use commonware_parallel::Sequential;
@@ -287,12 +287,7 @@ mod tests {
             let boundary_height = FixedEpocher::new(BLOCKS_PER_EPOCH)
                 .last(Epoch::zero())
                 .unwrap();
-            let genesis_context = Context {
-                round: Round::new(Epoch::zero(), View::zero()),
-                leader: signer.public_key(),
-                parent: (View::zero(), <Sha256Digest as Digest>::EMPTY),
-            };
-            let genesis = genesis_block::<Sha256, ed25519::PrivateKey, MinSig>(genesis_context);
+            let genesis = genesis::<Sha256, ed25519::PrivateKey, MinSig>();
             let boundary_context = Context {
                 round: Round::new(Epoch::zero(), View::new(boundary_height.get())),
                 leader: signer.public_key(),

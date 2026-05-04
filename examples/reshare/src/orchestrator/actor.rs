@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{genesis_block, Block, EpochProvider, Provider},
+    application::{genesis, Block, EpochProvider, Provider},
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
@@ -12,7 +12,7 @@ use commonware_consensus::{
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Digest, Digestible, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -343,18 +343,7 @@ where
 
     async fn floor(&mut self, epoch: Epoch) -> simplex::Floor<S, H::Digest> {
         if epoch.is_zero() {
-            let genesis_context = Context {
-                round: commonware_consensus::types::Round::new(
-                    epoch,
-                    commonware_consensus::types::View::zero(),
-                ),
-                leader: C::from_seed(0).public_key(),
-                parent: (
-                    commonware_consensus::types::View::zero(),
-                    <H::Digest as Digest>::EMPTY,
-                ),
-            };
-            return simplex::Floor::genesis(genesis_block::<H, C, V>(genesis_context).digest());
+            return simplex::Floor::genesis(genesis::<H, C, V>().digest());
         }
 
         let previous = epoch
