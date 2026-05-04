@@ -678,15 +678,15 @@ pub mod tests {
         }
     }
 
-    fn state_bits(waker: &Waker) -> u32 {
+    pub fn state_bits(waker: &Waker) -> u32 {
         waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
     }
 
-    fn submitted_seq(waker: &Waker) -> u32 {
+    pub fn submitted_seq(waker: &Waker) -> u32 {
         (waker.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
     }
 
-    fn read_eventfd_count(waker: &Waker) -> u64 {
+    pub fn eventfd_count(waker: &Waker) -> u64 {
         #[cfg(not(feature = "loom"))]
         {
             let mut value = 0u64;
@@ -912,7 +912,7 @@ pub mod tests {
         }
 
         assert_eq!(submitted_seq(&waker), 4);
-        assert_eq!(read_eventfd_count(&waker), 1);
+        assert_eq!(eventfd_count(&waker), 1);
         drop(arm);
     }
 
@@ -974,7 +974,7 @@ pub mod tests {
         }
 
         assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(read_eventfd_count(&waker), 1);
+        assert_eq!(eventfd_count(&waker), 1);
         drop(arm);
     }
 
@@ -1078,7 +1078,10 @@ pub mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::*;
+    use super::{
+        tests::{eventfd_count, state_bits, submitted_seq},
+        *,
+    };
     use loom::{
         sync::{
             atomic::{AtomicU32, Ordering},
@@ -1101,44 +1104,56 @@ mod loom_tests {
     // wake coalescing, sticky out-of-band wakes, sequence wraparound, and the
     // Release/Acquire edges that make producer state visible after `pending()`
     // or `clear_wait()`. The model intentionally stops at this userspace
-    // protocol boundary; it does not validate kernel CQE ordering,
+    // protocol boundary. It does not validate kernel CQE ordering,
     // `io_uring_enter`, wake-poll rearming, or syscall error handling.
 
-    fn waker() -> Waker {
-        Waker::new().unwrap()
+    // Minimal model of the inbound request queue that feeds the ring.
+    //
+    // The queue model deliberately uses only relaxed accesses. These tests rely
+    // on the waker's Release/Acquire edges to make an enqueued request visible
+    // to the loop after it observes progress or resumes from a wake.
+    struct QueuedRequest {
+        value: AtomicU32,
     }
 
-    // Return only the low wake-state bits from the modeled packed state.
-    fn state_bits(waker: &Waker) -> u32 {
-        waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
+    impl QueuedRequest {
+        fn empty() -> Self {
+            Self {
+                value: AtomicU32::new(0),
+            }
+        }
+
+        fn enqueue(&self, value: u32) {
+            self.value.store(value, Ordering::Relaxed);
+        }
+
+        fn read(&self) -> u32 {
+            self.value.load(Ordering::Relaxed)
+        }
     }
 
-    // Return the submitted sequence from the modeled packed state.
-    fn submitted_seq(waker: &Waker) -> u32 {
-        (waker.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
-    }
-
-    // Return the modeled eventfd readiness counter.
-    fn eventfd_count(waker: &Waker) -> u64 {
-        waker.inner.eventfd_counter.load(Ordering::Relaxed)
-    }
-
-    fn advance_seq(seq: u32) -> u32 {
-        seq.wrapping_add(1) & SUBMISSION_SEQ_MASK
-    }
-
-    // Model the eventfd-backed blocking section used by `submit_and_wait`.
-    fn wait_for_eventfd_signal(waker: &Waker) {
+    // Wait until the modeled eventfd has durable readiness.
+    //
+    // In production, `submit_and_wait` returns after the wake poll produces a
+    // CQE. In the loom model, `eventfd_wake()` increments `eventfd_counter` and
+    // notifies this condvar, so this helper represents only that blocking
+    // boundary.
+    fn wait_for_eventfd_readiness(waker: &Waker) {
         let mut guard = waker.inner.eventfd_readiness.lock().unwrap();
         while waker.inner.eventfd_counter.load(Ordering::Acquire) == 0 {
             guard = waker.inner.eventfd_waiters.wait(guard).unwrap();
         }
     }
 
-    // Clear a wake bit that may be left behind by a raced publisher. This is a
-    // cleanup helper: tests that care about wake coalescing should assert the
-    // modeled eventfd counter before calling it.
-    fn clear_sticky_wake(waker: &Waker) {
+    // Finish any wake epoch left over after a loop-simulator test has already
+    // observed the sequence progress it cares about.
+    //
+    // A producer can claim `WAKE_SIGNALLED_BIT` and queue modeled eventfd
+    // readiness while the simulated loop is also able to make progress by
+    // observing `pending()`. At that point the leftover wake is cleanup noise,
+    // not the property under test. Tests that care about exact wake coalescing
+    // should assert the modeled eventfd counter before calling this helper.
+    fn finish_leftover_wake(waker: &Waker) {
         assert_eq!(state_bits(waker) & WAITING_MASK, 0);
         if (state_bits(waker) & WAKE_SIGNALLED_BIT) != 0 {
             let guard = waker.arm(submitted_seq(waker));
@@ -1153,24 +1168,26 @@ mod loom_tests {
         assert_eq!(eventfd_count(waker), 0);
     }
 
-    // Drain with the same eventfd arm-and-recheck shape used before
-    // `submit_and_wait`: poll `pending()`, arm, block only if the post-arm
-    // snapshot is still idle, then clear the arm and acknowledge readiness.
+    // Simulate the loop's eventfd-backed wait path until it has observed
+    // `target` published submissions. This is not modeling the request queue
+    // itself, only the waker-side control flow: check `pending()`, arm the
+    // eventfd target, block only if the post-arm snapshot is still idle, then
+    // drop the guard and acknowledge modeled eventfd readiness.
     //
     // The final `acknowledge()` is model cleanup for any wake CQE readiness
     // produced during the brief arm window. It may be a no-op when the loop did
     // not actually block, so tests that validate exact wake counts assert the
     // counter directly instead of relying on this helper.
-    fn drain_with_eventfd_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
+    fn simulate_eventfd_loop_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
         while processed != target {
             if waker.pending(processed) {
-                processed = advance_seq(processed);
+                processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
                 continue;
             }
 
             let guard = waker.arm(processed);
             if guard.still_idle() {
-                wait_for_eventfd_signal(waker);
+                wait_for_eventfd_readiness(waker);
                 assert!(
                     eventfd_count(waker) > 0,
                     "blocking eventfd wait must observe queued readiness before cleanup",
@@ -1182,11 +1199,14 @@ mod loom_tests {
         processed
     }
 
-    // Drain with the fully-idle futex path instead of the eventfd path.
-    fn drain_with_futex_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
+    // Simulate the loop's fully-idle futex path until it has observed `target`
+    // published submissions. Like the eventfd loop simulator, this models only
+    // waker-side control flow: check `pending()`, otherwise call `park_idle()`
+    // to arm the futex wait target and perform the stale-snapshot recheck.
+    fn simulate_futex_loop_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
         while processed != target {
             if waker.pending(processed) {
-                processed = advance_seq(processed);
+                processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
                 continue;
             }
             let _ = waker.park_idle(processed);
@@ -1202,14 +1222,14 @@ mod loom_tests {
         // so the only intended synchronization is publish Release to pending
         // Acquire.
         loom::model(|| {
-            let waker = waker();
-            let aux = Arc::new(AtomicU32::new(0));
+            let waker = Waker::new().unwrap();
+            let queued = Arc::new(QueuedRequest::empty());
 
             let producer = thread::spawn({
                 let waker = waker.clone();
-                let aux = aux.clone();
+                let queued = queued.clone();
                 move || {
-                    aux.store(42, Ordering::Relaxed);
+                    queued.enqueue(42);
                     waker.publish();
                 }
             });
@@ -1218,7 +1238,7 @@ mod loom_tests {
                 thread::yield_now();
             }
 
-            assert_eq!(aux.load(Ordering::Relaxed), 42);
+            assert_eq!(queued.read(), 42);
             producer.join().unwrap();
             assert_eq!(submitted_seq(&waker), 1);
         });
@@ -1234,14 +1254,14 @@ mod loom_tests {
         // against the current sequence, and drops the guard so `clear_wait()`'s
         // Acquire can pair with `wake()`'s Release.
         loom::model(|| {
-            let waker = waker();
-            let aux = Arc::new(AtomicU32::new(0));
+            let waker = Waker::new().unwrap();
+            let queued = Arc::new(QueuedRequest::empty());
 
             let notifier = thread::spawn({
                 let waker = waker.clone();
-                let aux = aux.clone();
+                let queued = queued.clone();
                 move || {
-                    aux.store(42, Ordering::Relaxed);
+                    queued.enqueue(42);
                     waker.wake();
                 }
             });
@@ -1255,7 +1275,7 @@ mod loom_tests {
             assert!(guard.wake_latched());
             drop(guard);
 
-            assert_eq!(aux.load(Ordering::Relaxed), 42);
+            assert_eq!(queued.read(), 42);
             assert_eq!(eventfd_count(&waker), 0);
             notifier.join().unwrap();
         });
@@ -1268,7 +1288,7 @@ mod loom_tests {
         // across epochs verifies guard drop clears the latch enough for later
         // unarmed wakes to be observed independently.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
 
             // One unarmed wake latches the bit without queuing eventfd readiness.
             waker.wake();
@@ -1327,7 +1347,7 @@ mod loom_tests {
         // is not the same as a latched wake. This keeps `wake_latched()` useful
         // for out-of-band wake decisions such as shutdown.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
 
             waker.publish();
             let guard = waker.arm(0);
@@ -1348,7 +1368,7 @@ mod loom_tests {
         // loop has already processed. The exact half-domain boundary is
         // intentionally not considered pending because direction is ambiguous.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
 
             let set_submitted = |seq| {
                 waker
@@ -1388,7 +1408,7 @@ mod loom_tests {
         // If a wake is already latched before the fully-idle path arms, the
         // post-arm recheck must skip sleeping and clear the sticky wake.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
 
             waker.wake();
             assert!(waker.park_idle(0).is_none());
@@ -1404,7 +1424,7 @@ mod loom_tests {
         // If a sequence is already published before the fully-idle path arms,
         // the post-arm recheck must skip sleeping without manufacturing a wake.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
 
             waker.publish();
             assert!(waker.park_idle(0).is_none());
@@ -1422,7 +1442,7 @@ mod loom_tests {
         // wake. After the blocking section exits, guard drop clears wait state
         // and `acknowledge` drains the eventfd counter.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let producer = thread::spawn({
                 let waker = waker.clone();
                 move || waker.publish()
@@ -1430,7 +1450,7 @@ mod loom_tests {
 
             let guard = waker.arm(0);
             if guard.still_idle() {
-                wait_for_eventfd_signal(&waker);
+                wait_for_eventfd_readiness(&waker);
             }
 
             drop(guard);
@@ -1450,16 +1470,16 @@ mod loom_tests {
         // acquire the producer's enqueue-side writes before the loop checks the
         // queue after waking.
         loom::model(|| {
-            let waker = waker();
-            let aux = Arc::new(AtomicU32::new(0));
+            let waker = Waker::new().unwrap();
+            let queued = Arc::new(QueuedRequest::empty());
             let guard = waker.arm(0);
             assert!(guard.still_idle());
 
             let producer = thread::spawn({
                 let waker = waker.clone();
-                let aux = aux.clone();
+                let queued = queued.clone();
                 move || {
-                    aux.store(42, Ordering::Relaxed);
+                    queued.enqueue(42);
                     waker.publish();
                 }
             });
@@ -1469,7 +1489,7 @@ mod loom_tests {
             }
 
             drop(guard);
-            assert_eq!(aux.load(Ordering::Relaxed), 42);
+            assert_eq!(queued.read(), 42);
             producer.join().unwrap();
 
             assert_eq!(submitted_seq(&waker), 1);
@@ -1487,16 +1507,16 @@ mod loom_tests {
         // acquire the notifier's earlier state change before the loop checks
         // for disconnect or shutdown state after waking.
         loom::model(|| {
-            let waker = waker();
-            let aux = Arc::new(AtomicU32::new(0));
+            let waker = Waker::new().unwrap();
+            let queued = Arc::new(QueuedRequest::empty());
             let guard = waker.arm(0);
             assert!(guard.still_idle());
 
             let notifier = thread::spawn({
                 let waker = waker.clone();
-                let aux = aux.clone();
+                let queued = queued.clone();
                 move || {
-                    aux.store(42, Ordering::Relaxed);
+                    queued.enqueue(42);
                     waker.wake();
                 }
             });
@@ -1506,7 +1526,7 @@ mod loom_tests {
             }
 
             drop(guard);
-            assert_eq!(aux.load(Ordering::Relaxed), 42);
+            assert_eq!(queued.read(), 42);
             notifier.join().unwrap();
 
             assert_eq!(submitted_seq(&waker), 0);
@@ -1523,7 +1543,7 @@ mod loom_tests {
         // that producers update. A racing publish must either change the
         // post-arm snapshot before sleep or wake the modeled futex waiter.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let producer = thread::spawn({
                 let waker = waker.clone();
                 move || waker.publish()
@@ -1533,7 +1553,7 @@ mod loom_tests {
             producer.join().unwrap();
 
             assert_eq!(submitted_seq(&waker), 1);
-            clear_sticky_wake(&waker);
+            finish_leftover_wake(&waker);
         });
     }
 
@@ -1543,7 +1563,7 @@ mod loom_tests {
         // submitted sequence, but only the first wake claimant should increment
         // the modeled eventfd counter.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let guard = waker.arm(0);
             assert!(guard.still_idle());
 
@@ -1575,7 +1595,7 @@ mod loom_tests {
         // epoch should coalesce to one eventfd signal while still preserving
         // the publish's sequence increment.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let guard = waker.arm(0);
             assert!(guard.still_idle());
 
@@ -1610,7 +1630,7 @@ mod loom_tests {
         // arm point and verifies the stale futex snapshot is rejected after the
         // state changes.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let prev = waker
                 .inner
                 .state
@@ -1649,7 +1669,7 @@ mod loom_tests {
         // arming, `wake_latched` skips the wait; otherwise the modeled eventfd
         // signal releases the loop.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let notifier = thread::spawn({
                 let waker = waker.clone();
                 move || waker.wake()
@@ -1657,7 +1677,7 @@ mod loom_tests {
 
             let guard = waker.arm(0);
             if guard.still_idle() {
-                wait_for_eventfd_signal(&waker);
+                wait_for_eventfd_readiness(&waker);
             }
 
             drop(guard);
@@ -1677,7 +1697,7 @@ mod loom_tests {
         // half-range modular `pending()` check must remain directional across
         // that boundary.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             waker
                 .inner
                 .state
@@ -1691,10 +1711,13 @@ mod loom_tests {
                 }
             });
 
-            assert_eq!(drain_with_eventfd_until(&waker, SUBMISSION_SEQ_MASK, 1), 1);
+            assert_eq!(
+                simulate_eventfd_loop_until(&waker, SUBMISSION_SEQ_MASK, 1),
+                1
+            );
             producer.join().unwrap();
             assert_eq!(submitted_seq(&waker), 1);
-            clear_sticky_wake(&waker);
+            finish_leftover_wake(&waker);
         });
     }
 
@@ -1704,7 +1727,7 @@ mod loom_tests {
         // sequence conservation and must not queue eventfd readiness while the
         // loop is unarmed. A sticky wake bit may remain for the next arm cycle.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let publishes = Arc::new(AtomicU32::new(0));
 
             let a = thread::spawn({
@@ -1744,7 +1767,7 @@ mod loom_tests {
         // using the eventfd arm-and-recheck path whenever no sequence progress
         // is currently visible.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let producer = thread::spawn({
                 let waker = waker.clone();
                 move || {
@@ -1753,12 +1776,12 @@ mod loom_tests {
                 }
             });
 
-            let processed = drain_with_eventfd_until(&waker, 0, 2);
+            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
             producer.join().unwrap();
 
             assert_eq!(processed, 2);
             assert_eq!(submitted_seq(&waker), 2);
-            clear_sticky_wake(&waker);
+            finish_leftover_wake(&waker);
         });
     }
 
@@ -1768,7 +1791,7 @@ mod loom_tests {
         // The loop either sees the wake bit before sleeping or is resumed by
         // the modeled futex wake. No submission sequence bump is involved.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let notifier = thread::spawn({
                 let waker = waker.clone();
                 move || waker.wake()
@@ -1789,7 +1812,7 @@ mod loom_tests {
         // The wake may be consumed as a sticky bit or as eventfd readiness, but
         // both publishes must still be processed exactly once.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let producer = thread::spawn({
                 let waker = waker.clone();
                 move || {
@@ -1799,12 +1822,12 @@ mod loom_tests {
                 }
             });
 
-            let processed = drain_with_eventfd_until(&waker, 0, 2);
+            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
             producer.join().unwrap();
 
             assert_eq!(processed, 2);
             assert_eq!(submitted_seq(&waker), 2);
-            clear_sticky_wake(&waker);
+            finish_leftover_wake(&waker);
         });
     }
 
@@ -1814,7 +1837,7 @@ mod loom_tests {
         // publishes. This uses `park_idle()` instead of the eventfd arm path
         // whenever no sequence progress is currently visible.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let producer = thread::spawn({
                 let waker = waker.clone();
                 move || {
@@ -1823,12 +1846,12 @@ mod loom_tests {
                 }
             });
 
-            let processed = drain_with_futex_until(&waker, 0, 2);
+            let processed = simulate_futex_loop_until(&waker, 0, 2);
             producer.join().unwrap();
 
             assert_eq!(processed, 2);
             assert_eq!(submitted_seq(&waker), 2);
-            clear_sticky_wake(&waker);
+            finish_leftover_wake(&waker);
         });
     }
 
@@ -1838,7 +1861,7 @@ mod loom_tests {
         // still preserve conservation and progress. This adds one more producer
         // thread to the eventfd drain shape.
         loom::model(|| {
-            let waker = waker();
+            let waker = Waker::new().unwrap();
             let a = thread::spawn({
                 let waker = waker.clone();
                 move || waker.publish()
@@ -1848,13 +1871,13 @@ mod loom_tests {
                 move || waker.publish()
             });
 
-            let processed = drain_with_eventfd_until(&waker, 0, 2);
+            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
             a.join().unwrap();
             b.join().unwrap();
 
             assert_eq!(processed, 2);
             assert_eq!(submitted_seq(&waker), 2);
-            clear_sticky_wake(&waker);
+            finish_leftover_wake(&waker);
         });
     }
 
@@ -1924,7 +1947,7 @@ mod loom_tests {
             let report_b = program_b.clone();
 
             loom::model(move || {
-                let waker = waker();
+                let waker = Waker::new().unwrap();
                 let publishes = Arc::new(AtomicU32::new(0));
 
                 let a = thread::spawn({
@@ -2005,7 +2028,7 @@ mod loom_tests {
             let report_program = program.clone();
 
             loom::model(move || {
-                let waker = waker();
+                let waker = Waker::new().unwrap();
                 let publishes = Arc::new(AtomicU32::new(0));
 
                 let producer = thread::spawn({
@@ -2019,7 +2042,7 @@ mod loom_tests {
                     }
                 });
 
-                let processed = drain_with_eventfd_until(&waker, 0, publish_count);
+                let processed = simulate_eventfd_loop_until(&waker, 0, publish_count);
                 producer.join().unwrap();
 
                 assert_eq!(
@@ -2036,7 +2059,7 @@ mod loom_tests {
                     publish_count,
                     "producer accounting failed: seed={seed} iter={iter} program={report_program:?}",
                 );
-                clear_sticky_wake(&waker);
+                finish_leftover_wake(&waker);
             });
         }
     }
