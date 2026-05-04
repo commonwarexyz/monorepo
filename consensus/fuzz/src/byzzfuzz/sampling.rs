@@ -18,9 +18,9 @@ use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 use rand::{seq::SliceRandom, Rng};
 
-/// Algorithm 1's `(c, d, r)`: process-fault rounds (`c`), network-fault
+/// `(c, d, r)`: process-fault rounds (`c`), network-fault
 /// rounds (`d`), and total round budget (`r`). `c` and `d` are independent;
-/// either set to 0 disables that axis.
+/// either set to 0 disables that fault type.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ByzzFuzz {
     pub c: u64,

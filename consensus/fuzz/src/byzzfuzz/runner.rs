@@ -47,10 +47,10 @@ where
         // FuzzInput -- keeps mode-specific state out of the shared input
         // and reuses the deterministic FuzzRng.
         let r = context.gen_range(1..=input.required_containers.max(1));
-        let max_per_axis = (r / FAULT_INJECTION_RATIO).max(1);
-        let mut c = context.gen_range(0..=max_per_axis);
-        let mut d = context.gen_range(0..=max_per_axis);
-        // At least one axis must be active; otherwise the run is a no-op.
+        let max_per_fault_type = (r / FAULT_INJECTION_RATIO).max(1);
+        let mut c = context.gen_range(0..=max_per_fault_type);
+        let mut d = context.gen_range(0..=max_per_fault_type);
+        // At least one fault type must be active; otherwise the run is a no-op.
         if c == 0 && d == 0 {
             if context.gen_bool(0.5) {
                 c = 1;

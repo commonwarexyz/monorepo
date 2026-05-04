@@ -56,13 +56,13 @@ impl FaultScope {
     }
 }
 
-/// Sample a fault scope. 60% `Any`, 20% specific `Vote(_)`, 20% specific
+/// Sample a fault scope. 50% `Any`, 45% specific `Vote(_)`, 5% specific
 /// `Certificate(_)` (uniform within each variant).
 pub fn sample(rng: &mut impl Rng) -> FaultScope {
-    let bucket = rng.gen_range(0..10);
-    if bucket < 6 {
+    let bucket = rng.gen_range(0..100);
+    if bucket < 50 {
         FaultScope::Any
-    } else if bucket < 8 {
+    } else if bucket < 95 {
         let k = match rng.gen_range(0..3) {
             0 => VoteKind::Notarize,
             1 => VoteKind::Finalize,

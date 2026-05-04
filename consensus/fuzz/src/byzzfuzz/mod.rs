@@ -30,7 +30,6 @@ mod scope;
 pub use runner::run;
 pub(crate) use sampling::ByzzFuzz;
 
-/// Byzantine identity in `participants`. Single source of truth for the
-/// sampler (which builds its candidate receiver set as `participants[1..]`)
-/// and the runner (sender selection, injector key, invariant exclusion).
+/// Byzantine index in `participants`. Single source of truth for the
+/// sampler and the runner (sender selection, injector key, invariant exclusion).
 pub(crate) const BYZANTINE_IDX: usize = 0;
