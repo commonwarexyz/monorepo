@@ -73,7 +73,15 @@ pub async fn ssh_execute_with_timeout(
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{ip}"))
             .arg(command);
-        let output = command_output(cmd, "ssh", ip, command_timeout).await?;
+        let output = match command_output(cmd, "ssh", ip, command_timeout).await {
+            Ok(output) => output,
+            Err(err @ Error::CommandTimeout { .. }) => {
+                warn!(ip, error = ?err, "SSH command timed out");
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if output.status.success() {
             return Ok(());
         }
