@@ -8,7 +8,7 @@
 use crate::{
     index::ordered::Index,
     journal::contiguous::variable::Journal,
-    merkle::{self, Location},
+    merkle::{Family, Location},
     qmdb::{
         any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
@@ -37,15 +37,8 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
     S,
 >;
 
-impl<
-        F: merkle::Family,
-        E: Context,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -69,7 +62,7 @@ pub mod partitioned {
     use crate::{
         index::partitioned::ordered::Index,
         journal::contiguous::variable::Journal,
-        merkle::{self, Location},
+        merkle::{Family, Location},
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
@@ -103,7 +96,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: merkle::Family,
+            F: Family,
             E: Context,
             K: Key,
             V: VariableValue,
@@ -279,7 +272,7 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
+        let cfg = variable_db_config::<_>("fixed-bytes-var-partition", &context);
         VariableDb::init(context, cfg).await.unwrap()
     }
 
@@ -587,10 +580,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{
-                mmr::{self, full::Mmr},
-                Family as _,
-            },
+            merkle::mmr::{self, full::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

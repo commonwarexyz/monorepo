@@ -332,7 +332,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::new(),
+            hasher: StandardHasher::<DB::Hasher>::with_bagging(DB::ROOT_BAGGING),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
@@ -702,18 +702,18 @@ where
             && self.pinned_nodes.is_none()
             && !self.local_target_state_available
             && start_loc == self.target.range.start();
+        let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
-            qmdb::verify_proof_and_pinned_nodes(
+            proof.verify_proof_and_pinned_nodes(
                 &self.hasher,
-                &proof,
+                &elements,
                 start_loc,
-                &operations,
                 nodes,
                 target_root,
             )
         } else {
-            qmdb::verify_proof(&self.hasher, &proof, start_loc, &operations, target_root)
+            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
         };
 
         // Report success or failure to the resolver.
@@ -870,6 +870,7 @@ mod tests {
                 result: Ok(FetchResult {
                     proof: Proof {
                         leaves: Location::new(0),
+                        inactive_peaks: 0,
                         digests: vec![],
                     },
                     operations: vec![],

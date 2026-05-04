@@ -2,7 +2,7 @@
 //!
 //! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
 //! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **ops root** (via
+//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
 //! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
 //! returned by `Db::root()`.
 //!

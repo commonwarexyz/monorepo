@@ -4,8 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::merkle::{
-    hasher::Standard, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location,
-    Position, Proof,
+    self, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location, Position, Proof,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -19,6 +18,7 @@ const MAX_PEAKS: usize = 64;
 #[derive(Debug)]
 struct FuzzInput<F: MerkleFamily> {
     proof_leaves: Location<F>,
+    inactive_peaks: usize,
     proof_digests: Vec<[u8; 32]>,
     elements: Vec<Vec<u8>>,
     start_loc: u64,
@@ -36,6 +36,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
         let num_peaks = u.int_in_range(0..=MAX_PEAKS)?;
         Ok(FuzzInput {
             proof_leaves: u.arbitrary()?,
+            inactive_peaks: u.arbitrary()?,
             proof_digests: (0..num_digests)
                 .map(|_| u.arbitrary::<[u8; 32]>())
                 .collect::<arbitrary::Result<Vec<_>>>()?,
@@ -56,9 +57,10 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
+        inactive_peaks: input.inactive_peaks,
         digests: input
             .proof_digests
             .iter()

@@ -185,36 +185,36 @@ macro_rules! impl_db_any {
             type Digest = $dig;
 
             async fn get(&self, key: &$key) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$fam>> {
-                self.get(key).await
+                <$ty>::get(self, key).await
             }
 
             fn root(&self) -> $dig {
-                self.root()
+                <$ty>::root(self)
             }
 
             async fn bounds(&self) -> ::std::ops::Range<$crate::merkle::Location<$fam>> {
-                self.bounds().await
+                <$ty>::bounds(self).await
             }
 
             async fn get_metadata(
                 &self,
             ) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$fam>> {
-                self.get_metadata().await
+                <$ty>::get_metadata(self).await
             }
 
             async fn prune(
                 &mut self,
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
-                self.prune(loc).await
+                <$ty>::prune(self, loc).await
             }
 
             async fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
-                self.inactivity_floor_loc()
+                <$ty>::inactivity_floor_loc(self)
             }
 
             async fn sync_boundary(&self) -> $crate::merkle::Location<$fam> {
-                self.sync_boundary()
+                <$ty>::sync_boundary(self)
             }
         }
     };
@@ -243,7 +243,7 @@ macro_rules! impl_provable {
                 ($crate::merkle::Proof<$fam, <Self as $crate::qmdb::any::traits::DbAny<$fam>>::Digest>, Vec<$op>),
                 $crate::qmdb::Error<$fam>,
             > {
-                self.historical_proof(historical_size, start_loc, max_ops)
+                <$ty>::historical_proof(self, historical_size, start_loc, max_ops)
                     .await
             }
         }

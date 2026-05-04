@@ -1029,6 +1029,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
         merkle_cfg: crate::merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
+        bagging: crate::merkle::Bagging,
     ) -> Result<
         crate::journal::authenticated::Journal<F, E, Self, H, S>,
         crate::journal::authenticated::Error<F>,
@@ -1038,6 +1039,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
             merkle_cfg,
             journal_cfg,
             rewind_predicate,
+            bagging,
         )
         .await
     }

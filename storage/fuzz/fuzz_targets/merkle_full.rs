@@ -93,7 +93,7 @@ fn historical_root<F: MerkleFamily>(
     requested_leaves: Location<F>,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let hasher = Standard::<Sha256>::new();
-    let mut mem = Mem::<F, _>::new(&hasher);
+    let mut mem = Mem::<F, _>::new();
     let batch = {
         let mut batch = mem.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
@@ -102,7 +102,7 @@ fn historical_root<F: MerkleFamily>(
         batch.merkleize(&mem, &hasher)
     };
     mem.apply_batch(&batch).unwrap();
-    *mem.root()
+    mem.root(&hasher, 0).unwrap()
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
@@ -204,10 +204,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             if bounds.contains(&location) {
                                 let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                                if let Ok(proof) = merkle.proof(&hasher, location).await {
-                                    let root = merkle.root();
+                                if let Ok(proof) = merkle.proof(&hasher, location, 0).await {
+                                    let root = merkle.root(&hasher, 0).unwrap();
                                     assert!(proof.verify_element_inclusion(
-                                        &hasher, element, location, &root,
+                                        &hasher, element, location, &root
                                     ));
                                 }
                             }
@@ -225,9 +225,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 && end_loc < merkle.leaves()
                                 && merkle.bounds().contains(&range.start)
                             {
-                                if let Ok(proof) = merkle.range_proof(&hasher, range.clone()).await
+                                if let Ok(proof) =
+                                    merkle.range_proof(&hasher, range.clone(), 0).await
                                 {
-                                    let root = merkle.root();
+                                    let root = merkle.root(&hasher, 0).unwrap();
                                     assert!(proof.verify_range_inclusion(
                                         &hasher,
                                         &leaves[range.to_usize_range()],
@@ -253,7 +254,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let expected_root = historical_root::<F>(&leaves, requested_leaves);
 
                         let result = merkle
-                            .historical_range_proof(&hasher, requested_leaves, range.clone())
+                            .historical_range_proof(&hasher, requested_leaves, range.clone(), 0)
                             .await;
                         match result {
                             Ok(historical_proof) => {
@@ -297,7 +298,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     Operation::GetRoot => {
-                        let _ = merkle.root();
+                        let _ = merkle.root(&hasher, 0);
                     }
 
                     Operation::GetSize => {
@@ -355,18 +356,18 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         );
 
                         let sync_suffix = format!("{suffix}-sync");
-                        let sync_config = SyncConfig::<F, _> {
-                            config: test_config(&sync_suffix, &context),
-                            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
-                            pinned_nodes: None,
-                        };
+                        let sync_config =
+                            SyncConfig::<F, <Sha256 as commonware_cryptography::Hasher>::Digest> {
+                                config: test_config(&sync_suffix, &context),
+                                range: non_empty_range!(lower_bound_loc, upper_bound_loc),
+                                pinned_nodes: None,
+                            };
 
                         if let Ok(sync_merkle) = Merkle::<F, _, _>::init_sync(
                             context
                                 .with_label("sync")
                                 .with_attribute("instance", restarts),
                             sync_config,
-                            &hasher,
                         )
                         .await
                         {
