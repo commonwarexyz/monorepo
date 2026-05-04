@@ -43,14 +43,14 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        // Sample the paper's (d, p, c) here rather than threading it through
+        // Sample the paper's (d, p, r) here rather than threading it through
         // FuzzInput -- keeps mode-specific state out of the shared input
         // and reuses the deterministic FuzzRng.
-        let c = context.gen_range(1..=input.required_containers.max(1));
-        let max_per_axis = (c / FAULT_INJECTION_RATIO).max(1);
+        let r = context.gen_range(1..=input.required_containers.max(1));
+        let max_per_axis = (r / FAULT_INJECTION_RATIO).max(1);
         let d = context.gen_range(0..=max_per_axis);
         let p = context.gen_range(0..=max_per_axis);
-        let byzz = ByzzFuzz::new(d, p, c);
+        let byzz = ByzzFuzz::new(d, p, r);
 
         let network_schedule_vec = byzz.network_faults(&mut context);
 

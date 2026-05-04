@@ -1,4 +1,4 @@
-//! Paper-faithful ByzzFuzz schedule sampling (Algorithm 1 `(d, p, c)`).
+//! Paper-faithful ByzzFuzz schedule sampling (Algorithm 1 `(d, p, r)`).
 //!
 //! Schedule shape lives here. Content mutation of intercepted messages is
 //! delegated to [`crate::strategy::Strategy`] (`SmallScope` is forced by
@@ -9,31 +9,31 @@ use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 use rand::Rng;
 
-/// Algorithm 1's `(d, p, c)`: process-fault rounds, network-fault rounds,
+/// Algorithm 1's `(d, p, r)`: process-fault rounds, network-fault rounds,
 /// and round budget. `d` and `p` are independent; either set to 0 disables
 /// that axis.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ByzzFuzz {
     pub d: u64,
     pub p: u64,
-    pub c: u64,
+    pub r: u64,
 }
 
 impl ByzzFuzz {
-    pub const fn new(d: u64, p: u64, c: u64) -> Self {
-        Self { d, p, c }
+    pub const fn new(d: u64, p: u64, r: u64) -> Self {
+        Self { d, p, r }
     }
 
-    /// `p` independent draws of `(view, partition)` over `[1, c] x` all 15
+    /// `p` independent draws of `(view, partition)` over `[1, r] x` all 15
     /// set partitions of `{0,1,2,3}`. Includes the trivial single-block
     /// (no-op) per the paper's "uniform over partitions of P".
     pub fn network_faults(&self, rng: &mut impl Rng) -> Vec<(View, SetPartition)> {
-        if self.p == 0 || self.c == 0 {
+        if self.p == 0 || self.r == 0 {
             return Vec::new();
         }
         (0..self.p)
             .map(|_| {
-                let view = rng.gen_range(1..=self.c);
+                let view = rng.gen_range(1..=self.r);
                 let idx = rng.gen_range(0..15);
                 (View::new(view), SetPartition::n4(idx))
             })
@@ -50,7 +50,7 @@ impl ByzzFuzz {
         participants: &[P],
         rng: &mut impl Rng,
     ) -> Vec<ProcessFault<P>> {
-        if self.d == 0 || self.c == 0 {
+        if self.d == 0 || self.r == 0 {
             return Vec::new();
         }
         let candidates: Vec<P> = participants.iter().skip(1).cloned().collect();
@@ -59,7 +59,7 @@ impl ByzzFuzz {
         }
         (0..self.d)
             .map(|_| {
-                let view = rng.gen_range(1..=self.c);
+                let view = rng.gen_range(1..=self.r);
                 let receivers: Vec<P> = candidates
                     .iter()
                     .filter(|_| rng.gen_bool(0.5))
