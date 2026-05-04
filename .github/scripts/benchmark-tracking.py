@@ -314,7 +314,7 @@ def compare_results(
     comparisons = []
     for result in current:
         baseline = find_baseline(baseline_data, result["baseline_suite"], result["name"])
-        if baseline is None:
+        if baseline is None or baseline["value"] == 0:
             comparisons.append(
                 {
                     **result,
