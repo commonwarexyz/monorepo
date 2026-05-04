@@ -847,6 +847,7 @@ impl<F: Family> Subtree<F> {
 /// # Errors
 ///
 /// See [`Blueprint::new`].
+#[cfg(feature = "std")]
 pub(crate) fn range_peaks<F: Family>(
     leaves: Location<F>,
     inactive_peaks: usize,

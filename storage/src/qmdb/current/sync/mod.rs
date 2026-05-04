@@ -305,13 +305,12 @@ macro_rules! impl_current_sync_database {
                 if Location::new(bounds.start) > target.range.start() {
                     return false;
                 }
-                let Some(last_loc) = bounds.end.checked_sub(1) else {
-                    return false;
-                };
-                let Ok(last_op) = reader.read(last_loc).await else {
-                    return false;
-                };
-                let Some(inactivity_floor) = last_op.has_floor() else {
+                let Ok(inactivity_floor) =
+                    qmdb::find_inactivity_floor_at::<F, _>(&reader, target.range.end(), |op| {
+                        op.has_floor()
+                    })
+                    .await
+                else {
                     return false;
                 };
 
