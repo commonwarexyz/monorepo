@@ -7,10 +7,10 @@ use crate::{
     marshal::{
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock},
+            types::{coding_config_for_participants, hash_context, CodedBlock},
             Coding,
         },
-        config::Config,
+        config::{Config, Start},
         core::{Actor, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
@@ -120,6 +120,11 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
     B::new::<Sha256>(context, parent, height, timestamp)
 }
 
+/// Create the standard height-zero block used to seed fresh marshal actors.
+pub fn make_genesis_block() -> B {
+    make_raw_block(Sha256::hash(b""), Height::zero(), 0)
+}
+
 /// Setup network for tests with an initial participant peer set.
 pub async fn setup_network_with_participants<I>(
     context: deterministic::Context,
@@ -197,7 +202,8 @@ pub trait TestHarness: 'static + Sized {
     >;
 
     /// The block type used in test operations.
-    type TestBlock: Heightable
+    type TestBlock: crate::Block
+        + Heightable
         + Clone
         + Send
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
@@ -226,6 +232,17 @@ pub trait TestHarness: 'static + Sized {
         application: Application<Self::ApplicationBlock>,
     ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
 
+    /// Setup a single validator with a custom startup anchor.
+    fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
+
     /// Create a test block from parent and height.
     fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment;
 
@@ -237,6 +254,17 @@ pub trait TestHarness: 'static + Sized {
         timestamp: u64,
         num_participants: u16,
     ) -> Self::TestBlock;
+
+    /// Create the height-zero block used to seed a fresh marshal actor.
+    fn genesis_block(num_participants: u16) -> Self::TestBlock {
+        Self::make_test_block(
+            Sha256::hash(b""),
+            Self::genesis_parent_commitment(num_participants),
+            Height::zero(),
+            0,
+            num_participants,
+        )
+    }
 
     /// Get the commitment from a test block.
     fn commitment(block: &Self::TestBlock) -> Self::Commitment;
@@ -1556,9 +1584,31 @@ impl TestHarness for StandardHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        Self::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+        )
+        .await
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start,
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1794,6 +1844,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1929,6 +1980,34 @@ impl TestHarness for InlineHarness {
             provider,
             max_pending_acks,
             application,
+        )
+        .await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+            actor_handle: setup.actor_handle,
+        }
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
+        let setup = StandardHarness::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            start,
         )
         .await;
         ValidatorSetup {
@@ -2144,6 +2223,34 @@ impl TestHarness for DeferredHarness {
         }
     }
 
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
+        let setup = InlineHarness::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            start,
+        )
+        .await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+            actor_handle: setup.actor_handle,
+        }
+    }
+
     fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment {
         InlineHarness::genesis_parent_commitment(num_participants)
     }
@@ -2322,6 +2429,16 @@ pub fn genesis_commitment() -> Commitment {
     ))
 }
 
+/// Create the coding height-zero block used to seed fresh marshal actors.
+pub fn make_coding_genesis_block() -> CodingB {
+    let context = CodingCtx {
+        round: Round::zero(),
+        leader: default_leader(),
+        parent: (View::zero(), genesis_commitment()),
+    };
+    make_coding_block(context, Sha256::hash(b""), Height::zero(), 0)
+}
+
 /// Create a test block with a Commitment-based context.
 pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestamp: u64) -> CodingB {
     CodingB::new::<Sha256>(context, parent, height, timestamp)
@@ -2359,9 +2476,31 @@ impl TestHarness for CodingHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        Self::setup_validator_with_start(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+            Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+        )
+        .await
+    }
+
+    async fn setup_validator_with_start(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+        start: Start<Self::TestBlock>,
+    ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start,
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2532,6 +2671,17 @@ impl TestHarness for CodingHarness {
         genesis_commitment()
     }
 
+    fn genesis_block(_num_participants: u16) -> Self::TestBlock {
+        let inner = make_coding_genesis_block();
+        let commitment = Commitment::from((
+            inner.digest(),
+            inner.digest(),
+            hash_context::<Sha256, _>(&inner.context),
+            GENESIS_CODING_CONFIG,
+        ));
+        CodedBlock::new_trusted(inner, commitment)
+    }
+
     fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
         block.commitment()
     }
@@ -2630,6 +2780,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -3050,6 +3201,81 @@ pub fn set_floor_same_height_preserves_pending_acks<H: TestHarness>() {
             application.pending_ack_heights(),
             vec![Height::new(1), Height::new(2), Height::new(3)]
         );
+    });
+}
+
+/// Test that runtime floor updates after `Start::Floor` only act when the floor advances.
+pub fn set_floor_after_start_floor_only_advances_when_raised<H: TestHarness>() {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(0xF1003)
+            .with_timeout(Some(Duration::from_secs(120))),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+
+        let n = NUM_VALIDATORS as u16;
+        let lower = H::make_test_block(
+            Sha256::hash(b"start-parent"),
+            H::genesis_parent_commitment(n),
+            Height::new(9),
+            9,
+            n,
+        );
+        let start = H::make_test_block(
+            H::digest(&lower),
+            H::commitment(&lower),
+            Height::new(10),
+            10,
+            n,
+        );
+        let higher = H::make_test_block(
+            H::digest(&start),
+            H::commitment(&start),
+            Height::new(12),
+            12,
+            n,
+        );
+
+        let validator = participants[0].clone();
+        let setup = H::setup_validator_with_start(
+            context.with_label("validator_0"),
+            &mut oracle,
+            validator.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::default(),
+            Start::Floor(start.clone()),
+        )
+        .await;
+        assert_eq!(setup.height, Height::new(10));
+        assert!(setup.mailbox.get_block(Height::new(10)).await.is_some());
+
+        setup.mailbox.set_floor(lower.into()).await;
+        assert!(setup.mailbox.get_block(Height::new(9)).await.is_none());
+
+        setup.mailbox.set_floor(start.into()).await;
+        assert!(setup.mailbox.get_block(Height::new(10)).await.is_some());
+
+        setup.mailbox.set_floor(higher.into()).await;
+        assert!(setup.mailbox.get_block(Height::new(12)).await.is_some());
+        setup.actor_handle.abort();
+
+        let restart = H::setup_validator(
+            context.with_label("validator_0_restart"),
+            &mut oracle,
+            validator,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        assert_eq!(restart.height, Height::new(12));
     });
 }
 
@@ -4613,8 +4839,9 @@ pub fn ancestry_stream<H: TestHarness>() {
         };
 
         // Finalize blocks at heights 1-5
-        let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let genesis = H::genesis_block(participants.len() as u16);
+        let mut parent = H::digest(&genesis);
+        let mut parent_commitment = H::commitment(&genesis);
         for i in 1..=5u64 {
             let block = H::make_test_block(
                 parent,
@@ -4642,16 +4869,115 @@ pub fn ancestry_stream<H: TestHarness>() {
             parent_commitment = commitment;
         }
 
-        // Stream from latest -> height 1
+        // Stream from latest -> height 0
         let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
         let ancestry = handle.mailbox.ancestry((None, commitment)).await.unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;
 
-        // Ensure correct delivery order: 5,4,3,2,1
-        assert_eq!(blocks.len(), 5);
-        (0..5).for_each(|i| {
+        // Ensure correct delivery order: 5,4,3,2,1,0
+        assert_eq!(blocks.len(), 6);
+        (0..6).for_each(|i| {
             assert_eq!(blocks[i].height().get(), 5 - i as u64);
         });
+    })
+}
+
+/// Characterize the current interaction between state-sync floors and ancestry.
+///
+/// `Start::Floor` stores the floor anchor and marks it processed, but ancestry still walks toward
+/// height zero. If the parent below the floor is not available, the stream yields the floor anchor
+/// and then waits on the missing parent.
+pub fn ancestry_stream_start_floor_waits_for_below_floor_parent<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+
+        let n = participants.len() as u16;
+        let anchor = H::make_test_block(
+            Sha256::hash(b"missing-parent"),
+            H::genesis_parent_commitment(n),
+            Height::new(2),
+            2,
+            n,
+        );
+        let block = H::make_test_block(
+            H::digest(&anchor),
+            H::commitment(&anchor),
+            Height::new(3),
+            3,
+            n,
+        );
+
+        let me = participants[0].clone();
+        let setup = H::setup_validator_with_start(
+            context.with_label("validator_0"),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::default(),
+            Start::Floor(anchor.clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        let round = Round::new(Epoch::zero(), View::new(3));
+        H::propose(&mut handle, round, &block).await;
+        context.sleep(LINK.latency).await;
+
+        let proposal = Proposal {
+            round,
+            parent: View::new(2),
+            payload: H::commitment(&block),
+        };
+        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+        H::report_finalization(&mut handle.mailbox, finalization).await;
+
+        let start_digest = loop {
+            if let Some((height, digest)) = handle.mailbox.get_info(Identifier::Latest).await {
+                if height == Height::new(3) {
+                    break digest;
+                }
+            }
+            context.sleep(Duration::from_millis(10)).await;
+        };
+
+        let mut ancestry = handle
+            .mailbox
+            .ancestry((None, start_digest))
+            .await
+            .expect("start block should be available");
+        assert_eq!(
+            ancestry.next().await.expect("start block missing").height(),
+            Height::new(3)
+        );
+        assert_eq!(
+            ancestry
+                .next()
+                .await
+                .expect("floor anchor missing")
+                .height(),
+            Height::new(2)
+        );
+
+        // This is the current behavior under `Start::Floor`: ancestry does not know that height 2
+        // is the floor, so it subscribes to the unavailable height-1 parent and waits.
+        commonware_macros::select! {
+            _ = ancestry.next() => {
+                panic!("ancestry unexpectedly advanced past the floor");
+            },
+            _ = context.sleep(Duration::from_millis(100)) => {},
+        }
     })
 }
 

@@ -43,12 +43,12 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            config::Config,
+            config::{Config, Start},
             core::{cache, Actor, Mailbox},
             mocks::{
                 application::Application,
                 harness::{
-                    self, default_leader, make_raw_block, setup_network_links,
+                    self, default_leader, make_genesis_block, make_raw_block, setup_network_links,
                     setup_network_with_participants, Ctx, DeferredHarness, EmptyProvider,
                     InlineHarness, StandardHarness, TestHarness, ValidatorHandle, B,
                     BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
@@ -187,6 +187,12 @@ mod tests {
     fn test_standard_set_floor_same_height_preserves_pending_acks() {
         harness::set_floor_same_height_preserves_pending_acks::<InlineHarness>();
         harness::set_floor_same_height_preserves_pending_acks::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_set_floor_after_start_floor_only_advances_when_raised() {
+        harness::set_floor_after_start_floor_only_advances_when_raised::<InlineHarness>();
+        harness::set_floor_after_start_floor_only_advances_when_raised::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -467,7 +473,7 @@ mod tests {
             let peer_validator = participants[1].clone();
 
             // Build chain: genesis -> block_one -> block_two
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_two = StandardHarness::make_finalization(
@@ -554,7 +560,7 @@ mod tests {
             let peer_validator = participants[1].clone();
 
             // Build chain: genesis -> block_one -> block_two -> block_three
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let block_three = make_raw_block(block_two.digest(), Height::new(3), 300);
@@ -661,7 +667,7 @@ mod tests {
 
             // Build chain: genesis -> block_one -> block_two
             // Only block_one gets a finalization; block_two is an orphan.
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_one = StandardHarness::make_finalization(
@@ -739,7 +745,7 @@ mod tests {
             let peer_validator = participants[1].clone();
 
             // Build a 5-block chain.
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let block_three = make_raw_block(block_two.digest(), Height::new(3), 300);
@@ -844,7 +850,7 @@ mod tests {
 
             let recovering_validator = participants[0].clone();
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_one = StandardHarness::make_finalization(
@@ -917,7 +923,7 @@ mod tests {
 
             let recovering_validator = participants[0].clone();
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_two = StandardHarness::make_finalization(
@@ -1053,6 +1059,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_ancestry_stream_start_floor_waits_for_below_floor_parent() {
+        harness::ancestry_stream_start_floor_waits_for_below_floor_parent::<InlineHarness>();
+        harness::ancestry_stream_start_floor_waits_for_below_floor_parent::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_finalize_same_height_different_views() {
         harness::finalize_same_height_different_views::<InlineHarness>();
         harness::finalize_same_height_different_views::<DeferredHarness>();
@@ -1179,8 +1191,8 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let genesis = make_genesis_block();
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 // Non-boundary propose should drop the response because mock app cannot build.
@@ -1264,8 +1276,8 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let genesis = make_genesis_block();
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -1406,8 +1418,8 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let genesis = make_genesis_block();
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 // Test case 1: non-contiguous height.
@@ -1547,9 +1559,9 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_genesis_block();
                 let mock_app: MockVerifyingApp<B, S> =
-                    MockVerifyingApp::with_verify_result(genesis.clone(), false);
+                    MockVerifyingApp::with_verify_result(false);
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 // 1) Set up a valid parent so structural checks can pass.
@@ -1780,6 +1792,7 @@ mod tests {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(make_genesis_block()),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1895,6 +1908,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(make_genesis_block()),
                 mailbox_size: 100,
                 view_retention_timeout: ViewDelta::new(10),
                 max_repair: NZUsize!(10),

@@ -11,7 +11,7 @@ use crate::{
     Scheme,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Activity, types::Epoch, Viewable};
+use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
@@ -26,6 +26,12 @@ use tracing::{debug, info};
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
+
+pub fn genesis<H: Hasher>() -> H::Digest {
+    let mut hasher = H::default();
+    hasher.update(GENESIS);
+    hasher.finalize()
+}
 
 /// Application actor.
 pub struct Application<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> {
@@ -61,15 +67,6 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
         let (mut indexer_sender, mut indexer_receiver) = self.indexer;
         while let Some(message) = self.mailbox.recv().await {
             match message {
-                Message::Genesis { epoch, response } => {
-                    // Sanity check. We don't support multiple epochs.
-                    assert_eq!(epoch, Epoch::zero(), "epoch must be 0");
-
-                    // Use the digest of the genesis message as the initial payload.
-                    self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
-                    let _ = response.send(digest);
-                }
                 Message::Propose { round, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
                     let block = match self.context.gen_bool(0.5) {

@@ -81,7 +81,6 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            genesis,
             validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
             verification_tasks::VerificationTasks,
         },
@@ -98,7 +97,9 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
 };
-use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
+#[cfg(test)]
+use commonware_coding::Config as CodingConfig;
+use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher,
@@ -113,13 +114,12 @@ use commonware_runtime::{
     },
     Clock, Metrics, Spawner, Storage,
 };
-use commonware_utils::{
-    channel::{
-        fallible::OneshotExt,
-        oneshot::{self, error::RecvError},
-    },
-    NZU16,
+use commonware_utils::channel::{
+    fallible::OneshotExt,
+    oneshot::{self, error::RecvError},
 };
+#[cfg(test)]
+use commonware_utils::NZU16;
 use futures::future::{ready, try_join, Either, Ready};
 use rand::Rng;
 use std::sync::Arc;
@@ -127,13 +127,11 @@ use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
+#[cfg(test)]
 const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
     minimum_shards: NZU16!(1),
     extra_shards: NZU16!(1),
 };
-
-/// Cached genesis entry for the coding marshal wrapper.
-type CachedGenesis<B, C, H> = genesis::Cache<(Commitment, CodedBlock<B, C, H>)>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -187,7 +185,6 @@ where
     epocher: ES,
     strategy: S,
     verification_tasks: VerificationTasks<Commitment>,
-    cached_genesis: CachedGenesis<B, C, H>,
 
     build_duration: Timed<E>,
     verify_duration: Timed<E>,
@@ -265,7 +262,6 @@ where
             strategy,
             epocher,
             verification_tasks: VerificationTasks::new(),
-            cached_genesis: genesis::Cache::new(),
 
             build_duration,
             verify_duration,
@@ -302,7 +298,6 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
-        let cached_genesis = self.cached_genesis.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -315,14 +310,11 @@ where
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
-                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
                     &mut marshal,
-                    &cached_genesis,
                 )
                 .await;
 
@@ -453,19 +445,6 @@ where
     type Digest = Commitment;
     type Context = Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>;
 
-    /// Returns the genesis commitment for a given epoch.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (commitment, _) = self
-            .cached_genesis
-            .get_or_insert_with::<E, A, B, _>(
-                &mut self.application,
-                epoch,
-                derive_coded_genesis::<B, C, H>,
-            )
-            .await;
-        commitment
-    }
-
     /// Proposes a new block or re-proposes the epoch boundary block.
     ///
     /// This method builds a new block from the underlying application unless the parent block
@@ -484,7 +463,6 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
-        let cached_genesis = self.cached_genesis.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
@@ -550,14 +528,11 @@ where
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
-                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
                     &mut marshal,
-                    &cached_genesis,
                 )
                 .await;
 
@@ -1013,60 +988,46 @@ where
     }
 }
 
-/// Fetches the parent block given its digest and optional round.
+/// Fetches the parent block given its commitment and optional round.
 ///
-/// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent digest matches the genesis block, it returns the genesis block
-/// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
-/// the parent block's availability.
+/// If the parent is already available locally, it returns the parent directly.
+/// Otherwise, it subscribes to marshal to await the parent block's availability.
 ///
 /// `parent_round` is an optional resolver hint. Callers should only provide a hint when
 /// the source context is trusted/validated. Untrusted paths should pass `None`.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[allow(clippy::type_complexity)]
-async fn fetch_parent<E, S, A, B, C, H>(
+async fn fetch_parent<S, B, C, H>(
     parent_commitment: Commitment,
-    epoch: Epoch,
     parent_round: Option<Round>,
-    application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
-    cached_genesis: &CachedGenesis<B, C, H>,
 ) -> Either<Ready<Result<CodedBlock<B, C, H>, RecvError>>, oneshot::Receiver<CodedBlock<B, C, H>>>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
-    A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
     B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
 {
-    let (genesis_commitment, coded_genesis) = cached_genesis
-        .get_or_insert_with::<E, A, B, _>(application, epoch, derive_coded_genesis::<B, C, H>)
-        .await;
-    if parent_commitment == genesis_commitment {
-        Either::Left(ready(Ok(coded_genesis)))
-    } else {
-        Either::Right(
-            marshal
-                .subscribe_by_commitment(parent_round, parent_commitment)
-                .await,
-        )
+    let parent_digest =
+        <Coding<B, C, H, S::PublicKey> as core::Variant>::commitment_to_inner(parent_commitment);
+    if let Some(parent) = marshal.get_block(&parent_digest).await {
+        if <Coding<B, C, H, S::PublicKey> as core::Variant>::commitment(&parent)
+            == parent_commitment
+        {
+            return Either::Left(ready(Ok(parent)));
+        }
     }
-}
 
-fn derive_coded_genesis<B, C, H>(genesis: B) -> (Commitment, CodedBlock<B, C, H>)
-where
-    B: CertifiableBlock,
-    C: CodingScheme,
-    H: Hasher,
-{
-    let commitment = genesis_coding_commitment::<H, _>(&genesis);
-    let coded_genesis = CodedBlock::<B, C, H>::new_trusted(genesis, commitment);
-    (commitment, coded_genesis)
+    Either::Right(
+        marshal
+            .subscribe_by_commitment(parent_round, parent_commitment)
+            .await,
+    )
 }
 
 /// Constructs the [`Commitment`] for the genesis block.
+#[cfg(test)]
 pub(super) fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
     Commitment::from((
         block.digest(),

@@ -73,7 +73,6 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            genesis,
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
@@ -87,7 +86,7 @@ use crate::{
         Update,
     },
     simplex::{types::Context, Plan},
-    types::{Epoch, Epocher, Round},
+    types::{Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     VerifyingApplication,
 };
@@ -147,7 +146,6 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    cached_genesis: genesis::Cache<B>,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
     build_duration: Timed<E>,
@@ -180,7 +178,6 @@ where
             application,
             marshal,
             epocher,
-            cached_genesis: genesis::Cache::new(),
             verification_tasks: VerificationTasks::new(),
 
             build_duration,
@@ -205,7 +202,6 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let cached_genesis = self.cached_genesis.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("deferred_verify")
@@ -225,7 +221,6 @@ where
                     block,
                     &mut application,
                     &mut marshal,
-                    &cached_genesis,
                     &mut tx,
                     stage,
                 )
@@ -257,14 +252,6 @@ where
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
 
-    /// Returns the genesis digest for a given epoch.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        self.cached_genesis
-            .get::<E, A>(&mut self.application, epoch)
-            .await
-            .digest()
-    }
-
     /// Proposes a new block or re-proposes the epoch boundary block.
     ///
     /// This method builds a new block from the underlying application unless the parent block
@@ -282,7 +269,6 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let cached_genesis = self.cached_genesis.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -330,14 +316,11 @@ where
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
-                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
                     &mut marshal,
-                    &cached_genesis,
                 )
                 .await;
 
@@ -678,8 +661,9 @@ mod tests {
     use crate::{
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network_with_participants, Ctx,
-                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                default_leader, make_genesis_block, make_raw_block,
+                setup_network_with_participants, Ctx, StandardHarness, TestHarness, B,
+                BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
@@ -699,7 +683,7 @@ mod tests {
     use std::time::Duration;
 
     #[test_traced("INFO")]
-    fn test_propose_after_floor_uses_application_genesis_and_anchor_parent() {
+    fn test_propose_after_floor_uses_anchor_parent_without_application_genesis() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -753,13 +737,9 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), anchor_digest, child_height, 4600);
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
-            let genesis_calls = mock_app.genesis_calls();
+                MockVerifyingApp::default().with_propose_result(child);
             let mut marshaled = Deferred::new(context.clone(), mock_app, marshal.clone(), epocher);
 
-            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_digest);
-            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_digest);
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
             let proposed = marshaled
                 .propose(child_ctx)
                 .await
@@ -767,11 +747,6 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, child_digest);
             assert!(marshal.get_block(&child_digest).await.is_some());
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
-
-            assert_eq!(marshaled.genesis(epoch.next()).await, epoch_genesis_digest);
-            assert_eq!(marshaled.genesis(epoch.next()).await, epoch_genesis_digest);
-            assert_eq!(&*genesis_calls.lock(), &[epoch, epoch.next()]);
         });
     }
 
@@ -799,8 +774,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
 
             let mut marshaled = Deferred::new(
                 context.clone(),
@@ -926,8 +901,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
@@ -1020,8 +995,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
 
             let mut marshaled = Deferred::new(
                 context.clone(),
@@ -1117,9 +1092,9 @@ mod tests {
             let buffer = setup.extra;
             let marshal_actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
-                GatedVerifyingApp::new(genesis.clone());
+                GatedVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
@@ -1205,7 +1180,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let round = Round::new(Epoch::zero(), View::new(1));
             let ctx = Ctx {
                 round,
@@ -1221,7 +1196,7 @@ mod tests {
             assert_ne!(digest_a, digest_b, "test requires distinct digests");
 
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(genesis.clone()).with_propose_result(block_b);
+                MockVerifyingApp::default().with_propose_result(block_b);
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
@@ -1269,7 +1244,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
 
             // Stash a stale block built against genesis as its parent at round V=2.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1290,7 +1265,7 @@ mod tests {
                 parent: (View::new(1), new_parent_digest),
             };
 
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,

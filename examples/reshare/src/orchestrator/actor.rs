@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochProvider, Provider},
+    application::{genesis, Block, EpochProvider, Provider},
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
@@ -12,7 +12,7 @@ use commonware_consensus::{
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -301,6 +301,7 @@ where
     ) -> Handle<()> {
         // Start the new engine
         let elector = L::default();
+        let floor = self.floor(epoch).await;
         let context = self
             .context
             .with_label("consensus_engine")
@@ -317,6 +318,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: 1024,
                 epoch,
+                floor,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
@@ -337,5 +339,24 @@ where
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
         engine.start(vote, certificate, resolver)
+    }
+
+    async fn floor(&mut self, epoch: Epoch) -> simplex::Floor<S, H::Digest> {
+        if epoch.is_zero() {
+            return simplex::Floor::genesis(genesis::<H, C, V>().digest());
+        }
+
+        let previous = epoch
+            .previous()
+            .expect("nonzero epoch must have predecessor");
+        let boundary_height = FixedEpocher::new(BLOCKS_PER_EPOCH)
+            .last(previous)
+            .expect("epoch boundary height must be supported");
+        let (_, digest) = self
+            .marshal
+            .get_info(boundary_height)
+            .await
+            .expect("epoch boundary finalization must be available in marshal");
+        simplex::Floor::genesis(digest)
     }
 }

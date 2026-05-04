@@ -73,9 +73,10 @@ mod tests {
             mocks::{
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
-                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
-                    NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
+                    make_coding_genesis_block, setup_network_links,
+                    setup_network_with_participants, CodingB, CodingCtx, CodingHarness,
+                    EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS,
+                    QUORUM, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -98,7 +99,7 @@ mod tests {
     use std::time::Duration;
 
     #[test_traced("INFO")]
-    fn test_marshaled_propose_after_floor_uses_application_genesis_and_anchor_parent() {
+    fn test_marshaled_propose_after_floor_uses_anchor_parent_without_application_genesis() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -186,8 +187,7 @@ mod tests {
             )
             .commitment();
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
-            let genesis_calls = mock_app.genesis_calls();
+                MockVerifyingApp::default().with_propose_result(child);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -198,9 +198,6 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
-            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_commitment);
-            assert_eq!(marshaled.genesis(epoch).await, epoch_genesis_commitment);
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
             let proposed = marshaled
                 .propose(child_ctx)
                 .await
@@ -208,17 +205,6 @@ mod tests {
                 .expect("propose should use the floor anchor as parent");
             assert_eq!(proposed, expected_commitment);
             assert!(marshal.get_block(&child_digest).await.is_some());
-            assert_eq!(&*genesis_calls.lock(), &[epoch]);
-
-            assert_eq!(
-                marshaled.genesis(epoch.next()).await,
-                epoch_genesis_commitment
-            );
-            assert_eq!(
-                marshaled.genesis(epoch.next()).await,
-                epoch_genesis_commitment
-            );
-            assert_eq!(&*genesis_calls.lock(), &[epoch, epoch.next()]);
         });
     }
 
@@ -290,6 +276,11 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_set_floor_same_height_preserves_pending_acks() {
         harness::set_floor_same_height_preserves_pending_acks::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_set_floor_after_start_floor_only_advances_when_raised() {
+        harness::set_floor_after_start_floor_only_advances_when_raised::<CodingHarness>();
     }
 
     #[test_traced("WARN")]
@@ -385,6 +376,11 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_ancestry_stream() {
         harness::ancestry_stream::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_ancestry_stream_start_floor_waits_for_below_floor_parent() {
+        harness::ancestry_stream_start_floor_waits_for_below_floor_parent::<CodingHarness>();
     }
 
     #[test_traced("WARN")]
@@ -535,14 +531,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -554,6 +543,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
+            let genesis = make_coding_genesis_block();
             // Create parent block at height 1
             let parent_ctx = CodingCtx {
                 round: Round::new(Epoch::new(0), View::new(1)),
@@ -657,14 +647,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -675,6 +658,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
+            let genesis = make_coding_genesis_block();
             // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
             // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
             let mut parent = genesis.digest();
@@ -872,15 +856,9 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
+            let genesis = make_coding_genesis_block();
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -963,14 +941,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1040,14 +1011,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1227,15 +1191,9 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
+            let genesis = make_coding_genesis_block();
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
@@ -1333,15 +1291,10 @@ mod tests {
             let shards = setup.extra;
 
             // Create genesis block
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
 
             // Wrap with Marshaled verifier
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1499,15 +1452,9 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
+            let genesis = make_coding_genesis_block();
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1619,16 +1566,10 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
             // 2) Force application verification to fail in deferred verification.
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::with_verify_result(genesis.clone(), false);
+                MockVerifyingApp::with_verify_result(false);
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -1728,13 +1669,7 @@ mod tests {
 
             let mut v0_mailbox = v0_setup.mailbox;
             let v1_mailbox = v1_setup.mailbox;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
 
             let round1 = Round::new(Epoch::zero(), View::new(1));
             let block1_ctx = CodingCtx {
@@ -1820,14 +1755,7 @@ mod tests {
             )
             .await;
 
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -1898,13 +1826,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
             let marshal_actor_handle = setup.actor_handle;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
 
             // Push parent (height 1) and child (height 2) into the shards
             // engine. These are reconstructable but NOT durably persisted.
@@ -1933,7 +1855,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2018,18 +1940,12 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
             let marshal_actor_handle = setup.actor_handle;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Build the block we want propose() to return. Its embedded context
-            // uses the proper genesis commitment so fetch_parent matches the
-            // application-provided genesis without going through the marshal subscription.
+            // uses the proper genesis commitment so the seeded marshal genesis
+            // resolves as its parent.
             let propose_round = Round::new(Epoch::zero(), View::new(1));
             let propose_context = CodingCtx {
                 round: propose_round,
@@ -2051,7 +1967,7 @@ mod tests {
             .commitment();
 
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new(genesis).with_propose_result(block_to_propose);
+                MockVerifyingApp::default().with_propose_result(block_to_propose);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2130,13 +2046,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -2165,7 +2075,7 @@ mod tests {
             );
 
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new(genesis).with_propose_result(block_b);
+                MockVerifyingApp::default().with_propose_result(block_b);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2220,13 +2130,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_genesis_block();
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Stash a stale block built against genesis as its parent at round V=2.
@@ -2255,7 +2159,7 @@ mod tests {
                 parent: (View::new(1), new_parent_commitment),
             };
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),

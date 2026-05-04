@@ -34,10 +34,8 @@ pub trait BlockProvider: Clone + Send + 'static {
     ) -> impl Future<Output = Option<Self::Block>> + Send;
 }
 
-/// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
-///
-// TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
-// this stream should end at block height 0 rather than 1.
+/// Yields the ancestors of a block while prefetching parents, including the height-zero genesis
+/// block if it is available.
 #[pin_project]
 pub struct AncestorStream<M, B: Block> {
     buffered: Vec<B>,
@@ -86,8 +84,7 @@ where
     type Item = B;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Because marshal cannot currently yield the genesis block, we stop at height 1.
-        const END_BOUND: Height = Height::new(1);
+        const END_BOUND: Height = Height::zero();
 
         let mut this = self.project();
 
@@ -207,29 +204,38 @@ mod test {
 
     #[test_async]
     async fn test_yields_ancestors() {
-        let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let block0 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+        let block1 = Block::new::<Sha256>((), block0.digest(), Height::new(1), 1);
         let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
         let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
 
-        let provider = MockProvider(vec![block1.clone(), block2.clone()]);
+        let provider = MockProvider(vec![block0.clone(), block1.clone(), block2.clone()]);
         let stream = AncestorStream::new(provider, [block3.clone()]);
 
         let results = stream.collect::<Vec<_>>().await;
-        assert_eq!(results, vec![block3, block2, block1]);
+        assert_eq!(results, vec![block3, block2, block1, block0]);
     }
 
     #[test_async]
     async fn test_yields_ancestors_all_buffered() {
-        let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let block0 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+        let block1 = Block::new::<Sha256>((), block0.digest(), Height::new(1), 1);
         let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
         let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
 
         let provider = MockProvider(vec![]);
-        let stream =
-            AncestorStream::new(provider, [block1.clone(), block2.clone(), block3.clone()]);
+        let stream = AncestorStream::new(
+            provider,
+            [
+                block0.clone(),
+                block1.clone(),
+                block2.clone(),
+                block3.clone(),
+            ],
+        );
 
         let results = stream.collect::<Vec<_>>().await;
-        assert_eq!(results, vec![block3, block2, block1]);
+        assert_eq!(results, vec![block3, block2, block1, block0]);
     }
 
     #[test_async]

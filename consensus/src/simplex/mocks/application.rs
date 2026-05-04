@@ -26,10 +26,6 @@ use std::{
 use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
     Propose {
         context: Context<D, P>,
         response: oneshot::Sender<D>,
@@ -63,14 +59,6 @@ impl<D: Digest, P: PublicKey> Mailbox<D, P> {
 impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
-
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Genesis { epoch, response })
-            .await;
-        receiver.await.expect("Failed to receive genesis")
-    }
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
@@ -122,6 +110,12 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
 }
 
 const GENESIS_BYTES: &[u8] = b"genesis";
+
+pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
+    let mut hasher = H::default();
+    hasher.update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
+    hasher.finalize()
+}
 
 type Latency = (f64, f64);
 
@@ -289,14 +283,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         panic!("[{:?}] {}", self.me, msg);
     }
 
-    fn genesis(&mut self, epoch: Epoch) -> H::Digest {
-        self.hasher
-            .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
-        let digest = self.hasher.finalize();
-        self.verified.insert(digest);
-        digest
-    }
-
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
     async fn propose(&mut self, context: Context<H::Digest, P>) -> H::Digest {
@@ -423,10 +409,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             },
             Some(message) = self.mailbox.recv() else break => {
                 match message {
-                    Message::Genesis { epoch, response } => {
-                        let digest = self.genesis(epoch);
-                        response.send_lossy(digest);
-                    }
                     Message::Propose { context, response } => {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());

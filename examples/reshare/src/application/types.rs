@@ -1,7 +1,9 @@
 //! Types for the `commonware-reshare` example application.
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
-    simplex::types::Context, types::Height, Block as ConsensusBlock, CertifiableBlock, Heightable,
+    simplex::types::Context,
+    types::{Epoch, Height, Round, View},
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
@@ -176,4 +178,19 @@ where
         Height::zero(),
         None,
     )
+}
+
+/// Returns the deterministic genesis block.
+pub fn genesis<H, C, V>() -> Block<H, C, V>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    let context = Context {
+        round: Round::new(Epoch::zero(), View::zero()),
+        leader: C::from_seed(0).public_key(),
+        parent: (View::zero(), <H::Digest as Digest>::EMPTY),
+    };
+    genesis_block(context)
 }

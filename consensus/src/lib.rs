@@ -91,9 +91,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Payload used to initialize the consensus engine.
-        fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Digest> + Send;
-
         /// Generate a new payload for the given context.
         ///
         /// If it is possible to generate a payload, the Digest should be returned over the provided
@@ -259,9 +256,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// The block type produced by the application's builder.
         type Block: Block;
-
-        /// Returns the genesis block used to initialize the consensus engine for `epoch`.
-        fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Block> + Send;
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].

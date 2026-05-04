@@ -4,7 +4,7 @@ use commonware_consensus::{
         types::{Activity, Context},
         Plan,
     },
-    types::{Epoch, Round},
+    types::Round,
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
@@ -12,10 +12,6 @@ use commonware_utils::channel::{mpsc, oneshot};
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
     Propose {
         round: Round,
         response: oneshot::Sender<D>,
@@ -44,15 +40,6 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
-
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
-        receiver.await.expect("Failed to receive genesis")
-    }
 
     async fn propose(
         &mut self,
