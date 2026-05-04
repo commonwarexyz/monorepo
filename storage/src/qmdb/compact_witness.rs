@@ -23,9 +23,9 @@
 //!    its proof on every serve.
 
 use crate::{
-    merkle::{compact, Family, Location, Proof},
+    merkle::{self, compact, Family, Location, Proof},
     metadata::Metadata,
-    qmdb::{sync::compact::Target, Bagging, Error},
+    qmdb::{sync::compact::Target, Error},
     Context,
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize};
@@ -201,7 +201,7 @@ pub(crate) async fn load_serve_state<F, E, H, S, C, M, DecodeCommitOp>(
     decode_commit_op: DecodeCommitOp,
 ) -> Result<(CachedServeState<F, H::Digest>, M, Location<F>), Error<F>>
 where
-    F: Family + Bagging,
+    F: Family,
     E: Context,
     H: Hasher,
     S: Strategy,
@@ -236,7 +236,7 @@ where
 
     let inactive_peaks =
         F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
-    let hasher = F::default_hasher::<H>();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
     let root = merkle
         .root(&hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
@@ -274,12 +274,12 @@ pub(crate) async fn bootstrap_initial_commit<F, E, H, S>(
     commit_op_bytes: Vec<u8>,
 ) -> Result<(), Error<F>>
 where
-    F: Family + Bagging,
+    F: Family,
     E: Context,
     H: Hasher,
     S: Strategy,
 {
-    let hasher = F::default_hasher::<H>();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &commit_op_bytes);
         merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
@@ -355,12 +355,12 @@ where
 pub(crate) async fn persist_witness<W, F, E, H, S>(source: &W) -> Result<(), Error<F>>
 where
     W: WitnessSource<F, E, H, S>,
-    F: Family + Bagging,
+    F: Family,
     E: Context,
     H: Hasher,
     S: Strategy,
 {
-    let hasher = F::default_hasher::<H>();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
     let last_commit_loc = source.last_commit_loc();
     let inactivity_floor_loc = source.inactivity_floor_loc();
     let commit_op_bytes = source.encode_current_commit_op();

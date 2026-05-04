@@ -9,14 +9,11 @@ use commonware_storage::{
     journal::contiguous::fixed::{Config as FConfig, Journal},
     merkle::{mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
-    qmdb::{
-        any::{
-            db::Db as AnyDb,
-            ordered::{Operation, Update},
-            value::FixedEncoding,
-            FixedConfig as Config,
-        },
-        Bagging,
+    qmdb::any::{
+        db::Db as AnyDb,
+        ordered::{Operation, Update},
+        value::FixedEncoding,
+        FixedConfig as Config,
     },
     translator::EightCap,
 };
@@ -59,7 +56,7 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 100;
 
-async fn commit_pending<F: MerkleFamily + Bagging>(
+async fn commit_pending<F: MerkleFamily>(
     db: &mut GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut BTreeMap<RawKey, RawValue>,
@@ -82,7 +79,7 @@ async fn commit_pending<F: MerkleFamily + Bagging>(
     committed_state.extend(pending_inserts.drain());
 }
 
-fn fuzz_family<F: MerkleFamily + Bagging>(data: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {

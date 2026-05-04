@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    merkle::{mmb, mmr, Family as MerkleFamily, Location, Proof},
-    qmdb::{verify::verify_multi_proof, Bagging},
+    merkle::{self, mmb, mmr, Family as MerkleFamily, Location, Proof},
+    qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -22,7 +22,7 @@ struct OperationInput {
 // `proof_leaves` is typed `Location<F>` so that `Arbitrary` bounds it to `F::MAX_LEAVES`;
 // otherwise `verify_multi_proof` would reject on overflow before exercising its inner logic.
 #[derive(Debug)]
-struct FuzzInput<F: MerkleFamily + Bagging> {
+struct FuzzInput<F: MerkleFamily> {
     proof_leaves: Location<F>,
     inactive_peaks: usize,
     digests: Vec<[u8; 32]>,
@@ -30,7 +30,7 @@ struct FuzzInput<F: MerkleFamily + Bagging> {
     root: [u8; 32],
 }
 
-impl<'a, F: MerkleFamily + Bagging> Arbitrary<'a> for FuzzInput<F> {
+impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             proof_leaves: u.arbitrary()?,
@@ -42,8 +42,8 @@ impl<'a, F: MerkleFamily + Bagging> Arbitrary<'a> for FuzzInput<F> {
     }
 }
 
-fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput<F>) {
-    let hasher = F::default_hasher::<Sha256>();
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
+    let hasher = merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
     let digests: Vec<Digest> = input
         .digests

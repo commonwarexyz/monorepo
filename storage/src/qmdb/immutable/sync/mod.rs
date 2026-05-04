@@ -16,7 +16,7 @@ use crate::{
         immutable::{self, CompactDb, Operation},
         operation::{Key, Operation as _},
         sync::{self},
-        Bagging as FamilyBagging, Error,
+        Error,
     },
     translator::Translator,
     Context, Persistable,
@@ -28,7 +28,7 @@ use commonware_utils::range::NonEmptyRange;
 
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
-    F: Family + FamilyBagging,
+    F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -49,7 +49,7 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    const ROOT_BAGGING: merkle::Bagging = <F as FamilyBagging>::BAGGING;
+    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
@@ -75,7 +75,7 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
-        let hasher = F::default_hasher();
+        let hasher = merkle::hasher::Standard::with_bagging(merkle::Bagging::BackwardFold);
 
         // Initialize Merkle structure for sync
         let merkle = Merkle::<F, _, _, S>::init_sync(
@@ -147,7 +147,7 @@ where
 
 impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
-    F: Family + FamilyBagging,
+    F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
@@ -164,7 +164,7 @@ where
     type Context = E;
     type Hasher = H;
 
-    const ROOT_BAGGING: merkle::Bagging = <F as FamilyBagging>::BAGGING;
+    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
     async fn from_compact_state(
         context: Self::Context,
@@ -186,7 +186,7 @@ where
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let hasher = F::default_hasher::<H>();
+        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.with_label("merkle"),
             config.merkle,

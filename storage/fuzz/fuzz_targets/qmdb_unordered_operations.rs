@@ -7,7 +7,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{self, mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
@@ -16,7 +16,7 @@ use commonware_storage::{
             value::FixedEncoding,
             FixedConfig as Config,
         },
-        verify_proof, Bagging,
+        verify_proof,
     },
     translator::EightCap,
 };
@@ -59,7 +59,7 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(223);
 const PAGE_CACHE_SIZE: usize = 100;
 
-async fn commit_pending<F: MerkleFamily + Bagging>(
+async fn commit_pending<F: MerkleFamily>(
     db: &mut GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
@@ -77,8 +77,8 @@ async fn commit_pending<F: MerkleFamily + Bagging>(
     committed_state.extend(pending_expected.drain());
 }
 
-fn fuzz_family<F: MerkleFamily + Bagging>(data: &FuzzInput, suffix: &str) {
-    let hasher = F::default_hasher::<Sha256>();
+fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
+    let hasher = merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {

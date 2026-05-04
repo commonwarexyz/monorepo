@@ -50,7 +50,7 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, Bagging, Error},
+    qmdb::{any::value::ValueEncoding, Error},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -108,7 +108,7 @@ where
 
 impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
 where
-    F: Family + Bagging,
+    F: Family,
     E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -528,6 +528,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         journal::{contiguous::Mutable, Error as JournalError},
+        merkle,
         qmdb::verify_proof,
         Persistable,
     };
@@ -556,7 +557,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn test_keyless_db_empty<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_empty<F: Family, V, C, H>(
         context: deterministic::Context,
         db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -610,7 +611,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_build_basic<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -660,7 +661,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_recovery<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_recovery<F: Family, V, C, H>(
         context: deterministic::Context,
         db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -734,14 +735,15 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_proof<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_db_proof<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = F::default_hasher::<Sha256>();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         const ELEMENTS: u64 = 50;
 
         {
@@ -772,7 +774,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_metadata<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_metadata<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -798,7 +800,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_pruning<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_pruning<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -850,7 +852,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family, V, C, H>(
         context: deterministic::Context,
         db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -926,7 +928,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_replay_with_trailing_appends<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_replay_with_trailing_appends<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -1025,7 +1027,7 @@ pub(crate) mod tests {
 
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
     /// results consistent with individual `get` calls.
-    pub(crate) async fn test_keyless_get_many<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_get_many<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1074,7 +1076,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_chained<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_batch_chained<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1109,7 +1111,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_batch<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1136,7 +1138,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1173,7 +1175,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_to_batch<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_to_batch<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1203,7 +1205,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -1294,14 +1296,15 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = F::default_hasher::<Sha256>();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         // Build a db with some values.
         const ELEMENTS: u64 = 100;
@@ -1368,7 +1371,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family, V, C>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, Sha256>>,
@@ -1377,7 +1380,8 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = F::default_hasher::<Sha256>();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         const ELEMENTS: u64 = 100;
         {
@@ -1450,7 +1454,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1481,7 +1485,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_get<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_batch_get<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1523,7 +1527,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_stacked_get<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_batch_stacked_get<F: Family, V, C>(
         db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1549,7 +1553,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_speculative_root<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_batch_speculative_root<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1578,7 +1582,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_merkleized_batch_get<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_merkleized_batch_get<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1611,7 +1615,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_chained_apply_sequential<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_batch_chained_apply_sequential<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1644,14 +1648,15 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_many_sequential<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_batch_many_sequential<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = F::default_hasher::<Sha256>();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         const BATCHES: u64 = 20;
         const APPENDS_PER_BATCH: u64 = 5;
@@ -1683,7 +1688,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_empty<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_batch_empty<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1713,7 +1718,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1754,14 +1759,15 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_large<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_batch_large<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = F::default_hasher::<Sha256>();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         const N: u64 = 500;
         let mut values = Vec::new();
         let mut locs = Vec::new();
@@ -1788,7 +1794,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_batch_chained<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1818,11 +1824,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_sequential_commit_parent_then_child<
-        F: Family + Bagging,
-        V,
-        C,
-    >(
+    pub(crate) async fn test_keyless_sequential_commit_parent_then_child<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1845,7 +1847,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family + Bagging, V, C>(
+    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1871,11 +1873,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<
-        F: Family + Bagging,
-        V,
-        C,
-    >(
+    pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1909,7 +1907,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    async fn commit_appends<F: Family + Bagging, V, C, H>(
+    async fn commit_appends<F: Family, V, C, H>(
         db: &mut Keyless<F, deterministic::Context, V, C, H>,
         values: impl IntoIterator<Item = V::Value>,
         metadata: Option<V::Value>,
@@ -1938,7 +1936,7 @@ pub(crate) mod tests {
         range
     }
 
-    pub(crate) async fn test_keyless_db_rewind_recovery<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_rewind_recovery<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -2038,7 +2036,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2088,7 +2086,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_tracking<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_floor_tracking<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -2137,7 +2135,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2175,12 +2173,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<
-        F: Family + Bagging,
-        V,
-        C,
-        H,
-    >(
+    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2217,7 +2210,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2264,7 +2257,7 @@ pub(crate) mod tests {
 
     /// Floor is embedded in the Commit operation and therefore in the Merkle root: two databases
     /// with identical appends but different floors must produce different roots.
-    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H>(
         mut db_a: Keyless<F, deterministic::Context, V, C, H>,
         mut db_b: Keyless<F, deterministic::Context, V, C, H>,
     ) where
@@ -2300,7 +2293,7 @@ pub(crate) mod tests {
     }
 
     /// A floor equal to the commit operation's location is on the tight boundary of acceptance.
-    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<F: Family + Bagging, V, C, H>(
+    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2325,12 +2318,7 @@ pub(crate) mod tests {
     }
 
     /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
-    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<
-        F: Family + Bagging,
-        V,
-        C,
-        H,
-    >(
+    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
@@ -2391,7 +2379,7 @@ pub(crate) mod tests {
     pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<F, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
-        F: Family + Bagging,
+        F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         H: Hasher,
@@ -2432,7 +2420,7 @@ pub(crate) mod tests {
     pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
-        F: Family + Bagging,
+        F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         H: Hasher,
@@ -2470,7 +2458,7 @@ pub(crate) mod tests {
         mut db: Keyless<F, deterministic::Context, V, C, H>,
         reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
     ) where
-        F: Family + Bagging,
+        F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         H: Hasher,
@@ -2562,7 +2550,7 @@ pub(crate) mod tests {
     pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<F, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
-        F: Family + Bagging,
+        F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         H: Hasher,

@@ -8,7 +8,7 @@ use crate::{
         any::{batch::lookup_sorted, ValueEncoding},
         immutable::operation::Operation,
         operation::Key,
-        Bagging, Error,
+        Error,
     },
     translator::Translator,
     Context, Persistable,
@@ -26,7 +26,7 @@ type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
-pub(crate) struct DiffEntry<F: Family + Bagging, V> {
+pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) value: V,
     pub(crate) loc: Location<F>,
 }
@@ -39,7 +39,7 @@ pub(crate) struct DiffEntry<F: Family + Bagging, V> {
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy = Sequential>
 where
-    F: Family + Bagging,
+    F: Family,
     K: Key,
     V: ValueEncoding,
     H: CHasher,
@@ -67,13 +67,8 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<
-    F: Family + Bagging,
-    D: Digest,
-    K: Key,
-    V: ValueEncoding,
-    S: Strategy = Sequential,
-> {
+pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy = Sequential>
+{
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: JournalBatch<F, D, K, V, S>,
 
@@ -116,7 +111,7 @@ pub struct MerkleizedBatch<
 
 impl<F, H, K, V, S: Strategy> UnmerkleizedBatch<F, H, K, V, S>
 where
-    F: Family + Bagging,
+    F: Family,
     K: Key,
     V: ValueEncoding,
     H: CHasher,
@@ -329,8 +324,7 @@ where
     }
 }
 
-impl<F: Family + Bagging, D: Digest, K: Key, V: ValueEncoding, S: Strategy>
-    MerkleizedBatch<F, D, K, V, S>
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, K, V, S>
 where
     Operation<F, K, V>: EncodeShared,
 {
@@ -454,7 +448,7 @@ where
 
 impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
 where
-    F: Family + Bagging,
+    F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,

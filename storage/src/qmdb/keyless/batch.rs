@@ -4,7 +4,7 @@ use super::{operation::Operation, Keyless};
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, Bagging, Error},
+    qmdb::{any::value::ValueEncoding, Error},
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -22,7 +22,7 @@ type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
 pub struct UnmerkleizedBatch<F, H, V, S: Strategy = Sequential>
 where
-    F: Family + Bagging,
+    F: Family,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -47,12 +47,8 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<
-    F: Family + Bagging,
-    D: Digest,
-    V: ValueEncoding,
-    S: Strategy = Sequential,
-> where
+pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy = Sequential>
+where
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal batch (Merkle state + local items).
@@ -86,7 +82,7 @@ pub struct MerkleizedBatch<
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
-impl<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
+impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -106,7 +102,7 @@ where
 /// Returns `None` if the location cannot be found in the live parent chain (e.g. the
 /// owning ancestor was committed and freed). Callers should fall through to the committed
 /// DB in that case.
-fn read_chain_op<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy>(
+fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
 ) -> Option<Operation<F, V>>
@@ -133,7 +129,7 @@ where
 
 impl<F, H, V, S: Strategy> UnmerkleizedBatch<F, H, V, S>
 where
-    F: Family + Bagging,
+    F: Family,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -333,7 +329,7 @@ where
     }
 }
 
-impl<F: Family + Bagging, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
+impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {

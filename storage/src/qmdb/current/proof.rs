@@ -1206,7 +1206,7 @@ mod tests {
                     .await
                     .unwrap();
 
-            // Under the family's ForwardFold bagging, the prefix peaks before the multi-peak
+            // Under `current`'s ForwardFold bagging, the prefix peaks before the multi-peak
             // chunk that straddles the range are folded into `pre_prefix_acc`. Only the
             // straddling chunk's prefix peaks ship individually as `unfolded_prefix_peaks` so the
             // verifier can re-graft.

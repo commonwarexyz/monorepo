@@ -55,7 +55,7 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
-    type Family: merkle::Family + qmdb::Bagging;
+    type Family: merkle::Family;
 
     fn destroy(
         self,
@@ -64,7 +64,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible once for the generic full Merkle type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl<F: merkle::Family + qmdb::Bagging> Destructible
+impl<F: merkle::Family> Destructible
     for crate::merkle::full::Merkle<F, deterministic::Context, Digest>
 {
     type Family = F;

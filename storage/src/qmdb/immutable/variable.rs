@@ -8,11 +8,11 @@ use crate::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
-    merkle::Family,
+    merkle::{self, Family},
     qmdb::{
         any::{value::VariableEncoding, VariableValue},
         operation::Key,
-        Bagging, Error,
+        Error,
     },
     translator::Translator,
 };
@@ -42,7 +42,7 @@ pub type Config<T, C, S = Sequential> = BaseConfig<T, JournalConfig<C>, S>;
 pub type CompactConfig<C, S = Sequential> = super::CompactConfig<C, S>;
 
 impl<
-        F: Family + Bagging,
+        F: Family,
         E: Storage + Clock + Metrics,
         K: Key,
         V: VariableValue,
@@ -62,7 +62,7 @@ impl<
             cfg.merkle_config,
             cfg.log,
             Operation::<F, K, V>::is_commit,
-            <F as Bagging>::BAGGING,
+            merkle::Bagging::BackwardFold,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator).await
@@ -70,7 +70,7 @@ impl<
 }
 
 impl<
-        F: Family + Bagging,
+        F: Family,
         E: Storage + Clock + Metrics,
         K: Key,
         V: VariableValue,
@@ -131,14 +131,14 @@ mod tests {
         }
     }
 
-    async fn open_db<F: Family + Bagging>(
+    async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
         let cfg = config("partition", &context);
         Db::init(context, cfg).await.unwrap()
     }
 
-    async fn open_compact<F: Family + Bagging>(
+    async fn open_compact<F: Family>(
         context: deterministic::Context,
     ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ())> {
         let cfg = CompactConfig {
@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn open<F: Family + Bagging>(
+    fn open<F: Family>(
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
@@ -184,7 +184,7 @@ mod tests {
         cfg
     }
 
-    async fn open_small_sections_db<F: Family + Bagging>(
+    async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
         let cfg = small_sections_config("partition", &context);
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn open_small_sections<F: Family + Bagging>(
+    fn open_small_sections<F: Family>(
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
@@ -283,7 +283,7 @@ mod tests {
         });
     }
 
-    async fn assert_compact_root_compatibility<F: Family + Bagging>(ctx: deterministic::Context) {
+    async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
         let mut db = open_db::<F>(ctx.with_label("db")).await;
         let mut compact = open_compact::<F>(ctx.with_label("compact")).await;
         assert_eq!(db.root(), compact.root());

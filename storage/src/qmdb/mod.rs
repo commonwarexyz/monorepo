@@ -48,7 +48,7 @@ use crate::{
         contiguous::{Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{self, Family, Location},
+    merkle::{Family, Location},
     qmdb::operation::Operation,
 };
 use commonware_utils::NZUsize;
@@ -69,32 +69,6 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 
-/// Per-family default bagging policy used by QMDB databases.
-///
-/// QMDB chooses different active-region bagging per family: MMR uses forward bagging and MMB uses
-/// backward bagging (so the active suffix can collapse into a single accumulator under MMB's
-/// pyramid shape).
-///
-/// This trait isolates that consumer choice from the family's structural topology — `Family` itself
-/// stays bagging-agnostic.
-pub trait Bagging: Family {
-    /// The default bagging policy for this family in QMDB databases.
-    const BAGGING: merkle::Bagging;
-
-    /// Construct a [`merkle::hasher::Standard`] hasher pre-configured with this family's default
-    /// bagging.
-    fn default_hasher<H: commonware_cryptography::Hasher>() -> merkle::hasher::Standard<H> {
-        merkle::hasher::Standard::with_bagging(Self::BAGGING)
-    }
-}
-
-impl Bagging for merkle::mmr::Family {
-    const BAGGING: merkle::Bagging = merkle::Bagging::ForwardFold;
-}
-
-impl Bagging for merkle::mmb::Family {
-    const BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
-}
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,

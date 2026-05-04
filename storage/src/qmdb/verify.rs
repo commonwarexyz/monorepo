@@ -125,7 +125,6 @@ mod tests {
     use crate::{
         merkle::{build_range_proof, mem::Mem, LocationRangeExt as _},
         mmb, mmr,
-        qmdb::Bagging,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
@@ -140,7 +139,7 @@ mod tests {
         Standard::new()
     }
 
-    fn qmdb_range_proof<F: Family + Bagging>(
+    fn qmdb_range_proof<F: Family>(
         hasher: &Standard<Sha256>,
         merkle: &Mem<F, Digest>,
         inactive_peaks: usize,
@@ -159,7 +158,7 @@ mod tests {
 
     // ---- Generic inner functions for tests that work on both MMR and MMB ----
 
-    fn verify_proof_inner<F: Family + Bagging>() {
+    fn verify_proof_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -226,7 +225,7 @@ mod tests {
         executor.start(|_| async move { verify_proof_inner::<mmb::Family>() });
     }
 
-    fn verify_proof_with_offset_inner<F: Family + Bagging>() {
+    fn verify_proof_with_offset_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -280,7 +279,7 @@ mod tests {
         executor.start(|_| async move { verify_proof_with_offset_inner::<mmb::Family>() });
     }
 
-    fn verify_proof_and_extract_digests_inner<F: Family + Bagging>() {
+    fn verify_proof_and_extract_digests_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -335,7 +334,7 @@ mod tests {
         executor.start(|_| async move { verify_proof_and_extract_digests_inner::<mmb::Family>() });
     }
 
-    fn create_proof_store_inner<F: Family + Bagging>() {
+    fn create_proof_store_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -392,7 +391,7 @@ mod tests {
         executor.start(|_| async move { create_proof_store_inner::<mmb::Family>() });
     }
 
-    fn create_proof_store_invalid_proof_inner<F: Family + Bagging>() {
+    fn create_proof_store_invalid_proof_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -434,7 +433,7 @@ mod tests {
         executor.start(|_| async move { create_proof_store_invalid_proof_inner::<mmb::Family>() });
     }
 
-    fn create_multi_proof_inner<F: Family + Bagging>() {
+    fn create_multi_proof_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -500,7 +499,7 @@ mod tests {
         executor.start(|_| async move { create_multi_proof_inner::<mmb::Family>() });
     }
 
-    fn create_multi_proof_with_fold_prefix_peaks_inner<F: Family + Bagging>() {
+    fn create_multi_proof_with_fold_prefix_peaks_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -630,7 +629,7 @@ mod tests {
         });
     }
 
-    fn verify_multi_proof_inner<F: Family + Bagging>() {
+    fn verify_multi_proof_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 
@@ -710,7 +709,7 @@ mod tests {
         executor.start(|_| async move { verify_multi_proof_inner::<mmb::Family>() });
     }
 
-    fn multi_proof_empty_inner<F: Family + Bagging>() {
+    fn multi_proof_empty_inner<F: Family>() {
         let hasher = test_hasher();
         let empty_merkle = Mem::<F, Digest>::new();
         let empty_root = empty_merkle.root(&hasher, 0).unwrap();
@@ -757,7 +756,7 @@ mod tests {
         executor.start(|_| async move { multi_proof_empty_inner::<mmb::Family>() });
     }
 
-    fn multi_proof_single_element_inner<F: Family + Bagging>() {
+    fn multi_proof_single_element_inner<F: Family>() {
         let hasher = test_hasher();
         let mut merkle = Mem::<F, Digest>::new();
 

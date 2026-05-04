@@ -118,13 +118,13 @@ pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
 ///
-/// The operations root uses split-root mode and the bagging policy associated with `F`.
+/// The operations root uses split-root mode with backward-fold active bagging.
 pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
     cfg: Config<T, J::Config, S>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
-    F: crate::qmdb::Bagging,
+    F: Family,
     E: Context,
     U: Update + Send + Sync,
     H: Hasher,
@@ -139,7 +139,7 @@ where
         cfg,
         None,
         true,
-        <F as crate::qmdb::Bagging>::BAGGING,
+        Bagging::BackwardFold,
     )
     .await
 }
@@ -148,8 +148,8 @@ where
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 ///
 /// `split_root` selects whether the operations root commits to the inactive-prefix split, and
-/// `ops_root_bagging` selects its bagging policy. Public `Any` initialization uses split roots and
-/// the QMDB family default bagging; `current::Db` passes a plain `ForwardFold` operations root
+/// `ops_root_bagging` selects its bagging policy. Public `Any` initialization uses split roots
+/// with backward-fold active bagging; `current::Db` passes a plain `ForwardFold` operations root
 /// because activity is committed through the grafted root instead.
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,

@@ -406,7 +406,7 @@ macro_rules! impl_compact_resolver_keyless {
     ($db:ident, $op:ident, $val_bound:ident) => {
         impl<F, E, V, H> Resolver for Arc<$db<F, E, V, H>>
         where
-            F: Family + qmdb::Bagging,
+            F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -443,7 +443,7 @@ macro_rules! impl_compact_resolver_keyless {
 
         impl<F, E, V, H> Resolver for Arc<AsyncRwLock<$db<F, E, V, H>>>
         where
-            F: Family + qmdb::Bagging,
+            F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -481,7 +481,7 @@ macro_rules! impl_compact_resolver_keyless {
 
         impl<F, E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H>>>>
         where
-            F: Family + qmdb::Bagging,
+            F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -526,7 +526,7 @@ macro_rules! impl_compact_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
         impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
         where
-            F: Family + qmdb::Bagging,
+            F: Family,
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -566,7 +566,7 @@ macro_rules! impl_compact_resolver_immutable {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
         where
-            F: Family + qmdb::Bagging,
+            F: Family,
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -607,7 +607,7 @@ macro_rules! impl_compact_resolver_immutable {
 
         impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
         where
-            F: Family + qmdb::Bagging,
+            F: Family,
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,

@@ -98,7 +98,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     apply_batch_size: usize,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
-    F: qmdb::Bagging,
+    F: merkle::Family,
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
@@ -108,7 +108,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
-    let hasher = F::default_hasher::<H>();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
 
     let merkle = full::Merkle::<F, _, _, S>::init_sync(
         context.with_label("merkle"),
@@ -141,7 +141,7 @@ macro_rules! impl_sync_database {
      $(; $($where_extra:tt)+)?) => {
         impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
-            F: qmdb::Bagging,
+            F: merkle::Family,
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
@@ -158,7 +158,7 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-            const ROOT_BAGGING: merkle::Bagging = <F as qmdb::Bagging>::BAGGING;
+            const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
             async fn from_sync_result(
                 context: Self::Context,
@@ -196,7 +196,7 @@ macro_rules! impl_sync_database {
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,
-                    <F as qmdb::Bagging>::BAGGING,
+                    merkle::Bagging::BackwardFold,
                 )
                 .await
             }

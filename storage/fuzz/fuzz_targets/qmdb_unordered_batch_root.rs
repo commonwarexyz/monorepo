@@ -7,10 +7,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, R
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
-    qmdb::{
-        any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
-        Bagging,
-    },
+    qmdb::any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
     translator::OneCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -110,7 +107,7 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {

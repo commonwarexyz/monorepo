@@ -10,7 +10,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Bagging, Error,
+        Error,
     },
     translator::Translator,
     Context,
@@ -35,15 +35,8 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
     S,
 >;
 
-impl<
-        F: Family + Bagging,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -65,7 +58,7 @@ pub mod partitioned {
         merkle::{Family, Location},
         qmdb::{
             any::{FixedConfig as Config, FixedValue},
-            Bagging, Error,
+            Error,
         },
         translator::Translator,
         Context,
@@ -95,7 +88,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family + Bagging,
+            F: Family,
             E: Context,
             K: Array,
             V: FixedValue,
@@ -147,7 +140,7 @@ pub(crate) mod test {
                 },
                 test::fixed_db_config,
             },
-            verify_proof, Bagging,
+            verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
@@ -181,9 +174,7 @@ pub(crate) mod test {
         Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
-    async fn open_db_generic<F: Family + Bagging>(
-        context: deterministic::Context,
-    ) -> AnyTestGeneric<F> {
+    async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
         crate::qmdb::any::init(context, cfg).await.unwrap()
     }
@@ -1220,7 +1211,7 @@ pub(crate) mod test {
     }
 
     /// Helper: commit a batch of key-value writes and return the applied range (generic).
-    async fn commit_writes_generic<F: Family + Bagging>(
+    async fn commit_writes_generic<F: Family>(
         db: &mut AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
@@ -1237,7 +1228,7 @@ pub(crate) mod test {
 
     // -- Generic inner functions for parameterized batch tests --
 
-    async fn batch_empty_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let root_before = db.root();
 
@@ -1251,7 +1242,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_metadata_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_metadata_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let metadata = val(42);
 
@@ -1265,7 +1256,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_get_read_through_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_get_read_through_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1293,7 +1284,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_get_on_merkleized_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_get_on_merkleized_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1319,7 +1310,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_stacked_get_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_stacked_get_inner<F: Family>(context: deterministic::Context) {
         let db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1346,9 +1337,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_stacked_delete_recreate_inner<F: Family + Bagging>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_stacked_delete_recreate_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let ka = key(0);
 
@@ -1376,7 +1365,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_apply_returns_range_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_apply_returns_range_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1392,7 +1381,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_speculative_root_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn batch_speculative_root_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let mut batch = db.new_batch();
@@ -1408,7 +1397,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn log_replay_inner<F: Family + Bagging>(context: deterministic::Context) {
+    async fn log_replay_inner<F: Family>(context: deterministic::Context) {
         let db_context = context.with_label("db");
         let mut db = open_db_generic::<F>(db_context.clone()).await;
 

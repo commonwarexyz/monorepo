@@ -17,10 +17,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
-    qmdb::{
-        current::{unordered::variable::Db as Current, VariableConfig},
-        Bagging,
-    },
+    qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZU64};
@@ -151,7 +148,7 @@ fn apply_pending(
 }
 
 /// Commit pending writes. Returns `true` on success, `false` on error.
-async fn commit_pending<F: Graftable + Bagging>(
+async fn commit_pending<F: Graftable>(
     db: &mut Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     pending: &mut HashMap<RawKey, Option<RawValue>>,
@@ -181,7 +178,7 @@ async fn commit_pending<F: Graftable + Bagging>(
     true
 }
 
-fn fuzz_family<F: Graftable + Bagging>(input: &FuzzInput, suffix_base: &str) {
+fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     if input.operations.is_empty() {
         return;
     }

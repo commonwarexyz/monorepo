@@ -11,7 +11,6 @@ use crate::{
             FixedValue, VariableValue,
         },
         current::BitmapPrunedBits,
-        Bagging,
     },
     translator::Translator,
     Context,
@@ -28,7 +27,7 @@ use commonware_utils::Array;
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] fixed::Db<F, E, K, V, H, T, N, S>
     where {
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
@@ -47,7 +46,7 @@ crate::qmdb::any::traits::impl_db_any! {
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] variable::Db<F, E, K, V, H, T, N, S>
     where {
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: VariableValue + 'static,
@@ -64,7 +63,7 @@ crate::qmdb::any::traits::impl_db_any! {
 // =============================================================================
 
 impl<
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -88,7 +87,7 @@ impl<
 }
 
 impl<
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: VariableValue,
@@ -120,7 +119,7 @@ where
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S] fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: FixedValue + 'static,
@@ -133,7 +132,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: FixedValue,
@@ -165,7 +164,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S]
     variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: VariableValue + 'static,
@@ -178,7 +177,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable + Bagging,
+        F: Graftable,
         E: Context,
         K: Array,
         V: VariableValue,

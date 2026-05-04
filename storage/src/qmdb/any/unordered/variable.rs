@@ -11,7 +11,7 @@ use crate::{
     qmdb::{
         any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Bagging, Error,
+        Error,
     },
     translator::Translator,
     Context,
@@ -36,15 +36,8 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
     S,
 >;
 
-impl<
-        F: Family + Bagging,
-        E: Context,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -72,7 +65,7 @@ pub mod partitioned {
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Bagging, Error,
+            Error,
         },
         translator::Translator,
         Context,
@@ -102,7 +95,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family + Bagging,
+            F: Family,
             E: Context,
             K: Key,
             V: VariableValue,

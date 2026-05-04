@@ -14,7 +14,6 @@ use crate::{
         any::{ordered::Update, ValueEncoding},
         current::proof::OperationProof,
         operation::Key,
-        Bagging,
     },
 };
 use commonware_cryptography::Digest;
@@ -33,8 +32,7 @@ pub mod variable;
 ///
 /// Verify using [Db::verify_exclusion_proof](fixed::Db::verify_exclusion_proof).
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProof<F: Graftable + Bagging, K: Key, V: ValueEncoding, D: Digest, const N: usize>
-{
+pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const N: usize> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
     KeyValue(OperationProof<F, D, N>, Update<K, V>),
@@ -63,7 +61,7 @@ pub mod tests {
             },
             current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
             store::tests::{TestKey, TestValue},
-            Bagging, Error,
+            Error,
         },
         translator::OneCap,
         Persistable,
@@ -92,7 +90,7 @@ pub mod tests {
     /// and verifies state is preserved across close/reopen cycles.
     pub fn test_build_small_close_reopen<F, C, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + Bagging,
+        F: Graftable,
         C: DbAny<F> + BitmapPrunedBits,
         C::Key: TestKey,
         <C as DbAny<F>>::Value: TestValue,
@@ -190,7 +188,7 @@ pub mod tests {
     pub(super) fn test_verify_proof_over_bits_in_uncommitted_chunk<F, C, V, Fn, Fut>(
         mut open_db: Fn,
     ) where
-        F: Graftable + Bagging,
+        F: Graftable,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -376,7 +374,7 @@ pub mod tests {
     /// proof, and that adding extra chunks causes verification to fail.
     pub(super) fn test_range_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + Bagging,
+        F: Graftable,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -461,7 +459,7 @@ pub mod tests {
     /// wrong keys, wrong values, wrong roots, and wrong next-keys.
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + Bagging,
+        F: Graftable,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -560,7 +558,7 @@ pub mod tests {
     /// value's proof fails.
     pub(super) fn test_proving_repeated_updates<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + Bagging,
+        F: Graftable,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
@@ -620,7 +618,7 @@ pub mod tests {
     /// wrong roots are rejected.
     pub(super) fn test_exclusion_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
-        F: Graftable + Bagging + PartialEq,
+        F: Graftable + PartialEq,
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
         Operation<F, Digest, V>: Codec,

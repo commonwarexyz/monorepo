@@ -5,6 +5,7 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
+        self,
         full::{self, Merkle},
         Bagging, Family, Location,
     },
@@ -24,7 +25,7 @@ use commonware_utils::range::NonEmptyRange;
 
 impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
-    F: Family + qmdb::Bagging,
+    F: Family,
     E: Context,
     V: ValueEncoding + Codec,
     C: Mutable<Item = Operation<F, V>>
@@ -43,7 +44,7 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    const ROOT_BAGGING: Bagging = <F as qmdb::Bagging>::BAGGING;
+    const ROOT_BAGGING: Bagging = merkle::Bagging::BackwardFold;
 
     /// Returns a [Keyless] db initialized from data collected in the sync process.
     ///
@@ -68,7 +69,7 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error<F>> {
-        let hasher = F::default_hasher::<H>();
+        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
 
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.with_label("merkle"),
@@ -125,7 +126,7 @@ where
 
 impl<F, E, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, V, H, Cfg, S>
 where
-    F: Family + qmdb::Bagging,
+    F: Family,
     E: Context,
     V: ValueEncoding + Codec,
     H: Hasher,
@@ -141,7 +142,7 @@ where
     type Context = E;
     type Hasher = H;
 
-    const ROOT_BAGGING: Bagging = <F as qmdb::Bagging>::BAGGING;
+    const ROOT_BAGGING: Bagging = merkle::Bagging::BackwardFold;
 
     async fn from_compact_state(
         context: Self::Context,
@@ -163,7 +164,7 @@ where
             Operation::<F, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let hasher = F::default_hasher::<H>();
+        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.with_label("merkle"),
             config.merkle,

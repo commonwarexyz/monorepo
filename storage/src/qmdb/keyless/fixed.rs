@@ -7,12 +7,12 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::Family,
+    merkle::{self, Family},
     qmdb::{
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Bagging, Error,
+        Error,
     },
 };
 use commonware_cryptography::Hasher;
@@ -38,7 +38,7 @@ pub type Config<S = Sequential> = super::Config<JournalConfig, S>;
 /// Configuration for a fixed-size [keyless](super) compact db.
 pub type CompactConfig<S = Sequential> = super::CompactConfig<(), S>;
 
-impl<F: Family + Bagging, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
     Db<F, E, V, H, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
@@ -49,14 +49,14 @@ impl<F: Family + Bagging, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher
             cfg.merkle,
             cfg.log,
             Operation::<F, V>::is_commit,
-            <F as Bagging>::BAGGING,
+            merkle::Bagging::BackwardFold,
         )
         .await?;
         Self::init_from_journal(journal).await
     }
 }
 
-impl<F: Family + Bagging, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
     CompactDb<F, E, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
@@ -109,11 +109,11 @@ mod test {
     type TestCompactDb<F> =
         CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
-    async fn open_db<F: Family + Bagging>(context: deterministic::Context) -> TestDb<F> {
+    async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
     }
 
-    async fn open_db_with_suffix<F: Family + Bagging>(
+    async fn open_db_with_suffix<F: Family>(
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
@@ -121,7 +121,7 @@ mod test {
         TestDb::init(context, cfg).await.unwrap()
     }
 
-    async fn open_compact<F: crate::merkle::Family + Bagging>(
+    async fn open_compact<F: crate::merkle::Family>(
         context: deterministic::Context,
     ) -> TestCompactDb<F> {
         let cfg = CompactConfig {
@@ -134,7 +134,7 @@ mod test {
         TestCompactDb::init(context, cfg).await.unwrap()
     }
 
-    fn reopen<F: Family + Bagging>() -> tests::Reopen<TestDb<F>> {
+    fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 
@@ -227,7 +227,7 @@ mod test {
         });
     }
 
-    async fn assert_compact_root_compatibility<F: crate::merkle::Family + Bagging>(
+    async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
         let mut db = open_db::<F>(ctx.with_label("db")).await;
