@@ -1,8 +1,4 @@
-use crate::{
-    ordered_broadcast::types::Context,
-    types::Height,
-    Automaton as A, Relay as R,
-};
+use crate::{ordered_broadcast::types::Context, types::Height, Automaton as A, Relay as R};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
 use commonware_utils::channel::oneshot;

@@ -830,7 +830,10 @@ mod tests {
             };
             let mut state = State::new(context, cfg);
 
-            assert_eq!(state.set_floor(Floor::finalized(finalization.clone())), Some(finalization));
+            assert_eq!(
+                state.set_floor(Floor::finalized(finalization.clone())),
+                Some(finalization)
+            );
             assert!(state.genesis.is_none());
             assert_eq!(state.last_finalized(), floor_view);
             assert_eq!(state.current_view(), floor_view.next());

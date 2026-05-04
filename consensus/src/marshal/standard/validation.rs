@@ -1,11 +1,8 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::{
-            validation::{
-                has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
-                Stage,
-            },
+        application::validation::{
+            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
         core::Mailbox,
         standard::Standard,

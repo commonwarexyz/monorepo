@@ -261,7 +261,7 @@ mod tests {
             reporter: reporter.clone(),
             partition: format!("voter_test_{me}"),
             epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+            floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
             mailbox_size: 128,
             leader_timeout,
             certification_timeout,

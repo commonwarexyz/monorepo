@@ -114,11 +114,9 @@ use commonware_runtime::{
     },
     Clock, Metrics, Spawner, Storage,
 };
-use commonware_utils::{
-    channel::{
-        fallible::OneshotExt,
-        oneshot::{self, error::RecvError},
-    },
+use commonware_utils::channel::{
+    fallible::OneshotExt,
+    oneshot::{self, error::RecvError},
 };
 #[cfg(test)]
 use commonware_utils::NZU16;
