@@ -7,7 +7,7 @@ use crate::{
     marshal::{
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock},
+            types::{coding_config_for_participants, hash_context, CodedBlock},
             Coding,
         },
         config::{Config, Start},
@@ -2671,6 +2671,17 @@ impl TestHarness for CodingHarness {
         genesis_commitment()
     }
 
+    fn genesis_block(_num_participants: u16) -> Self::TestBlock {
+        let inner = make_coding_genesis_block();
+        let commitment = Commitment::from((
+            inner.digest(),
+            inner.digest(),
+            hash_context::<Sha256, _>(&inner.context),
+            GENESIS_CODING_CONFIG,
+        ));
+        CodedBlock::new_trusted(inner, commitment)
+    }
+
     fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
         block.commitment()
     }
@@ -4828,8 +4839,9 @@ pub fn ancestry_stream<H: TestHarness>() {
         };
 
         // Finalize blocks at heights 1-5
-        let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let genesis = H::genesis_block(participants.len() as u16);
+        let mut parent = H::digest(&genesis);
+        let mut parent_commitment = H::commitment(&genesis);
         for i in 1..=5u64 {
             let block = H::make_test_block(
                 parent,
@@ -4857,14 +4869,14 @@ pub fn ancestry_stream<H: TestHarness>() {
             parent_commitment = commitment;
         }
 
-        // Stream from latest -> height 1
+        // Stream from latest -> height 0
         let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
         let ancestry = handle.mailbox.ancestry((None, commitment)).await.unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;
 
-        // Ensure correct delivery order: 5,4,3,2,1
-        assert_eq!(blocks.len(), 5);
-        (0..5).for_each(|i| {
+        // Ensure correct delivery order: 5,4,3,2,1,0
+        assert_eq!(blocks.len(), 6);
+        (0..6).for_each(|i| {
             assert_eq!(blocks[i].height().get(), 5 - i as u64);
         });
     })

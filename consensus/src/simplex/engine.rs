@@ -55,9 +55,9 @@ impl<
     > Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
+    pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
-        cfg.assert();
+        cfg.assert(&mut context);
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(

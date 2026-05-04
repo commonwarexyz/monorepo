@@ -10,6 +10,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
+use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Controls whether and how the engine proactively forwards certified blocks
@@ -51,6 +52,28 @@ impl<S: Scheme, D: Digest> Floor<S, D> {
     /// Returns a floor rooted at a finalized proposal.
     pub const fn finalized(finalization: Finalization<S, D>) -> Self {
         Self::Finalized(finalization)
+    }
+
+    fn assert<Rng>(&self, epoch: Epoch, rng: &mut Rng, scheme: &S, strategy: &impl Strategy)
+    where
+        Rng: CryptoRngCore,
+        S: super::scheme::Scheme<D>,
+    {
+        if let Self::Finalized(finalization) = self {
+            assert_eq!(
+                finalization.epoch(),
+                epoch,
+                "floor finalization must be in the configured epoch"
+            );
+            assert!(
+                !finalization.view().is_zero(),
+                "use Floor::Genesis for the genesis view"
+            );
+            assert!(
+                finalization.verify(rng, scheme, strategy),
+                "floor finalization must verify"
+            );
+        }
     }
 }
 
@@ -181,7 +204,13 @@ impl<
     > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
-    pub fn assert(&self) {
+    ///
+    /// The RNG is used to verify finalized floor certificates.
+    pub fn assert<Rng>(&self, rng: &mut Rng)
+    where
+        Rng: CryptoRngCore,
+        S: super::scheme::Scheme<D>,
+    {
         assert!(
             !self.scheme.participants().is_empty(),
             "there must be at least one participant"
@@ -222,16 +251,70 @@ impl<
             self.fetch_concurrent > 0,
             "it must be possible to fetch from at least one peer at a time"
         );
-        if let Floor::Finalized(finalization) = &self.floor {
-            assert_eq!(
-                finalization.epoch(),
-                self.epoch,
-                "floor finalization must be in the configured epoch"
-            );
-            assert!(
-                !finalization.view().is_zero(),
-                "use Floor::Genesis for the genesis view"
-            );
-        }
+        self.floor
+            .assert(self.epoch, rng, &self.scheme, &self.strategy);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::{
+            scheme::ed25519,
+            types::{Finalization, Finalize, Proposal},
+        },
+        types::{Round, View},
+    };
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{deterministic, Runner};
+
+    fn make_finalization<S>(schemes: &[S], verifier: &S) -> Finalization<S, Sha256Digest>
+    where
+        S: super::super::scheme::Scheme<Sha256Digest>,
+    {
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(7), View::new(3)),
+            View::new(2),
+            Sha256Digest::from([1u8; 32]),
+        );
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+
+        Finalization::from_finalizes(verifier, finalizes.iter(), &Sequential).unwrap()
+    }
+
+    #[test]
+    fn assert_accepts_verified_finalized_floor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"config-floor", 4);
+            let finalization = make_finalization(&schemes, &verifier);
+            let floor = Floor::finalized(finalization);
+
+            floor.assert(Epoch::new(7), &mut context, &verifier, &Sequential);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "floor finalization must verify")]
+    fn assert_rejects_unverified_finalized_floor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"config-floor", 4);
+            let Fixture {
+                verifier: wrong_verifier,
+                ..
+            } = ed25519::fixture(&mut context, b"config-floor-wrong", 4);
+            let finalization = make_finalization(&schemes, &verifier);
+            let floor = Floor::finalized(finalization);
+
+            floor.assert(Epoch::new(7), &mut context, &wrong_verifier, &Sequential);
+        });
     }
 }
