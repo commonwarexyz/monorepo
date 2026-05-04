@@ -338,14 +338,14 @@ where
     ///
     /// # Contract
     ///
-    /// When this database is configured with `split_root: true`, `historical_size` must be a
-    /// commit-boundary size: the operation at `historical_size - 1` must itself be a commit
-    /// op declaring the governing inactivity floor. With `split_root: false`, historical proof
-    /// roots do not depend on the floor and any retained `historical_size` works.
+    /// In split-root mode, `historical_size` must be a commit-boundary size: the operation at
+    /// `historical_size - 1` must itself be a commit op declaring the governing inactivity floor.
+    /// In plain-root mode, historical proof roots do not depend on the floor and any retained
+    /// `historical_size` works.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] (split_root only) if
+    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] in split-root mode if
     /// `historical_size - 1` is retained but is not a commit op, either because the caller
     /// passed a non-commit-boundary size or because pruning removed the commit that would
     /// have governed it.

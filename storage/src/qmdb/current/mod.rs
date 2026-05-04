@@ -301,8 +301,6 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
-            split_root: false,
-            root_bagging: Bagging::ForwardFold,
         }
     }
 }
@@ -357,7 +355,14 @@ where
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
-    let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
+    let any = any::init_with_bitmap(
+        context.with_label("any"),
+        config.into(),
+        Some(bitmap),
+        false,
+        Bagging::ForwardFold,
+    )
+    .await?;
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::new();

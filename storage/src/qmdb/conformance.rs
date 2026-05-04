@@ -11,7 +11,6 @@ use crate::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family},
     qmdb::{
-        self,
         any::{
             self,
             traits::{DbAny, UnmerkleizedBatch as _},
@@ -141,21 +140,16 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config<F: qmdb::Bagging>(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> any::FixedConfig<OneCap> {
+fn any_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> any::FixedConfig<OneCap> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
-        split_root: true,
-        root_bagging: <F as crate::qmdb::Bagging>::BAGGING,
     }
 }
 
-fn any_variable_config<F: qmdb::Bagging>(
+fn any_variable_config(
     suffix: &str,
     pooler: &impl BufferPooler,
 ) -> any::VariableConfig<OneCap, ((), ())> {
@@ -164,8 +158,6 @@ fn any_variable_config<F: qmdb::Bagging>(
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
-        split_root: true,
-        root_bagging: <F as crate::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -593,42 +585,34 @@ macro_rules! immutable_compact_conformance {
 keyed_conformance!(
     AnyMmrUnorderedFixedConf,
     AnyMmrUnorderedFixed,
-    any_fixed_config::<mmr::Family>
+    any_fixed_config
 );
 keyed_conformance!(
     AnyMmrUnorderedVariableConf,
     AnyMmrUnorderedVariable,
-    any_variable_config::<mmr::Family>
+    any_variable_config
 );
-keyed_conformance!(
-    AnyMmrOrderedFixedConf,
-    AnyMmrOrderedFixed,
-    any_fixed_config::<mmr::Family>
-);
+keyed_conformance!(AnyMmrOrderedFixedConf, AnyMmrOrderedFixed, any_fixed_config);
 keyed_conformance!(
     AnyMmrOrderedVariableConf,
     AnyMmrOrderedVariable,
-    any_variable_config::<mmr::Family>
+    any_variable_config
 );
 keyed_conformance!(
     AnyMmbUnorderedFixedConf,
     AnyMmbUnorderedFixed,
-    any_fixed_config::<mmb::Family>
+    any_fixed_config
 );
 keyed_conformance!(
     AnyMmbUnorderedVariableConf,
     AnyMmbUnorderedVariable,
-    any_variable_config::<mmb::Family>
+    any_variable_config
 );
-keyed_conformance!(
-    AnyMmbOrderedFixedConf,
-    AnyMmbOrderedFixed,
-    any_fixed_config::<mmb::Family>
-);
+keyed_conformance!(AnyMmbOrderedFixedConf, AnyMmbOrderedFixed, any_fixed_config);
 keyed_conformance!(
     AnyMmbOrderedVariableConf,
     AnyMmbOrderedVariable,
-    any_variable_config::<mmb::Family>
+    any_variable_config
 );
 keyed_conformance!(
     CurrentMmrUnorderedFixedConf,
@@ -949,49 +933,49 @@ macro_rules! order_test {
 order_test!(
     test_order_any_mmr_unordered_fixed,
     AnyMmrUnorderedFixed,
-    any_fixed_config::<mmr::Family>,
+    any_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmr_unordered_variable,
     AnyMmrUnorderedVariable,
-    any_variable_config::<mmr::Family>,
+    any_variable_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmr_ordered_fixed,
     AnyMmrOrderedFixed,
-    any_fixed_config::<mmr::Family>,
+    any_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmr_ordered_variable,
     AnyMmrOrderedVariable,
-    any_variable_config::<mmr::Family>,
+    any_variable_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmb_unordered_fixed,
     AnyMmbUnorderedFixed,
-    any_fixed_config::<mmb::Family>,
+    any_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmb_unordered_variable,
     AnyMmbUnorderedVariable,
-    any_variable_config::<mmb::Family>,
+    any_variable_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmb_ordered_fixed,
     AnyMmbOrderedFixed,
-    any_fixed_config::<mmb::Family>,
+    any_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
     test_order_any_mmb_ordered_variable,
     AnyMmbOrderedVariable,
-    any_variable_config::<mmb::Family>,
+    any_variable_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(

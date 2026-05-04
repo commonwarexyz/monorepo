@@ -49,6 +49,8 @@ where
     type Digest = H::Digest;
     type Context = E;
 
+    const ROOT_BAGGING: merkle::Bagging = <F as FamilyBagging>::BAGGING;
+
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
     /// # Behavior
@@ -141,10 +143,6 @@ where
     fn root(&self) -> Self::Digest {
         self.root()
     }
-
-    fn root_bagging(_config: &Self::Config) -> merkle::Bagging {
-        <F as FamilyBagging>::BAGGING
-    }
 }
 
 impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
@@ -165,6 +163,8 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
+
+    const ROOT_BAGGING: merkle::Bagging = <F as FamilyBagging>::BAGGING;
 
     async fn from_compact_state(
         context: Self::Context,
@@ -213,10 +213,6 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    fn root_bagging() -> merkle::Bagging {
-        <F as FamilyBagging>::BAGGING
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {

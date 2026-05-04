@@ -43,6 +43,8 @@ where
     type Digest = H::Digest;
     type Context = E;
 
+    const ROOT_BAGGING: Bagging = <F as qmdb::Bagging>::BAGGING;
+
     /// Returns a [Keyless] db initialized from data collected in the sync process.
     ///
     /// # Behavior
@@ -119,10 +121,6 @@ where
     fn root(&self) -> Self::Digest {
         self.root()
     }
-
-    fn root_bagging(_config: &Self::Config) -> Bagging {
-        <F as qmdb::Bagging>::BAGGING
-    }
 }
 
 impl<F, E, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, V, H, Cfg, S>
@@ -142,6 +140,8 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
+
+    const ROOT_BAGGING: Bagging = <F as qmdb::Bagging>::BAGGING;
 
     async fn from_compact_state(
         context: Self::Context,
@@ -190,10 +190,6 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    fn root_bagging() -> Bagging {
-        <F as qmdb::Bagging>::BAGGING
     }
 
     async fn persist_compact_state(&self) -> Result<(), qmdb::Error<F>> {

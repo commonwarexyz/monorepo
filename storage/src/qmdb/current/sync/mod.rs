@@ -256,6 +256,8 @@ macro_rules! impl_current_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
+            const ROOT_BAGGING: Bagging = Bagging::ForwardFold;
+
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -316,10 +318,6 @@ macro_rules! impl_current_sync_database {
             /// batches against the ops tree.
             fn root(&self) -> Self::Digest {
                 self.any.root()
-            }
-
-            fn root_bagging(_config: &Self::Config) -> Bagging {
-                Bagging::ForwardFold
             }
         }
     };

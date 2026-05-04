@@ -2243,7 +2243,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::test::fixed_db_config::<crate::mmr::Family, _>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
         fn create_ops(
@@ -2366,7 +2366,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::test::fixed_db_config::<crate::mmr::Family, _>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
         fn create_ops_seeded(
@@ -2503,7 +2503,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::test::fixed_db_config::<crate::mmr::Family, _>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
         fn create_ops(
@@ -2521,10 +2521,7 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let cfg = crate::qmdb::any::test::fixed_db_config::<crate::mmr::Family, TwoCap>(
-                &seed.to_string(),
-                &ctx,
-            );
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -2669,7 +2666,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::test::fixed_db_config::<crate::mmr::Family, _>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
         fn create_ops(
@@ -2689,10 +2686,7 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let cfg = crate::qmdb::any::test::fixed_db_config::<crate::mmr::Family, TwoCap>(
-                &seed.to_string(),
-                &ctx,
-            );
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -3021,113 +3015,3 @@ sync_tests_for_harness!(
     harnesses::UnorderedVariableMmbHarness,
     unordered_variable_mmb
 );
-
-/// Regression: sync preserves caller-selected ops-root bagging after later commits make the
-/// inactivity floor visible in the root.
-#[commonware_macros::test_traced("WARN")]
-fn test_any_sync_preserves_non_default_policy() {
-    use crate::{
-        merkle::{mmr, Bagging, Family as _},
-        qmdb::any::{ordered::fixed::Db as OrderedFixedDb, FixedConfig},
-        translator::TwoCap,
-    };
-
-    type Db = OrderedFixedDb<
-        mmr::Family,
-        deterministic::Context,
-        Digest,
-        Digest,
-        commonware_cryptography::Sha256,
-        TwoCap,
-    >;
-
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap> {
-        let mut cfg = crate::qmdb::any::test::fixed_db_config::<mmr::Family, _>(suffix, pooler);
-        // Non-default policy: full root with forward bagging (no inactive-prefix split).
-        cfg.split_root = false;
-        cfg.root_bagging = Bagging::ForwardFold;
-        cfg
-    }
-
-    /// Overwrite a small fixed key set with `version`-tagged values. Each pass retires the
-    /// previous version of the same keys, advancing the inactivity floor.
-    async fn churn(db: &mut Db, version: u64, key_count: u64) {
-        let mut batch = db.new_batch();
-        for k in 0..key_count {
-            let mut key_bytes = [0u8; 32];
-            key_bytes[..8].copy_from_slice(&k.to_be_bytes());
-            let mut value_bytes = [0u8; 32];
-            value_bytes[..8].copy_from_slice(&version.to_be_bytes());
-            value_bytes[8..16].copy_from_slice(&k.to_be_bytes());
-            batch = batch.write(Digest::from(key_bytes), Some(Digest::from(value_bytes)));
-        }
-        let merkleized = batch.merkleize(&*db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-    }
-
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        // Keep the initial workload small so the sync-time root has no inactive peaks.
-        let source_cfg = config("src", &context);
-        let mut source = Db::init(context.with_label("source"), source_cfg.clone())
-            .await
-            .unwrap();
-        churn(&mut source, 0, 8).await;
-
-        // Sync a replica.
-        let lower = source.sync_boundary();
-        let upper = source.bounds().await.end;
-        let sync_root = source.root();
-        let target_db = Arc::new(source);
-
-        let replica_cfg = config(&context.next_u64().to_string(), &context);
-        let engine_cfg = Config {
-            db_config: replica_cfg.clone(),
-            fetch_batch_size: NZU64!(4),
-            target: Target {
-                root: sync_root,
-                range: non_empty_range!(lower, upper),
-            },
-            context: context.with_label("client"),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let mut replica: Db = sync::sync(engine_cfg).await.unwrap();
-        let mut source =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("source still shared"));
-
-        // Roots must agree at sync completion.
-        assert_eq!(replica.root(), source.root());
-
-        // Drive enough overwrites for `inactive_peaks` to grow past zero.
-        for version in 1..40u64 {
-            churn(&mut source, version, 8).await;
-            churn(&mut replica, version, 8).await;
-        }
-
-        let inactive_peaks = mmr::Family::inactive_peaks(
-            mmr::Family::location_to_position(source.bounds().await.end),
-            source.inactivity_floor_loc(),
-        );
-        assert!(
-            inactive_peaks > 0,
-            "test setup must drive inactive_peaks > 0",
-        );
-
-        // Source and replica must still agree after the inactive boundary affects the root.
-        assert_eq!(
-            replica.root(),
-            source.root(),
-            "source and replica diverged after follow-on commits",
-        );
-
-        replica.destroy().await.unwrap();
-        source.destroy().await.unwrap();
-    });
-}

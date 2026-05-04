@@ -249,6 +249,9 @@ pub trait Database: Sized + Send {
     type Context: Storage + Clock + Metrics;
     type Hasher: Hasher<Digest = Self::Digest>;
 
+    /// Bagging policy used by this database when computing roots.
+    const ROOT_BAGGING: merkle::Bagging;
+
     /// Build a database from authenticated state in memory.
     ///
     /// The caller has already verified `last_commit_proof` against the requested target root, but
@@ -263,9 +266,6 @@ pub trait Database: Sized + Send {
 
     /// Get the root digest for final verification.
     fn root(&self) -> Self::Digest;
-
-    /// Bagging policy used by this database when computing roots.
-    fn root_bagging() -> merkle::Bagging;
 
     /// Persist the compact-initialized state once the caller has verified its root.
     fn persist_compact_state(
@@ -327,7 +327,7 @@ where
         }));
     }
 
-    let hasher = StandardHasher::<DB::Hasher>::with_bagging(DB::root_bagging());
+    let hasher = StandardHasher::<DB::Hasher>::with_bagging(DB::ROOT_BAGGING);
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     if !verify_proof(
         &hasher,

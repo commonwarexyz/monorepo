@@ -77,7 +77,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config<F: Bagging>(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
+fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
@@ -95,8 +95,6 @@ fn test_config<F: Bagging>(name: &str, pooler: &impl BufferPooler) -> Config<One
             page_cache,
         },
         translator: OneCap,
-        split_root: true,
-        root_bagging: <F as commonware_storage::qmdb::Bagging>::BAGGING,
     }
 }
 
@@ -116,7 +114,7 @@ fn fuzz_family<F: MerkleFamily + Bagging>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config::<F>(suffix, &context);
+        let cfg = test_config(suffix, &context);
         let mut db: Db<F> = Db::init(context.clone(), cfg)
             .await
             .expect("init unordered any db");
