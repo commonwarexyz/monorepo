@@ -24,3 +24,12 @@ pub mod log;
 mod runner;
 
 pub use runner::run;
+
+/// Index of the byzantine identity in `participants`. Fixed at the lowest
+/// position so every consumer (process-fault sampling in
+/// [`fault::sample`]; sender selection / interception / injector key /
+/// invariant exclusion in [`runner::run`]) reads from a single source of
+/// truth. Several call sites encode this assumption (notably the sampler,
+/// which builds its candidate receiver set as `participants[1..]`);
+/// changing this value requires auditing them.
+pub(crate) const BYZANTINE_IDX: usize = 0;

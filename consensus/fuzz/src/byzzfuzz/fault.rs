@@ -23,33 +23,20 @@ pub struct ProcessFault<P: PublicKey> {
 
 /// Sample a process-fault schedule of `count` faults distributed uniformly
 /// over `[min_view, max_view]`. Receivers are a uniform random subset of
-/// `participants \ {byzantine_idx}` -- including the empty subset, which the
-/// paper permits.
+/// `participants[1..]` -- the paper's `randomSubsetOf(P)`, restricted by
+/// the harness invariant that participant 0 is the byzantine identity
+/// (the rationale for excluding it lives on `super::BYZANTINE_IDX`).
 pub fn sample<P: PublicKey>(
     count: u64,
     min_view: u64,
     max_view: u64,
     participants: &[P],
-    byzantine_idx: usize,
     rng: &mut impl Rng,
 ) -> Vec<ProcessFault<P>> {
     if count == 0 || max_view < min_view {
         return Vec::new();
     }
-    // Exclude the intercepted byzantine identity from its own receiver
-    // subset. The paper's `randomSubsetOf(P)` is over abstract process
-    // identities under a separate interception layer; in this harness the
-    // byzantine process is a real honest engine plus outbound mutation, so
-    // a self-targeted mutated delivery would loop back into that local
-    // engine -- exercising a deployment artifact rather than a
-    // network-delivered ByzzFuzz fault. Do not "fix" this back to `P` for
-    // paper literalness.
-    let candidates: Vec<P> = participants
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| *idx != byzantine_idx)
-        .map(|(_, pk)| pk.clone())
-        .collect();
+    let candidates: Vec<P> = participants.iter().skip(1).cloned().collect();
     if candidates.is_empty() {
         return Vec::new();
     }

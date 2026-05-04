@@ -35,10 +35,7 @@ use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, FuzzRng};
 use futures::future::join_all;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-/// Maximum virtual time `run` waits for finalization before giving up.
-/// Adversarial schedules can prevent finalization indefinitely; this bound
-/// guarantees `run` always returns so the fuzzer can move on.
-const LIVENESS_BUDGET: Duration = Duration::from_secs(60);
+use super::BYZANTINE_IDX;
 
 /// Sample a process-fault schedule. Number of faults and view range are
 /// derived from `strategy` mirroring the network/messaging dispatchers in
@@ -47,7 +44,6 @@ fn process_faults<P: CryptoPublicKey>(
     strategy: StrategyChoice,
     required_containers: u64,
     participants: &[P],
-    byzantine_idx: usize,
     rng: &mut impl rand::Rng,
 ) -> Vec<ProcessFault<P>> {
     let (count, min_view, max_view) = match strategy {
@@ -77,7 +73,7 @@ fn process_faults<P: CryptoPublicKey>(
             (d, start, required_containers.max(start))
         }
     };
-    fault::sample(count, min_view, max_view, participants, byzantine_idx, rng)
+    fault::sample(count, min_view, max_view, participants, rng)
 }
 
 /// Closed-set enum over the three strategy-keyed [`ByzzFuzzInjector`]
@@ -174,8 +170,6 @@ where
         let network_schedule_vec =
             network_faults(input.strategy, input.required_containers, &mut context);
 
-        let byzantine_idx = 0usize;
-
         let (oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
 
@@ -183,13 +177,12 @@ where
             input.strategy,
             input.required_containers,
             &participants,
-            byzantine_idx,
             &mut context,
         );
 
         log::push(format!(
             "byzzfuzz schedule: byzantine_idx={} required_containers={} strategy={:?} network_faults={:?} proc_faults={:?}",
-            byzantine_idx,
+            BYZANTINE_IDX,
             input.required_containers,
             input.strategy,
             network_schedule_vec,
@@ -223,7 +216,7 @@ where
             let (cert_sender, cert_receiver) = cert_chan;
             let (resolver_sender, resolver_receiver) = resolver_chan;
 
-            if i == byzantine_idx {
+            if i == BYZANTINE_IDX {
                 injector_vote_sender = Some(vote_sender.clone());
                 injector_cert_sender = Some(cert_sender.clone());
                 injector_resolver_sender = Some(resolver_sender.clone());
@@ -240,12 +233,12 @@ where
             // Non-byzantine senders see an empty procFault schedule -> the
             // forwarder degenerates to partition-only filtering. Same closure
             // type for all four senders -> no opaque-type mismatch.
-            let proc_for_sender = if i == byzantine_idx {
+            let proc_for_sender = if i == BYZANTINE_IDX {
                 proc_schedule_arc.clone()
             } else {
                 empty_proc_schedule.clone()
             };
-            let intercept_for_sender = if i == byzantine_idx {
+            let intercept_for_sender = if i == BYZANTINE_IDX {
                 Some(intercept_tx.clone())
             } else {
                 None
@@ -329,7 +322,7 @@ where
         // arrive and the injector exits as soon as `intercept_tx` is dropped.
         let injector_ctx = context.with_label("byzzfuzz_injector");
         let injector =
-            InjectorChoice::<P>::build(injector_ctx, schemes[byzantine_idx].clone(), input.strategy);
+            InjectorChoice::<P>::build(injector_ctx, schemes[BYZANTINE_IDX].clone(), input.strategy);
         injector.start(
             injector_vote_sender.expect("byzantine vote sender cloned"),
             injector_cert_sender.expect("byzantine cert sender cloned"),
@@ -337,37 +330,29 @@ where
             intercept_rx,
         );
 
-        // Liveness wait, bounded so adversarial schedules cannot block forever.
-        if config.is_valid() {
-            let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
-                let required_containers = input.required_containers;
-                let (mut latest, mut monitor): (View, ViewReceiver<View>) =
-                    reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
-                        let Some(next) = monitor.recv().await else {
-                            return;
-                        };
-                        latest = next;
-                    }
-                }));
-            }
-            select! {
-                _ = join_all(finalizers) => {},
-                _ = context.sleep(LIVENESS_BUDGET) => {},
-            }
-        } else {
-            context.sleep(MAX_SLEEP_DURATION).await;
+        let mut finalizers = Vec::new();
+        for reporter in reporters.iter_mut() {
+            let required_containers = input.required_containers;
+            let (mut latest, mut monitor): (View, ViewReceiver<View>) = reporter.subscribe().await;
+            finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                while latest.get() < required_containers {
+                    let Some(next) = monitor.recv().await else {
+                        return;
+                    };
+                    latest = next;
+                }
+            }));
         }
 
-        if config.is_valid() {
-            // Index 0 is intentionally byzantine via the injector; exclude it
-            // from the equivocation invariant.
-            let byzantine: HashSet<usize> = [byzantine_idx].into_iter().collect();
-            invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
-            let states = invariants::extract(reporters, config.n as usize);
-            invariants::check::<P>(config.n, states);
+        select! {
+          _ = join_all(finalizers) => {},
+          _ = context.sleep(MAX_SLEEP_DURATION) => {},
         }
+
+        // Exclude the byzantine replica from the equivocation invariant.
+        let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
+        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
+        let states = invariants::extract(reporters, config.n as usize);
+        invariants::check::<P>(config.n, states);
     });
 }
