@@ -64,11 +64,6 @@ impl Array {
         self.values.is_empty()
     }
 
-    /// Returns whether the container is at maximum capacity.
-    pub const fn is_full(&self) -> bool {
-        self.values.len() >= MAX_CARDINALITY
-    }
-
     /// Checks if the container contains the given value.
     pub fn contains(&self, value: u16) -> bool {
         self.values.binary_search(&value).is_ok()
@@ -80,8 +75,8 @@ impl Array {
     ///
     /// # Note
     ///
-    /// After insertion, check [`is_full`](Self::is_full) to determine if the
-    /// container should be converted to a `Bitmap`.
+    /// After insertion, convert to `Bitmap` if the cardinality exceeds
+    /// [`MAX_CARDINALITY`].
     pub fn insert(&mut self, value: u16) -> bool {
         match self.values.binary_search(&value) {
             Ok(_) => false,
@@ -98,8 +93,8 @@ impl Array {
     ///
     /// # Note
     ///
-    /// After insertion, check [`is_full`](Self::is_full) to determine if the
-    /// container should be converted to a `Bitmap`.
+    /// After insertion, convert to `Bitmap` if the cardinality exceeds
+    /// [`MAX_CARDINALITY`].
     pub fn insert_range(&mut self, start: u16, end: u16) -> usize {
         if start >= end {
             return 0;
@@ -459,22 +454,17 @@ impl Read for Array {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Array {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Generate sorted unique values by partitioning the remaining u16 space.
-        // For each value, we compute the maximum increment that still allows
-        // room for all remaining values, then pick a random increment in [1, max].
-        // This ensures values are strictly increasing without gaps or overflow.
         let len = u.int_in_range(0..=MAX_CARDINALITY)?;
         let mut values = Vec::with_capacity(len);
-        let mut prev = 0u16;
+        let mut min = 0u32;
         for i in 0..len {
-            let max_increment = (u16::MAX - prev) / (len - i) as u16;
-            if max_increment == 0 {
-                break;
-            }
-            let increment = u.int_in_range(1..=max_increment)?;
-            prev = prev.saturating_add(increment);
-            values.push(prev);
+            let remaining = len - i - 1;
+            let max = u16::MAX as u32 - remaining as u32;
+            let value = u.int_in_range(min..=max)? as u16;
+            values.push(value);
+            min = value as u32 + 1;
         }
+
         Ok(Self::from_sorted_vec(values))
     }
 }
@@ -488,7 +478,6 @@ mod tests {
         let container = Array::new();
         assert!(container.is_empty());
         assert_eq!(container.len(), 0);
-        assert!(!container.is_full());
     }
 
     #[test]
@@ -556,13 +545,6 @@ mod tests {
 
         assert_eq!(container.min(), Some(10));
         assert_eq!(container.max(), Some(100));
-    }
-
-    #[test]
-    fn test_is_full() {
-        let values: Vec<u16> = (0..MAX_CARDINALITY as u16).collect();
-        let container = Array::from_sorted_vec(values);
-        assert!(container.is_full());
     }
 
     #[test]

@@ -421,21 +421,18 @@ impl arbitrary::Arbitrary<'_> for Run {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let num_runs = u.int_in_range(0..=MAX_RUNS)?;
         let mut runs: Vec<(u16, u16)> = Vec::new();
-        let mut prev_end = 0u16;
+        let mut prev_end: Option<u16> = None;
 
         for _ in 0..num_runs {
-            if prev_end == u16::MAX {
+            let min_start = prev_end.map_or(0, |end| end as u32 + 2);
+            if min_start > u16::MAX as u32 {
                 break;
             }
-            // Leave a gap of at least 2 between runs (non-adjacent invariant).
-            let min_start = prev_end.saturating_add(2);
-            if min_start == u16::MAX {
-                break;
-            }
-            let start = u.int_in_range(min_start..=u16::MAX)?;
+
+            let start = u.int_in_range(min_start..=u16::MAX as u32)? as u16;
             let end = u.int_in_range(start..=u16::MAX)?;
             runs.push((start, end));
-            prev_end = end;
+            prev_end = Some(end);
         }
 
         Ok(Self { runs })
@@ -754,6 +751,27 @@ mod tests {
         assert!(
             matches!(result, Err(CodecError::Invalid("Run", _))),
             "expected Invalid(\"Run\", ...) error, got {result:?}"
+        );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn test_arbitrary_can_generate_run_starting_at_zero() {
+        let mut u = arbitrary::Unstructured::new(&[0, 1, 0, 0, 0, 5]);
+        let run = <Run as arbitrary::Arbitrary>::arbitrary(&mut u).unwrap();
+
+        assert_eq!(run.runs().collect::<Vec<_>>(), vec![(0, 5)]);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn test_arbitrary_can_generate_trailing_max_singleton() {
+        let mut u = arbitrary::Unstructured::new(&[0, 2, 0, 0, 0xff, 0xfd]);
+        let run = <Run as arbitrary::Arbitrary>::arbitrary(&mut u).unwrap();
+
+        assert_eq!(
+            run.runs().collect::<Vec<_>>(),
+            vec![(0, u16::MAX - 2), (u16::MAX, u16::MAX)]
         );
     }
 

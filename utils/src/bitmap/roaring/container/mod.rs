@@ -107,7 +107,7 @@ impl Container {
         match self {
             Self::Array(a) => {
                 let inserted = a.insert(value);
-                if a.is_full() {
+                if a.len() > array::MAX_CARDINALITY {
                     self.convert_array_to_bitmap();
                 }
                 inserted
@@ -615,6 +615,20 @@ mod tests {
         // Should have converted to bitmap.
         assert!(matches!(container, Container::Bitmap(_)));
         assert_eq!(container.len(), (array::MAX_CARDINALITY + 1) as u32);
+    }
+
+    #[test]
+    fn test_array_stays_array_at_max_cardinality() {
+        let mut container = Container::new();
+
+        for i in 0..array::MAX_CARDINALITY as u16 {
+            assert!(container.insert(i * 2));
+        }
+
+        assert!(matches!(container, Container::Array(_)));
+        assert_eq!(container.len(), array::MAX_CARDINALITY as u32);
+        assert!(!container.insert(0));
+        assert!(matches!(container, Container::Array(_)));
     }
 
     #[test]
