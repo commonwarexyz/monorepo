@@ -117,8 +117,6 @@ pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
-///
-/// The operations root uses split-root mode with backward-fold active bagging.
 pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
     cfg: Config<T, J::Config, S>,
@@ -134,29 +132,15 @@ where
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(
-        context,
-        cfg,
-        None,
-        true,
-        Bagging::BackwardFold,
-    )
-    .await
+    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
-///
-/// `split_root` selects whether the operations root commits to the inactive-prefix split, and
-/// `ops_root_bagging` selects its bagging policy. Public `Any` initialization uses split roots
-/// with backward-fold active bagging; `current::Db` passes a plain `ForwardFold` operations root
-/// because activity is committed through the grafted root instead.
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
     cfg: Config<T, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
-    split_root: bool,
-    ops_root_bagging: Bagging,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -174,7 +158,7 @@ where
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
-        ops_root_bagging,
+        Bagging::BackwardFold,
     )
     .await?;
 
@@ -186,7 +170,7 @@ where
     }
 
     let index = I::new(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap, split_root).await
+    db::Db::init_from_log(index, log, bitmap).await
 }
 
 #[cfg(test)]

@@ -49,8 +49,6 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
-
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
     /// # Behavior
@@ -163,8 +161,6 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
-
-    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
     async fn from_compact_state(
         context: Self::Context,

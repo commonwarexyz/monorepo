@@ -148,9 +148,7 @@ where
         .map_err(|_| qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(qmdb::bitmap::Shared::<N>::new(bitmap));
 
-    // `current` always uses split bagging at the underlying ops tree.
-    let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), true).await?;
+    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(index, log, Some(bitmap)).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -261,7 +259,6 @@ macro_rules! impl_current_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-            const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
             async fn from_sync_result(
                 context: Self::Context,

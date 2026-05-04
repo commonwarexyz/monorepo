@@ -925,7 +925,8 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> =
+                StandardHasher::with_bagging(Bagging::BackwardFold);
             let grafting_height = grafting::height::<N>();
 
             let leaf_count = (16..=64u64)
@@ -1260,7 +1261,8 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> =
+                StandardHasher::with_bagging(Bagging::BackwardFold);
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -1353,7 +1355,8 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> =
+                StandardHasher::with_bagging(Bagging::BackwardFold);
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -1517,7 +1520,8 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> =
+                StandardHasher::with_bagging(Bagging::BackwardFold);
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
             let leaf_count = chunk_bits;

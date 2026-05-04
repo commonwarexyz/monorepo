@@ -1190,8 +1190,7 @@ mod tests {
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
 
-            let mut hasher =
-                StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let mut hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();

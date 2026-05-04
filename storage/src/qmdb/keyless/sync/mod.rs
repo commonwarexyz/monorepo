@@ -7,7 +7,7 @@ use crate::{
     merkle::{
         self,
         full::{self, Merkle},
-        Bagging, Family, Location,
+        Family, Location,
     },
     qmdb::{
         self,
@@ -43,8 +43,6 @@ where
     type Config = super::Config<C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
-
-    const ROOT_BAGGING: Bagging = merkle::Bagging::BackwardFold;
 
     /// Returns a [Keyless] db initialized from data collected in the sync process.
     ///
@@ -141,8 +139,6 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
-
-    const ROOT_BAGGING: Bagging = merkle::Bagging::BackwardFold;
 
     async fn from_compact_state(
         context: Self::Context,

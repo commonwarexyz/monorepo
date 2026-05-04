@@ -355,15 +355,7 @@ where
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(crate::qmdb::bitmap::Shared::<N>::new(bitmap));
 
-    // `current` always uses split bagging at the underlying ops tree.
-    let any = any::init_with_bitmap(
-        context.with_label("any"),
-        config.into(),
-        Some(bitmap),
-        true,
-        Bagging::BackwardFold,
-    )
-    .await?;
+    let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);

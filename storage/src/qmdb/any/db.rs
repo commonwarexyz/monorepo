@@ -79,9 +79,6 @@ pub struct Db<
     /// Cached operations root for this database.
     pub(crate) root: H::Digest,
 
-    /// Whether the operations root uses inactive-prefix split semantics.
-    pub(crate) split_root: bool,
-
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location<F>,
@@ -161,16 +158,11 @@ where
     }
 
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
-    ///
-    /// Returns 0 when `split_root` is false (the boundary is not committed in that case).
     pub(crate) fn inactive_peaks(
         &self,
         leaves: Location<F>,
         inactivity_floor: Location<F>,
     ) -> usize {
-        if !self.split_root {
-            return 0;
-        }
         F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
     }
 
@@ -338,17 +330,14 @@ where
     ///
     /// # Contract
     ///
-    /// In split-root mode, `historical_size` must be a commit-boundary size: the operation at
-    /// `historical_size - 1` must itself be a commit op declaring the governing inactivity floor.
-    /// In plain-root mode, historical proof roots do not depend on the floor and any retained
-    /// `historical_size` works.
+    /// `historical_size` must be a commit-boundary size: the operation at `historical_size - 1`
+    /// must itself be a commit op declaring the governing inactivity floor.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] in split-root mode if
-    /// `historical_size - 1` is retained but is not a commit op, either because the caller
-    /// passed a non-commit-boundary size or because pruning removed the commit that would
-    /// have governed it.
+    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
+    /// but is not a commit op, either because the caller passed a non-commit-boundary size or
+    /// because pruning removed the commit that would have governed it.
     pub async fn historical_proof(
         &self,
         historical_size: Location<F>,
@@ -361,14 +350,12 @@ where
             ));
         }
 
-        let inactivity_floor = if self.split_root {
+        let inactivity_floor = {
             let reader = self.log.reader().await;
             crate::qmdb::find_inactivity_floor_at::<F, _>(&reader, historical_size, |op| {
                 op.has_floor()
             })
             .await?
-        } else {
-            Location::new(0)
         };
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
@@ -579,7 +566,6 @@ where
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
-        split_root: bool,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
@@ -658,20 +644,15 @@ where
             ));
         }
 
-        let inactive_peaks = if split_root {
-            F::inactive_peaks(
-                F::location_to_position(log.merkle.leaves()),
-                inactivity_floor_loc,
-            )
-        } else {
-            0
-        };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(log.merkle.leaves()),
+            inactivity_floor_loc,
+        );
         let root = log.root(inactive_peaks)?;
 
         Ok(Self {
             log,
             root,
-            split_root,
             inactivity_floor_loc,
             snapshot: index,
             last_commit_loc,

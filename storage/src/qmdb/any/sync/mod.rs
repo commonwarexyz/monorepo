@@ -129,7 +129,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None, true).await?;
+    let db = Db::init_from_log(index, log, None).await?;
 
     Ok(db)
 }
@@ -158,7 +158,6 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-            const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
             async fn from_sync_result(
                 context: Self::Context,

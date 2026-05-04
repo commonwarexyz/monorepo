@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{hasher::Standard as StandardHasher, Family, Location},
+    merkle::{self, hasher::Standard as StandardHasher, Family, Location},
     qmdb::{
         self,
         sync::{
@@ -332,7 +332,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::with_bagging(DB::ROOT_BAGGING),
+            hasher: StandardHasher::<DB::Hasher>::with_bagging(merkle::Bagging::BackwardFold),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
