@@ -18,10 +18,13 @@ use commonware_utils::{
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
-/// A responder waiting for a message.
-struct Waiter<M> {
-    /// The responder to send the message to.
-    responder: oneshot::Sender<M>,
+/// A responder waiting for a digest.
+enum Waiter<M> {
+    /// A subscriber waiting for the full message.
+    Message(oneshot::Sender<M>),
+
+    /// A subscriber waiting only for digest availability.
+    Availability(oneshot::Sender<()>),
 }
 
 /// Result of buffering an incoming or locally sent digest (inserted, duplicate, or ineligible).
@@ -71,7 +74,7 @@ where
     /// The mailbox for receiving messages.
     mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
-    /// Pending requests from the application.
+    /// Pending subscriptions from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
 
     /// Provider for peer set changes.
@@ -164,7 +167,7 @@ where
             on_start => {
                 // Cleanup waiters
                 self.cleanup_waiters();
-                let _ = self.metrics.waiters.try_set(self.waiters.len());
+                let _ = self.metrics.waiters.try_set(self.waiter_digests());
             },
             on_stopped => {
                 debug!("shutdown");
@@ -195,9 +198,17 @@ where
                     trace!("mailbox: subscribe");
                     self.handle_subscribe(digest, responder);
                 }
+                Message::SubscribeAvailable { digest, responder } => {
+                    trace!("mailbox: subscribe available");
+                    self.handle_subscribe_available(digest, responder);
+                }
                 Message::Get { digest, responder } => {
                     trace!("mailbox: get");
                     self.handle_get(digest, responder);
+                }
+                Message::Has { digest, responder } => {
+                    trace!("mailbox: has");
+                    self.handle_has(digest, responder);
                 }
             },
             // Handle incoming messages
@@ -270,13 +281,43 @@ where
         self.waiters
             .entry(digest)
             .or_default()
-            .push(Waiter { responder });
+            .push(Waiter::Message(responder));
+    }
+
+    /// Handles a `subscribe available` request from the application.
+    ///
+    /// If the message is already in the cache, the responder is immediately notified.
+    /// Otherwise, the responder is stored in the waiters list.
+    fn handle_subscribe_available(&mut self, digest: M::Digest, responder: oneshot::Sender<()>) {
+        if self.items.contains_key(&digest) {
+            self.respond_subscribe_available(responder);
+            return;
+        }
+
+        self.waiters
+            .entry(digest)
+            .or_default()
+            .push(Waiter::Availability(responder));
     }
 
     /// Handles a `get` request from the application.
     fn handle_get(&mut self, digest: M::Digest, responder: oneshot::Sender<Option<M>>) {
         let item = self.items.get(&digest).cloned();
         self.respond_get(responder, item);
+    }
+
+    /// Handles a `has` request from the application.
+    fn handle_has(&mut self, digest: M::Digest, responder: oneshot::Sender<bool>) {
+        let found = self.items.contains_key(&digest);
+        self.metrics.get.inc(if responder.send_lossy(found) {
+            if found {
+                Status::Success
+            } else {
+                Status::Failure
+            }
+        } else {
+            Status::Dropped
+        });
     }
 
     /// Handles a message that was received from a peer.
@@ -309,7 +350,14 @@ where
         // Send the message to the waiters, if any
         if let Some(waiters) = self.waiters.remove(&digest) {
             for waiter in waiters {
-                self.respond_subscribe(waiter.responder, msg.clone());
+                match waiter {
+                    Waiter::Message(responder) => {
+                        self.respond_subscribe(responder, msg.clone());
+                    }
+                    Waiter::Availability(responder) => {
+                        self.respond_subscribe_available(responder);
+                    }
+                }
             }
         }
 
@@ -379,23 +427,48 @@ where
     /// Remove all waiters that have dropped receivers.
     fn cleanup_waiters(&mut self) {
         self.waiters.retain(|_, waiters| {
-            let initial_len = waiters.len();
-            waiters.retain(|waiter| !waiter.responder.is_closed());
-            let dropped_count = initial_len - waiters.len();
+            let mut dropped_message_waiters = 0;
+            let mut dropped_availability_waiters = 0;
+            waiters.retain(|waiter| {
+                let is_closed = waiter.is_closed();
+                if is_closed {
+                    match waiter {
+                        Waiter::Message(_) => dropped_message_waiters += 1,
+                        Waiter::Availability(_) => dropped_availability_waiters += 1,
+                    }
+                }
+                !is_closed
+            });
 
-            // Increment metrics for each dropped waiter
-            for _ in 0..dropped_count {
+            for _ in 0..dropped_message_waiters {
                 self.metrics.get.inc(Status::Dropped);
+            }
+            for _ in 0..dropped_availability_waiters {
+                self.metrics.subscribe.inc(Status::Dropped);
             }
 
             !waiters.is_empty()
         });
     }
 
+    /// Count the number of digests with at least one pending waiter.
+    fn waiter_digests(&self) -> usize {
+        self.waiters.len()
+    }
+
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
     fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
         self.metrics.subscribe.inc(if responder.send_lossy(msg) {
+            Status::Success
+        } else {
+            Status::Dropped
+        });
+    }
+
+    /// Respond to an availability waiter.
+    fn respond_subscribe_available(&mut self, responder: oneshot::Sender<()>) {
+        self.metrics.subscribe.inc(if responder.send_lossy(()) {
             Status::Success
         } else {
             Status::Dropped
@@ -415,6 +488,16 @@ where
         } else {
             Status::Dropped
         });
+    }
+}
+
+impl<M> Waiter<M> {
+    /// Whether the waiter has already dropped its receiver.
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Message(responder) => responder.is_closed(),
+            Self::Availability(responder) => responder.is_closed(),
+        }
     }
 }
 

@@ -98,6 +98,17 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         digest: <V::Block as Digestible>::Digest,
     ) -> impl Future<Output = Option<Self::CachedBlock>> + Send;
 
+    /// Check whether a block is immediately available by digest.
+    ///
+    /// This is a non-blocking existence check that does not materialize the block
+    /// when the buffer can answer more cheaply than `find_by_digest`.
+    fn has_by_digest(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> impl Future<Output = bool> + Send {
+        async move { self.find_by_digest(digest).await.is_some() }
+    }
+
     /// Attempt to find a block by its commitment.
     ///
     /// Returns `Some(block)` if the block is immediately available in the buffer,
@@ -121,6 +132,17 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         &self,
         digest: <V::Block as Digestible>::Digest,
     ) -> impl Future<Output = oneshot::Receiver<Self::CachedBlock>> + Send;
+
+    /// Subscribe to a block's availability by its digest without fetching the block.
+    ///
+    /// Returns a receiver that will resolve when the block becomes available.
+    /// If the block is already cached, the receiver may resolve immediately.
+    ///
+    /// The returned receiver can be dropped to cancel the subscription.
+    fn subscribe_available_by_digest(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> impl Future<Output = oneshot::Receiver<()>> + Send;
 
     /// Subscribe to a block's availability by its commitment.
     ///

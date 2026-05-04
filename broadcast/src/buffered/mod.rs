@@ -275,6 +275,66 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_availability_subscription() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.clone(), 1, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailbox = mailboxes.get(&peers[0]).unwrap().clone();
+
+            let message = TestMessage::shared(b"availability");
+            let digest = message.digest();
+
+            assert!(!mailbox.has(digest).await);
+
+            let available_before = mailbox.subscribe_available(digest).await;
+            let result = mailbox.broadcast(Recipients::All, message).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
+
+            available_before
+                .await
+                .expect("pre-broadcast availability subscription failed");
+            assert!(mailbox.has(digest).await);
+
+            let available_after = mailbox.subscribe_available(digest).await;
+            let start = context.current();
+            available_after
+                .await
+                .expect("post-broadcast availability subscription failed");
+            let duration = context.current().duration_since(start).unwrap();
+            assert!(duration < A_JIFFY, "availability should resolve immediately");
+        });
+    }
+
+    #[test_traced]
+    fn test_message_and_availability_subscriptions_share_digest_waiters() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.clone(), 1, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailbox = mailboxes.get(&peers[0]).unwrap().clone();
+
+            let message = TestMessage::shared(b"message-and-availability");
+            let digest = message.digest();
+
+            let available = mailbox.subscribe_available(digest).await;
+            let subscribed = mailbox.subscribe(digest).await;
+            let result = mailbox.broadcast(Recipients::All, message.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
+
+            available
+                .await
+                .expect("availability subscription should resolve");
+            let resolved = subscribed
+                .await
+                .expect("message subscription should resolve");
+            assert_eq!(resolved, message);
+        });
+    }
+
+    #[test_traced]
     fn test_packet_loss() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {

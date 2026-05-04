@@ -76,6 +76,16 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
+    /// A request to subscribe to block availability by digest.
+    SubscribeAvailableByDigest {
+        /// The round in which the block was notarized. This is an optimization
+        /// to help locate the block.
+        round: Option<Round>,
+        /// The digest of the block to check.
+        digest: <V::Block as Digestible>::Digest,
+        /// A channel to notify once the block is available.
+        response: oneshot::Sender<()>,
+    },
     /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
         /// The round in which the block was notarized. This is an optimization
@@ -257,6 +267,30 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send_lossy(Message::SubscribeByDigest {
+                round,
+                digest,
+                response: tx,
+            })
+            .await;
+        rx
+    }
+
+    /// Subscribe to block availability by its digest.
+    ///
+    /// If the block is already available locally, the receiver resolves immediately.
+    /// Otherwise, the request will be registered and the caller will be notified when the
+    /// block becomes available. If the block is not finalized, it's possible that it may
+    /// never become available.
+    ///
+    /// The oneshot receiver should be dropped to cancel the subscription.
+    pub async fn subscribe_available_by_digest(
+        &self,
+        round: Option<Round>,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send_lossy(Message::SubscribeAvailableByDigest {
                 round,
                 digest,
                 response: tx,

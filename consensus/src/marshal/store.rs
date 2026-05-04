@@ -130,6 +130,16 @@ pub trait Blocks: Send + Sync + 'static {
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
+    /// Check whether a finalized block exists by height or block digest.
+    ///
+    /// Implementations may answer this more cheaply than [`Self::get`].
+    fn has(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+        async move { self.get(id).await.map(|block| block.is_some()) }
+    }
+
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// # Arguments
@@ -258,6 +268,13 @@ where
         <Self as Archive>::get(self, id).await
     }
 
+    async fn has(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, id).await
+    }
+
     async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(())
@@ -349,6 +366,13 @@ where
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
+    }
+
+    async fn has(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, id).await
     }
 
     async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
