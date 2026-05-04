@@ -1430,42 +1430,27 @@ impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
-/// **Byzzfuzz mode** - faithful realization of the ByzzFuzz fault model
-/// (Algorithm 1 in the paper). Implementation lives in [`byzzfuzz`].
+/// **Byzzfuzz mode** - the ByzzFuzz fuzzing model (https://gleissen.github.io/papers/byzzfuzz.pdf).
 ///
-/// Runs **4 honest engines** -- no `Disrupter`, no twin halves -- and
-/// installs a per-message strict-replace interception layer on every
-/// validator's outgoing channels:
+/// Runs 4 honest engines and layers two adversarial axes on top, both
+/// derived from `input.strategy`:
+/// - **Network faults**: a round-indexed schedule of set partitions over
+///   `{0..n}`. While a partition is active, traffic across blocks is
+///   dropped on every protocol channel (vote, certificate, resolver).
+///   Outside scheduled rounds the topology is fully connected.
+/// - **Process faults**: a fixed byzantine identity, whose outgoing
+///   protocol messages are intercepted and replaced (or omitted) per a
+///   round-indexed schedule of `(round, receivers, seed)` triples.
+///   Replacements are mutations of the *actual* intercepted message: vote
+///   variants are re-signed under the byzantine identity; certificate and
+///   resolver bytes are mutated in place.
 ///
-/// - **Network faults (`networkFaults`)**: per-channel
-///   [`commonware_p2p::simulated::SplitForwarder`]s on vote, certificate,
-///   and resolver senders. The forwarder consults the active partition
-///   schedule using the *sender's max round* (paper's `rnd(m)` =
-///   "max round in which the sender has sent or received a message"),
-///   tracked by a per-sender atomic (`SenderViewCell`) that the vote /
-///   cert forwarders update on outbound and that `RoundTrackingReceiver`
-///   wrappers update on inbound vote / cert / resolver traffic.
-///   Recipients isolated by the partition at that round are dropped --
-///   including resolver recovery traffic, so partitions are true
-///   partitions.
-/// - **Process faults (`procFaults`)**: for the fixed byzantine identity
-///   (index 0) the same forwarders also enqueue an `Intercept` per
-///   intercepted message + matching `(rnd, recv, seed)` fault and remove
-///   those receivers from the residual original send. The `ByzzFuzzInjector`
-///   consumes the queue, decodes the *actual* intercepted message, runs
-///   the strategy mutator on its content (votes are re-signed; cert /
-///   resolver are byte-mutated), and emits the result to the dropped
-///   subset via cloned senders that bypass the forwarder. Faults marked
-///   `omit` skip the re-emit, realizing Algorithm 1's "or omits them".
+/// Faults are attributed to the byzantine sender's current protocol round
+/// (the maximum view it has sent or received), so retransmissions of an
+/// old view at a later round inherit the later round's fault window.
 ///
-/// Fault density per axis is derived from the chosen `StrategyChoice`,
-/// matching the other adaptive modes. Vote-equivocation invariants exclude
-/// index 0 via [`invariants::check_vote_invariants_with_byzantine`] so the
-/// injector's scripted byzantine equivocation is not flagged.
-///
-/// Use this to fuzz consensus under the combined ByzzFuzz adversary:
-/// transient set-partitions across all three channels plus byzantine
-/// in-flight message mutation / omission by a fixed identity.
+/// Use this to fuzz consensus under transient set-partitions combined with
+/// byzantine in-flight message mutation / omission by a fixed identity.
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
