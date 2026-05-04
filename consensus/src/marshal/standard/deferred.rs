@@ -203,6 +203,60 @@ where
             build_duration,
         }
     }
+
+    /// Verifies a proposed block's application-level validity.
+    ///
+    /// This method validates that:
+    /// 1. The block's parent digest matches the expected parent
+    /// 2. The block's height is exactly one greater than the parent's height
+    /// 3. The underlying application's verification logic passes
+    ///
+    /// Verification is spawned in a background task and returns a receiver that will contain
+    /// the verification result. Valid blocks are reported to the marshal as verified.
+    #[inline]
+    async fn deferred_verify(
+        &mut self,
+        context: <Self as Automaton>::Context,
+        block: B,
+        stage: Stage,
+    ) -> oneshot::Receiver<bool> {
+        let mut marshal = self.marshal.clone();
+        let mut application = self.application.clone();
+        let (mut tx, rx) = oneshot::channel();
+        let runtime_context = self
+            .context
+            .lock()
+            .await
+            .child("deferred_verify")
+            .with_attribute("round", context.round);
+        runtime_context.spawn(move |runtime_context| async move {
+                // Shared non-reproposal verification:
+                // - fetch parent (using trusted round hint from consensus context)
+                // - validate standard ancestry invariants
+                // - run application verification over ancestry
+                //
+                // The helper preserves the prior early-exit behavior and returns
+                // `None` when work should stop (for example receiver dropped or
+                // parent unavailable).
+                let application_valid = match verify_with_parent(
+                    runtime_context,
+                    context,
+                    block,
+                    &mut application,
+                    &mut marshal,
+                    &mut tx,
+                    stage,
+                )
+                .await
+                {
+                    Some(valid) => valid,
+                    None => return,
+                };
+                tx.send_lossy(application_valid);
+        });
+
+        rx
+    }
 }
 
 impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
@@ -425,12 +479,7 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
-        let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
-        let verification_tasks = self.verification_tasks.clone();
-        let round = context.round;
-        let (mut task_tx, task_rx) = oneshot::channel();
-        verification_tasks.insert(round, digest, task_rx);
+        let mut marshaled = self.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -438,8 +487,8 @@ where
             .lock()
             .await
             .child("optimistic_verify")
-            .with_attribute("round", round);
-        runtime_context.spawn(move |runtime_context| async move {
+            .with_attribute("round", context.round);
+        runtime_context.spawn(move |_| async move {
                 let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
                 let block = select! {
                     _ = tx.closed() => {
@@ -447,7 +496,6 @@ where
                             reason = "consensus dropped receiver",
                             "skipping optimistic verification"
                         );
-                        verification_tasks.take(round, digest);
                         return;
                     },
                     result = block_request => match result {
@@ -458,7 +506,6 @@ where
                                 reason = "failed to fetch block for optimistic verification",
                                 "skipping optimistic verification"
                             );
-                            verification_tasks.take(round, digest);
                             return;
                         }
                     },
@@ -472,7 +519,7 @@ where
                 // because they were already verified when originally proposed and
                 // parent-child checks would fail by construction when parent == block.
                 let Some(decision) = precheck_epoch_and_reproposal(
-                    &epocher,
+                    &marshaled.epocher,
                     &mut marshal,
                     &context,
                     digest,
@@ -480,13 +527,18 @@ where
                 )
                 .await
                 else {
-                    verification_tasks.take(round, digest);
                     return;
                 };
                 let block = match decision {
                     Decision::Complete(valid) => {
-                        // `certify` expects the task registered before this spawn to resolve.
-                        task_tx.send_lossy(valid);
+                        if valid {
+                            // A valid re-proposal needs no further ancestry validation, but
+                            // `certify` still expects a completed verification task.
+                            let round = context.round;
+                            let (task_tx, task_rx) = oneshot::channel();
+                            task_tx.send_lossy(true);
+                            marshaled.verification_tasks.insert(round, digest, task_rx);
+                        }
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
                         tx.send_lossy(valid);
@@ -509,32 +561,18 @@ where
                         block_context = ?block.context(),
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
-                    task_tx.send_lossy(false);
                     tx.send_lossy(false);
                     return;
                 }
 
-                // The optimistic result is available now. Keep this task alive to finish the
-                // deferred verification so children under `runtime_context` are not aborted.
-                tx.send_lossy(true);
+                // Begin the rest of the verification process asynchronously.
+                let round = context.round;
+                let task = marshaled
+                    .deferred_verify(context, block, Stage::Verified)
+                    .await;
+                marshaled.verification_tasks.insert(round, digest, task);
 
-                let application_valid = match verify_with_parent(
-                    runtime_context
-                        .child("deferred_verify")
-                        .with_attribute("round", round),
-                    context,
-                    block,
-                    &mut application,
-                    &mut marshal,
-                    &mut task_tx,
-                    Stage::Verified,
-                )
-                .await
-                {
-                    Some(valid) => valid,
-                    None => return,
-                };
-                task_tx.send_lossy(application_valid);
+                tx.send_lossy(true);
         });
         rx
     }
@@ -573,8 +611,7 @@ where
             "subscribing to block for certification using embedded context"
         );
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
-        let mut marshal = self.marshal.clone();
-        let mut application = self.application.clone();
+        let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -583,7 +620,7 @@ where
             .await
             .child("certify")
             .with_attribute("round", round);
-        context.spawn(move |runtime_context| async move {
+        context.spawn(move |_| async move {
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -622,7 +659,7 @@ where
                     // Certifier holds a notarization for this block, so route
                     // the write to the notarized cache. `certified` is
                     // idempotent, so crash-recovery double-invocation is safe.
-                    if !marshal.certified(round, block).await {
+                    if !marshaled.marshal.certified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
@@ -630,23 +667,12 @@ where
                     return;
                 }
 
-                let application_valid = match verify_with_parent(
-                    runtime_context
-                        .child("deferred_verify")
-                        .with_attribute("round", round),
-                    embedded_context,
-                    block,
-                    &mut application,
-                    &mut marshal,
-                    &mut tx,
-                    Stage::Certified,
-                )
-                .await
-                {
-                    Some(valid) => valid,
-                    None => return,
-                };
-                tx.send_lossy(application_valid);
+                let verify_rx = marshaled
+                    .deferred_verify(embedded_context, block, Stage::Certified)
+                    .await;
+                if let Ok(result) = verify_rx.await {
+                    tx.send_lossy(result);
+                }
         });
         rx
     }
