@@ -1,11 +1,12 @@
-//! ByzzFuzz schedule sampling (Algorithm 1 `(c, d, r)` with signal-biased
-//! deviations from a literal reading: trivial single-block partitions are
-//! excluded, network views are sampled without replacement, and process
-//! receiver subsets are non-empty. Each *process* fault carries a
-//! [`super::scope::FaultScope`] for per-(channel, kind) targeting; network
-//! faults are total at their view. Content mutation of intercepted
-//! messages is delegated to [`crate::strategy::Strategy`] (`SmallScope`
-//! is forced by the runner).
+//! ByzzFuzz schedule sampling parameterised by `(c, d, r)`: process-fault
+//! rounds, network-fault rounds, and total round budget. Signal-biased:
+//! trivial single-block partitions are excluded, network views are
+//! sampled without replacement, and process receiver subsets are
+//! non-empty. Each *process* fault carries a
+//! [`super::scope::FaultScope`] for per-(channel, kind) targeting;
+//! network faults are total at their view. Content mutation of
+//! intercepted messages is delegated to [`crate::strategy::Strategy`]
+//! (`SmallScope` is forced by the runner).
 
 use crate::{
     byzzfuzz::{

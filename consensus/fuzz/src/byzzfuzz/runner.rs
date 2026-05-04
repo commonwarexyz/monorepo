@@ -21,8 +21,8 @@ use futures::future::join_all;
 use rand::Rng;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-/// Run the ByzzFuzz fault model on `input`. 4 *honest* engines plus a
-/// per-message strict-replace interception layer (Algorithm 1).
+/// Run the ByzzFuzz fault model on `input`. 4 honest engines plus a
+/// per-message strict-replace interception layer.
 ///
 /// See [`crate::byzzfuzz`] module docs for the architectural overview.
 pub fn run<P: Simplex>(mut input: crate::FuzzInput)
@@ -31,7 +31,7 @@ where
         Clone + Send + Sync + 'static,
 {
     // Per-channel forwarders own all network-fault behavior in this mode;
-    // disable oracle-driven topology and Disrupters.
+    // disable oracle-driven topology and do not use `Disrupter` actor.
     input.configuration = N4F0C4;
     input.partition = Partition::Connected;
     input.degraded_network = false;
@@ -43,10 +43,16 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        // Sample the paper's (c, d, r) here rather than threading it through
-        // FuzzInput -- keeps mode-specific state out of the shared input
-        // and reuses the deterministic FuzzRng.
-        let r = context.gen_range(1..=input.required_containers.max(1));
+        // Sample `(c, d, r)` here rather than threading it through `FuzzInput` type.
+        let use_required_bound = context.gen_bool(0.5);
+        let r_bound = if use_required_bound {
+            input.required_containers
+        } else {
+            let multiplier = context.gen_range(2..=100);
+            input.required_containers.saturating_mul(multiplier)
+        };
+
+        let r = context.gen_range(1..=r_bound.max(input.required_containers));
         let max_per_fault_type = (r / FAULT_INJECTION_RATIO).max(1);
         let mut c = context.gen_range(0..=max_per_fault_type);
         let mut d = context.gen_range(0..=max_per_fault_type);
@@ -68,7 +74,7 @@ where
         let proc_faults = byzz.process_faults(&participants, &mut context);
 
         log::push(format!(
-            "byzzfuzz schedule: byzantine_idx={} required_containers={} byzz={:?} network_faults={:?} proc_faults={:?}",
+            "byzzfuzz schedule: byzantine_idx={} required_containers={} (c,d,r)={:?} network_faults={:?} proc_faults={:?}",
             BYZANTINE_IDX,
             input.required_containers,
             byzz,
