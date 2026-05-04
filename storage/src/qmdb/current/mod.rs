@@ -223,7 +223,7 @@
 //!
 //! This combines two (or three) components into a single hash:
 //!
-//! - **QMDB ops root**: The root of the operations tree computed using the QMDB root spec for
+//! - **ops root**: The root of the operations tree computed using the QMDB root spec for
 //!   the Merkle family (the inner [crate::qmdb::any] database's root). Used for state sync,
 //!   where a client downloads operations and verifies each batch against this root using QMDB
 //!   range proofs.
@@ -236,10 +236,10 @@
 //!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
-//! The QMDB ops root is returned by the `sync::Database` trait's `root()` method, since the sync
+//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync
 //! engine verifies batches against the ops root, not the canonical root.
 //!
-//! For state sync, the sync engine targets the QMDB ops root and verifies each batch against it.
+//! For state sync, the sync engine targets the ops root and verifies each batch against it.
 //! After sync, the bitmap and grafted tree are reconstructed deterministically from the
 //! operations, and the canonical root is computed. [proof::OpsRootWitness] can be used to validate
 //! that a particular ops root is committed by a trusted canonical root; the sync engine does not

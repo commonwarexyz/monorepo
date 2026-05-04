@@ -784,7 +784,8 @@ pub(super) async fn compute_db_root<
 /// grafting height. Therefore, a single bitmap chunk may span across multiple smaller ops peaks.
 /// `grafting::grafted_root` intercepts the folding process to group these sub-grafting-height peaks,
 /// hash them together with their corresponding bitmap chunks, and then complete the final fold using
-/// the QMDB root spec. For MMR, this produces the exact same result as `hasher.root()`.
+/// the hasher's peak-bagging policy. For MMR, each complete chunk already appears as a single
+/// grafted peak, so no extra peak regrouping is needed.
 pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,

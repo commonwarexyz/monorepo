@@ -444,8 +444,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let mut unfolded_prefix_peaks = Vec::new();
         let mut unfolded_suffix_peaks = Vec::new();
         let proof = if needs_grafted_peak_fold {
-            let mut positions =
+            let collection_positions =
                 merkle::range_collection_nodes(leaves, inactive_peaks, range.clone())?;
+            let mut positions = collection_positions.clone();
             positions.extend(layout.prefix.iter().map(|&(pos, _)| pos));
             positions.extend(layout.after.iter().map(|&(pos, _)| pos));
             positions.sort_unstable();
@@ -471,7 +472,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             let proof = merkle::build_range_collection_proof::<F, D, Error<F>>(
                 leaves,
                 inactive_peaks,
-                range.clone(),
+                &collection_positions,
                 |pos| fetched.get(&pos).copied(),
                 |pos| Error::from(merkle::Error::<F>::MissingNode(pos)),
             )?;

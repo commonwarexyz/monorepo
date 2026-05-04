@@ -629,23 +629,15 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         let range = start_loc..end_loc;
-        // Bagging only governs the prefix/suffix accumulator layout, which this method
-        // deliberately ignores; `range_peaks` and `fetch_nodes` are bagging-independent. Pass
-        // ForwardFold as a placeholder.
-        let bp = Blueprint::new(
-            self.leaves,
-            self.inactive_peaks,
-            Bagging::ForwardFold,
-            range,
-        )
-        .map_err(|_| ReconstructionError::InvalidSize)?;
+        let peaks = range_peaks(self.leaves, self.inactive_peaks, &range)
+            .map_err(|_| ReconstructionError::InvalidSize)?;
 
         let mut sibling_cursor = 0usize;
         let mut elements_iter = elements.iter();
-        for peak in &bp.range_peaks {
+        for peak in &peaks {
             let peak_digest = peak.reconstruct_digest(
                 hasher,
-                &bp.range,
+                &range,
                 &mut elements_iter,
                 &self.digests,
                 &mut sibling_cursor,
@@ -844,6 +836,25 @@ impl<F: Family> Subtree<F> {
 
         Ok(hasher.node_digest(self.pos, &left_d, &right_d))
     }
+}
+
+/// Return the peaks of a tree of `leaves` that overlap `range`, validating both the range and the
+/// declared `inactive_peaks` boundary.
+///
+/// The returned subtrees are bagging-independent: `Blueprint::new`'s prefix/suffix accumulator
+/// layout depends on bagging, but the per-peak partition of the proven range does not.
+///
+/// # Errors
+///
+/// See [`Blueprint::new`].
+pub(crate) fn range_peaks<F: Family>(
+    leaves: Location<F>,
+    inactive_peaks: usize,
+    range: &Range<Location<F>>,
+) -> Result<Vec<Subtree<F>>, super::Error<F>> {
+    // Bagging only affects `Blueprint`'s prefix/suffix bucketing; `range_peaks` is independent.
+    Blueprint::new(leaves, inactive_peaks, Bagging::ForwardFold, range.clone())
+        .map(|bp| bp.range_peaks)
 }
 
 /// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
@@ -1135,25 +1146,25 @@ where
 }
 
 /// Return the node positions needed by [`build_range_collection_proof`].
-///
-/// Bagging only governs prefix/suffix accumulator layout, which this helper does not consult; the
-/// `range_peaks` siblings it collects are bagging-independent. ForwardFold is passed as a
-/// placeholder.
 #[cfg(feature = "std")]
 pub(crate) fn range_collection_nodes<F: Family>(
     leaves: Location<F>,
     inactive_peaks: usize,
     range: Range<Location<F>>,
 ) -> Result<Vec<Position<F>>, super::Error<F>> {
-    let bp = Blueprint::new(leaves, inactive_peaks, Bagging::ForwardFold, range)?;
+    let peaks = range_peaks(leaves, inactive_peaks, &range)?;
     let mut fetch_nodes = Vec::new();
-    for peak in &bp.range_peaks {
-        peak.collect_siblings(&bp.range, &mut fetch_nodes);
+    for peak in &peaks {
+        peak.collect_siblings(&range, &mut fetch_nodes);
     }
     Ok(fetch_nodes)
 }
 
 /// Build a proof containing only the sibling digests needed to authenticate the requested range.
+///
+/// `fetch_nodes` must be the slice returned by [`range_collection_nodes`] for the same `leaves` and
+/// `inactive_peaks`; the caller passes it in so the Blueprint traversal isn't repeated when the
+/// positions are already known (e.g., to drive concurrent fetching).
 ///
 /// The resulting proof cannot reconstruct a complete generic Merkle root on its own. It is intended
 /// for wrappers that rebuild a custom root from separately supplied peak witnesses, such as current
@@ -1162,7 +1173,7 @@ pub(crate) fn range_collection_nodes<F: Family>(
 pub(crate) fn build_range_collection_proof<F, D, E>(
     leaves: Location<F>,
     inactive_peaks: usize,
-    range: Range<Location<F>>,
+    fetch_nodes: &[Position<F>],
     get_node: impl Fn(Position<F>) -> Option<D>,
     element_pruned: impl Fn(Position<F>) -> E,
 ) -> Result<Proof<F, D>, E>
@@ -1171,9 +1182,8 @@ where
     D: Digest,
     E: From<super::Error<F>>,
 {
-    let fetch_nodes = range_collection_nodes(leaves, inactive_peaks, range)?;
     let mut digests = Vec::with_capacity(fetch_nodes.len());
-    for pos in fetch_nodes {
+    for &pos in fetch_nodes {
         digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
     }
 
