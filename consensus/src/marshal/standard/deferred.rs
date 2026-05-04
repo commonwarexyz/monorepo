@@ -661,8 +661,9 @@ mod tests {
     use crate::{
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network_with_participants, Ctx,
-                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                default_leader, make_genesis_block, make_raw_block,
+                setup_network_with_participants, Ctx, StandardHarness, TestHarness, B,
+                BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
@@ -736,7 +737,7 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), anchor_digest, child_height, 4600);
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
+                MockVerifyingApp::new().with_propose_result(child);
             let mut marshaled = Deferred::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             let proposed = marshaled
@@ -773,8 +774,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut marshaled = Deferred::new(
                 context.clone(),
@@ -900,8 +901,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
@@ -994,8 +995,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut marshaled = Deferred::new(
                 context.clone(),
@@ -1091,9 +1092,9 @@ mod tests {
             let buffer = setup.extra;
             let marshal_actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
-                GatedVerifyingApp::new(genesis.clone());
+                GatedVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
@@ -1179,7 +1180,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let round = Round::new(Epoch::zero(), View::new(1));
             let ctx = Ctx {
                 round,
@@ -1195,7 +1196,7 @@ mod tests {
             assert_ne!(digest_a, digest_b, "test requires distinct digests");
 
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(genesis.clone()).with_propose_result(block_b);
+                MockVerifyingApp::new().with_propose_result(block_b);
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
@@ -1243,7 +1244,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
 
             // Stash a stale block built against genesis as its parent at round V=2.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1264,7 +1265,7 @@ mod tests {
                 parent: (View::new(1), new_parent_digest),
             };
 
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,

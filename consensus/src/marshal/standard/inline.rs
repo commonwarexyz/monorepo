@@ -543,8 +543,9 @@ mod tests {
     use crate::{
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network_with_participants, Ctx,
-                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                default_leader, make_genesis_block, make_raw_block,
+                setup_network_with_participants, Ctx, StandardHarness, TestHarness, B,
+                BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
@@ -643,7 +644,7 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), anchor_digest, child_height, 4600);
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(epoch_genesis).with_propose_result(child);
+                MockVerifyingApp::new().with_propose_result(child);
             let mut inline = Inline::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             let proposed = inline
@@ -679,8 +680,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -757,8 +758,8 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -829,8 +830,8 @@ mod tests {
             let marshal = setup.mailbox;
             let marshal_actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -930,8 +931,8 @@ mod tests {
             let buffer = setup.extra;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut inline = Inline::new(
                 context.clone(),
@@ -1043,8 +1044,8 @@ mod tests {
             let buffer = setup.extra;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let genesis = make_genesis_block();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -1132,9 +1133,9 @@ mod tests {
             let buffer = setup.extra;
             let marshal_actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
-                GatedVerifyingApp::new(genesis.clone());
+                GatedVerifyingApp::new();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -1242,7 +1243,7 @@ mod tests {
 
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_genesis_block();
             let ctx = Ctx {
                 round,
                 leader: me.clone(),
@@ -1288,7 +1289,7 @@ mod tests {
 
             let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
+                MockVerifyingApp::new().with_propose_result(fresh_block);
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,

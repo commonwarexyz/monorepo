@@ -31,7 +31,7 @@ pub struct MockVerifyingApp<B, S> {
 
 impl<B, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
-    pub fn new(_genesis: B) -> Self {
+    pub fn new() -> Self {
         Self {
             propose_result: None,
             verify_result: true,
@@ -40,7 +40,7 @@ impl<B, S> MockVerifyingApp<B, S> {
     }
 
     /// Create a new mock verifying application with a fixed verify result.
-    pub fn with_verify_result(_genesis: B, verify_result: bool) -> Self {
+    pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
             propose_result: None,
             verify_result,
@@ -102,7 +102,7 @@ pub struct GatedVerifyingApp<B, S> {
 impl<B, S> GatedVerifyingApp<B, S> {
     /// Returns the gated app, a `started` receiver fired when `verify()` is entered,
     /// and a `release` sender that unblocks `verify()` once signaled.
-    pub fn new(_genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    pub fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         (

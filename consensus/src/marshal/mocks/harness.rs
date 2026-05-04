@@ -120,6 +120,11 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
     B::new::<Sha256>(context, parent, height, timestamp)
 }
 
+/// Create the standard height-zero block used to seed fresh marshal actors.
+pub fn make_genesis_block() -> B {
+    make_raw_block(Sha256::hash(b""), Height::zero(), 0)
+}
+
 /// Setup network for tests with an initial participant peer set.
 pub async fn setup_network_with_participants<I>(
     context: deterministic::Context,
@@ -249,6 +254,17 @@ pub trait TestHarness: 'static + Sized {
         timestamp: u64,
         num_participants: u16,
     ) -> Self::TestBlock;
+
+    /// Create the height-zero block used to seed a fresh marshal actor.
+    fn genesis_block(num_participants: u16) -> Self::TestBlock {
+        Self::make_test_block(
+            Sha256::hash(b""),
+            Self::genesis_parent_commitment(num_participants),
+            Height::zero(),
+            0,
+            num_participants,
+        )
+    }
 
     /// Get the commitment from a test block.
     fn commitment(block: &Self::TestBlock) -> Self::Commitment;
@@ -1575,7 +1591,7 @@ impl TestHarness for StandardHarness {
             provider,
             max_pending_acks,
             application,
-            Start::Genesis(make_raw_block(Sha256::hash(b""), Height::zero(), 0)),
+            Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
         )
         .await
     }
@@ -1828,7 +1844,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(make_raw_block(Sha256::hash(b""), Height::zero(), 0)),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2413,6 +2429,16 @@ pub fn genesis_commitment() -> Commitment {
     ))
 }
 
+/// Create the coding height-zero block used to seed fresh marshal actors.
+pub fn make_coding_genesis_block() -> CodingB {
+    let context = CodingCtx {
+        round: Round::zero(),
+        leader: default_leader(),
+        parent: (View::zero(), genesis_commitment()),
+    };
+    make_coding_block(context, Sha256::hash(b""), Height::zero(), 0)
+}
+
 /// Create a test block with a Commitment-based context.
 pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestamp: u64) -> CodingB {
     CodingB::new::<Sha256>(context, parent, height, timestamp)
@@ -2457,13 +2483,7 @@ impl TestHarness for CodingHarness {
             provider,
             max_pending_acks,
             application,
-            Start::Genesis(Self::make_test_block(
-                Sha256::hash(b""),
-                genesis_commitment(),
-                Height::zero(),
-                0,
-                NUM_VALIDATORS as u16,
-            )),
+            Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
         )
         .await
     }
@@ -2749,13 +2769,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::make_test_block(
-                Sha256::hash(b""),
-                genesis_commitment(),
-                Height::zero(),
-                0,
-                NUM_VALIDATORS as u16,
-            )),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
