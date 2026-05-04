@@ -19,26 +19,6 @@
 //! This keeps the arm-and-recheck handshake lock-free, enables futex sleep when
 //! the loop is truly idle, and avoids repeated wake writes while a wake is
 //! already pending.
-//!
-//! ## Loom Model
-//!
-//! The `loom` feature keeps the same packed state machine, but replaces the
-//! kernel wake surfaces with loom-visible userspace models. The futex path uses
-//! a mutex and condition variable to preserve the atomic compare-and-park
-//! property of `FUTEX_WAIT`. The eventfd path uses a durable readiness counter
-//! plus a condition variable to model both persistent wake readiness and a
-//! blocked `submit_and_wait` returning after a wake CQE.
-//!
-//! The loom tests exercise the producer/loop protocol around that state word:
-//! publishes must advance the submitted sequence exactly once, armed waits must
-//! not lose concurrent publishes or out-of-band wakes, repeated wake attempts
-//! within one epoch must coalesce, sticky unarmed wakes must be consumed by the
-//! next arm cycle, and the `Release`/`Acquire` edges must make producer-side
-//! state visible after the loop observes progress or clears a wait epoch.
-//!
-//! The model intentionally stops at this userspace protocol boundary. It does
-//! not validate kernel CQE ordering, `io_uring_enter`, wake-poll rearming, or
-//! syscall error handling; those are covered by the normal real-syscall tests.
 
 use super::UserData;
 use io_uring::squeue::SubmissionQueue;
@@ -482,7 +462,7 @@ impl Waker {
     ///
     /// The loom tests in this module do not model the `io_uring` submission
     /// queue or wake-poll rearm state. Keeping this method present lets the
-    /// crate compile with `iouring,loom` while keeping that boundary explicit.
+    /// crate compile with `loom` while keeping that boundary explicit.
     #[cfg(feature = "loom")]
     pub const fn reinstall(&self, _submission_queue: &mut SubmissionQueue<'_>) -> bool {
         true
@@ -1109,12 +1089,20 @@ mod loom_tests {
 
     // This module uses loom to model the waker's producer/loop protocol over
     // the packed atomic state word. The model keeps the production sequence and
-    // wait-bit state machine, but replaces futex and eventfd kernel surfaces
-    // with loom-visible condvars and counters. The tests keep schedules small
-    // while exercising the important races: publish versus arm-and-recheck,
-    // futex idle parking, eventfd wake coalescing, sticky out-of-band wakes,
-    // sequence wraparound, and the Release/Acquire edges that make producer
-    // state visible after `pending()` or `clear_wait()`.
+    // wait-bit state machine, but replaces kernel wake surfaces with
+    // loom-visible userspace models: the futex path uses a mutex and condvar to
+    // preserve the atomic compare-and-park property of `FUTEX_WAIT`, and the
+    // eventfd path uses a durable readiness counter plus a condvar to model
+    // both persistent wake readiness and a blocked `submit_and_wait` returning
+    // after a wake CQE.
+    //
+    // The tests keep schedules small while exercising the important races and
+    // invariants: publish versus arm-and-recheck, futex idle parking, eventfd
+    // wake coalescing, sticky out-of-band wakes, sequence wraparound, and the
+    // Release/Acquire edges that make producer state visible after `pending()`
+    // or `clear_wait()`. The model intentionally stops at this userspace
+    // protocol boundary; it does not validate kernel CQE ordering,
+    // `io_uring_enter`, wake-poll rearming, or syscall error handling.
 
     fn waker() -> Waker {
         Waker::new().unwrap()
