@@ -2,7 +2,7 @@
 //!
 //! This module implements the network interception model from "ByzzFuzz:
 //! Foundations and Applications of Random Testing for BFT Protocols" on top of
-//! the simulated p2p network".
+//! the simulated p2p network.
 //!
 //! The harness runs honest Simplex validators while the network layer injects:
 //! - network faults, which drop messages crossing sampled partitions; and
@@ -21,8 +21,11 @@ mod forwarder;
 mod injector;
 mod intercept;
 pub mod log;
+mod mutator;
+mod observed;
 mod runner;
 mod sampling;
+mod scope;
 
 pub use runner::run;
 pub(crate) use sampling::ByzzFuzz;

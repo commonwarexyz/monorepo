@@ -22,7 +22,7 @@
 //!   module is private, so we hand-decode the small fixed prefix and reuse
 //!   the [`Certificate`] codec for the response payload.
 
-use commonware_codec::{Decode, DecodeExt, Read};
+use commonware_codec::{Decode, DecodeExt, RangeCfg, Read};
 use commonware_consensus::{
     simplex::{
         scheme::Scheme,
@@ -177,28 +177,30 @@ where
     }
 }
 
-/// Build a `Vote`-decoding extractor for [`RoundTrackingReceiver`].
+/// Build a `Vote`-decoding extractor. Also populates the observed-value pool.
 pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
+    pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static {
-    |bytes: &[u8]| {
-        Vote::<S, Sha256Digest>::decode(bytes)
-            .ok()
-            .map(|v| v.view().get())
+    move |bytes: &[u8]| {
+        let v = Vote::<S, Sha256Digest>::decode(bytes).ok()?;
+        pool.observe_vote::<S, S::PublicKey>(&v);
+        Some(v.view().get())
     }
 }
 
-/// Build a `Certificate`-decoding extractor for [`RoundTrackingReceiver`].
-/// Captures `cert_codec` so the closure can run `Certificate::decode_cfg`.
+/// Build a `Certificate`-decoding extractor. Also populates the
+/// observed-value pool with the raw cert bytes for later replay.
 pub fn certificate_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
+    pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
     move |bytes: &[u8]| {
-        Certificate::<S, Sha256Digest>::decode_cfg(&mut &bytes[..], &cert_codec)
-            .ok()
-            .map(|c| c.view().get())
+        let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &bytes[..], &cert_codec).ok()?;
+        pool.observe_certificate::<S, S::PublicKey>(&c, bytes);
+        Some(c.view().get())
     }
 }
 
@@ -226,11 +228,11 @@ where
 ///   tag 2:  no payload.
 pub fn resolver_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
+    pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
-    use commonware_codec::RangeCfg;
     move |bytes: &[u8]| {
         // The real p2p decode wrapper goes through `V::decode_cfg`, which
         // rejects messages with trailing bytes. We mirror that strictness
@@ -252,7 +254,9 @@ where
                 }
                 let mut be = [0u8; 8];
                 be.copy_from_slice(payload);
-                Some(u64::from_be_bytes(be))
+                let view = u64::from_be_bytes(be);
+                pool.observe_resolver_request(view);
+                Some(view)
             }
             1 => {
                 // Response(Bytes) -- varint usize length, then exactly that
@@ -265,9 +269,12 @@ where
                 if buf.len() != len {
                     return None;
                 }
-                Certificate::<S, Sha256Digest>::decode_cfg(&mut &buf[..], &cert_codec)
-                    .ok()
-                    .map(|c| c.view().get())
+                let cert_slice = &buf[..len];
+                let c =
+                    Certificate::<S, Sha256Digest>::decode_cfg(&mut &cert_slice[..], &cert_codec)
+                        .ok()?;
+                pool.observe_certificate::<S, S::PublicKey>(&c, cert_slice);
+                Some(c.view().get())
             }
             // Error: no payload -- mirror Decode strictness on trailing bytes.
             2 if payload.is_empty() => None,

@@ -4,15 +4,16 @@
 //! Each factory produces a closure installed via `Sender::split_with` on a
 //! validator's outgoing channel. The closure recovers `rnd(m)` from the
 //! shared per-sender [`SenderViewCell`] -- the paper's "max round in which
-//! the sender has sent or received a message". Outgoing vote / cert
-//! forwarders also fold `m.view()` into the cell *before* reading it, so
-//! a fresh transmission's view is included in `rnd(m)` while a
-//! retransmission of an old view at a later sender round still sees the
-//! sender's current round (matching the paper's "we apply the same faults
-//! to retransmissions sent in the same protocol round, but allow their
-//! nonfaulty delivery if they are repeated in a later round"). The
-//! resolver forwarder reads the cell directly; received resolver, vote,
-//! and cert traffic feed it via [`super::intercept::RoundTrackingReceiver`].
+//! the sender has sent or received a message". All three outgoing
+//! forwarders (vote, cert, resolver) fold the message's carried view into
+//! the cell *before* reading it: vote/cert from `m.view()`, resolver from
+//! the wire `Request(U64)` key or the embedded `Certificate` of a
+//! `Response`. A retransmission of an old view at a later sender round
+//! therefore inherits the sender's current round (matching the paper's
+//! "we apply the same faults to retransmissions sent in the same protocol
+//! round, but allow their nonfaulty delivery if they are repeated in a
+//! later round"). Received vote/cert/resolver traffic feeds the cell via
+//! [`super::intercept::RoundTrackingReceiver`].
 //!
 //! Per recipient the closure then decides:
 //!
@@ -31,19 +32,20 @@
 
 use crate::{
     byzzfuzz::{
-        fault::ProcessFault,
+        fault::{NetworkFault, ProcessFault},
         intercept::{Intercept, InterceptChannel, SenderViewCell},
         log,
+        observed::ObservedState,
+        scope::{self, FaultScope},
     },
     utils::SetPartition,
 };
-use commonware_codec::{Decode, DecodeExt, Read};
+use commonware_codec::{Decode, DecodeExt, RangeCfg, Read};
 use commonware_consensus::{
     simplex::{
         scheme::Scheme,
         types::{Certificate, Vote},
     },
-    types::View,
     Viewable,
 };
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
@@ -68,23 +70,24 @@ fn expand<P: PublicKey>(recipients: &Recipients<P>, participants: &[P]) -> Vec<P
     }
 }
 
-/// Drop receivers not in `sender_idx`'s partition block at `view`. Returns
+/// Drop receivers not in `sender_idx`'s partition block at `view`, considering
+/// only partitions whose scope matches the current channel/kind. Returns
 /// `None` (= drop entirely) when nothing is left.
 fn filter_by_partition<P: PublicKey>(
     recipients: Vec<P>,
     participants: &[P],
     sender_idx: usize,
-    schedule: &[(View, SetPartition)],
+    schedule: &[NetworkFault],
     view: u64,
+    scope_matches: impl Fn(FaultScope) -> bool,
 ) -> Option<Vec<P>> {
-    // Collect *all* partition faults scheduled for this view. With-replacement
-    // sampling allows duplicates per view, and Algorithm 1 line 15 reads
-    // "drop if any partition fault at rnd(m) isolates sender from receiver".
-    // A receiver is therefore kept iff *every* matching partition keeps
-    // sender/receiver in the same block.
+    // With-replacement sampling allows multiple partitions per view; a
+    // receiver is kept iff *every* matching partition keeps sender/receiver
+    // in the same block.
     let actives: Vec<SetPartition> = schedule
         .iter()
-        .filter_map(|(v, p)| (v.get() == view).then_some(*p))
+        .filter(|f| f.view.get() == view && scope_matches(f.scope))
+        .map(|f| f.partition)
         .collect();
     let kept: Vec<P> = if actives.is_empty() {
         recipients
@@ -114,8 +117,7 @@ fn idx_of<P: PublicKey>(set: &[P], participants: &[P]) -> Vec<usize> {
 }
 
 /// Apply procFault interception to `recipients`: enqueue an [`Intercept`] per
-/// matching fault and remove its targets from the list. Returns the residual
-/// to which the *original* message should still be delivered.
+/// matching fault (view *and* scope) and remove its targets from the list.
 #[allow(clippy::too_many_arguments)]
 fn apply_proc_faults<P: PublicKey>(
     channel: InterceptChannel,
@@ -126,8 +128,12 @@ fn apply_proc_faults<P: PublicKey>(
     proc_schedule: &[ProcessFault<P>],
     intercept_tx: &UnboundedSender<Intercept<P>>,
     participants: &[P],
+    scope_matches: impl Fn(FaultScope) -> bool,
 ) -> Vec<P> {
-    for fault in proc_schedule.iter().filter(|f| f.view == view) {
+    for fault in proc_schedule
+        .iter()
+        .filter(|f| f.view == view && scope_matches(f.scope))
+    {
         let targets: Vec<P> = recipients
             .iter()
             .filter(|r| fault.receivers.contains(r))
@@ -140,11 +146,10 @@ fn apply_proc_faults<P: PublicKey>(
         let mut line = String::new();
         let _ = write!(
             line,
-            "byzzfuzz: intercept channel={:?} view={} sender={} targets={:?} seed={} omit={}",
-            channel, view, sender_idx, target_idx, fault.seed, fault.omit,
+            "byzzfuzz: intercept channel={:?} view={} sender={} targets={:?} seed={} omit={} scope={:?}",
+            channel, view, sender_idx, target_idx, fault.seed, fault.omit, fault.scope,
         );
         log::push(line);
-        // tokio mpsc UnboundedSender::send is sync (returns Err on closed).
         let _ = intercept_tx.send(Intercept {
             channel,
             view,
@@ -167,20 +172,21 @@ fn apply_proc_faults<P: PublicKey>(
 pub fn make_vote<S: Scheme<Sha256Digest>>(
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
-    network_schedule: Arc<Vec<(View, SetPartition)>>,
+    network_schedule: Arc<Vec<NetworkFault>>,
     proc_schedule: Arc<Vec<ProcessFault<S::PublicKey>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
+    pool: Arc<ObservedState>,
 ) -> impl SplitForwarder<S::PublicKey> {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
-        // Best-effort decode to fold the message's own view into the sender's
-        // max-round cell -- the cell is the round attribution per the paper:
-        // "rnd(m) = max round in which the sender has sent or received a
-        // message". A retransmission of an old view at a later sender round
-        // therefore does NOT pick up the old round's faults.
-        if let Ok(msg) = Vote::<S, Sha256Digest>::decode(message.clone()) {
-            sender_view.update(msg.view().get());
-        }
+        let Ok(msg) = Vote::<S, Sha256Digest>::decode(message.clone()) else {
+            // Undecodable: bypass scope filtering (no kind to match) and
+            // leave the network-layer behavior unchanged.
+            return Some(recipients.clone());
+        };
+        pool.observe_vote::<S, S::PublicKey>(&msg);
+        sender_view.update(msg.view().get());
+        let kind = scope::vote_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);
         let kept = match filter_by_partition(
@@ -189,11 +195,12 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
             sender_idx,
             &network_schedule,
             view,
+            |s| s.matches_vote(kind),
         ) {
             None => {
                 log::push(format!(
-                    "byzzfuzz: drop channel=Vote view={view} sender={sender_idx} recipients={:?} reason=partition",
-                    idx_of(&expanded, &participants),
+                    "byzzfuzz: drop channel=Vote kind={:?} view={view} sender={sender_idx} recipients={:?} reason=partition",
+                    kind, idx_of(&expanded, &participants),
                 ));
                 return None;
             }
@@ -209,6 +216,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
                 &proc_schedule,
                 tx,
                 &participants,
+                |s| s.matches_vote(kind),
             ),
             None => kept,
         };
@@ -220,27 +228,30 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
     }
 }
 
-/// Per-message forwarder for a sender's certificate channel. Same shape as
-/// [`make_vote`] but decodes [`Certificate`] to update the round cell.
+/// Per-message forwarder for a sender's certificate channel.
 #[allow(clippy::too_many_arguments)]
 pub fn make_certificate<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
-    network_schedule: Arc<Vec<(View, SetPartition)>>,
+    network_schedule: Arc<Vec<NetworkFault>>,
     proc_schedule: Arc<Vec<ProcessFault<S::PublicKey>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
+    pool: Arc<ObservedState>,
 ) -> impl SplitForwarder<S::PublicKey>
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
-        if let Ok(msg) =
+        let Ok(msg) =
             Certificate::<S, Sha256Digest>::decode_cfg(&mut message.as_ref(), &cert_codec)
-        {
-            sender_view.update(msg.view().get());
-        }
+        else {
+            return Some(recipients.clone());
+        };
+        pool.observe_certificate::<S, S::PublicKey>(&msg, message.as_ref());
+        sender_view.update(msg.view().get());
+        let kind = scope::certificate_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);
         let kept = match filter_by_partition(
@@ -249,11 +260,12 @@ where
             sender_idx,
             &network_schedule,
             view,
+            |s| s.matches_certificate(kind),
         ) {
             None => {
                 log::push(format!(
-                    "byzzfuzz: drop channel=Cert view={view} sender={sender_idx} recipients={:?} reason=partition",
-                    idx_of(&expanded, &participants),
+                    "byzzfuzz: drop channel=Cert kind={:?} view={view} sender={sender_idx} recipients={:?} reason=partition",
+                    kind, idx_of(&expanded, &participants),
                 ));
                 return None;
             }
@@ -269,6 +281,7 @@ where
                 &proc_schedule,
                 tx,
                 &participants,
+                |s| s.matches_certificate(kind),
             ),
             None => kept,
         };
@@ -280,21 +293,61 @@ where
     }
 }
 
-/// Per-message forwarder for a sender's resolver channel.
-///
-/// Resolver traffic carries no protocol view; like vote/cert it uses
-/// [`SenderViewCell`] -- which by then reflects the union of "any view this
-/// sender has sent or received", per the paper's `rnd(m)` definition.
+// Resolver-specific scopes are not yet sampled; only `FaultScope::Any`
+// applies on this channel.
 #[allow(clippy::too_many_arguments)]
-pub fn make_resolver<P: PublicKey>(
-    participants: Arc<[P]>,
+pub fn make_resolver<S: Scheme<Sha256Digest>>(
+    cert_codec: <S::Certificate as Read>::Cfg,
+    participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
-    network_schedule: Arc<Vec<(View, SetPartition)>>,
-    proc_schedule: Arc<Vec<ProcessFault<P>>>,
+    network_schedule: Arc<Vec<NetworkFault>>,
+    proc_schedule: Arc<Vec<ProcessFault<S::PublicKey>>>,
     sender_view: SenderViewCell,
-    intercept_tx: Option<UnboundedSender<Intercept<P>>>,
-) -> impl SplitForwarder<P> {
-    move |_origin: SplitOrigin, recipients: &Recipients<P>, message: &IoBuf| {
+    intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
+    pool: Arc<ObservedState>,
+) -> impl SplitForwarder<S::PublicKey>
+where
+    <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
+{
+    move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
+        // Decode the wire shape (8-byte id + 1-byte tag + payload) and fold
+        // any extracted view into the sender's round cell *before* reading
+        // it -- otherwise the resolver send would be filtered against a
+        // stale rnd(m).
+        let bytes = message.as_ref();
+        if bytes.len() >= 9 {
+            let tag = bytes[8];
+            let payload = &bytes[9..];
+            match tag {
+                // Request(U64): exactly 8 BE bytes.
+                0 if payload.len() == 8 => {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(payload);
+                    let v = u64::from_be_bytes(be);
+                    pool.observe_resolver_request(v);
+                    sender_view.update(v);
+                }
+                // Response(Bytes): varint length, then exactly that many
+                // certificate bytes.
+                1 => {
+                    let mut buf = payload;
+                    let range: RangeCfg<usize> = (..).into();
+                    if let Ok(len) = usize::read_cfg(&mut buf, &range) {
+                        if buf.len() == len {
+                            let cert_slice = &buf[..len];
+                            if let Ok(c) = Certificate::<S, Sha256Digest>::decode_cfg(
+                                &mut &cert_slice[..],
+                                &cert_codec,
+                            ) {
+                                pool.observe_certificate::<S, S::PublicKey>(&c, cert_slice);
+                                sender_view.update(c.view().get());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);
         let kept = match filter_by_partition(
@@ -303,6 +356,7 @@ pub fn make_resolver<P: PublicKey>(
             sender_idx,
             &network_schedule,
             view,
+            FaultScope::matches_resolver,
         ) {
             None => {
                 log::push(format!(
@@ -323,6 +377,7 @@ pub fn make_resolver<P: PublicKey>(
                 &proc_schedule,
                 tx,
                 &participants,
+                FaultScope::matches_resolver,
             ),
             None => kept,
         };

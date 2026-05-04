@@ -3,12 +3,12 @@
 use super::BYZANTINE_IDX;
 use crate::{
     byzzfuzz::{
-        fault::ProcessFault, forwarder, injector::ByzzFuzzInjector, intercept, log, ByzzFuzz,
+        fault::ProcessFault, forwarder, injector::ByzzFuzzInjector, intercept, log,
+        mutator::ByzzFuzzMutator, observed::ObservedState, ByzzFuzz,
     },
     invariants,
     simplex::Simplex,
     spawn_honest_validator,
-    strategy::SmallScope,
     utils::Partition,
     PublicKeyOf, FAULT_INJECTION_RATIO, MAX_SLEEP_DURATION, N4F0C4,
 };
@@ -43,14 +43,22 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        // Sample the paper's (d, p, r) here rather than threading it through
+        // Sample the paper's (c, d, r) here rather than threading it through
         // FuzzInput -- keeps mode-specific state out of the shared input
         // and reuses the deterministic FuzzRng.
         let r = context.gen_range(1..=input.required_containers.max(1));
         let max_per_axis = (r / FAULT_INJECTION_RATIO).max(1);
-        let d = context.gen_range(0..=max_per_axis);
-        let p = context.gen_range(0..=max_per_axis);
-        let byzz = ByzzFuzz::new(d, p, r);
+        let mut c = context.gen_range(0..=max_per_axis);
+        let mut d = context.gen_range(0..=max_per_axis);
+        // At least one axis must be active; otherwise the run is a no-op.
+        if c == 0 && d == 0 {
+            if context.gen_bool(0.5) {
+                c = 1;
+            } else {
+                d = 1;
+            }
+        }
+        let byzz = ByzzFuzz::new(c, d, r);
 
         let network_schedule_vec = byzz.network_faults(&mut context);
 
@@ -76,6 +84,12 @@ where
 
         // Intercept queue. Forwarders push (sync); injector consumes (async).
         let (intercept_tx, intercept_rx) = intercept::channel::<PublicKeyOf<P>>();
+
+        // Observed-value pool shared by every extractor (populated by
+        // decoded vote/cert/resolver bytes flowing in either direction)
+        // and by the byzantine injector's mutator (replays observed
+        // payloads / proposals / certs / request views).
+        let pool = ObservedState::new();
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
@@ -124,6 +138,7 @@ where
                     proc_for_sender.clone(),
                     sender_view.clone(),
                     intercept_for_sender.clone(),
+                    pool.clone(),
                 ));
             let (cert_primary, _cert_secondary) =
                 cert_sender.split_with(forwarder::make_certificate::<P::Scheme>(
@@ -134,31 +149,34 @@ where
                     proc_for_sender.clone(),
                     sender_view.clone(),
                     intercept_for_sender.clone(),
+                    pool.clone(),
                 ));
             let (resolver_primary, _resolver_secondary) =
-                resolver_sender.split_with(forwarder::make_resolver::<PublicKeyOf<P>>(
+                resolver_sender.split_with(forwarder::make_resolver::<P::Scheme>(
+                    cert_codec.clone(),
                     participants_arc.clone(),
                     i,
                     network_schedule.clone(),
                     proc_for_sender,
                     sender_view.clone(),
                     intercept_for_sender,
+                    pool.clone(),
                 ));
 
             let vote_receiver = intercept::RoundTrackingReceiver::new(
                 vote_receiver,
                 sender_view.clone(),
-                intercept::vote_view_extractor::<P::Scheme>(),
+                intercept::vote_view_extractor::<P::Scheme>(pool.clone()),
             );
             let cert_receiver = intercept::RoundTrackingReceiver::new(
                 cert_receiver,
                 sender_view.clone(),
-                intercept::certificate_view_extractor::<P::Scheme>(cert_codec.clone()),
+                intercept::certificate_view_extractor::<P::Scheme>(cert_codec.clone(), pool.clone()),
             );
             let resolver_receiver = intercept::RoundTrackingReceiver::new(
                 resolver_receiver,
                 sender_view,
-                intercept::resolver_view_extractor::<P::Scheme>(cert_codec),
+                intercept::resolver_view_extractor::<P::Scheme>(cert_codec, pool.clone()),
             );
 
             let ctx = context.with_label(&format!("validator_{validator}"));
@@ -182,19 +200,14 @@ where
         // Closes the intercept queue once all forwarder-held clones drop.
         drop(intercept_tx);
 
-        // Mutator is forced to `SmallScope` so byzantine-message edits are
-        // paper-style "small local" changes; `input.strategy` is left to
-        // the other modes' content-mutation choices.
+        // Mutator: observed-value pool first, SmallScope local edits as
+        // fallback. Replays seen payloads / proposals / certs / request
+        // views so byzantine messages stay consensus-relevant.
         let injector_ctx = context.with_label("byzzfuzz_injector");
         let injector = ByzzFuzzInjector::new(
             injector_ctx,
             schemes[BYZANTINE_IDX].clone(),
-            // fault_rounds / fault_rounds_bound are unused on the mutate_*
-            // path the injector calls; only network/messaging_faults read them.
-            SmallScope {
-                fault_rounds: 1,
-                fault_rounds_bound: 1,
-            },
+            ByzzFuzzMutator::new(pool.clone()),
         );
         injector.start(
             injector_vote_sender.expect("byzantine vote sender cloned"),
