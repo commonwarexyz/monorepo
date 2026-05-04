@@ -207,6 +207,7 @@ mod tests {
                 last_commit_op: keyless_compact::Operation::Commit(None, Location::new(0)),
                 last_commit_proof: commonware_storage::mmr::Proof {
                     leaves: Location::new(11),
+                    inactive_peaks: 0,
                     digests: vec![digest_c],
                 },
             },

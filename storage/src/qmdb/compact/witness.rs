@@ -23,7 +23,7 @@
 //!    its proof on every serve.
 
 use crate::{
-    merkle::{compact, hasher::Standard as StandardHasher, Family, Location, Proof, Readable},
+    merkle::{self, compact, Family, Location, Proof},
     metadata::Metadata,
     qmdb::{
         sync::compact::{State, Target},
@@ -208,6 +208,7 @@ pub(crate) fn validate_inactivity_floor<F: Family>(
 #[allow(clippy::type_complexity)]
 pub(crate) fn witness_from_authenticated_state<F, E, D, S>(
     merkle: &compact::Merkle<F, E, D, S>,
+    root: D,
     inactivity_floor_loc: Location<F>,
     last_commit_op_bytes: Vec<u8>,
     last_commit_proof: Proof<F, D>,
@@ -226,7 +227,7 @@ where
     let last_commit_loc = Location::<F>::new(*leaf_count - 1);
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     let witness = Witness {
-        root: merkle.root(),
+        root,
         leaf_count,
         pinned_nodes,
         last_commit_op_bytes,
@@ -277,16 +278,29 @@ where
     let last_commit_proof =
         Proof::<F, H::Digest>::decode_cfg(last_commit_proof_bytes.as_ref(), &max_digests)
             .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    let root = merkle.root();
     let leaf_count = last_commit_proof.leaves;
     if leaf_count == 0 {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
+
+    // Decode the commit op to get the inactivity floor, which determines the inactive peak
+    // boundary used for root computation.
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let hasher = StandardHasher::<H>::new();
-    if !last_commit_proof.verify_element_inclusion(
+    let last_commit_op = Op::decode_cfg(last_commit_op_bytes.as_ref(), commit_codec_config)
+        .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
+    let inactivity_floor_loc = last_commit_floor(&last_commit_op)
+        .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
+    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+
+    let inactive_peaks =
+        F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+    let root = merkle
+        .root(&hasher, inactive_peaks)
+        .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
+    if !last_commit_proof.verify_range_inclusion(
         &hasher,
-        last_commit_op_bytes.as_slice(),
+        &[last_commit_op_bytes.as_slice()],
         last_commit_loc,
         &root,
     ) {
@@ -297,11 +311,6 @@ where
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>()
     });
-    let last_commit_op = Op::decode_cfg(last_commit_op_bytes.as_ref(), commit_codec_config)
-        .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-    let inactivity_floor_loc = last_commit_floor(&last_commit_op)
-        .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     let witness = Witness {
         root,
         leaf_count,
@@ -328,21 +337,26 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);
         merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
     };
-    let last_commit_proof = batch.proof(&hasher, Location::new(0))?;
     merkle.apply_batch(&batch)?;
+
+    // The initial commit has one leaf and an inactivity floor of 0, giving 0 inactive peaks.
+    let leaf_count = merkle.leaves();
+    let inactive_peaks = F::inactive_peaks(F::location_to_position(leaf_count), Location::new(0));
     merkle
         .sync_with_witness(
-            |_| {
+            |mem| {
+                let root = mem.root(&hasher, inactive_peaks)?;
+                let last_commit_proof = mem.proof(&hasher, Location::new(0), inactive_peaks)?;
                 Ok(Witness {
-                    root: batch.root(),
+                    root,
                     leaf_count: Location::new(1),
                     pinned_nodes: Vec::new(),
-                    last_commit_op_bytes,
+                    last_commit_op_bytes: last_commit_op_bytes.clone(),
                     last_commit_proof,
                 })
             },
@@ -357,14 +371,15 @@ where
 
 /// Persist the current compact witness for a compact db.
 ///
-/// If the cached witness already matches the Merkle root and leaf count being synced, it is copied
-/// into the Merkle slot being activated. Otherwise, a new witness is built from the unpruned Merkle
+/// If the cached witness already matches the Merkle leaf count being synced, it is copied into
+/// the Merkle slot being activated. Otherwise, a new witness is built from the unpruned Merkle
 /// before sync prunes it. The cache check runs inside `sync_with_witness` so concurrent syncs
 /// observe the latest witness cache after each persisted slot flip.
 pub(crate) async fn persist_witness<F, E, H, S>(
     merkle: &compact::Merkle<F, E, H::Digest, S>,
     cache: &Cache<F, H::Digest>,
     last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
     last_commit_op_bytes: Vec<u8>,
 ) -> Result<(), Error<F>>
 where
@@ -373,27 +388,28 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
     merkle
         .sync_with_witness(
             |mem| {
-                let mem_root = *mem.root();
                 let mem_leaves = mem.leaves();
-                if let Some(cached) = cache.with(|witness| {
-                    (witness.root == mem_root && witness.leaf_count == mem_leaves)
-                        .then(|| witness.clone())
-                }) {
+                if let Some(cached) = cache
+                    .with(|witness| (witness.leaf_count == mem_leaves).then(|| witness.clone()))
+                {
                     return Ok(cached);
                 }
+                let inactive_peaks =
+                    F::inactive_peaks(F::location_to_position(mem_leaves), inactivity_floor_loc);
+                let mem_root = mem.root(&hasher, inactive_peaks)?;
                 let pinned_nodes = F::nodes_to_pin(mem_leaves)
                     .map(|pos| *mem.get_node_unchecked(pos))
                     .collect::<Vec<_>>();
-                let last_commit_proof = mem.proof(&hasher, last_commit_loc)?;
+                let last_commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
                 Ok(Witness {
                     root: mem_root,
                     leaf_count: mem_leaves,
                     pinned_nodes,
-                    last_commit_op_bytes,
+                    last_commit_op_bytes: last_commit_op_bytes.clone(),
                     last_commit_proof,
                 })
             },

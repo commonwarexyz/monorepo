@@ -95,6 +95,9 @@ where
     /// Authenticated journal of operations.
     journal: authenticated::Journal<F, E, C, H, S>,
 
+    /// Cached canonical operations root.
+    root: H::Digest,
+
     /// The location of the last commit, if any.
     last_commit_loc: Location<F>,
 
@@ -136,9 +139,15 @@ where
             op.has_floor()
                 .expect("last operation should be a commit with floor")
         };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(*last_commit_loc + 1)),
+            inactivity_floor_loc,
+        );
+        let root = journal.root(inactive_peaks)?;
 
         Ok(Self {
             journal,
+            root,
             last_commit_loc,
             inactivity_floor_loc,
         })
@@ -229,8 +238,8 @@ where
     }
 
     /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
-        self.journal.root()
+    pub const fn root(&self) -> H::Digest {
+        self.root
     }
 
     /// Return a reference to the merkleization strategy.
@@ -263,21 +272,33 @@ where
     /// Analogous to proof, but with respect to the state of the Merkle structure when it had
     /// `op_count` operations.
     ///
+    /// `op_count` must be the size of a commit boundary.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
     ///   >= `op_count` or `op_count` > number of operations.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
     ///   been pruned.
+    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
+    ///   op.
     pub async fn historical_proof(
         &self,
         op_count: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, V>>), Error<F>> {
+        if op_count > self.journal.size().await {
+            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        }
+
+        let reader = self.journal.reader().await;
+        let inactive_peaks =
+            crate::qmdb::inactive_peaks_at::<F, _>(&reader, op_count, |op| op.has_floor()).await?;
+
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops)
+            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
@@ -361,6 +382,8 @@ where
         self.journal.rewind(rewind_size).await?;
         self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
+        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
+        self.root = self.journal.root(inactive_peaks)?;
         Ok(())
     }
 
@@ -392,6 +415,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
+            root: self.root,
             parent: None,
             bounds: batch_chain::Bounds {
                 base_size: journal_size,
@@ -442,6 +466,7 @@ where
 
         self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+        self.root = batch.root;
         let end_loc = Location::new(batch.bounds.total_size);
         debug!(size = ?end_loc, "applied batch");
         Ok(start_loc..end_loc)
@@ -453,7 +478,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle::hasher::Standard,
+        merkle,
         qmdb::verify_proof,
         Persistable,
     };
@@ -667,7 +692,8 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = Standard::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         const ELEMENTS: u64 = 50;
 
         {
@@ -682,7 +708,7 @@ pub(crate) mod tests {
         let root = db.root();
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root,));
         assert_eq!(ops.len() as u64, 1 + ELEMENTS + 1);
 
         let (proof, ops) = db.proof(Location::new(10), NZU64!(5)).await.unwrap();
@@ -691,7 +717,7 @@ pub(crate) mod tests {
             &proof,
             Location::new(10),
             &ops,
-            &root
+            &root,
         ));
         assert_eq!(ops.len(), 5);
 
@@ -1227,7 +1253,8 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = Standard::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         // Build a db with some values.
         const ELEMENTS: u64 = 100;
@@ -1266,7 +1293,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert!(
-                verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &root),
+                verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &root,),
                 "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
             );
             let expected_ops = std::cmp::min(max_ops, *db.bounds().await.end - start_loc);
@@ -1278,7 +1305,7 @@ pub(crate) mod tests {
                 &proof,
                 Location::new(start_loc),
                 &ops,
-                &wrong_root
+                &wrong_root,
             ));
             if start_loc > 0 {
                 assert!(!verify_proof(
@@ -1286,7 +1313,7 @@ pub(crate) mod tests {
                     &proof,
                     Location::new(start_loc - 1),
                     &ops,
-                    &root
+                    &root,
                 ));
             }
         }
@@ -1303,7 +1330,8 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = Standard::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         const ELEMENTS: u64 = 100;
         {
@@ -1349,7 +1377,7 @@ pub(crate) mod tests {
                 continue;
             }
             let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
-            assert!(verify_proof(&hasher, &proof, start_loc, &ops, &root));
+            assert!(verify_proof(&hasher, &proof, start_loc, &ops, &root,));
         }
 
         let aggressive_prune: Location<F> = Location::new(150);
@@ -1357,7 +1385,7 @@ pub(crate) mod tests {
 
         let new_oldest = db.bounds().await.start;
         let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, new_oldest, &ops, &root));
+        assert!(verify_proof(&hasher, &proof, new_oldest, &ops, &root,));
 
         let almost_all = db.bounds().await.end - 5;
         db.prune(almost_all).await.unwrap();
@@ -1369,7 +1397,7 @@ pub(crate) mod tests {
                 &final_proof,
                 final_oldest,
                 &final_ops,
-                &root
+                &root,
             ));
         }
 
@@ -1577,7 +1605,8 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = Standard::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         const BATCHES: u64 = 20;
         const APPENDS_PER_BATCH: u64 = 5;
@@ -1603,7 +1632,7 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root,));
         assert_eq!(db.bounds().await.end, 1 + BATCHES * (APPENDS_PER_BATCH + 1));
 
         db.destroy().await.unwrap();
@@ -1687,7 +1716,8 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher = Standard::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         const N: u64 = 500;
         let mut values = Vec::new();
         let mut locs = Vec::new();
@@ -1708,7 +1738,7 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root,));
         assert_eq!(db.bounds().await.end, 1 + N + 1);
 
         db.destroy().await.unwrap();

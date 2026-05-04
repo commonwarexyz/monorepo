@@ -216,6 +216,9 @@ pub struct MerkleizedBatch<
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
     pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>, S>>,
 
+    /// Cached operations root after applying this batch.
+    pub(crate) root: D,
+
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
     pub(crate) diff: Arc<DiffVec<U::Key, F, U::Value>>,
@@ -692,9 +695,14 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let ops = Arc::new(ops);
+        let leaves = Location::new(self.base_size + ops.len() as u64);
+        let inactive_peaks = db.inactive_peaks(leaves, floor);
         let journal = db
             .log
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
+        let root = db
+            .log
+            .with_mem(|base| journal.root(base, &db.log.hasher, inactive_peaks))?;
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestors: Vec<_> = self
@@ -709,6 +717,7 @@ where
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
+            root,
             diff: Arc::new(diff),
             parent: self.ancestors.first().map(Arc::downgrade),
             total_active_keys: total_active_keys as usize,
@@ -1383,8 +1392,8 @@ where
     Operation<F, U>: Send + Sync,
 {
     /// Return the speculative root.
-    pub fn root(&self) -> D {
-        self.journal_batch.root()
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
@@ -1620,6 +1629,7 @@ where
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.root = batch.root;
 
         // Return range of operations that were written to the log.
         Ok(start_loc..Location::new(batch.bounds.total_size))
@@ -1644,6 +1654,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             journal_batch: self.log.to_merkleized_batch(),
+            root: self.root,
             diff: Arc::new(Vec::new()),
             parent: None,
             total_active_keys: self.active_keys,

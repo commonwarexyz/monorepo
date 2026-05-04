@@ -145,6 +145,9 @@ pub struct Immutable<
     /// Authenticated journal of operations.
     pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
 
+    /// Cached canonical operations root.
+    pub(crate) root: H::Digest,
+
     /// A map from each active key to the location of the operation that set its value.
     ///
     /// # Invariant
@@ -203,6 +206,9 @@ where
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
+            if inactivity_floor_loc > last_commit_loc {
+                return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
+            }
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
@@ -215,9 +221,15 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(*last_commit_loc + 1)),
+            inactivity_floor_loc,
+        );
+        let root = journal.root(inactive_peaks)?;
 
         Ok(Self {
             journal,
+            root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
@@ -365,6 +377,12 @@ where
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
     /// operations.
     ///
+    /// # Contract
+    ///
+    /// `op_count` must be a commit-boundary size: the operation at `op_count - 1` must
+    /// itself be a commit op. Non-commit-boundary sizes are not supported because the
+    /// inactivity floor governing them is not directly retrievable.
+    ///
     /// # Errors
     ///
     /// Returns [crate::merkle::Error::LocationOverflow] if `op_count` or `start_loc` >
@@ -372,15 +390,26 @@ where
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
+    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
+    /// because pruning removed the commit that would have governed `op_count`.
     pub async fn historical_proof(
         &self,
         op_count: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
+        if op_count > self.journal.size().await {
+            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        }
+
+        let reader = self.journal.reader().await;
+        let inactive_peaks =
+            crate::qmdb::inactive_peaks_at::<F, _>(&reader, op_count, |op| op.has_floor()).await?;
+
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops)
+            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
@@ -513,13 +542,15 @@ where
 
         self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
+        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
+        self.root = self.journal.root(inactive_peaks)?;
 
         Ok(())
     }
 
-    /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
-        self.journal.root()
+    /// Return the canonical QMDB root of the db.
+    pub const fn root(&self) -> H::Digest {
+        self.root
     }
 
     /// Return a reference to the merkleization strategy.
@@ -623,6 +654,7 @@ where
         // Update state.
         self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+        self.root = batch.root;
         Ok(start_loc..Location::new(batch.bounds.total_size))
     }
 }
@@ -631,7 +663,7 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        merkle::{Family, Location},
+        merkle::{self, Family, Location},
         qmdb::verify_proof,
         translator::TwoCap,
     };
@@ -641,8 +673,6 @@ pub(super) mod test {
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
     use std::ops::Range;
-
-    type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 
     const ITEMS_PER_SECTION: u64 = 5;
 
@@ -793,7 +823,8 @@ pub(super) mod test {
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         db.destroy().await.unwrap();
@@ -903,7 +934,8 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         let mut db = open_db(context.with_label("first")).await;
 
         let mut batch = db.new_batch();
@@ -1679,7 +1711,8 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.with_label("db")).await;
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         const BATCHES: u64 = 20;
         const KEYS_PER_BATCH: u64 = 5;
@@ -1822,7 +1855,8 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.with_label("db")).await;
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher =
+            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         const N: u64 = 500;
         let mut kvs: Vec<(Digest, Digest)> = Vec::new();

@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::{hasher::Standard as StandardHasher, Family},
+    merkle::{self, Family},
     qmdb::{
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
@@ -44,8 +44,14 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H, S> =
-            Journal::new(context, cfg.merkle, cfg.log, Operation::<F, V>::is_commit).await?;
+        let journal: Journal<F, E, V, H, S> = Journal::new(
+            context,
+            cfg.merkle,
+            cfg.log,
+            Operation::<F, V>::is_commit,
+            merkle::Bagging::BackwardFold,
+        )
+        .await?;
         Self::init_from_journal(journal).await
     }
 }
@@ -55,9 +61,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle =
-            crate::merkle::compact::Merkle::init(context, &StandardHasher::<H>::new(), cfg.merkle)
-                .await?;
+        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
         Self::init_from_merkle(merkle, ()).await
     }
 }
@@ -105,11 +109,11 @@ mod test {
     type TestCompactDb<F> =
         CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
-    async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
+    async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
     }
 
-    async fn open_db_with_suffix<F: crate::merkle::Family>(
+    async fn open_db_with_suffix<F: Family>(
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
@@ -130,7 +134,7 @@ mod test {
         TestCompactDb::init(context, cfg).await.unwrap()
     }
 
-    fn reopen<F: crate::merkle::Family>() -> tests::Reopen<TestDb<F>> {
+    fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 

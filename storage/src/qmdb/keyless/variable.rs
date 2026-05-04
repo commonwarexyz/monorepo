@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
-    merkle::{hasher::Standard as StandardHasher, Family},
+    merkle::{self, Family},
     qmdb::{
         any::value::{VariableEncoding, VariableValue},
         keyless::operation::Operation as BaseOperation,
@@ -49,8 +49,14 @@ impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: St
         context: E,
         cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H, S> =
-            Journal::new(context, cfg.merkle, cfg.log, Operation::<F, V>::is_commit).await?;
+        let journal: Journal<F, E, V, H, S> = Journal::new(
+            context,
+            cfg.merkle,
+            cfg.log,
+            Operation::<F, V>::is_commit,
+            merkle::Bagging::BackwardFold,
+        )
+        .await?;
         Self::init_from_journal(journal).await
     }
 }
@@ -68,9 +74,7 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle =
-            crate::merkle::compact::Merkle::init(context, &StandardHasher::<H>::new(), cfg.merkle)
-                .await?;
+        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
         Self::init_from_merkle(merkle, cfg.commit_codec_config).await
     }
 }
@@ -130,11 +134,11 @@ mod test {
     >;
 
     /// Return a [Db] database initialized with a fixed config.
-    async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
+    async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
     }
 
-    async fn open_db_with_suffix<F: crate::merkle::Family>(
+    async fn open_db_with_suffix<F: Family>(
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
@@ -155,7 +159,7 @@ mod test {
         TestCompactDb::init(context, cfg).await.unwrap()
     }
 
-    fn reopen<F: crate::merkle::Family>() -> tests::Reopen<TestDb<F>> {
+    fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 
@@ -212,6 +216,68 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
             tests::test_keyless_db_proof_with_pruning(ctx, db, reopen::<mmr::Family>()).await;
+        });
+    }
+
+    /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
+    /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
+    /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
+    /// data corruption).
+    ///
+    /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
+    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <=
+    /// 8) and retains blob 1 ([7, 14)). `bounds.start = 7` is a non-commit op (an Append), and the
+    /// previous commit at location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the
+    /// state just before the first retained commit, which has no retained governing floor.
+    #[test_traced("INFO")]
+    fn test_keyless_historical_proof_floor_pruned() {
+        use crate::merkle::Location;
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+
+            // Build commits at 0, 4, 8, 12, ... (3 appends + 1 commit per batch).
+            for batch_idx in 0u64..15 {
+                let mut batch = db.new_batch();
+                for j in 0..3 {
+                    batch =
+                        batch.append(<Vec<u8> as crate::qmdb::keyless::tests::TestValue>::make(
+                            batch_idx * 10 + j,
+                        ));
+                }
+                let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
+                db.apply_batch(batch.merkleize(&db, None, new_commit_loc))
+                    .await
+                    .unwrap();
+            }
+
+            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
+            // commit is at 8.
+            db.prune(Location::new(8)).await.unwrap();
+            let bounds = db.bounds().await;
+            assert_eq!(*bounds.start, 7);
+
+            // op_count = first retained commit (= state just before that commit). Expected:
+            // HistoricalFloorPruned, NOT UnexpectedData.
+            let result = db
+                .historical_proof(Location::new(8), bounds.start, NZU64!(5))
+                .await;
+            assert!(
+                !matches!(result, Err(Error::UnexpectedData(_))),
+                "must not surface as UnexpectedData; got {result:?}",
+            );
+            assert!(
+                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
+                "expected HistoricalFloorPruned(8), got {result:?}",
+            );
+
+            // Sanity: a commit-boundary size whose floor is retained still works. First retained
+            // commit at 8 declares some floor; op_count=9 is the post-commit size whose governing
+            // floor is the one declared at op 8.
+            db.historical_proof(Location::new(9), Location::new(8), NZU64!(1))
+                .await
+                .expect("commit-boundary historical_proof should succeed");
+
+            db.destroy().await.unwrap();
         });
     }
 

@@ -7,7 +7,7 @@
 use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
-    merkle::{self, Location},
+    merkle::{Family, Location},
     qmdb::{
         any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
@@ -35,15 +35,8 @@ pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
     S,
 >;
 
-impl<
-        F: merkle::Family,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -62,7 +55,7 @@ pub mod partitioned {
     use crate::{
         index::partitioned::ordered::Index,
         journal::contiguous::fixed::Journal,
-        merkle::{self, Location},
+        merkle::{Family, Location},
         qmdb::{
             any::{FixedConfig as Config, FixedValue},
             Error,
@@ -95,7 +88,7 @@ pub mod partitioned {
     >;
 
     impl<
-            F: merkle::Family,
+            F: Family,
             E: Context,
             K: Array,
             V: FixedValue,
@@ -133,6 +126,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
+            self,
             mmr::{self, Location, StandardHasher as Standard},
             Location as GenericLocation,
         },
@@ -181,16 +175,14 @@ pub(crate) mod test {
         Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
-    async fn open_db_generic<F: crate::merkle::Family>(
-        context: deterministic::Context,
-    ) -> AnyTestGeneric<F> {
+    async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
         crate::qmdb::any::init(context, cfg).await.unwrap()
     }
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = fixed_db_config("partition", &context);
+        let cfg = fixed_db_config::<_>("partition", &context);
         AnyTest::init(context, cfg).await.unwrap()
     }
 
@@ -375,7 +367,7 @@ pub(crate) mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
             let mut db = open_db(context.with_label("first")).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -684,7 +676,7 @@ pub(crate) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
             let root_hash = db.root();
             let original_op_count = db.bounds().await.end;
 
@@ -738,14 +730,20 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::new();
-            let ops = create_test_ops(50);
+            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
             let mut db = create_test_db(context.with_label("first")).await;
-            apply_ops(&mut db, ops.clone()).await;
+            // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
+            // after each batch is a commit-boundary historical size.
+            let mut commit_boundary_sizes: Vec<Location> = Vec::new();
+            for _ in 0..5 {
+                apply_ops(&mut db, create_test_ops(10)).await;
+                commit_boundary_sizes.push(db.bounds().await.end);
+            }
 
             let root = db.root();
             let full_size = db.bounds().await.end;
+            assert_eq!(full_size, *commit_boundary_sizes.last().unwrap());
 
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
@@ -755,8 +753,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root
-            ));
+                &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -766,20 +763,31 @@ pub(crate) mod test {
             assert_eq!(hp.digests, proof.digests);
             assert_eq!(hp_ops, proof_ops);
 
-            // Test requesting more operations than available in historical position.
+            // Test requesting more operations than available in historical position. Use
+            // the commit-boundary size after the first batch.
+            let first_batch_size = commit_boundary_sizes[0];
             let (_proof, limited_ops) = db
-                .historical_proof(Location::new(10), Location::new(5), NZU64!(20))
+                .historical_proof(first_batch_size, Location::new(5), NZU64!(1000))
                 .await
                 .unwrap();
-            assert_eq!(limited_ops.len(), 5); // limited by historical size
+            assert_eq!(limited_ops.len() as u64, *first_batch_size - 5);
 
-            // Test proof at minimum historical position.
+            // Test proof at minimum historical position (just the initial commit).
             let (min_proof, min_ops) = db
-                .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+                .historical_proof(Location::new(1), Location::new(0), NZU64!(3))
                 .await
                 .unwrap();
-            assert_eq!(min_proof.leaves, Location::new(4));
-            assert_eq!(min_ops.len(), 3);
+            assert_eq!(min_proof.leaves, Location::new(1));
+            assert_eq!(min_ops.len(), 1);
+
+            // Non-commit-boundary historical sizes are rejected.
+            let result = db
+                .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
+                .await;
+            assert!(
+                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
+                "expected HistoricalFloorPruned(5), got {result:?}"
+            );
 
             db.destroy().await.unwrap();
         });
@@ -793,7 +801,7 @@ pub(crate) mod test {
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
 
-            let hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
             let root = db.root();
 
             let start_loc = Location::new(20);
@@ -938,7 +946,7 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        let cfg = fixed_db_config("fixed-bytes-partition", &context);
+        let cfg = fixed_db_config::<_>("fixed-bytes-partition", &context);
         FixedDb::init(context, cfg).await.unwrap()
     }
 
@@ -1204,7 +1212,7 @@ pub(crate) mod test {
     }
 
     /// Helper: commit a batch of key-value writes and return the applied range (generic).
-    async fn commit_writes_generic<F: crate::merkle::Family>(
+    async fn commit_writes_generic<F: Family>(
         db: &mut AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
@@ -1221,7 +1229,7 @@ pub(crate) mod test {
 
     // -- Generic inner functions for parameterized batch tests --
 
-    async fn batch_empty_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+    async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let root_before = db.root();
 
@@ -1235,7 +1243,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_metadata_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+    async fn batch_metadata_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let metadata = val(42);
 
@@ -1249,9 +1257,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_get_read_through_inner<F: crate::merkle::Family>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_get_read_through_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1279,9 +1285,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_get_on_merkleized_inner<F: crate::merkle::Family>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_get_on_merkleized_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1307,7 +1311,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_stacked_get_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+    async fn batch_stacked_get_inner<F: Family>(context: deterministic::Context) {
         let db = open_db_generic::<F>(context.with_label("db")).await;
 
         let ka = key(0);
@@ -1334,9 +1338,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_stacked_delete_recreate_inner<F: crate::merkle::Family>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_stacked_delete_recreate_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
         let ka = key(0);
 
@@ -1364,9 +1366,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_apply_returns_range_inner<F: crate::merkle::Family>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_apply_returns_range_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1382,9 +1382,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_speculative_root_inner<F: crate::merkle::Family>(
-        context: deterministic::Context,
-    ) {
+    async fn batch_speculative_root_inner<F: Family>(context: deterministic::Context) {
         let mut db = open_db_generic::<F>(context.with_label("db")).await;
 
         let mut batch = db.new_batch();
@@ -1400,7 +1398,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn log_replay_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+    async fn log_replay_inner<F: Family>(context: deterministic::Context) {
         let db_context = context.with_label("db");
         let mut db = open_db_generic::<F>(db_context.clone()).await;
 
@@ -1645,10 +1643,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{
-                mmr::{self, full::Mmr},
-                Family as _,
-            },
+            merkle::mmr::{self, full::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

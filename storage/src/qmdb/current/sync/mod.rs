@@ -34,7 +34,7 @@ use crate::{
     merkle::{
         full::{self, Merkle},
         hasher::Standard as StandardHasher,
-        Graftable, Location,
+        Bagging, Graftable, Location,
     },
     qmdb::{
         self,
@@ -126,7 +126,6 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &hasher,
     )
     .await?;
     let index = I::new(context.with_label("index"), translator);
@@ -151,7 +150,8 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(index, log, Some(bitmap)).await?;
+    let any: AnyDb<F, E, J, I, H, U, N, S> =
+        AnyDb::init_from_log(index, log, Some(bitmap), false).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -199,7 +199,7 @@ where
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
     let grafted_root = db::compute_grafted_root(&hasher, any.bitmap.as_ref(), &storage).await?;
-    let ops_root = any.log.root();
+    let ops_root = any.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
@@ -256,6 +256,8 @@ macro_rules! impl_current_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
+            const ROOT_BAGGING: Bagging = Bagging::ForwardFold;
+
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -291,6 +293,8 @@ macro_rules! impl_current_sync_database {
                     context.with_label("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
+                    0,
+                    Bagging::ForwardFold,
                 )
                 .await
                 {
@@ -313,7 +317,7 @@ macro_rules! impl_current_sync_database {
             /// Returns the ops root (not the canonical root), since the sync engine verifies
             /// batches against the ops tree.
             fn root(&self) -> Self::Digest {
-                self.any.log.root()
+                self.any.root()
             }
         }
     };

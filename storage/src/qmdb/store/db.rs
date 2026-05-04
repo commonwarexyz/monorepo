@@ -370,6 +370,11 @@ where
             let reader = log.reader().await;
             let op = reader.read(*last_commit_loc).await?;
             let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
+            if inactivity_floor_loc > last_commit_loc {
+                return Err(crate::qmdb::Error::DataCorrupted(
+                    "inactivity floor exceeds last commit",
+                ));
+            }
             let active_keys =
                 build_snapshot_from_log(inactivity_floor_loc, &reader, &mut snapshot, |_, _| {})
                     .await?;

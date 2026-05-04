@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
-    merkle::Family,
+    merkle::{self, Family},
     qmdb::{
         any::{value::VariableEncoding, VariableValue},
         operation::Key,
@@ -62,6 +62,7 @@ impl<
             cfg.merkle_config,
             cfg.log,
             Operation::<F, K, V>::is_commit,
+            merkle::Bagging::BackwardFold,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator).await
@@ -82,12 +83,7 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(
-            context,
-            &crate::merkle::hasher::Standard::<H>::new(),
-            cfg.merkle,
-        )
-        .await?;
+        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
         Self::init_from_merkle(merkle, cfg.commit_codec_config).await
     }
 }

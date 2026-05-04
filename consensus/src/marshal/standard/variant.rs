@@ -54,26 +54,22 @@ where
     K: PublicKey,
 {
     type PublicKey = K;
-    type CachedBlock = B;
 
-    async fn find_by_digest(&self, digest: B::Digest) -> Option<Self::CachedBlock> {
+    async fn find_by_digest(&self, digest: B::Digest) -> Option<B> {
         self.get(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Self::CachedBlock> {
+    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<B> {
         self.find_by_digest(commitment).await
     }
 
-    async fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<Self::CachedBlock> {
+    async fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
         self.subscribe_prepared(digest, tx).await;
         rx
     }
 
-    async fn subscribe_by_commitment(
-        &self,
-        commitment: B::Digest,
-    ) -> oneshot::Receiver<Self::CachedBlock> {
+    async fn subscribe_by_commitment(&self, commitment: B::Digest) -> oneshot::Receiver<B> {
         self.subscribe_by_digest(commitment).await
     }
 

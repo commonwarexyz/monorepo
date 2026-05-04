@@ -174,7 +174,6 @@ use rand::Rng;
 use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
-    sync::Arc,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -331,8 +330,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
-    reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C, H>>>,
+    reconstructed_blocks: BTreeMap<Commitment, CodedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -350,7 +348,7 @@ where
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
-        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
+        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -580,9 +578,9 @@ where
     fn try_reconstruct(
         &mut self,
         commitment: Commitment,
-    ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
+    ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
-            return Ok(Some(Arc::clone(block)));
+            return Ok(Some(block.clone()));
         }
         let Some(state) = self.state.get_mut(&commitment) else {
             return Ok(None);
@@ -635,8 +633,8 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = Arc::new(CodedBlock::new_trusted(inner, commitment));
-        self.cache_block(Arc::clone(&block));
+        let block = CodedBlock::new_trusted(inner, commitment);
+        self.cache_block(block.clone());
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -744,10 +742,9 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
-    fn cache_block(&mut self, block: Arc<CodedBlock<B, C, H>>) {
+    fn cache_block(&mut self, block: CodedBlock<B, C, H>) {
         let commitment = block.commitment();
-        self.reconstructed_blocks
-            .insert(commitment, Arc::clone(&block));
+        self.reconstructed_blocks.insert(commitment, block.clone());
         self.notify_block_subscribers(block);
     }
 
@@ -825,7 +822,6 @@ where
         }
 
         // Cache the block so we don't have to reconstruct it again.
-        let block = Arc::new(block);
         self.cache_block(block);
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
@@ -937,7 +933,7 @@ where
     fn handle_block_subscription(
         &mut self,
         key: BlockSubscriptionKey<B::Digest>,
-        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
+        response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => {
@@ -951,7 +947,7 @@ where
 
         // Answer immediately if we have the block cached.
         if let Some(block) = block {
-            response.send_lossy(Arc::clone(block));
+            response.send_lossy(block.clone());
             return;
         }
 
@@ -975,7 +971,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
+    fn notify_block_subscribers(&mut self, block: CodedBlock<B, C, H>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -985,7 +981,7 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+                subscriber.send_lossy(block.clone());
             }
         }
 
@@ -995,7 +991,7 @@ where
             .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+                subscriber.send_lossy(block.clone());
             }
         }
     }
@@ -1541,7 +1537,10 @@ mod tests {
         future::Future,
         marker::PhantomData,
         num::NonZeroU32,
-        sync::atomic::{AtomicIsize, Ordering},
+        sync::{
+            atomic::{AtomicIsize, Ordering},
+            Arc,
+        },
         time::Duration,
     };
 
