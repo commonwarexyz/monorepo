@@ -1415,7 +1415,7 @@ impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
-/// **Byzzfuzz mode** - implements the fuzzing method described in https://gleissen.github.io/papers/byzzfuzz.pdf.
+/// **Byzzfuzz mode** - implements the fuzzing method described in <https://gleissen.github.io/papers/byzzfuzz.pdf>.
 ///
 /// Runs four honest engines and simulate network and process faults derived from the input strategy:
 /// - **Network faults**: a round-indexed schedule of set partitions over
