@@ -644,7 +644,7 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), anchor_digest, child_height, 4600);
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(child);
+                MockVerifyingApp::default().with_propose_result(child);
             let mut inline = Inline::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             let proposed = inline
@@ -681,7 +681,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -759,7 +759,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -831,7 +831,7 @@ mod tests {
             let marshal_actor_handle = setup.actor_handle;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -932,7 +932,7 @@ mod tests {
             let actor_handle = setup.actor_handle;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
 
             let mut inline = Inline::new(
                 context.clone(),
@@ -1045,7 +1045,7 @@ mod tests {
             let actor_handle = setup.actor_handle;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -1289,7 +1289,7 @@ mod tests {
 
             let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(fresh_block);
+                MockVerifyingApp::default().with_propose_result(fresh_block);
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,

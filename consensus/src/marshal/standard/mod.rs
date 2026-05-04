@@ -1192,7 +1192,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_genesis_block();
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 // Non-boundary propose should drop the response because mock app cannot build.
@@ -1277,7 +1277,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_genesis_block();
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -1419,7 +1419,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_genesis_block();
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
                 // Test case 1: non-contiguous height.

@@ -30,15 +30,6 @@ pub struct MockVerifyingApp<B, S> {
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
-    /// Create a new mock verifying application.
-    pub fn new() -> Self {
-        Self {
-            propose_result: None,
-            verify_result: true,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
     /// Create a new mock verifying application with a fixed verify result.
     pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
@@ -52,6 +43,16 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn with_propose_result(mut self, block: B) -> Self {
         self.propose_result = Some(block);
         self
+    }
+}
+
+impl<B, S> Default for MockVerifyingApp<B, S> {
+    fn default() -> Self {
+        Self {
+            propose_result: None,
+            verify_result: true,
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 

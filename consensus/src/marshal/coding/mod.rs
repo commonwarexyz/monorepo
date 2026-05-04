@@ -187,7 +187,7 @@ mod tests {
             )
             .commitment();
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new().with_propose_result(child);
+                MockVerifyingApp::default().with_propose_result(child);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -531,7 +531,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -647,7 +647,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -858,7 +858,7 @@ mod tests {
             let shards = setup.extra;
             let genesis = make_coding_genesis_block();
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -941,7 +941,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1011,7 +1011,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1193,7 +1193,7 @@ mod tests {
             let shards = setup.extra;
             let genesis = make_coding_genesis_block();
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
@@ -1294,7 +1294,7 @@ mod tests {
             let genesis = make_coding_genesis_block();
 
             // Wrap with Marshaled verifier
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1454,7 +1454,7 @@ mod tests {
             let shards = setup.extra;
             let genesis = make_coding_genesis_block();
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1755,7 +1755,7 @@ mod tests {
             )
             .await;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
 
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -1855,7 +1855,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -1967,7 +1967,7 @@ mod tests {
             .commitment();
 
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new().with_propose_result(block_to_propose);
+                MockVerifyingApp::default().with_propose_result(block_to_propose);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2075,7 +2075,7 @@ mod tests {
             );
 
             let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new().with_propose_result(block_b);
+                MockVerifyingApp::default().with_propose_result(block_b);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2159,7 +2159,7 @@ mod tests {
                 parent: (View::new(1), new_parent_commitment),
             };
 
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::default();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),

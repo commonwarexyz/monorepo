@@ -737,7 +737,7 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), anchor_digest, child_height, 4600);
             let child_digest = child.digest();
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(child);
+                MockVerifyingApp::default().with_propose_result(child);
             let mut marshaled = Deferred::new(context.clone(), mock_app, marshal.clone(), epocher);
 
             let proposed = marshaled
@@ -775,7 +775,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
 
             let mut marshaled = Deferred::new(
                 context.clone(),
@@ -902,7 +902,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
@@ -996,7 +996,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_genesis_block();
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
 
             let mut marshaled = Deferred::new(
                 context.clone(),
@@ -1196,7 +1196,7 @@ mod tests {
             assert_ne!(digest_a, digest_b, "test requires distinct digests");
 
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(block_b);
+                MockVerifyingApp::default().with_propose_result(block_b);
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
@@ -1265,7 +1265,7 @@ mod tests {
                 parent: (View::new(1), new_parent_digest),
             };
 
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::default();
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
