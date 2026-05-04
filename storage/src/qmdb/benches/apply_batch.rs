@@ -12,7 +12,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::{Duration, Instant};
 
 const NUM_KEYS: u64 = 65_536;
-const UPDATES: [u64; 2] = [1_024, 4_096];
+const UPDATES: [u64; 1] = [16_384];
 
 type Db = AnyUFixDb<Mmb>;
 
