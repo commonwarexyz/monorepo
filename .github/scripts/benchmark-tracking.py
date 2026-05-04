@@ -350,7 +350,7 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
     ]
     if regression_count:
         lines.append(
-            f"> [!CAUTION]\n>\n> {regression_count} benchmark(s) exceeded the regression threshold.\n\n> <img width=\"1200\" height=\"675\" alt=\"gandalf\" src=\"https://github.com/user-attachments/assets/5aec7740-f886-4bf6-8e7e-e164cc95a586\" />"
+            f"> [!CAUTION]\n>\n> {regression_count} benchmark(s) exceeded the regression threshold.\n\n> <img width=\"1200\" height=\"675\" alt=\"gandalf\" src=\"https://commonware.xyz/imgs/gandalf-you-shall-not-pass.jpg\" />"
         )
     else:
         lines.append(
