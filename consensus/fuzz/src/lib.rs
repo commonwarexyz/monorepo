@@ -1425,7 +1425,7 @@ impl FuzzMode for FaultyNet {
 ///   scheduled views the topology is fully connected.
 /// - **Process faults**: a fixed byzantine identity, whose outgoing
 ///   protocol messages are intercepted per a schedule of
-///   `(view, receivers, seed, omit, scope)` entries. `scope` optionally
+///   `(view, receivers, omit, scope)` entries. `scope` optionally
 ///   narrows a fault to a specific channel + message kind (e.g. only
 ///   Notarize votes); `Any` matches every byzantine outgoing message at
 ///   the view. Vote process faults semantically mutate the intercepted

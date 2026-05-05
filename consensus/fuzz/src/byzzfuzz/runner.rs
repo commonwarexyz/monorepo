@@ -292,8 +292,14 @@ where
         let mut reporters = setup_engines::<P>(&mut context, &mut input, gate, "byzzfuzz").await;
         let config = input.configuration;
 
+        // Wait only on correct reporters: BYZANTINE_IDX is intentionally
+        // adversarial in this harness and may stall, which would otherwise
+        // burn the full MAX_SLEEP_DURATION before invariants run.
         let mut finalizers = Vec::new();
-        for reporter in reporters.iter_mut() {
+        for (i, reporter) in reporters.iter_mut().enumerate() {
+            if i == BYZANTINE_IDX {
+                continue;
+            }
             let required_containers = input.required_containers;
             let (mut latest, mut monitor): (View, ViewReceiver<View>) = reporter.subscribe().await;
             finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
