@@ -45,8 +45,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, toml, publish order, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-stability
+# Runs all lints (fmt, clippy, docs, features, toml, custom, publish order, and stability)
+lint: check-fmt check-toml-fmt clippy check-docs check-features check-no-borrowed-child check-publish-order check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -75,6 +75,10 @@ check-docs *args='':
 # Check publish workflow ordering against workspace dependencies
 check-publish-order:
     python3 .github/scripts/check_publish_order.py
+
+# Check for borrowed temporary child contexts
+check-no-borrowed-child:
+    python3 .github/scripts/check_no_borrowed_child.py
 
 # Run all fuzz tests in a given directory
 fuzz fuzz_dir max_time='60' max_mem='4000':

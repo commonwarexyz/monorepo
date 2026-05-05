@@ -1608,7 +1608,7 @@ impl TestHarness for StandardHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
@@ -1844,7 +1844,7 @@ impl TestHarness for StandardHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
@@ -2414,7 +2414,7 @@ impl TestHarness for CodingHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
@@ -2682,7 +2682,7 @@ impl TestHarness for CodingHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
         let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider.clone(),

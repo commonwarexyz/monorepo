@@ -793,8 +793,7 @@ pub(crate) mod harnesses {
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache =
-            CacheRef::from_pooler(&pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1044,8 +1043,7 @@ mod compact_variable_mmr {
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
-        let page_cache =
-            CacheRef::from_pooler(&pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1512,8 +1510,7 @@ mod compact_variable_mmb {
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
-        let page_cache =
-            CacheRef::from_pooler(&pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
