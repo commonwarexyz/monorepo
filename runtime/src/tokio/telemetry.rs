@@ -95,9 +95,8 @@ pub fn init(
                 .await
                 .expect("Failed to bind metrics server");
 
-            let shared = Arc::new(context);
-
             // Create a router for the metrics server
+            let shared = Arc::new(context);
             let app = Router::new()
                 .route(
                     "/metrics",
