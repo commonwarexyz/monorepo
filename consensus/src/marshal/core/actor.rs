@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, Request},
+        resolver::handler::{self, BlockFetchContext, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -46,7 +46,7 @@ use futures::{future::join_all, try_join, FutureExt};
 use pin_project::pin_project;
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque},
+    collections::{btree_map::Entry, BTreeMap, VecDeque},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -248,10 +248,6 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<BlockSubscriptionKeyFor<V>, BlockSubscription<V>>,
-    // Commitment fetches issued only to satisfy ancestry verification.
-    ancestry_block_requests: BTreeMap<V::Commitment, Height>,
-    // Commitment fetches issued to repair or complete the finalized chain.
-    finalized_block_requests: BTreeSet<V::Commitment>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -346,8 +342,6 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
-                ancestry_block_requests: BTreeMap::new(),
-                finalized_block_requests: BTreeSet::new(),
                 cache,
                 application_metadata,
                 finalizations_by_height,
@@ -633,8 +627,12 @@ where
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
-                            self.finalized_block_requests.insert(commitment);
-                            resolver.fetch(Request::Block(commitment)).await;
+                            Self::enqueue_block_fetch(
+                                &mut resolver,
+                                commitment,
+                                BlockFetchContext::Finalized { round },
+                            )
+                                .await;
                         }
                     }
                     Message::GetBlock {
@@ -790,6 +788,7 @@ where
                                     key,
                                     value,
                                     response,
+                                    &mut resolver,
                                     &mut delivers,
                                     &mut application,
                                 )
@@ -833,7 +832,7 @@ where
         buffer: &Buf,
     ) {
         match key {
-            Request::Block(commitment) => {
+            Request::Block { commitment, .. } => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
@@ -866,6 +865,17 @@ where
         }
     }
 
+    /// Enqueue a resolver fetch for a block commitment.
+    async fn enqueue_block_fetch(
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
+        commitment: V::Commitment,
+        context: BlockFetchContext,
+    ) {
+        resolver
+            .fetch(Request::block_request(commitment, context))
+            .await;
+    }
+
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
@@ -896,7 +906,7 @@ where
 
         // We don't have the block locally, so fetch by round if we have one.
         // If ancestry supplied a commitment and height, fetch the block directly
-        // and track the height so the request can be canceled after it goes stale.
+        // with a height annotation so the request can be canceled after it goes stale.
         if let Some(round) = round {
             if round < self.last_processed_round {
                 // At this point, we have failed to find the block locally, and
@@ -922,8 +932,12 @@ where
                 return;
             }
             debug!(%height, ?commitment, ?digest, "requested ancestry block missing");
-            self.ancestry_block_requests.insert(commitment, height);
-            resolver.fetch(Request::Block(commitment)).await;
+            Self::enqueue_block_fetch(
+                resolver,
+                commitment,
+                BlockFetchContext::Ancestry { height },
+            )
+                .await;
         }
 
         // Register subscriber.
@@ -967,11 +981,15 @@ where
         key: ResolverRequestFor<V>,
         value: Bytes,
         response: oneshot::Sender<bool>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         match key {
-            Request::Block(commitment) => {
+            Request::Block {
+                commitment,
+                context: Some(context),
+            } => {
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config)
                 else {
                     response.send_lossy(false);
@@ -982,39 +1000,69 @@ where
                     return false;
                 }
 
-                let ancestry_height = self.ancestry_block_requests.get(&commitment).copied();
-                let finalized_request = self.finalized_block_requests.contains(&commitment);
-
                 let height = block.height();
                 let digest = block.digest();
 
                 let finalization = self.cache.get_finalization_for(digest).await;
-                let wrote = if finalized_request || finalization.is_some() {
-                    self.ancestry_block_requests.remove(&commitment);
-                    self.finalized_block_requests.remove(&commitment);
-                    self.store_finalization(height, digest, block, finalization, application)
-                        .await
-                } else if let Some(expected_height) = ancestry_height {
-                    if height != expected_height {
-                        response.send_lossy(false);
-                        return false;
+                let wrote = match context {
+                    BlockFetchContext::Ancestry {
+                        height: expected_height,
+                    } => {
+                        if height != expected_height {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        if finalization.is_some() {
+                            self.store_finalization(height, digest, block, finalization, application)
+                                .await
+                        } else {
+                            if height > self.last_processed_height {
+                                self.cache
+                                    .put_digest_block(height, digest, block.clone().into())
+                                    .await;
+                                self.notify_subscribers(&block);
+                            }
+                            false
+                        }
                     }
-                    self.ancestry_block_requests.remove(&commitment);
-                    if height > self.last_processed_height {
-                        self.cache
-                            .put_digest_block(height, digest, block.clone().into())
-                            .await;
-                        self.notify_subscribers(&block);
+                    BlockFetchContext::Repair {
+                        height: expected_height,
+                    } => {
+                        if height != expected_height {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        self.store_finalization(height, digest, block, finalization, application)
+                            .await
                     }
-                    false
-                } else {
-                    self.finalized_block_requests.remove(&commitment);
-                    self.store_finalization(height, digest, block, None, application)
-                        .await
+                    BlockFetchContext::Floor { .. } | BlockFetchContext::Finalized { .. } => {
+                        self.store_finalization(height, digest, block, finalization, application)
+                            .await
+                    }
                 };
                 debug!(?digest, %height, "received block");
+                let current = Request::Block {
+                    commitment,
+                    context: Some(context),
+                };
+                resolver
+                    .retain(move |request| {
+                        *request == current || request.block_commitment() != Some(commitment)
+                    })
+                    .await;
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
                 wrote
+            }
+            Request::Block {
+                commitment,
+                context: None,
+            } => {
+                debug!(
+                    ?commitment,
+                    "ignoring block delivery without local fetch context"
+                );
+                response.send_lossy(false);
+                false
             }
             Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
@@ -1350,7 +1398,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .cancel(Request::Block(commitment))
+            .retain(Request::without_block_commitment(commitment))
             .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1655,8 +1703,14 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    self.finalized_block_requests.insert(commitment);
-                    resolver.fetch(Request::Block(commitment)).await;
+                    Self::enqueue_block_fetch(
+                        resolver,
+                        commitment,
+                        BlockFetchContext::Repair {
+                            height: last_finalized,
+                        },
+                    )
+                    .await;
                 }
             }
         }
@@ -1705,8 +1759,18 @@ where
                     // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
-                    self.finalized_block_requests.insert(parent_commitment);
-                    resolver.fetch(Request::Block(parent_commitment)).await;
+                    let parent_height = cursor
+                        .height()
+                        .previous()
+                        .expect("gap repair cursor must be above genesis");
+                    Self::enqueue_block_fetch(
+                        resolver,
+                        parent_commitment,
+                        BlockFetchContext::Repair {
+                            height: parent_height,
+                        },
+                    )
+                        .await;
                     break 'cache_repair;
                 }
             }
@@ -1743,18 +1807,6 @@ where
             .processed_height
             .try_set(self.last_processed_height.get());
         self.cache.prune_digest_blocks(height).await;
-
-        let stale: Vec<_> = self
-            .ancestry_block_requests
-            .iter()
-            .filter_map(|(commitment, request_height)| (*request_height <= height).then_some(*commitment))
-            .collect();
-        for commitment in stale {
-            self.ancestry_block_requests.remove(&commitment);
-            if !self.finalized_block_requests.contains(&commitment) {
-                resolver.cancel(Request::Block(commitment)).await;
-            }
-        }
 
         // Cancel any existing requests below the new floor.
         resolver

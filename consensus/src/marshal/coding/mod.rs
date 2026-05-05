@@ -1683,7 +1683,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // Regression: when backfilling by Request::Block(commitment), a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -1769,7 +1769,7 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(digest)
+            //   - it fetches Request::Block(commitment_a)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
             //   - finalization lookup is digest-indexed, so deliver path must still
             //     reject because cached finalization expects commitment_a

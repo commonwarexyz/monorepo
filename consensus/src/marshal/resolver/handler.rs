@@ -95,20 +95,60 @@ impl<D: Digest> Producer for Handler<D> {
     }
 }
 
+/// Context for a block request.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum BlockFetchContext {
+    /// A block requested only to satisfy ancestry verification.
+    Ancestry { height: Height },
+    /// A block requested while establishing a floor.
+    Floor { round: Round },
+    /// A block requested because its finalization is known.
+    Finalized { round: Round },
+    /// A block requested while repairing an internal finalized-chain gap.
+    Repair { height: Height },
+}
+
 /// A request for backfilling data.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum Request<D: Digest> {
     /// Fetch a block by consensus commitment.
-    Block(D),
+    ///
+    /// The context is local-only retention metadata. It is present for locally
+    /// enqueued fetches and absent for decoded peer requests.
+    Block {
+        commitment: D,
+        context: Option<BlockFetchContext>,
+    },
     Finalized { height: Height },
     Notarized { round: Round },
 }
 
 impl<D: Digest> Request<D> {
+    /// Create a locally annotated block request key.
+    pub const fn block_request(commitment: D, context: BlockFetchContext) -> Self {
+        Self::Block {
+            commitment,
+            context: Some(context),
+        }
+    }
+
+    /// Return the block commitment, if this is a block request.
+    pub const fn block_commitment(&self) -> Option<D> {
+        match self {
+            Self::Block { commitment, .. } => Some(*commitment),
+            _ => None,
+        }
+    }
+
+    /// A predicate that drops all block requests for `commitment`.
+    pub fn without_block_commitment(commitment: D) -> impl Fn(&Self) -> bool + Send + 'static {
+        move |request| request.block_commitment() != Some(commitment)
+    }
+
     /// The subject of the request.
     const fn subject(&self) -> u8 {
         match self {
-            Self::Block(_) => BLOCK_REQUEST,
+            Self::Block { .. } => BLOCK_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
             Self::Notarized { .. } => NOTARIZED_REQUEST,
         }
@@ -119,14 +159,51 @@ impl<D: Digest> Request<D> {
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
     pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
-        let cloned = self.clone();
-        move |s| match (&cloned, &s) {
-            (Self::Block(_), _) => unreachable!("we should never retain by block"),
+        let cloned = *self;
+        move |s| match (&cloned, s) {
+            (
+                Self::Block {
+                    commitment: mine,
+                    context: Some(mine_context),
+                },
+                Self::Block {
+                    commitment: theirs,
+                    context: their_context,
+                },
+            ) => mine != theirs || Some(*mine_context) != *their_context,
+            (
+                Self::Block {
+                    commitment: mine,
+                    context: None,
+                },
+                _,
+            ) => s.block_commitment() != Some(*mine),
+            (Self::Block { context: Some(_), .. }, _) => true,
             (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
                 *theirs > *mine
             }
+            (
+                Self::Finalized { height: mine },
+                Self::Block {
+                    context: Some(
+                        BlockFetchContext::Ancestry { height: theirs }
+                        | BlockFetchContext::Repair { height: theirs },
+                    ),
+                    ..
+                },
+            ) => *theirs > *mine,
             (Self::Finalized { .. }, _) => true,
             (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
+            (
+                Self::Notarized { round: mine },
+                Self::Block {
+                    context: Some(
+                        BlockFetchContext::Floor { round: theirs }
+                        | BlockFetchContext::Finalized { round: theirs },
+                    ),
+                    ..
+                },
+            ) => *theirs > *mine,
             (Self::Notarized { .. }, _) => true,
         }
     }
@@ -136,7 +213,7 @@ impl<D: Digest> Write for Request<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.subject().write(buf);
         match self {
-            Self::Block(commitment) => commitment.write(buf),
+            Self::Block { commitment, .. } => commitment.write(buf),
             Self::Finalized { height } => height.write(buf),
             Self::Notarized { round } => round.write(buf),
         }
@@ -148,7 +225,10 @@ impl<D: Digest> Read for Request<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
-            BLOCK_REQUEST => Self::Block(D::read(buf)?),
+            BLOCK_REQUEST => Self::Block {
+                commitment: D::read(buf)?,
+                context: None,
+            },
             FINALIZED_REQUEST => Self::Finalized {
                 height: Height::read(buf)?,
             },
@@ -164,7 +244,7 @@ impl<D: Digest> Read for Request<D> {
 impl<D: Digest> EncodeSize for Request<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Block(commitment) => commitment.encode_size(),
+            Self::Block { commitment, .. } => commitment.encode_size(),
             Self::Finalized { height } => height.encode_size(),
             Self::Notarized { round } => round.encode_size(),
         }
@@ -176,7 +256,16 @@ impl<D: Digest> Span for Request<D> {}
 impl<D: Digest> PartialEq for Request<D> {
     fn eq(&self, other: &Self) -> bool {
         match (&self, &other) {
-            (Self::Block(a), Self::Block(b)) => a == b,
+            (
+                Self::Block {
+                    commitment: a,
+                    context: a_context,
+                },
+                Self::Block {
+                    commitment: b,
+                    context: b_context,
+                },
+            ) => a == b && a_context == b_context,
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a == b,
             _ => false,
@@ -189,7 +278,16 @@ impl<D: Digest> Eq for Request<D> {}
 impl<D: Digest> Ord for Request<D> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (&self, &other) {
-            (Self::Block(a), Self::Block(b)) => a.cmp(b),
+            (
+                Self::Block {
+                    commitment: a,
+                    context: a_context,
+                },
+                Self::Block {
+                    commitment: b,
+                    context: b_context,
+                },
+            ) => a.cmp(b).then_with(|| a_context.cmp(b_context)),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a.cmp(b),
             (a, b) => a.subject().cmp(&b.subject()),
@@ -207,7 +305,13 @@ impl<D: Digest> Hash for Request<D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.subject().hash(state);
         match self {
-            Self::Block(commitment) => commitment.hash(state),
+            Self::Block {
+                commitment,
+                context,
+            } => {
+                commitment.hash(state);
+                context.hash(state);
+            }
             Self::Finalized { height } => height.hash(state),
             Self::Notarized { round } => round.hash(state),
         }
@@ -217,7 +321,10 @@ impl<D: Digest> Hash for Request<D> {
 impl<D: Digest> Display for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(commitment) => write!(f, "Block({commitment:?})"),
+            Self::Block {
+                commitment,
+                context,
+            } => write!(f, "Block({commitment:?}, {context:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -227,9 +334,34 @@ impl<D: Digest> Display for Request<D> {
 impl<D: Digest> Debug for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(commitment) => write!(f, "Block({commitment:?})"),
+            Self::Block {
+                commitment,
+                context,
+            } => write!(f, "Block({commitment:?}, {context:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for BlockFetchContext {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=3)?;
+        match choice {
+            0 => Ok(Self::Ancestry {
+                height: u.arbitrary()?,
+            }),
+            1 => Ok(Self::Floor {
+                round: u.arbitrary()?,
+            }),
+            2 => Ok(Self::Finalized {
+                round: u.arbitrary()?,
+            }),
+            3 => Ok(Self::Repair {
+                height: u.arbitrary()?,
+            }),
+            _ => unreachable!(),
         }
     }
 }
@@ -242,7 +374,10 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=2)?;
         match choice {
-            0 => Ok(Self::Block(u.arbitrary()?)),
+            0 => Ok(Self::Block {
+                commitment: u.arbitrary()?,
+                context: Some(u.arbitrary()?),
+            }),
             1 => Ok(Self::Finalized {
                 height: u.arbitrary()?,
             }),
@@ -266,6 +401,13 @@ mod tests {
     use std::collections::BTreeSet;
 
     type D = Sha256Digest;
+
+    const fn block(digest: D) -> Request<D> {
+        Request::Block {
+            commitment: digest,
+            context: None,
+        }
+    }
 
     #[test]
     fn test_cross_variant_hash_differs() {
@@ -292,7 +434,12 @@ mod tests {
     #[test]
     fn test_subject_block_encoding() {
         let digest = Sha256::hash(b"test");
-        let request = Request::<D>::Block(digest);
+        let request = Request::block_request(
+            digest,
+            BlockFetchContext::Repair {
+                height: Height::new(7),
+            },
+        );
 
         // Test encoding
         let encoded = request.encode();
@@ -302,8 +449,9 @@ mod tests {
         // Test decoding
         let mut buf = encoded.as_ref();
         let decoded = Request::<D>::read(&mut buf).unwrap();
-        assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::Block(digest));
+        assert_ne!(request, decoded);
+        assert_eq!(decoded, block(digest));
+        assert_eq!(request.encode(), decoded.encode());
     }
 
     #[test]
@@ -391,9 +539,95 @@ mod tests {
     }
 
     #[test]
+    fn test_block_annotation_affects_identity_but_not_encoding() {
+        let digest = Sha256::hash(b"annotated");
+        let ancestry = Request::block_request(
+            digest,
+            BlockFetchContext::Ancestry {
+                height: Height::new(10),
+            },
+        );
+        let repair = Request::block_request(
+            digest,
+            BlockFetchContext::Repair {
+                height: Height::new(10),
+            },
+        );
+
+        assert_ne!(ancestry, repair);
+        assert_eq!(ancestry.encode(), repair.encode());
+
+        let set = [ancestry, repair].into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_subject_predicate_prunes_annotated_blocks() {
+        let digest = Sha256::hash(b"prune");
+        let height_floor = Request::<D>::Finalized {
+            height: Height::new(10),
+        };
+        let keep_repair = Request::block_request(
+            digest,
+            BlockFetchContext::Repair {
+                height: Height::new(11),
+            },
+        );
+        let drop_repair = Request::block_request(
+            digest,
+            BlockFetchContext::Repair {
+                height: Height::new(10),
+            },
+        );
+        let drop_ancestry = Request::block_request(
+            digest,
+            BlockFetchContext::Ancestry {
+                height: Height::new(9),
+            },
+        );
+
+        let predicate = height_floor.predicate();
+        assert!(predicate(&keep_repair));
+        assert!(!predicate(&drop_repair));
+        assert!(!predicate(&drop_ancestry));
+
+        let round_floor = Request::<D>::Notarized {
+            round: Round::new(Epoch::new(1), View::new(10)),
+        };
+        let keep_finalized = Request::block_request(
+            digest,
+            BlockFetchContext::Finalized {
+                round: Round::new(Epoch::new(1), View::new(11)),
+            },
+        );
+        let drop_finalized = Request::block_request(
+            digest,
+            BlockFetchContext::Finalized {
+                round: Round::new(Epoch::new(1), View::new(10)),
+            },
+        );
+        let drop_floor = Request::block_request(
+            digest,
+            BlockFetchContext::Floor {
+                round: Round::new(Epoch::new(1), View::new(9)),
+            },
+        );
+
+        let predicate = round_floor.predicate();
+        assert!(predicate(&keep_finalized));
+        assert!(!predicate(&drop_finalized));
+        assert!(!predicate(&drop_floor));
+    }
+
+    #[test]
     fn test_encode_size() {
         let digest = Sha256::hash(&[0u8; 32]);
-        let r1 = Request::<D>::Block(digest);
+        let r1 = Request::block_request(
+            digest,
+            BlockFetchContext::Ancestry {
+                height: Height::new(1),
+            },
+        );
         let r2 = Request::<D>::Finalized {
             height: Height::new(u64::MAX),
         };
@@ -412,8 +646,8 @@ mod tests {
         // Test ordering within the same variant
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block(digest1);
-        let block2 = Request::<D>::Block(digest2);
+        let block1 = block(digest1);
+        let block2 = block(digest2);
 
         // Block ordering depends on digest ordering
         if digest1 < digest2 {
@@ -458,7 +692,7 @@ mod tests {
     #[test]
     fn test_request_ord_cross_variant() {
         let digest = Sha256::hash(b"test");
-        let block = Request::<D>::Block(digest);
+        let block = block(digest);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -488,8 +722,8 @@ mod tests {
     fn test_request_partial_ord() {
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block(digest1);
-        let block2 = Request::<D>::Block(digest2);
+        let block1 = block(digest1);
+        let block2 = block(digest2);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -527,18 +761,18 @@ mod tests {
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(300)),
             },
-            Request::<D>::Block(digest2),
+            block(digest2),
             Request::<D>::Finalized {
                 height: Height::new(200),
             },
-            Request::<D>::Block(digest1),
+            block(digest1),
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
             },
             Request::<D>::Finalized {
                 height: Height::new(100),
             },
-            Request::<D>::Block(digest3),
+            block(digest3),
         ];
 
         // Sort using BTreeSet (uses Ord)
@@ -552,9 +786,9 @@ mod tests {
         assert_eq!(sorted.len(), 7);
 
         // Check that all blocks come first
-        assert!(matches!(sorted[0], Request::<D>::Block(_)));
-        assert!(matches!(sorted[1], Request::<D>::Block(_)));
-        assert!(matches!(sorted[2], Request::<D>::Block(_)));
+        assert!(sorted[0].block_commitment().is_some());
+        assert!(sorted[1].block_commitment().is_some());
+        assert!(sorted[2].block_commitment().is_some());
 
         // Check that finalized come next
         assert_eq!(
@@ -607,7 +841,7 @@ mod tests {
 
         // Test self-comparison
         let digest = Sha256::hash(b"self");
-        let block = Request::<D>::Block(digest);
+        let block = block(digest);
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
