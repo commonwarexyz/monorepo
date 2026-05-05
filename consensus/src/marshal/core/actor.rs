@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, BlockFetchContext, Request},
+        resolver::handler::{self, BlockFetchContext, Request, ResolverKey},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -185,7 +185,7 @@ enum BlockSubscriptionKey<C, D> {
 
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
-type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
+type ResolverRequestFor<V> = ResolverKey<<V as Variant>::Commitment>;
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
@@ -590,7 +590,9 @@ where
                             self.cache_block(round, digest, block).await;
                         } else {
                             debug!(?round, "notarized block missing");
-                            resolver.fetch(Request::Notarized { round }).await;
+                            resolver
+                                .fetch(ResolverKey::request(Request::Notarized { round }))
+                                .await;
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -673,7 +675,7 @@ where
                         }
 
                         // Trigger a targeted fetch via the resolver
-                        let request = Request::Finalized { height };
+                        let request = ResolverKey::request(Request::Finalized { height });
                         resolver.fetch_targeted(request, targets).await;
                     }
                     Message::SubscribeByDigest {
@@ -831,8 +833,8 @@ where
         response: oneshot::Sender<Bytes>,
         buffer: &Buf,
     ) {
-        match key {
-            Request::Block { commitment, .. } => {
+        match key.request_key() {
+            Request::Block { commitment } => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
@@ -872,7 +874,7 @@ where
         context: BlockFetchContext,
     ) {
         resolver
-            .fetch(Request::block_request(commitment, context))
+            .fetch(ResolverKey::block_request(commitment, context))
             .await;
     }
 
@@ -920,7 +922,9 @@ where
             // If this is a valid view, this request should be fine to keep open
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
-            resolver.fetch(Request::Notarized { round }).await;
+            resolver
+                .fetch(ResolverKey::request(Request::Notarized { round }))
+                .await;
         } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
             if height <= self.last_processed_height {
                 debug!(
@@ -986,9 +990,9 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         match key {
-            Request::Block {
+            ResolverKey::Block {
                 commitment,
-                context: Some(context),
+                context,
             } => {
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config)
                 else {
@@ -1041,10 +1045,7 @@ where
                     }
                 };
                 debug!(?digest, %height, "received block");
-                let current = Request::Block {
-                    commitment,
-                    context: Some(context),
-                };
+                let current = ResolverKey::block_request(commitment, context);
                 resolver
                     .retain(move |request| {
                         *request == current || request.block_commitment() != Some(commitment)
@@ -1053,10 +1054,7 @@ where
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
                 wrote
             }
-            Request::Block {
-                commitment,
-                context: None,
-            } => {
+            ResolverKey::Request(Request::Block { commitment }) => {
                 debug!(
                     ?commitment,
                     "ignoring block delivery without local fetch context"
@@ -1064,7 +1062,7 @@ where
                 response.send_lossy(false);
                 false
             }
-            Request::Finalized { height } => {
+            ResolverKey::Request(Request::Finalized { height }) => {
                 let Some(bounds) = self.epocher.containing(height) else {
                     debug!(
                         %height,
@@ -1112,7 +1110,7 @@ where
                 });
                 false
             }
-            Request::Notarized { round } => {
+            ResolverKey::Request(Request::Notarized { round }) => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1398,7 +1396,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .retain(Request::without_block_commitment(commitment))
+            .retain(ResolverKey::without_block_commitment(commitment))
             .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1418,7 +1416,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(Request::Notarized { round }.predicate())
+                .retain(ResolverKey::request(Request::Notarized { round }).predicate())
                 .await;
         }
     }
@@ -1786,7 +1784,7 @@ where
             .missing_items(start, self.max_repair.get());
         let requests: Vec<_> = missing_items
             .into_iter()
-            .map(|height| Request::Finalized { height })
+            .map(|height| ResolverKey::request(Request::Finalized { height }))
             .collect();
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
@@ -1810,7 +1808,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(Request::Finalized { height }.predicate())
+            .retain(ResolverKey::request(Request::Finalized { height }).predicate())
             .await;
     }
 

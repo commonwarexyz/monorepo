@@ -1786,7 +1786,7 @@ mod tests {
     }
 
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
-    type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
+    type TargetedFetch = (handler::ResolverKey<D>, NonEmptyVec<PublicKey>);
 
     /// A resolver that records each `fetch_targeted` invocation; other
     /// methods are no-ops.
@@ -1817,7 +1817,7 @@ mod tests {
     }
 
     impl Resolver for RecordingResolver {
-        type Key = handler::Request<D>;
+        type Key = handler::ResolverKey<D>;
         type PublicKey = PublicKey;
 
         async fn fetch(&mut self, _key: Self::Key) {}
@@ -2109,9 +2109,9 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    key: handler::Request::Finalized {
+                    key: handler::ResolverKey::request(handler::Request::Finalized {
                         height: Height::new(5),
-                    },
+                    }),
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -2123,9 +2123,9 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    key: handler::Request::Notarized {
+                    key: handler::ResolverKey::request(handler::Request::Notarized {
                         round: Round::new(Epoch::zero(), View::new(1)),
-                    },
+                    }),
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -2634,9 +2634,9 @@ mod tests {
             let (request, targets) = &targeted[0];
             assert_eq!(
                 request,
-                &handler::Request::Finalized {
+                &handler::ResolverKey::request(handler::Request::Finalized {
                     height: Height::new(7)
-                }
+                })
             );
             assert_eq!(&targets[..], &[target]);
         });

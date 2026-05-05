@@ -53,7 +53,7 @@ pub fn init<E, C, B, D, S, R, P>(
     backfill: (S, R),
 ) -> (
     mpsc::Receiver<handler::Message<D>>,
-    p2p::Mailbox<handler::Request<D>, P>,
+    p2p::Mailbox<handler::ResolverKey<D>, P>,
 )
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
