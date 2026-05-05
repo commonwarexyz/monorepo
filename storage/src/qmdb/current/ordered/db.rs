@@ -18,7 +18,8 @@ use crate::{
     },
     Context,
 };
-use commonware_codec::Codec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use futures::stream::Stream;
@@ -28,6 +29,36 @@ use futures::stream::Stream;
 pub struct KeyValueProof<F: merkle::Family, K: Key, D: Digest, const N: usize> {
     pub proof: OperationProof<F, D, N>,
     pub next_key: K,
+}
+
+impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.proof.write(buf);
+        self.next_key.write(buf);
+    }
+}
+
+impl<F: merkle::Family, K: Key, D: Digest, const N: usize> EncodeSize
+    for KeyValueProof<F, K, D, N>
+{
+    fn encode_size(&self) -> usize {
+        self.proof.encode_size() + self.next_key.encode_size()
+    }
+}
+
+impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
+    /// `(max_digests, key_cfg)`: the max digest count for the embedded operation proof and the
+    /// read configuration for the key type.
+    type Cfg = (usize, <K as Read>::Cfg);
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_digests, key_cfg): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
+        let next_key = K::read_cfg(buf, key_cfg)?;
+        Ok(Self { proof, next_key })
+    }
 }
 
 /// The generic Db type for ordered Current QMDB variants.

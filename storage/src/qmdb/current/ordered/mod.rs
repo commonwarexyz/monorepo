@@ -16,6 +16,8 @@ use crate::{
         operation::Key,
     },
 };
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 
 pub mod db;
@@ -42,6 +44,111 @@ pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const
     /// equal to its own location, which is a necessary and sufficient condition for an empty
     /// database.
     Commit(OperationProof<F, D, N>, Option<V::Value>),
+}
+
+const EXCLUSION_TAG_KEY_VALUE: u8 = 0;
+const EXCLUSION_TAG_COMMIT: u8 = 1;
+
+impl<F, K, V, D, const N: usize> Write for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::KeyValue(op_proof, update) => {
+                EXCLUSION_TAG_KEY_VALUE.write(buf);
+                op_proof.write(buf);
+                update.key.write(buf);
+                update.value.write(buf);
+                update.next_key.write(buf);
+            }
+            Self::Commit(op_proof, value) => {
+                EXCLUSION_TAG_COMMIT.write(buf);
+                op_proof.write(buf);
+                value.is_some().write(buf);
+                if let Some(v) = value {
+                    v.write(buf);
+                }
+            }
+        }
+    }
+}
+
+impl<F, K, V, D, const N: usize> EncodeSize for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::KeyValue(op_proof, update) => {
+                op_proof.encode_size()
+                    + update.key.encode_size()
+                    + update.value.encode_size()
+                    + update.next_key.encode_size()
+            }
+            Self::Commit(op_proof, value) => {
+                op_proof.encode_size() + value.as_ref().map_or(1, |v| 1 + v.encode_size())
+            }
+        }
+    }
+}
+
+impl<F, K, V, D, const N: usize> Read for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+{
+    /// `(max_digests, key_cfg, value_cfg)`: max digest count for the embedded operation proof,
+    /// the read configuration for the key type, and the read configuration for the value type.
+    type Cfg = (
+        usize,
+        <K as Read>::Cfg,
+        <<V as ValueEncoding>::Value as Read>::Cfg,
+    );
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_digests, key_cfg, value_cfg): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            EXCLUSION_TAG_KEY_VALUE => {
+                let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
+                let key = K::read_cfg(buf, key_cfg)?;
+                let value = V::Value::read_cfg(buf, value_cfg)?;
+                let next_key = K::read_cfg(buf, key_cfg)?;
+                Ok(Self::KeyValue(
+                    op_proof,
+                    Update {
+                        key,
+                        value,
+                        next_key,
+                    },
+                ))
+            }
+            EXCLUSION_TAG_COMMIT => {
+                let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
+                let value = if bool::read(buf)? {
+                    Some(V::Value::read_cfg(buf, value_cfg)?)
+                } else {
+                    None
+                };
+                Ok(Self::Commit(op_proof, value))
+            }
+            _ => Err(commonware_codec::Error::Invalid(
+                "ExclusionProof",
+                "unknown variant tag",
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -830,5 +937,106 @@ pub mod tests {
                 &empty_root, // wrong root
             ));
         });
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::{db::KeyValueProof, ExclusionProof};
+    use crate::{
+        merkle::Proof,
+        mmb,
+        qmdb::{
+            any::{ordered::Update, value::FixedEncoding},
+            current::proof::{OperationProof, RangeProof},
+        },
+    };
+    use commonware_codec::{Decode as _, Encode as _, EncodeSize as _};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+
+    type F = mmb::Family;
+    const N: usize = 32;
+    const MAX_DIGESTS: usize = 64;
+
+    fn sample_op_proof() -> OperationProof<F, Digest, N> {
+        let range_proof = RangeProof {
+            proof: Proof::<F, Digest> {
+                leaves: mmb::Location::new(7),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"sib")],
+            },
+            pre_prefix_acc: Some(Sha256::hash(b"pre")),
+            unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops"),
+        };
+        let mut chunk = [0u8; N];
+        for (i, byte) in chunk.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        OperationProof {
+            loc: mmb::Location::new(5),
+            chunk,
+            range_proof,
+        }
+    }
+
+    #[test]
+    fn test_key_value_proof_codec_roundtrip() {
+        let proof = KeyValueProof::<F, Digest, Digest, N> {
+            proof: sample_op_proof(),
+            next_key: Sha256::hash(b"next-key"),
+        };
+
+        let encoded = proof.encode();
+        assert_eq!(encoded.len(), proof.encode_size());
+        let decoded =
+            KeyValueProof::<F, Digest, Digest, N>::decode_cfg(encoded, &(MAX_DIGESTS, ())).unwrap();
+        assert_eq!(decoded, proof);
+    }
+
+    #[test]
+    fn test_exclusion_proof_codec_roundtrip() {
+        let cases = [
+            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::KeyValue(
+                sample_op_proof(),
+                Update {
+                    key: Sha256::hash(b"key"),
+                    value: Sha256::hash(b"value"),
+                    next_key: Sha256::hash(b"next-key"),
+                },
+            ),
+            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::Commit(
+                sample_op_proof(),
+                Some(Sha256::hash(b"metadata")),
+            ),
+            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::Commit(
+                sample_op_proof(),
+                None,
+            ),
+        ];
+
+        for proof in cases {
+            let encoded = proof.encode();
+            assert_eq!(encoded.len(), proof.encode_size());
+            let decoded =
+                ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::decode_cfg(
+                    encoded,
+                    &(MAX_DIGESTS, (), ()),
+                )
+                .unwrap();
+            assert_eq!(decoded, proof);
+        }
+    }
+
+    #[test]
+    fn test_exclusion_proof_rejects_unknown_tag() {
+        let mut bytes = vec![42u8]; // unknown tag
+        bytes.extend_from_slice(&[0u8; 32]); // garbage
+        let result = ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::decode_cfg(
+            bytes.as_slice(),
+            &(MAX_DIGESTS, (), ()),
+        );
+        assert!(result.is_err());
     }
 }
