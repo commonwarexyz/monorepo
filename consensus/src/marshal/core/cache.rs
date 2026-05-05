@@ -197,30 +197,34 @@ where
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
+        let context = self
+            .context
+            .child("cache")
+            .with_attribute("epoch", epoch);
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
-                &self.context,
+                &context,
                 &self.cfg,
                 epoch,
                 "verified",
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
-                &self.context,
+                &context,
                 &self.cfg,
                 epoch,
                 "notarized",
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
-                &self.context,
+                &context,
                 &self.cfg,
                 epoch,
                 "notarizations",
                 S::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
-                &self.context,
+                &context,
                 &self.cfg,
                 epoch,
                 "finalizations",
@@ -247,7 +251,6 @@ where
         name: &'static str,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
-        let ctx = ctx.child("cache").with_attribute("epoch", epoch);
         let start = ctx.current();
         let archive_cfg = prunable::Config {
             translator: TwoCap,
