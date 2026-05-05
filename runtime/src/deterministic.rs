@@ -1223,6 +1223,7 @@ impl crate::Supervisor for Context {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(key);
 
+        // Add the attribute to the list of attributes
         add_attribute(&mut self.attributes, key, value);
         self
     }
