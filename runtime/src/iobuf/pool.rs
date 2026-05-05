@@ -293,6 +293,9 @@ impl BufferPoolConfig {
     ///
     /// # Panics
     ///
+    /// Panics if size-class bounds violate the invariants checked by
+    /// [`Self::validate`].
+    ///
     /// Panics if the derived per-class capacity does not fit in `u32`.
     pub fn with_budget_bytes(mut self, budget_bytes: NonZeroUsize) -> Self {
         let mut class_bytes = 0usize;
@@ -362,37 +365,69 @@ impl BufferPoolConfig {
     }
 
     /// Returns the number of size classes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size-class bounds violate the invariants checked by
+    /// [`Self::validate`].
     #[inline]
-    fn num_classes(&self) -> usize {
-        if self.max_size < self.min_size {
-            return 0;
-        }
-        // Classes are: min_size, min_size*2, min_size*4, ..., max_size
-        (self.max_size.get() / self.min_size.get()).trailing_zeros() as usize + 1
+    const fn num_classes(&self) -> usize {
+        let min_size = self.min_size.get();
+        let max_size = self.max_size.get();
+
+        assert!(
+            min_size.is_power_of_two(),
+            "min_size must be a power of two"
+        );
+        assert!(
+            max_size.is_power_of_two(),
+            "max_size must be a power of two"
+        );
+        assert!(max_size >= min_size, "max_size must be >= min_size");
+
+        // Since sizes are powers of two, trailing zeros is the size-class
+        // exponent
+        (max_size.trailing_zeros() - min_size.trailing_zeros() + 1) as usize
     }
 
-    /// Returns the size class index for a given size.
-    /// Returns None if size > max_size.
+    /// Returns the size class index for a given size, or `None` if `size > max_size`.
+    ///
+    /// This method assumes the config has already passed [`Self::validate`]. Invalid
+    /// configs can produce meaningless or out-of-range class indexes. Since this is
+    /// used in the allocation hot-path it does not recheck size-class invariants.
     #[inline]
-    fn class_index(&self, size: usize) -> Option<usize> {
-        if size > self.max_size.get() {
+    const fn class_index(&self, size: usize) -> Option<usize> {
+        let min_size = self.min_size.get();
+        let max_size = self.max_size.get();
+        if size > max_size {
             return None;
         }
-        if size <= self.min_size.get() {
+        if size <= min_size {
             return Some(0);
         }
-        // Find the smallest power-of-two class that fits
-        let size_class = size.next_power_of_two();
-        let index = (size_class / self.min_size.get()).trailing_zeros() as usize;
-        if index < self.num_classes() {
-            Some(index)
-        } else {
-            None
-        }
+
+        // Config validation guarantees `min_size` and `max_size` are powers of
+        // two. Since `min_size < size <= max_size`, `next_power_of_two()`
+        // resolves to a valid class and its exponent must be greater than
+        // `min_size`'s exponent. Use wrapping arithmetic to avoid a release
+        // overflow-check branch in this hot helper.
+        Some(
+            size.next_power_of_two()
+                .trailing_zeros()
+                .wrapping_sub(min_size.trailing_zeros()) as usize,
+        )
     }
 
     /// Returns the buffer size for a given class index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size-class bounds violate the invariants checked by
+    /// [`Self::validate`].
+    ///
+    /// Panics if `index >= self.num_classes()`.
     const fn class_size(&self, index: usize) -> usize {
+        assert!(index < self.num_classes(), "class index out of range");
         self.min_size.get() << index
     }
 
@@ -1269,6 +1304,8 @@ mod tests {
         assert_eq!(config.class_index(page), Some(0));
         assert_eq!(config.class_index(page + 1), Some(1));
         assert_eq!(config.class_index(page * 2), Some(1));
+        assert_eq!(config.class_index(page * 4 + 1), Some(3));
+        assert_eq!(config.class_index(page * 8 - 1), Some(3));
         assert_eq!(config.class_index(page * 8), Some(3));
         assert_eq!(config.class_index(page * 8 + 1), None);
     }
@@ -1723,38 +1760,6 @@ mod tests {
             PoolError::Exhausted.to_string(),
             "pool exhausted for required size class"
         );
-    }
-
-    #[test]
-    fn test_config_invalid_range_edge_paths() {
-        // max_size < min_size should yield zero size classes, and budget_bytes
-        // should leave max_per_class unchanged (no division by zero).
-        let invalid_order = BufferPoolConfig {
-            pool_min_size: 0,
-            min_size: NZUsize!(8),
-            max_size: NZUsize!(4),
-            max_per_class: NZU32!(1),
-            parallelism: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
-            prefill: false,
-            alignment: NZUsize!(4),
-        };
-        assert_eq!(invalid_order.num_classes(), 0);
-        let unchanged = invalid_order.clone().with_budget_bytes(NZUsize!(128));
-        assert_eq!(unchanged.max_per_class, invalid_order.max_per_class);
-
-        // Non-power-of-two max_size should make the size unreachable via class_index.
-        let non_power_two_max = BufferPoolConfig {
-            pool_min_size: 0,
-            min_size: NZUsize!(8),
-            max_size: NZUsize!(12),
-            max_per_class: NZU32!(1),
-            parallelism: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
-            prefill: false,
-            alignment: NZUsize!(4),
-        };
-        assert_eq!(non_power_two_max.class_index(12), None);
     }
 
     #[test]
