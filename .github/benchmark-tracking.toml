@@ -52,4 +52,5 @@ name = "qmdb"
 criterion_args = ["--sample-size", "100", "--significance-level", "0.01"]
 variants = [
   "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false",
+  "qmdb::merkleize/variant=current::ordered::fixed::mmb keys=10000 ch=true sync=false",
 ]
