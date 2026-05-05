@@ -11,9 +11,11 @@
 //!   byzantine behavior. Omission + partition faults already cover
 //!   delayed/missing certificate and recovery traffic.
 //!
-//! Vote mutation is deterministic: the per-fault RNG is keyed only by the
-//! `seed`, so given the same intercepted message, observed-value pool,
-//! and seed the produced fault is identical.
+//! Vote mutation entropy is drawn from the runtime context's RNG, which
+//! in fuzz runs is fed by the libfuzzer input via `FuzzRng`. Mutation
+//! choices (observed-vs-fallback branch, observed-payload selection,
+//! local edits) therefore respond to byte-level coverage feedback rather
+//! than being funneled through a single per-fault `u64` seed.
 
 use crate::{
     byzzfuzz::{
@@ -35,7 +37,7 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use commonware_utils::channel::mpsc::UnboundedReceiver;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::Rng;
 use rand_core::CryptoRngCore;
 use std::sync::Arc;
 
@@ -91,23 +93,48 @@ where
     ) where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
+        // Destructure so `context` can be borrowed as `&mut Rng` independently
+        // of the immutable `scheme` / `strategy` / `gate` borrows that
+        // `handle_intercept` needs. Method calls on `&self` would borrow the
+        // whole struct and conflict with `&mut self.context`.
+        let Self {
+            mut context,
+            scheme,
+            strategy,
+            gate,
+        } = self;
         while let Some(item) = intercept_rx.recv().await {
-            self.handle(&mut vote_sender, item).await;
+            Self::handle_intercept(
+                &scheme,
+                &strategy,
+                &gate,
+                &mut vote_sender,
+                item,
+                &mut context,
+            )
+            .await;
         }
     }
 
-    async fn handle<VS>(&self, vote_sender: &mut VS, item: Intercept<S::PublicKey>)
-    where
+    async fn handle_intercept<VS, R>(
+        scheme: &S,
+        strategy: &St,
+        gate: &FaultGate,
+        vote_sender: &mut VS,
+        item: Intercept<S::PublicKey>,
+        rng: &mut R,
+    ) where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
+        R: Rng,
     {
         // After the fault phase ends, drain any in-flight intercepts
         // without emitting -- liveness mode needs the post-heal protocol
         // to run unperturbed even if intercepts captured before heal are
         // still queued.
-        if self.gate.healed() {
+        if gate.healed() {
             log::push(format!(
-                "byzzfuzz: drop intercept channel={:?} view={} seed={} reason=post_heal",
-                item.channel, item.view, item.fault_seed,
+                "byzzfuzz: drop intercept channel={:?} view={} reason=post_heal",
+                item.channel, item.view,
             ));
             return;
         }
@@ -132,36 +159,32 @@ where
                 "scheduled_omit"
             };
             log::push(format!(
-                "byzzfuzz: omit channel={:?} view={} targets_n={} seed={} scheduled_omit={} reason={reason}",
+                "byzzfuzz: omit channel={:?} view={} targets_n={} scheduled_omit={} reason={reason}",
                 item.channel,
                 item.view,
                 item.targets.len(),
-                item.fault_seed,
                 item.omit,
             ));
             return;
         }
-        // Per-fault deterministic RNG keyed only by `seed`.
-        let mut rng = StdRng::seed_from_u64(item.fault_seed);
         // Vote is the only channel with content mutation: a byzantine
         // signer can sign conflicting votes, so semantic mutation +
         // re-signing under the byzantine keys is meaningful.
         let Ok(vote) = Vote::<S, Sha256Digest>::decode(IoBuf::from(item.bytes.clone())) else {
             log::push(format!(
-                "byzzfuzz: skip view={} reason=undecodable_vote seed={}",
-                item.view, item.fault_seed,
+                "byzzfuzz: skip view={} reason=undecodable_vote",
+                item.view,
             ));
             return;
         };
-        let Some((variant, bytes)) = self.mutate_vote(vote, &mut rng) else {
+        let Some((variant, bytes)) = Self::mutate_vote(scheme, strategy, vote, rng) else {
             return;
         };
         log::push(format!(
-            "byzzfuzz: replace channel=Vote view={} variant={} targets_n={} seed={}",
+            "byzzfuzz: replace channel=Vote view={} variant={} targets_n={}",
             item.view,
             variant,
             item.targets.len(),
-            item.fault_seed,
         ));
         let _ = vote_sender
             .send(commonware_p2p::Recipients::Some(item.targets), bytes, true)
@@ -173,37 +196,39 @@ where
     /// byzantine keys. Preserves message *type* (Notarize stays Notarize,
     /// etc.) so the receiver experiences mutation of the intercepted message
     /// rather than a synthetic injection.
-    fn mutate_vote(
-        &self,
+    ///
+    /// Associated function rather than `&self` method so the caller can pass
+    /// a `&mut Rng` borrowed from `self.context` without a whole-self borrow
+    /// conflict.
+    fn mutate_vote<R>(
+        scheme: &S,
+        strategy: &St,
         vote: Vote<S, Sha256Digest>,
-        rng: &mut StdRng,
-    ) -> Option<(&'static str, Vec<u8>)> {
+        rng: &mut R,
+    ) -> Option<(&'static str, Vec<u8>)>
+    where
+        R: Rng,
+    {
         let view = vote.view().get();
         match vote {
             Vote::Notarize(n) => {
-                let proposal =
-                    self.strategy
-                        .mutate_proposal(rng, &n.proposal, view, view, view, view);
-                let signed = Notarize::sign(&self.scheme, proposal)?;
+                let proposal = strategy.mutate_proposal(rng, &n.proposal, view, view, view, view);
+                let signed = Notarize::sign(scheme, proposal)?;
                 Some((
                     "Notarize",
                     Vote::<S, Sha256Digest>::Notarize(signed).encode().to_vec(),
                 ))
             }
             Vote::Finalize(f) => {
-                let proposal =
-                    self.strategy
-                        .mutate_proposal(rng, &f.proposal, view, view, view, view);
-                let signed = Finalize::sign(&self.scheme, proposal)?;
+                let proposal = strategy.mutate_proposal(rng, &f.proposal, view, view, view, view);
+                let signed = Finalize::sign(scheme, proposal)?;
                 Some((
                     "Finalize",
                     Vote::<S, Sha256Digest>::Finalize(signed).encode().to_vec(),
                 ))
             }
             Vote::Nullify(_) => {
-                let mut nullify_view = self
-                    .strategy
-                    .mutate_nullify_view(rng, view, view, view, view);
+                let mut nullify_view = strategy.mutate_nullify_view(rng, view, view, view, view);
                 // Identity guard: a Nullify mutation that returns the same
                 // view re-signs identical content -- a no-op for the
                 // receiver. Force a nearby different view.
@@ -214,7 +239,7 @@ where
                     }
                 }
                 let round = Round::new(Epoch::new(EPOCH), View::new(nullify_view));
-                let signed = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round)?;
+                let signed = Nullify::<S>::sign::<Sha256Digest>(scheme, round)?;
                 Some((
                     "Nullify",
                     Vote::<S, Sha256Digest>::Nullify(signed).encode().to_vec(),

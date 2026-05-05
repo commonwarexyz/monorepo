@@ -150,15 +150,14 @@ fn apply_proc_faults<P: PublicKey>(
         let mut line = String::new();
         let _ = write!(
             line,
-            "byzzfuzz: intercept channel={:?} view={} sender={} targets={:?} seed={} scheduled_omit={} scope={:?}",
-            channel, view, sender_idx, target_idx, fault.seed, fault.omit, fault.scope,
+            "byzzfuzz: intercept channel={:?} view={} sender={} targets={:?} scheduled_omit={} scope={:?}",
+            channel, view, sender_idx, target_idx, fault.omit, fault.scope,
         );
         log::push(line);
         let _ = intercept_tx.send(Intercept {
             channel,
             view,
             bytes: bytes.to_vec(),
-            fault_seed: fault.seed,
             omit: fault.omit,
             targets: targets.clone(),
         });

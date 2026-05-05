@@ -62,7 +62,6 @@ pub struct Intercept<P: PublicKey> {
     pub channel: InterceptChannel,
     pub view: u64,
     pub bytes: Vec<u8>,
-    pub fault_seed: u64,
     pub omit: bool,
     pub targets: Vec<P>,
 }

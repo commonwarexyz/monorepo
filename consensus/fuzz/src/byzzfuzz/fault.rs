@@ -8,14 +8,13 @@ use commonware_cryptography::PublicKey;
 /// equals `view`, its deliveries to anyone in `receivers` whose
 /// channel/kind matches `scope` are intercepted. The forwarder drops the
 /// original to those receivers; the injector then either replaces it
-/// (Vote: semantic mutation by `seed`, re-signed under the byzantine
-/// keys) or emits nothing (Cert / Resolver: omit-only; or Vote when
-/// `omit` is true).
+/// (Vote: semantic mutation drawn from the runtime RNG -- which is fed
+/// by the libfuzzer input -- and re-signed under the byzantine keys) or
+/// emits nothing (Cert / Resolver: omit-only; or Vote when `omit` is true).
 #[derive(Clone, Debug)]
 pub struct ProcessFault<P: PublicKey> {
     pub view: u64,
     pub receivers: Vec<P>,
-    pub seed: u64,
     pub omit: bool,
     pub scope: FaultScope,
 }

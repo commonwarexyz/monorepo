@@ -42,7 +42,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, sync::Once, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
 #[cfg(feature = "mocks")]
 pub use simplex::SimplexCertificateMock;
@@ -55,7 +55,7 @@ use std::{
     collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
-    sync::{Arc, Once},
+    sync::Arc,
     time::Duration,
 };
 pub const EPOCH: u64 = 333;
@@ -1416,32 +1416,30 @@ impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
-/// **Byzzfuzz mode** - implements the fuzzing method described in <https://gleissen.github.io/papers/byzzfuzz.pdf>.
+/// **Byzzfuzz mode** - safety fuzzing under sampled network and process faults.
 ///
-/// Runs four honest engines and simulates sampled ByzzFuzz network and process faults:
-/// - **Network faults**: a schedule of `(view, partition)` entries over
-///   `{0, ..., n-1}`. At a scheduled view, traffic across partition blocks
-///   is dropped on every channel (vote, certificate, resolver, even
-///   undecodable bytes) -- network partitions are total at their round.
-///   Outside scheduled views the topology is fully connected.
+/// Runs four honest engines and applies sampled faults for the entire run:
+/// - **Network faults**: a schedule of `(view, partition)` entries. At a
+///   scheduled view, traffic across partition blocks is dropped on every
+///   channel (vote, certificate, resolver, even undecodable bytes); outside
+///   scheduled views the topology is fully connected.
 /// - **Process faults**: a fixed byzantine identity, whose outgoing
 ///   protocol messages are intercepted per a schedule of
 ///   `(view, receivers, seed, omit, scope)` entries. `scope` optionally
 ///   narrows a fault to a specific channel + message kind (e.g. only
 ///   Notarize votes); `Any` matches every byzantine outgoing message at
-///   the view. Vote process faults semantically mutate the *actual*
-///   intercepted vote and re-sign it under the byzantine identity (the
-///   byzantine signer can plausibly equivocate). Certificate and resolver
-///   process faults are **omit-only** -- a single byzantine node cannot
-///   forge a valid quorum certificate or a meaningful recovery response,
-///   so the forwarder drops the original to the targeted recipients and
-///   the injector emits nothing on those channels.
+///   the view. Vote process faults semantically mutate the intercepted
+///   vote and re-sign it under the byzantine identity. Certificate and
+///   resolver process faults are **omit-only**: the forwarder drops the
+///   original to the targeted recipients and the injector emits nothing.
 ///
 /// Round attribution uses each message sender's current protocol round
 /// (the maximum view that sender has sent or received): network faults
 /// apply per-message-sender, process faults apply per-byzantine-sender.
 /// Retransmissions of an old view at a later round therefore inherit the
 /// later round's fault window.
+///
+/// Finalization timeout is not a failure; only invariant violations panic.
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
@@ -1451,16 +1449,13 @@ impl FuzzMode for Byzzfuzz {
 ///
 /// Same fault model as `Byzzfuzz`, but applies faults only during a bounded
 /// fault phase. After the phase elapses (or all non-byzantine reporters
-/// reach `required_containers`, whichever comes first), a shared `FaultGate`
-/// is healed: forwarders pass partition decisions through and the injector
-/// drops queued intercepts. Each non-byzantine reporter (every index except
-/// `BYZANTINE_IDX = 0`) must then finalize at least one new view within a
-/// fixed heal window; failure to advance panics with a liveness violation.
-///
-/// Mirrors Tendermint ByzzFuzz's `liveness.SetupLivenessTimer` boundary --
-/// the gate is what makes post-heal progress measurable; without it, a
-/// fuzzer that kept dropping/mutating forever at a stuck round would
-/// generate false liveness failures.
+/// reach `required_containers`, whichever comes first), the shared fault
+/// gate is healed: forwarders pass partition decisions through and the
+/// injector drops queued intercepts. Each non-byzantine reporter (every
+/// index except `BYZANTINE_IDX = 0`) must then finalize at least one new
+/// view within a fixed heal window; failure to advance panics with a
+/// liveness violation. Safety invariants run after the heal check on
+/// every successful path.
 pub struct ByzzfuzzLiveness;
 impl FuzzMode for ByzzfuzzLiveness {
     const MODE: Mode = Mode::ByzzfuzzLiveness;

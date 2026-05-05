@@ -62,12 +62,15 @@ impl ByzzFuzz {
             .collect()
     }
 
-    /// `c` independent draws of `(view, receivers, seed, omit, scope)`.
-    /// Views sampled with replacement from `[1, r]`; receivers are a
-    /// uniform *non-empty* subset of `participants[1..]` (sampled as a
-    /// non-zero bitmask). The byzantine identity (`participants[0]`, see
+    /// `c` independent draws of `(view, receivers, omit, scope)`. Views
+    /// sampled with replacement from `[1, r]`; receivers are a uniform
+    /// *non-empty* subset of `participants[1..]` (sampled as a non-zero
+    /// bitmask). The byzantine identity (`participants[0]`, see
     /// [`crate::byzzfuzz::BYZANTINE_IDX`]) is excluded from the candidate
-    /// set. `omit` fires with probability `1/4`.
+    /// set. `omit` fires with probability `1/4`. No per-fault mutation
+    /// seed: the injector pulls mutation entropy directly from the
+    /// runtime RNG (fed by the libfuzzer input) so byte-level guidance
+    /// applies to the mutation choices themselves.
     pub fn process_faults<P: PublicKey>(
         &self,
         participants: &[P],
@@ -89,12 +92,10 @@ impl ByzzFuzz {
                     .filter(|i| (mask >> i) & 1 == 1)
                     .map(|i| candidates[i].clone())
                     .collect();
-                let seed = rng.gen::<u64>();
                 let omit = rng.gen_bool(0.25);
                 ProcessFault {
                     view,
                     receivers,
-                    seed,
                     omit,
                     scope: scope::sample(rng),
                 }

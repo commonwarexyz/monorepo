@@ -325,8 +325,7 @@ where
 /// (panics). Index [`BYZANTINE_IDX`] is excluded -- only correct-process
 /// liveness is checked.
 ///
-/// Mirrors Tendermint ByzzFuzz's `liveness.SetupLivenessTimer`: faults must
-/// stop at the boundary so the post-heal protocol can run unperturbed; a
+/// Faults must stop at the boundary so the post-heal protocol can run unperturbed; a
 /// fuzzer that kept dropping/mutating at a stuck round forever would
 /// generate false liveness failures.
 pub fn run_liveness<P: Simplex>(mut input: crate::FuzzInput)
@@ -357,8 +356,7 @@ where
         let non_byzantine: Vec<usize> = (0..n).filter(|i| *i != BYZANTINE_IDX).collect();
 
         // Phase 1: race the fault-phase timer against an early-success
-        // condition (all non-byzantine reporters reach `required_containers`,
-        // mirroring Tendermint's `HeightReached(maxHeight)` success label).
+        // condition (all non-byzantine reporters reach `required_containers`).
         // Each finisher returns true iff its reporter actually reached
         // `required_containers`; a closed monitor is a stall (false), not a
         // success -- otherwise an unexpectedly dropped subscription would
@@ -415,10 +413,7 @@ where
             gate.heal();
 
             // Per-non-byzantine watcher: returns true iff the reporter
-            // advances strictly past `baseline` within the heal window. A
-            // closed monitor is a stall (false), not success -- that's the
-            // bug Tendermint's liveness gate is meant to surface, so it
-            // must not be silently absorbed here.
+            // advances strictly past `baseline` within the heal window.
             let mut watchers = Vec::new();
             for (i, baseline, mut latest, mut monitor) in watcher_inputs {
                 watchers.push(
