@@ -8,6 +8,7 @@ mod roaring_insert_range;
 mod roaring_intersection;
 mod roaring_iteration;
 mod roaring_union;
+mod roaring_write;
 
 criterion_main!(
     count_ones::benches,
@@ -18,4 +19,5 @@ criterion_main!(
     roaring_intersection::benches,
     roaring_difference::benches,
     roaring_iteration::benches,
+    roaring_write::benches,
 );

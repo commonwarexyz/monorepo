@@ -21,6 +21,9 @@ use core::ops::Range;
 /// Number of 64-bit words needed to store 65536 bits.
 pub const WORDS: usize = 1024;
 
+/// Encoded byte length of a bitmap container.
+const ENCODED_BYTES: usize = WORDS * core::mem::size_of::<u64>();
+
 /// Total number of bits in a bitmap container.
 pub const BITS: u32 = WORDS as u32 * 64;
 
@@ -443,16 +446,19 @@ fn count_runs(words: &[u64; WORDS]) -> u16 {
 
 impl Write for Bitmap {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write all words directly (fixed 8KB)
-        for &word in &self.words {
-            word.write(buf);
+        // Preserve the codec's big-endian word order while collapsing 1024 small
+        // `put_slice` calls into one bulk write.
+        let mut bytes = [0u8; ENCODED_BYTES];
+        for (dst, &word) in bytes.chunks_exact_mut(8).zip(self.words.iter()) {
+            dst.copy_from_slice(&word.to_be_bytes());
         }
+        buf.put_slice(&bytes);
     }
 }
 
 impl EncodeSize for Bitmap {
     fn encode_size(&self) -> usize {
-        WORDS * 8 // 1024 * 8 = 8KB
+        ENCODED_BYTES
     }
 }
 
