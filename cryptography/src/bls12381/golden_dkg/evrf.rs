@@ -1,6 +1,6 @@
 use crate::{
     bls12381::primitives::group::{Scalar, G1},
-    ed25519,
+    ed25519::{self, core as ed_core},
     transcript::{Summary, Transcript},
     Secret,
 };
@@ -15,7 +15,7 @@ use core::{
     ops::Deref,
 };
 use curve25519_dalek::edwards::CompressedEdwardsY;
-use ed25519_consensus::VerificationKey;
+use ed_core::VerificationKey;
 use rand_core::CryptoRngCore;
 use sha2::{Digest, Sha512};
 use std::num::NonZeroU32;
@@ -25,13 +25,13 @@ const PUBLIC_KEY_LENGTH: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    inner: Secret<ed25519_consensus::SigningKey>,
+    inner: Secret<ed_core::SigningKey>,
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
         Self {
-            inner: Secret::new(ed25519_consensus::SigningKey::new(rng)),
+            inner: Secret::new(ed_core::SigningKey::new(rng)),
         }
     }
 }
@@ -149,7 +149,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key = ed25519_consensus::SigningKey::from(*raw);
+        let key = ed_core::SigningKey::from(*raw);
         Ok(Self {
             inner: Secret::new(key),
         })
@@ -175,7 +175,7 @@ impl crate::Verifier for PublicKey {
         let payload = union_unique(namespace, msg);
         self.inner
             .verify(
-                &ed25519_consensus::Signature::from(<[u8; 64]>::try_from(sig.as_ref()).unwrap()),
+                &ed_core::Signature::from(<[u8; 64]>::try_from(sig.as_ref()).unwrap()),
                 &payload,
             )
             .is_ok()
@@ -196,7 +196,7 @@ impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read_cfg(buf, &())?;
         let inner = VerificationKey::try_from(raw)
-            .map_err(|e: ed25519_consensus::Error| CodecError::Wrapped("evrf", e.into()))?;
+            .map_err(|e: ed_core::Error| CodecError::Wrapped("evrf", e.into()))?;
         Ok(Self { inner })
     }
 }
