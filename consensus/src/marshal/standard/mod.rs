@@ -2112,16 +2112,27 @@ mod tests {
 
     /// Parse the `processed_height` gauge value from a prometheus-encoded
     /// metrics dump produced by `Metrics::encode`. Looks for any line of the
-    /// form `<prefix>processed_height <value>`.
+    /// form `<prefix>processed_height <value>` or
+    /// `<prefix>processed_height{labels} <value>`.
     fn parse_processed_height(metrics: &str) -> Option<u64> {
         for line in metrics.lines() {
             let line = line.trim();
             if line.starts_with('#') {
                 continue;
             }
-            let needle = "processed_height ";
-            if let Some(idx) = line.find(needle) {
-                let value = line[idx + needle.len()..].split_whitespace().next()?;
+
+            let Some(idx) = line.find("processed_height") else {
+                continue;
+            };
+            let mut rest = &line[idx + "processed_height".len()..];
+            if let Some(labeled) = rest.strip_prefix('{') {
+                let Some(labels_end) = labeled.find('}') else {
+                    continue;
+                };
+                rest = &labeled[labels_end + 1..];
+            }
+            if rest.chars().next().is_some_and(char::is_whitespace) {
+                let value = rest.split_whitespace().next()?;
                 return value.parse().ok();
             }
         }
