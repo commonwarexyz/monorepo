@@ -22,8 +22,8 @@
 //! 2. Deriving encryption randomness r = H3(sigma || message)
 //! 3. Computing the ciphertext components:
 //!    - U = r * G (commitment in G1)
-//!    - V = sigma ⊕ H2(e(P_pub, Q_id)^r) (masked random value)
-//!    - W = M ⊕ H4(sigma) (masked message)
+//!    - V = sigma xor H2(e(P_pub, Q_id)^r) (masked random value)
+//!    - W = M xor H4(sigma) (masked message)
 //!
 //! Where Q_id = H1(target) maps the target to a point in G2.
 //!

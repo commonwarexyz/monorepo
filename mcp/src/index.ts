@@ -43,7 +43,7 @@ interface CrateInfo {
 
 // Constants
 const MAX_SEARCH_RESULTS = 50;
-const INDEX_BUILD_BATCH_SIZE = 20; // D1 has 100 bind param limit, 20 rows × 3 cols = 60
+const INDEX_BUILD_BATCH_SIZE = 20; // D1 has 100 bind param limit, 20 rows x 3 cols = 60
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;

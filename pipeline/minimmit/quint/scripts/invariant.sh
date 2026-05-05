@@ -166,7 +166,7 @@ check() {
         exit 1
     else
         echo ""
-        echo "✓ No violations found in any of the $total_files stdout files."
+        echo "OK: No violations found in any of the $total_files stdout files."
         echo "All invariants passed verification!"
         exit 0
     fi

@@ -332,7 +332,7 @@ mod tests {
 
         // Unicode characters
         assert!(matches!(
-            Hostname::new("hôst.com").unwrap_err(),
+            Hostname::new("h\u{00f4}st.com").unwrap_err(),
             Error::InvalidCharacter
         ));
     }

@@ -1513,7 +1513,7 @@ mod tests {
             assert!(
                 first_elapsed >= expected_first.saturating_sub(tolerance)
                     && first_elapsed <= expected_first + tolerance,
-                "slow message arrived outside expected window: {first_elapsed:?} (expected {expected_first:?} ± {tolerance:?})"
+                "slow message arrived outside expected window: {first_elapsed:?} (expected {expected_first:?} +/- {tolerance:?})"
             );
             assert!(
                 second_elapsed >= first_elapsed,
@@ -1526,7 +1526,7 @@ mod tests {
             assert!(
                 arrival_gap >= egress_time.saturating_sub(tolerance)
                     && arrival_gap <= egress_time + tolerance,
-                "next arrival deviated from transmit duration (gap = {arrival_gap:?}, expected {egress_time:?} ± {tolerance:?})"
+                "next arrival deviated from transmit duration (gap = {arrival_gap:?}, expected {egress_time:?} +/- {tolerance:?})"
             );
         })
     }

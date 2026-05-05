@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_from_hex_utf8_char_boundaries() {
         // Ensure that `from_hex` handles misaligned UTF-8 character boundaries.
-        const MISALIGNMENT_CASE: &str = "쀘\n";
+        const MISALIGNMENT_CASE: &str = "\u{c018}\n";
         assert!(from_hex(MISALIGNMENT_CASE).is_none());
     }
 

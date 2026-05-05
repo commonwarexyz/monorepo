@@ -1697,7 +1697,7 @@ mod tests {
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = PAGE_SIZE.get() as u64 + 6;
 
-            // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
+            // === Step 1: Write 10 bytes -> slot 0 authoritative (len=10) ===
             let (blob, _) = context.open("test_partition", b"slot1_prot").await.unwrap();
             let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1706,7 +1706,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
+            // === Step 2: Extend to 30 bytes -> slot 1 authoritative (len=30) ===
             let (blob, size) = context.open("test_partition", b"slot1_prot").await.unwrap();
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1758,7 +1758,7 @@ mod tests {
                 .into();
             assert_eq!(slot0_mangled, DUMMY_MARKER, "Mangle failed");
 
-            // === Step 4: Extend to 50 bytes → new CRC goes to slot 0, slot 1 protected ===
+            // === Step 4: Extend to 50 bytes -> new CRC goes to slot 0, slot 1 protected ===
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = PAGE_SIZE.get() as u64 + 6;
 
-            // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
+            // === Step 1: Write 10 bytes -> slot 0 authoritative (len=10) ===
             let (blob, _) = context.open("test_partition", b"slot0_prot").await.unwrap();
             let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1832,7 +1832,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
+            // === Step 2: Extend to 30 bytes -> slot 1 authoritative (len=30) ===
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1844,7 +1844,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            // === Step 3: Extend to 50 bytes → slot 0 authoritative (len=50) ===
+            // === Step 3: Extend to 50 bytes -> slot 0 authoritative (len=50) ===
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1896,7 +1896,7 @@ mod tests {
                 .into();
             assert_eq!(slot1_mangled, DUMMY_MARKER, "Mangle failed");
 
-            // === Step 5: Extend to 70 bytes → new CRC goes to slot 1, slot 0 protected ===
+            // === Step 5: Extend to 70 bytes -> new CRC goes to slot 1, slot 0 protected ===
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
@@ -2048,7 +2048,7 @@ mod tests {
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = PAGE_SIZE.get() as u64 + 6;
 
-            // === Step 1: Write 50 bytes → slot 0 authoritative ===
+            // === Step 1: Write 50 bytes -> slot 0 authoritative ===
             let (blob, _) = context.open("test_partition", b"boundary").await.unwrap();
             let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -2057,7 +2057,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            // === Step 2: Extend to 80 bytes → slot 1 authoritative ===
+            // === Step 2: Extend to 80 bytes -> slot 1 authoritative ===
             let (blob, size) = context.open("test_partition", b"boundary").await.unwrap();
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -2163,8 +2163,8 @@ mod tests {
     /// partial page contents.
     ///
     /// Strategy:
-    /// 1. Write 10 bytes → slot 0 authoritative (len=10, valid crc)
-    /// 2. Extend to 30 bytes → slot 1 authoritative (len=30, valid crc)
+    /// 1. Write 10 bytes -> slot 0 authoritative (len=10, valid crc)
+    /// 2. Extend to 30 bytes -> slot 1 authoritative (len=30, valid crc)
     /// 3. Corrupt ONLY the crc2 value in slot 1 (not the length)
     /// 4. Re-open and verify we fall back to slot 0's 10 bytes
     #[test_traced("DEBUG")]
@@ -2176,7 +2176,7 @@ mod tests {
             // crc2 is at offset: PAGE_SIZE + 6 (for len2) + 2 (skip len2 bytes) = PAGE_SIZE + 8
             let crc2_offset = PAGE_SIZE.get() as u64 + 8;
 
-            // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
+            // === Step 1: Write 10 bytes -> slot 0 authoritative (len=10) ===
             let (blob, _) = context
                 .open("test_partition", b"crc_fallback")
                 .await
@@ -2189,7 +2189,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
+            // === Step 2: Extend to 30 bytes -> slot 1 authoritative (len=30) ===
             let (blob, size) = context
                 .open("test_partition", b"crc_fallback")
                 .await
@@ -2284,9 +2284,9 @@ mod tests {
     /// indicates a partial page, validation should fail entirely (not fall back to partial).
     ///
     /// Strategy:
-    /// 1. Write 10 bytes → slot 0 has len=10 (partial)
-    /// 2. Extend to full page (103 bytes) → slot 1 has len=103 (full, authoritative)
-    /// 3. Extend past page boundary (e.g., 110 bytes) → page 0 is now non-last
+    /// 1. Write 10 bytes -> slot 0 has len=10 (partial)
+    /// 2. Extend to full page (103 bytes) -> slot 1 has len=103 (full, authoritative)
+    /// 3. Extend past page boundary (e.g., 110 bytes) -> page 0 is now non-last
     /// 4. Corrupt the primary CRC of page 0 (slot 1's crc, which has len=103)
     /// 5. Re-open and verify that reading from page 0 fails (fallback has len=10, not full)
     #[test_traced("DEBUG")]
@@ -2298,7 +2298,7 @@ mod tests {
             // crc2 for page 0 is at offset: PAGE_SIZE + 8
             let page0_crc2_offset = PAGE_SIZE.get() as u64 + 8;
 
-            // === Step 1: Write 10 bytes → slot 0 has len=10 ===
+            // === Step 1: Write 10 bytes -> slot 0 has len=10 ===
             let (blob, _) = context
                 .open("test_partition", b"non_last_page")
                 .await
@@ -2310,7 +2310,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            // === Step 2: Extend to exactly full page (103 bytes) → slot 1 has len=103 ===
+            // === Step 2: Extend to exactly full page (103 bytes) -> slot 1 has len=103 ===
             let (blob, size) = context
                 .open("test_partition", b"non_last_page")
                 .await

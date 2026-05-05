@@ -192,7 +192,7 @@ const fn is_global_v6(ip: Ipv6Addr) -> bool {
                 // Drone Remote ID Protocol Entity Tags (DETs) Prefix (`2001:30::/28`)
                 || matches!(ip.segments(), [0x2001, b, _, _, _, _, _, _] if b >= 0x20 && b <= 0x3F)
             ))
-        // 6to4 (`2002::/16`) – it's not explicitly documented as globally reachable,
+        // 6to4 (`2002::/16`) - it's not explicitly documented as globally reachable,
         // IANA says N/A.
         || matches!(ip.segments(), [0x2002, _, _, _, _, _, _, _])
         || is_documentation_v6(ip)

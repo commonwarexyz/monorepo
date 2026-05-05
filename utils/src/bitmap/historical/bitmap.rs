@@ -30,18 +30,18 @@ impl State for Clean {}
 ///
 /// ```text
 /// Example 1: push + pop = no-op
-///   push(true)  → appended_bits=[true], projected_len=11
-///   pop()       → appended_bits=[], projected_len=10
+///   push(true)  -> appended_bits=[true], projected_len=11
+///   pop()       -> appended_bits=[], projected_len=10
 ///   Result: dirty state unchanged from base
 ///
 /// Example 2: set_bit + set_bit = last write wins
-///   set_bit(5, true)   → modified_bits={5: true}
-///   set_bit(5, false)  → modified_bits={5: false}
+///   set_bit(5, true)   -> modified_bits={5: true}
+///   set_bit(5, false)  -> modified_bits={5: false}
 ///   Result: only final value recorded
 ///
 /// Example 3: set_bit + pop = cancels modification
-///   set_bit(9, true)  → modified_bits={9: true}
-///   pop()             → modified_bits={} (removed), projected_len=9
+///   set_bit(9, true)  -> modified_bits={9: true}
+///   pop()             -> modified_bits={} (removed), projected_len=9
 ///   Result: bit 9 no longer exists, modification discarded
 /// ```
 ///
@@ -922,10 +922,10 @@ impl<const N: usize> DirtyBitMap<N> {
                 let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
 
                 if self.state.projected_len > chunk_start_bit {
-                    // Chunk spans the new length boundary → partially kept (Modified)
+                    // Chunk spans the new length boundary -> partially kept (Modified)
                     ChunkDiff::Modified(old_chunk)
                 } else {
-                    // Chunk is completely beyond the new length → fully removed (Removed)
+                    // Chunk is completely beyond the new length -> fully removed (Removed)
                     ChunkDiff::Removed(old_chunk)
                 }
             });

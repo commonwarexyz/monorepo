@@ -3273,7 +3273,7 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Do NOT set a leader — shards should be buffered.
+                // Do NOT set a leader - shards should be buffered.
 
                 // Peer 1 sends the shard to peer 2 (buffered, leader unknown).
                 peers[1]
@@ -3315,7 +3315,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                // Create two different blocks — shard from block2 won't verify
+                // Create two different blocks - shard from block2 won't verify
                 // against commitment from block1.
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
@@ -4484,7 +4484,7 @@ mod tests {
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
 
-                // No peer should be blocked — withholding is not detectable.
+                // No peer should be blocked - withholding is not detectable.
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),

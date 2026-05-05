@@ -782,7 +782,7 @@ mod tests {
             let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
             mailbox.connect(peer_pk.clone(), peer_mailbox);
 
-            // 3) Block it → should see exactly one Kill
+            // 3) Block it -> should see exactly one Kill
             crate::block_peer(&mut oracle, peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(
@@ -790,7 +790,7 @@ mod tests {
                 "connected peer must be killed on first Block"
             );
 
-            // 4) Block again → mailbox was removed, so no new Kill
+            // 4) Block again -> mailbox was removed, so no new Kill
             crate::block_peer(&mut oracle, peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(

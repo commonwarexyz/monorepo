@@ -33,7 +33,7 @@ module tests {
     //
     // For any honest replica in the 3-group:
     // - Sees 3 votes for its own block (still < M = 4, so no notarization).
-    // - Sees 3 conflicting votes (still < M = 4, so no “nullify by contradiction”).
+    // - Sees 3 conflicting votes (still < M = 4, so no "nullify by contradiction").
     //
     //
     // The single Byzantine node stays silent.
@@ -43,8 +43,8 @@ module tests {
     // - No one sees M=4 conflicting votes.
     // - Anyone who notarized is forbidden to nullify by timeout.
     //
-    // ⇒ No proof(v) can be produced → progress stalls indefinitely.
-    // ⇒ So M = 4 can break liveness.
+    // => No proof(v) can be produced -> progress stalls indefinitely.
+    // => So M = 4 can break liveness.
 
     run livenessTest = {
         pure val proposal_from_n6_1 = { 

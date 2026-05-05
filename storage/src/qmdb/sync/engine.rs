@@ -684,7 +684,7 @@ where
             let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
-                // penalizing the resolver — the data may be valid.
+                // penalizing the resolver - the data may be valid.
                 return Ok(());
             };
             root

@@ -48,7 +48,7 @@
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
 //!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though
-//!   a CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
+//!   a CommitFloor is not an active update - earlier (intermediate) CommitFloors carry bit =
 //!   0. Maintaining this makes the chunk containing the latest commit deterministic across
 //!   init and `apply_batch`.
 //!
@@ -1872,7 +1872,7 @@ pub mod tests {
     }
 
     /// Verify that on a non-delayed-merge (MMR) family `sync_boundary()` lags the inactivity
-    /// floor only by chunk alignment (less than one chunk) — never by a delayed-merge absorption
+    /// floor only by chunk alignment (less than one chunk) - never by a delayed-merge absorption
     /// window. Guards against an accidental regression that would introduce a larger lag on
     /// families that don't need it.
     #[test_traced]
@@ -3366,7 +3366,7 @@ pub mod tests {
     /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255 (end of chunk 0). P
     /// overwrites keys 1..254; P's floor-raise moves key(0) from 255 to a fresh loc above 255.
     /// C is built from P and writes key(0) again. After committing P and pruning chunk 0, C's
-    /// pre-merkleize `base_old_loc=255` is no longer the right clear target — `committed_locs`
+    /// pre-merkleize `base_old_loc=255` is no longer the right clear target - `committed_locs`
     /// substitutes P's rewrite loc instead. If that precedence path broke, apply would panic
     /// (`set_bit` on a pruned bit).
     #[test_traced("WARN")]

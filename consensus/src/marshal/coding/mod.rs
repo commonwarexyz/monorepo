@@ -1726,7 +1726,7 @@ mod tests {
     }
 
     /// Regression: a validator must not vote finalize on a block that is not
-    /// durably persisted. `certify` resolves true ⟹ block is on disk for
+    /// durably persisted. `certify` resolves true => block is on disk for
     /// this validator. We assert this by aborting the marshal actor the
     /// instant `certify` returns true; without the persist-before-certify
     /// fix, the actor may have only had the `Verified` message enqueued (not
@@ -1852,7 +1852,7 @@ mod tests {
             let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
-                "certify resolved true ⟹ block must be durably persisted"
+                "certify resolved true => block must be durably persisted"
             );
         });
     }

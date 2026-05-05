@@ -213,16 +213,16 @@ where
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
 pub type DST = &'static [u8];
 
-/// Wrapper around [blst_fr] that represents an element of the BLS12‑381
+/// Wrapper around [blst_fr] that represents an element of the BLS12-381
 /// scalar field `F_r`.
 ///
-/// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same
+/// The new-type is marked `#[repr(transparent)]`, so it has exactly the same
 /// memory layout as the underlying `blst_fr`, allowing safe passage across
 /// the C FFI boundary without additional transmutation.
 ///
 /// All arithmetic is performed modulo the prime
 /// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
-/// the order of the BLS12‑381 G1/G2 groups.
+/// the order of the BLS12-381 G1/G2 groups.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
@@ -236,7 +236,7 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 }
 
 /// Number of bytes required to encode a scalar in its canonical
-/// big-endian form (`32 × 8 = 256 bits`).
+/// big-endian form (`32 x 8 = 256 bits`).
 ///
 /// Because `r` is only 255 bits wide, the most-significant byte is always in
 /// the range `0x00..=0x7f`, leaving the top bit clear.
@@ -544,7 +544,7 @@ impl Scalar {
         // where p is the field modulus and k is the security parameter.
         //
         // For BLS12-381's scalar field:
-        // - log2(p) ≈ 255 bits
+        // - log2(p) ~= 255 bits
         // - k = 128 bits (for 128-bit security)
         // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
         //
@@ -970,7 +970,7 @@ impl G1 {
         out
     }
 
-    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    /// Checks that `sum_i (p1[i] * p2[i]) + t1 * t2 == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
@@ -1405,7 +1405,7 @@ impl G2 {
         out
     }
 
-    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    /// Checks that `sum_i (p1[i] * p2[i]) + t1 * t2 == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]

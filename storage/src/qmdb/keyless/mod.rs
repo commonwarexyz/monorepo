@@ -483,7 +483,7 @@ where
         for i in (0..batch.ancestor_batch_ends.len()).rev() {
             let ancestor_end = batch.ancestor_batch_ends[i];
             if ancestor_end <= db_size {
-                // Already on disk — its floor was validated when it was first applied.
+                // Already on disk - its floor was validated when it was first applied.
                 continue;
             }
             let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
@@ -2182,7 +2182,7 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         // Batch of 2 appends + 1 commit lands at locations [1..4); commit at 3, total_size = 4.
-        // A floor > 3 (the commit location) is invalid — even floor == 4 (one past the commit)
+        // A floor > 3 (the commit location) is invalid - even floor == 4 (one past the commit)
         // is rejected so a subsequent prune cannot remove the last readable commit.
         let merkleized = db
             .new_batch()
@@ -2317,7 +2317,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
+    /// End-to-end: commit -> drop -> reopen -> rewind -> verify floor restored after a crash.
     pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<F: Family, V, C, H>(
         context: deterministic::Context,
         mut db: Keyless<F, deterministic::Context, V, C, H>,
@@ -2373,7 +2373,7 @@ pub(crate) mod tests {
     }
 
     /// A chained batch that applies a tip with a floor *lower than* its parent's floor must
-    /// be rejected — the parent's `Commit` is written to the journal by the same
+    /// be rejected - the parent's `Commit` is written to the journal by the same
     /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
     /// invariant.
     pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<F, V, C, H>(
@@ -2416,7 +2416,7 @@ pub(crate) mod tests {
     }
 
     /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
-    /// rejected — identifying the ancestor's bound, not the tip's.
+    /// rejected - identifying the ancestor's bound, not the tip's.
     pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
@@ -2431,7 +2431,7 @@ pub(crate) mod tests {
             db.new_batch()
                 .append(V::Value::make(1))
                 .merkleize(&db, None, Location::new(3));
-        // child: valid on its own (floor = 0 ≤ child's commit_loc), but parent's floor is bad.
+        // child: valid on its own (floor = 0 <= child's commit_loc), but parent's floor is bad.
         let child = parent.new_batch::<H>().append(V::Value::make(2)).merkleize(
             &db,
             None,
@@ -2449,7 +2449,7 @@ pub(crate) mod tests {
     }
 
     /// After committing with `floor = commit_loc` and pruning down to it, the live set is
-    /// exactly one operation — the commit itself. This is the minimum non-empty live set
+    /// exactly one operation - the commit itself. This is the minimum non-empty live set
     /// achievable under the per-commit bound. The DB must remain fully usable: the commit is
     /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
     /// remaining op, and a follow-on batch applies cleanly on top.
@@ -2464,7 +2464,7 @@ pub(crate) mod tests {
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
-        // Initial commit is at loc 0. 3 appends + commit → commit lands at loc 4.
+        // Initial commit is at loc 0. 3 appends + commit -> commit lands at loc 4.
         // Declare floor = 4 (= commit_loc), the tight maximum.
         let metadata = V::Value::make(42);
         let commit_loc = Location::<F>::new(4);
@@ -2482,7 +2482,7 @@ pub(crate) mod tests {
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
-        // Prune at the floor — the maximum prune allowed under the invariant.
+        // Prune at the floor - the maximum prune allowed under the invariant.
         // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
         // to `commit_loc`; what matters semantically is that the floor has authorized pruning
         // of everything below the commit and that any further prune is rejected.
@@ -2494,7 +2494,7 @@ pub(crate) mod tests {
         );
         assert_eq!(bounds.end, Location::new(*commit_loc + 1));
 
-        // Pruning one past the floor must be rejected — the floor is the hard ceiling.
+        // Pruning one past the floor must be rejected - the floor is the hard ceiling.
         let err = db.prune(Location::new(*commit_loc + 1)).await.unwrap_err();
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
                 if *p == *commit_loc + 1 && *f == *commit_loc));

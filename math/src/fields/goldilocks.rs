@@ -95,8 +95,8 @@ impl F {
         //
         // self <= P - 1
         // b <= P - 1
-        // ∴ self + b <= 2P - 2
-        // ∴ self + b - P <= P - 1
+        // therefore self + b <= 2P - 2
+        // therefore self + b - P <= P - 1
         //
         // So, we need to subtract P at most once.
 

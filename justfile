@@ -37,6 +37,10 @@ check-toml-fmt:
 check-fmt:
     just fix-fmt --check
 
+# Check code files for non-ASCII characters
+check-ascii:
+    python3 .github/scripts/check_ascii.py
+
 # Run clippy lints
 clippy *args='':
     cargo clippy --all-targets $@ -- -D warnings
@@ -45,8 +49,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, toml, publish order, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-stability
+# Runs all lints (ASCII, fmt, clippy, docs, features, toml, publish order, and stability)
+lint: check-ascii check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features

@@ -583,7 +583,7 @@ where
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no prior state exists — either no sync has occurred yet, or the previous state was
+    /// no prior state exists - either no sync has occurred yet, or the previous state was
     /// already consumed by a rewind with no intervening sync.
     ///
     /// Any error from this method is fatal for this handle. The Merkle layer may have already

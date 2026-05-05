@@ -674,7 +674,7 @@ impl Runner {
             "executor still has weak references"
         );
 
-        // Handle the result — resume the original panic after cleanup if one was caught.
+        // Handle the result - resume the original panic after cleanup if one was caught.
         let output = match result {
             Ok(output) => output,
             Err(payload) => resume_unwind(payload),

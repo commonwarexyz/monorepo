@@ -256,7 +256,7 @@ impl Graftable for Family {
         }
 
         // Recover birth leaf from position, then compute leftmost via the closed-form: `leftmost =
-        // birth - (3·2^(h-1) - 2)`.
+        // birth - (3*2^(h-1) - 2)`.
         let prev_pos = pos.checked_sub(1).expect("position underflow");
         let birth =
             Self::position_to_location(prev_pos).expect("position is neither leaf nor parent");
@@ -274,7 +274,7 @@ impl Graftable for Family {
             return Self::location_to_position(leaf_start);
         }
 
-        // birth_leaf = leaf_start + 3·2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
+        // birth_leaf = leaf_start + 3*2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
         // 2^h - 1 into birth_leaf = last_leaf + 2^(h-1) - 1)
         let offset = 3u64
             .checked_shl(height - 1)

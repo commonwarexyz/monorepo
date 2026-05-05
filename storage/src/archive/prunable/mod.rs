@@ -735,7 +735,7 @@ mod tests {
             );
             assert!(archive.has(Identifier::Key(&key)).await.unwrap());
 
-            // Prune past the later index too — now nothing survives.
+            // Prune past the later index too - now nothing survives.
             archive.prune(6).await.unwrap();
             assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), None);
             assert!(!archive.has(Identifier::Key(&key)).await.unwrap());

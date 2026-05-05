@@ -226,7 +226,7 @@ module replica {
 
     // Initialize all replicas with genesis.
     action init = {
-        // Non‑deterministically choose any total leader function (View → ReplicaId)
+        // Non-deterministically choose any total leader function (View -> ReplicaId)
         nondet l = VIEWS.setOfMaps(Replicas).oneOf()
         initWithLeader(l)
     }
@@ -277,7 +277,7 @@ module replica {
     // A step by a correct replica, except for the proposer step.
     action correct_replica_step(): bool = all {
         nondet id = oneOf(CORRECT)
-        // Non‑deterministically pick one enabled internal action
+        // Non-deterministically pick one enabled internal action
         any {
             {
                 on_timer_expired(id)
@@ -353,7 +353,7 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Handle proposal (first valid one wins)
+    // -- Handle proposal (first valid one wins)
     // -------------------------------------------------
 
     // 8.2. Notarize
@@ -400,7 +400,7 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Handle a subset of received votes
+    // -- Handle a subset of received votes
     // -------------------------------------------------
 
     // 8.6 Nullify by Contradiction

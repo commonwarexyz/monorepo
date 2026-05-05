@@ -6,7 +6,7 @@
 //!
 //! - [`bench_merkleize`]: timing on a freshly seeded DB (no prior overwrites).
 //! - [`bench_merkleize_churned`]: timing after overwrite batches have accumulated inactive
-//!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
+//!   update operations above the inactivity floor - the workload the floor-raise bitmap-skip
 //!   optimizes for.
 
 use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};

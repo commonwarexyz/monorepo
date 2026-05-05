@@ -354,7 +354,7 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
         )
     else:
         lines.append(
-            "> [!TIP]\n>\n> ✅ **PASSED**: No benchmark exceeded the regression threshold."
+            "> [!TIP]\n>\n> **PASSED**: No benchmark exceeded the regression threshold."
         )
     if missing_count:
         lines.extend(
@@ -382,11 +382,11 @@ def render_markdown(comparisons: list[dict[str, Any]]) -> str:
         else:
             delta = f"{item['delta_percent']:+.2f}%"
         if item["status"] == "regressed":
-            status = "❌ FAIL regression"
+            status = "FAIL regression"
         elif item["status"] == "missing baseline":
-            status = "⚠️ WARN missing baseline"
+            status = "WARN missing baseline"
         else:
-            status = "✅ PASS"
+            status = "PASS"
         lines.append(
             "| "
             + " | ".join(

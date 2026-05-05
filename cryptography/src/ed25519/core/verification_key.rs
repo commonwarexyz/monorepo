@@ -83,7 +83,7 @@ impl From<VerificationKeyBytes> for [u8; 32] {
 ///
 /// ## Consensus properties
 ///
-/// Ed25519 checks are described in [§5.4.5][ps] of the Zcash protocol specification and in
+/// Ed25519 checks are described in [Section5.4.5][ps] of the Zcash protocol specification and in
 /// [ZIP215].  The verification criteria for an (encoded) verification key `A_bytes` are:
 ///
 /// * `A_bytes` MUST be an encoding of a point `A` on the twisted Edwards form of
@@ -190,7 +190,7 @@ impl VerificationKey {
     ///
     /// ## Consensus properties
     ///
-    /// Ed25519 checks are described in [§5.4.5][ps] of the Zcash protocol specification and in
+    /// Ed25519 checks are described in [Section5.4.5][ps] of the Zcash protocol specification and in
     /// [ZIP215].  The verification criteria for an (encoded) signature `(R_bytes, s_bytes)` with
     /// (encoded) verification key `A_bytes` are:
     ///

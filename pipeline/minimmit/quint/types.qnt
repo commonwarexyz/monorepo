@@ -68,7 +68,7 @@ module types {
         ghost_sender: Signature
     }
 
-    // Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
+    // Leader-proposal message propose(h, b_0, ..., b_h)
     type Proposal = {
         // proposed block
         block: Block,
@@ -88,7 +88,7 @@ module types {
         view: ViewNumber,
         // whether this replica has nullified this view, initially false
         nullified: bool,
-        // originally, timer. Here, timer_cancelled <=> (timer >= 2Δ)
+        // originally, timer. Here, timer_cancelled <=> (timer >= 2Delta)
         timer_cancelled: bool,
         // NOTE: `proofs` are stored in a global variable `store_certificate`
         // NOTE: messages are stored in global variables `store_vote`

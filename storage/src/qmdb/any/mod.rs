@@ -2700,10 +2700,10 @@ mod bitmap_tests {
     /// to walk into the tail.
     ///
     /// Failure modes caught:
-    /// - tail-fallthrough boundary off-by-one → wrong root,
-    /// - missing `is_active_at` revalidation → parent's superseded loc gets moved → divergent
+    /// - tail-fallthrough boundary off-by-one -> wrong root,
+    /// - missing `is_active_at` revalidation -> parent's superseded loc gets moved -> divergent
     ///   root,
-    /// - bitmap state inconsistent with `init_from_log` → oracle reopen mismatch.
+    /// - bitmap state inconsistent with `init_from_log` -> oracle reopen mismatch.
     #[test_traced]
     fn floor_scan_falls_through_to_uncommitted_tail() {
         deterministic::Runner::default().start(|context| async move {

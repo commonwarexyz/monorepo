@@ -106,7 +106,7 @@ jobs:
             echo "Please run 'npm install' locally and commit the updated package-lock.json."
             exit 1
           fi
-          echo "✓ package-lock.json remained unchanged after npm ci"
+          echo "OK: package-lock.json remained unchanged after npm ci"
 
   Integration:
     runs-on: ubuntu-latest

@@ -762,7 +762,7 @@ mod test {
             // First apply_entries: Update + 1 move + CommitFloor = 3 ops. Subsequent 99: Update + 2
             // moves + CommitFloor = 4 ops each. Total: 1 (init) + 3 + 99*4 = 400.
             assert_eq!(*db.bounds().await.end, 400);
-            // Only the last Update and CommitFloor are active → floor = 398.
+            // Only the last Update and CommitFloor are active -> floor = 398.
             assert_eq!(*db.inactivity_floor_loc, 398);
             let floor = db.inactivity_floor_loc;
 

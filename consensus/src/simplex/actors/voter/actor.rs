@@ -417,7 +417,7 @@ impl<
 
     /// Handles the certification of a proposal.
     ///
-    /// The certification may succeed, in which case the proposal can be used in future views—
+    /// The certification may succeed, in which case the proposal can be used in future views-
     /// or fail, in which case we should nullify the view as fast as possible.
     async fn handle_certification(
         &mut self,

@@ -1203,7 +1203,7 @@ where
         // for 32-byte Digest keys because Digest cmp (~5ns, SIMD) is cheaper than SipHash
         // (~200ns) per op at the sizes involved.
         //
-        // Depth-1 chains skip the BTreeSet entirely — a single ancestor can't shadow itself,
+        // Depth-1 chains skip the BTreeSet entirely - a single ancestor can't shadow itself,
         // and each diff's keys are unique by construction.
         let track_shadow = m.ancestors.len() > 1;
         let mut seen: BTreeSet<&K> = BTreeSet::new();

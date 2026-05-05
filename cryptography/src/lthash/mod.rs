@@ -8,7 +8,7 @@
 //!
 //! # Properties
 //!
-//! - **Homomorphic**: Supports addition and subtraction of hashes (H(a ± b) = H(a) ± H(b))
+//! - **Homomorphic**: Supports addition and subtraction of hashes (H(a +/- b) = H(a) +/- H(b))
 //! - **Commutative**: Operation order doesn't matter (H(a) + H(b) = H(b) + H(a))
 //! - **Incremental**: Update existing hashes in O(1) time instead of rehashing everything
 //!

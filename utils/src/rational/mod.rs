@@ -135,7 +135,7 @@ pub trait BigRationalExt {
     ///
     /// let x = BigRational::from_frac_u64(3, 1); // 3
     /// let result = x.log2_ceil(4);
-    /// // log2(3) ≈ 1.585, the algorithm computes a ceiling approximation
+    /// // log2(3) ~= 1.585, the algorithm computes a ceiling approximation
     /// assert!(result >= BigRational::from_u64(1));
     /// assert!(result <= BigRational::from_u64(2));
     /// ```
@@ -158,7 +158,7 @@ pub trait BigRationalExt {
     ///
     /// let x = BigRational::from_frac_u64(3, 1); // 3
     /// let result = x.log2_floor(4);
-    /// // log2(3) ≈ 1.585, the algorithm computes a floor approximation
+    /// // log2(3) ~= 1.585, the algorithm computes a floor approximation
     /// assert!(result >= BigRational::from_u64(1));
     /// assert!(result <= BigRational::from_u64(2));
     /// ```
@@ -346,12 +346,12 @@ mod tests {
 
     #[test]
     fn log2_ceil_simple_values() {
-        // log2(3) ≈ 1.585, with binary_digits=0 we get integer part
+        // log2(3) ~= 1.585, with binary_digits=0 we get integer part
         let value = BigRational::from_u64(3);
         let result = value.log2_ceil(0);
         assert_eq!(result, BigRational::from_u64(2));
 
-        // log2(5) ≈ 2.322, with binary_digits=0 we get integer part
+        // log2(5) ~= 2.322, with binary_digits=0 we get integer part
         let value = BigRational::from_u64(5);
         let result = value.log2_ceil(0);
         assert_eq!(result, BigRational::from_u64(3));
@@ -415,44 +415,44 @@ mod tests {
     #[test]
     fn log2_ceil_edge_cases() {
         // -- Just above a power of two (small positive, should round up to a tiny dyadic)
-        // log2(17/16) ≈ 0.087462, k=8 → 0.087462 * 256 ≈ 22.39 ⇒ ceil = 23 → 23/256
+        // log2(17/16) ~= 0.087462, k=8 -> 0.087462 * 256 ~= 22.39 => ceil = 23 -> 23/256
         let x = BigRational::from_frac_u64(17, 16);
         assert_eq!(x.log2_ceil(8), BigRational::from_frac_u64(23, 256));
 
-        // log2(129/128) ≈ 0.011227, k=8 → 0.011227 * 256 ≈ 2.874 ⇒ ceil = 3 → 3/256
+        // log2(129/128) ~= 0.011227, k=8 -> 0.011227 * 256 ~= 2.874 => ceil = 3 -> 3/256
         let x = BigRational::from_frac_u64(129, 128);
         assert_eq!(x.log2_ceil(8), BigRational::from_frac_u64(3, 256));
 
-        // log2(33/32) ≈ 0.044394, k=10 → 0.044394 * 1024 ≈ 45.45 ⇒ ceil = 46 → 46/1024
+        // log2(33/32) ~= 0.044394, k=10 -> 0.044394 * 1024 ~= 45.45 => ceil = 46 -> 46/1024
         let x = BigRational::from_frac_u64(33, 32);
         assert_eq!(x.log2_ceil(10), BigRational::from_frac_u64(46, 1024));
 
         // -- Just below a power of two (negative, but tiny in magnitude)
-        // log2(255/256) ≈ −0.00565, k=8 → −0.00565 * 256 ≈ −1.44 ⇒ ceil = −1 → −1/256
+        // log2(255/256) ~= -0.00565, k=8 -> -0.00565 * 256 ~= -1.44 => ceil = -1 -> -1/256
         let x = BigRational::from_frac_u64(255, 256);
         assert_eq!(x.log2_ceil(8), BigRational::new((-1).into(), 256u32.into()));
 
-        // log2(1023/1024) ≈ −0.00141, k=9 → −0.00141 * 512 ≈ −0.72 ⇒ ceil = 0 → 0/512
+        // log2(1023/1024) ~= -0.00141, k=9 -> -0.00141 * 512 ~= -0.72 => ceil = 0 -> 0/512
         let x = BigRational::from_frac_u64(1023, 1024);
         assert_eq!(x.log2_ceil(9), BigRational::new(0.into(), 512u32.into()));
 
         // -- k = 0 (integer ceiling of log2)
-        // log2(3/2) ≈ 0.585 ⇒ ceil = 1
+        // log2(3/2) ~= 0.585 => ceil = 1
         let x = BigRational::from_frac_u64(3, 2);
         assert_eq!(x.log2_ceil(0), BigRational::from_integer(1.into()));
 
-        // log2(3/4) ≈ −0.415 ⇒ ceil = 0
+        // log2(3/4) ~= -0.415 => ceil = 0
         let x = BigRational::from_frac_u64(3, 4);
         assert_eq!(x.log2_ceil(0), BigRational::from_integer(0.into()));
 
         // -- x < 1 with fractional bits (negative dyadic output)
-        // log2(3/4) ≈ −0.415, k=4 → −0.415 * 16 ≈ −6.64 => ceil = −6 → −6/16
+        // log2(3/4) ~= -0.415, k=4 -> -0.415 * 16 ~= -6.64 => ceil = -6 -> -6/16
         let x = BigRational::from_frac_u64(3, 4);
         assert_eq!(x.log2_ceil(4), BigRational::new((-6).into(), 16u32.into()));
 
         // -- Monotonic with k: increasing k refines the dyadic upwards
-        // For 257/256: k=8 → 0.00563*256 ≈ 1.44 ⇒ ceil=2 → 2/256
-        //              k=9 → 0.00563*512 ≈ 2.88 ⇒ ceil=3 → 3/512
+        // For 257/256: k=8 -> 0.00563*256 ~= 1.44 => ceil=2 -> 2/256
+        //              k=9 -> 0.00563*512 ~= 2.88 => ceil=3 -> 3/512
         let x = BigRational::from_frac_u64(257, 256);
         assert_eq!(x.log2_ceil(8), BigRational::new(2.into(), 256u32.into()));
         assert_eq!(x.log2_ceil(9), BigRational::new(3.into(), 512u32.into()));
@@ -500,7 +500,7 @@ mod tests {
         let result = value.log2_floor(4);
         assert_eq!(result, BigRational::from_integer(BigInt::from(-2)));
 
-        // log2(3/8) ≈ -1.415, floor(-1.415 * 16) / 16 = -23/16
+        // log2(3/8) ~= -1.415, floor(-1.415 * 16) / 16 = -23/16
         let value = BigRational::from_frac_u64(3, 8);
         let result = value.log2_floor(4);
         assert_eq!(
@@ -511,18 +511,18 @@ mod tests {
 
     #[test]
     fn log2_floor_simple_values() {
-        // log2(3) ≈ 1.585, with binary_digits=0 we get floor(1.585) = 1
+        // log2(3) ~= 1.585, with binary_digits=0 we get floor(1.585) = 1
         let value = BigRational::from_u64(3);
         let result = value.log2_floor(0);
         assert_eq!(result, BigRational::from_u64(1));
 
-        // log2(5) ≈ 2.322, with binary_digits=0 we get floor(2.322) = 2
+        // log2(5) ~= 2.322, with binary_digits=0 we get floor(2.322) = 2
         let value = BigRational::from_u64(5);
         let result = value.log2_floor(0);
         assert_eq!(result, BigRational::from_u64(2));
 
         // With 4 bits precision
-        // log2(3) ≈ 1.585, floor(1.585 * 16) / 16 = 25/16
+        // log2(3) ~= 1.585, floor(1.585 * 16) / 16 = 25/16
         let value = BigRational::from_u64(3);
         let result = value.log2_floor(4);
         assert_eq!(result, BigRational::from_frac_u64(25, 16));
@@ -530,12 +530,12 @@ mod tests {
 
     #[test]
     fn log2_floor_rational_values() {
-        // log2(3/2) ≈ 0.585, floor(0.585 * 16) / 16 = 9/16
+        // log2(3/2) ~= 0.585, floor(0.585 * 16) / 16 = 9/16
         let value = BigRational::from_frac_u64(3, 2);
         let result = value.log2_floor(4);
         assert_eq!(result, BigRational::from_frac_u64(9, 16));
 
-        // log2(7/4) ≈ 0.807, floor(0.807 * 16) / 16 = 12/16
+        // log2(7/4) ~= 0.807, floor(0.807 * 16) / 16 = 12/16
         let value = BigRational::from_frac_u64(7, 4);
         let result = value.log2_floor(4);
         assert_eq!(result, BigRational::from_frac_u64(12, 16));
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn log2_floor_large_values() {
-        // log2(1000) ≈ 9.966, floor = 9
+        // log2(1000) ~= 9.966, floor = 9
         let value = BigRational::from_u64(1000);
         let result = value.log2_floor(4);
         assert_eq!(result, BigRational::from_frac_u64(159, 16));
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn log2_floor_very_small_values() {
-        // log2(1/1000) ≈ -9.966
+        // log2(1/1000) ~= -9.966
         let value = BigRational::from_frac_u64(1, 1000);
         let result = value.log2_floor(4);
         assert_eq!(
@@ -582,27 +582,27 @@ mod tests {
     #[test]
     fn log2_floor_edge_cases() {
         // -- Just above a power of two
-        // log2(17/16) ≈ 0.087462, k=8 → floor(0.087462 * 256) = 22 → 22/256
+        // log2(17/16) ~= 0.087462, k=8 -> floor(0.087462 * 256) = 22 -> 22/256
         let x = BigRational::from_frac_u64(17, 16);
         assert_eq!(x.log2_floor(8), BigRational::from_frac_u64(22, 256));
 
-        // log2(129/128) ≈ 0.011227, k=8 → floor(0.011227 * 256) = 2 → 2/256
+        // log2(129/128) ~= 0.011227, k=8 -> floor(0.011227 * 256) = 2 -> 2/256
         let x = BigRational::from_frac_u64(129, 128);
         assert_eq!(x.log2_floor(8), BigRational::from_frac_u64(2, 256));
 
-        // log2(33/32) ≈ 0.044394, k=10 → floor(0.044394 * 1024) = 45 → 45/1024
+        // log2(33/32) ~= 0.044394, k=10 -> floor(0.044394 * 1024) = 45 -> 45/1024
         let x = BigRational::from_frac_u64(33, 32);
         assert_eq!(x.log2_floor(10), BigRational::from_frac_u64(45, 1024));
 
         // -- Just below a power of two (negative, but tiny in magnitude)
-        // log2(255/256) ≈ -0.00565, k=8 → floor(-0.00565 * 256) = -2 → -2/256
+        // log2(255/256) ~= -0.00565, k=8 -> floor(-0.00565 * 256) = -2 -> -2/256
         let x = BigRational::from_frac_u64(255, 256);
         assert_eq!(
             x.log2_floor(8),
             BigRational::new((-2).into(), 256u32.into())
         );
 
-        // log2(1023/1024) ≈ -0.00141, k=9 → floor(-0.00141 * 512) = -1 → -1/512
+        // log2(1023/1024) ~= -0.00141, k=9 -> floor(-0.00141 * 512) = -1 -> -1/512
         let x = BigRational::from_frac_u64(1023, 1024);
         assert_eq!(
             x.log2_floor(9),
@@ -610,22 +610,22 @@ mod tests {
         );
 
         // -- k = 0 (integer floor of log2)
-        // log2(3/2) ≈ 0.585 ⇒ floor = 0
+        // log2(3/2) ~= 0.585 => floor = 0
         let x = BigRational::from_frac_u64(3, 2);
         assert_eq!(x.log2_floor(0), BigRational::from_integer(0.into()));
 
-        // log2(3/4) ≈ -0.415 ⇒ floor = -1
+        // log2(3/4) ~= -0.415 => floor = -1
         let x = BigRational::from_frac_u64(3, 4);
         assert_eq!(x.log2_floor(0), BigRational::from_integer((-1).into()));
 
         // -- x < 1 with fractional bits (negative dyadic output)
-        // log2(3/4) ≈ -0.415, k=4 → floor(-0.415 * 16) = -7 → -7/16
+        // log2(3/4) ~= -0.415, k=4 -> floor(-0.415 * 16) = -7 -> -7/16
         let x = BigRational::from_frac_u64(3, 4);
         assert_eq!(x.log2_floor(4), BigRational::new((-7).into(), 16u32.into()));
 
         // -- Monotonic with k: increasing k refines the dyadic downwards
-        // For 257/256: k=8 → floor(0.00563*256) = 1 → 1/256
-        //              k=9 → floor(0.00563*512) = 2 → 2/512
+        // For 257/256: k=8 -> floor(0.00563*256) = 1 -> 1/256
+        //              k=9 -> floor(0.00563*512) = 2 -> 2/512
         let x = BigRational::from_frac_u64(257, 256);
         assert_eq!(x.log2_floor(8), BigRational::new(1.into(), 256u32.into()));
         assert_eq!(x.log2_floor(9), BigRational::new(2.into(), 512u32.into()));

@@ -43,9 +43,9 @@ enum FloorKind {
     Current,
     /// Advance to the commit location (the tight upper bound).
     AdvanceToCommit,
-    /// Floor one below the current floor — must be rejected as `FloorRegressed`.
+    /// Floor one below the current floor - must be rejected as `FloorRegressed`.
     BadRegression,
-    /// Floor one past the commit location — must be rejected as `FloorBeyondSize`.
+    /// Floor one past the commit location - must be rejected as `FloorBeyondSize`.
     BadBeyondCommit,
 }
 
@@ -71,7 +71,7 @@ enum Operation {
         metadata_bytes: Option<Vec<u8>>,
         floor_kind: FloorKind,
     },
-    /// Build a two-level batch chain (parent → child) and apply the child directly. The
+    /// Build a two-level batch chain (parent -> child) and apply the child directly. The
     /// parent's floor is intentionally invalid (regressed or beyond its own commit location);
     /// this exercises the per-ancestor validation path in `apply_batch`.
     BadChainedCommit {
@@ -155,7 +155,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             12 => Ok(Operation::SimulateFailure {}),
             13 => {
-                // Only Bad* kinds make sense here — the ancestor is guaranteed unapplied.
+                // Only Bad* kinds make sense here - the ancestor is guaranteed unapplied.
                 let ancestor_kind = match u.arbitrary::<bool>()? {
                     false => FloorKind::BadRegression,
                     true => FloorKind::BadBeyondCommit,
@@ -310,13 +310,13 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                         _ => continue, // only bad kinds are meaningful here
                     };
 
-                    // Don't drain pending_appends — keep them for future ops. Build from scratch.
+                    // Don't drain pending_appends - keep them for future ops. Build from scratch.
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
                         .merkleize(&db, None, parent_floor);
                     // child: valid on its own; only the ancestor should trip the check.
-                    let child_floor = parent_floor; // stay ≥ parent_floor even if parent is bad
+                    let child_floor = parent_floor; // stay >= parent_floor even if parent is bad
                     let child = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
