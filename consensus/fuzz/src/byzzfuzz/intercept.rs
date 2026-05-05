@@ -42,7 +42,7 @@ use std::{
 };
 
 /// Channel an intercepted message came from. The injector decode-mutates
-/// + re-signs `Vote` content; `Cert` and `Resolver` intercepts are
+/// then re-signs `Vote` content; `Cert` and `Resolver` intercepts are
 /// omit-only (the forwarder's drop is the entire fault).
 #[derive(Clone, Copy, Debug)]
 pub enum InterceptChannel {
