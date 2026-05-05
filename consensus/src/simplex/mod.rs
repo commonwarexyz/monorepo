@@ -18,52 +18,80 @@
 //!
 //! # Design
 //!
+//! TODO: temporal description that should be deleted after finishing the informal spec located below
 //! ## Protocol Description
 //!
 //! ### Genesis
 //!
 //! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
 //! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
-//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//! finalized state. At initialization, each replica calls `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
+//! Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//!
+//! ### Timer semantics
+//! * `t_x = Some(d)` means timer `t_x` is armed with deadline `d`
+//! * `t_x = None` means timer `t_x` is canceled
+//! * Setting `t_x` to `0` is shorthand for `t_x = Some(now)` (immediate expiry)
+//! * Timer `t_x` fires iff `t_x = Some(d)` and `now >= d`
 //!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
+//! * Set timer for leader proposal `t_l = now+2Δ`, retry `t_r = None` and advance (certification) `t_a = now+3Δ`
+//! * If `r != l` and leader `l` has not been active in the last `lookback` rounds observed by `r`,
+//!   set `t_l` and `t_a` to `0` (immediate local timeout).
+//! * If `r == l`, do not fast-timeout solely due to inactivity; still attempt proposal.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
-//!     previous view `v_m`, request `v_m`
+//!     previous view, do nothing (retry on next iteration)
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
-//! * Cancel `t_l`
+//! * Set `t_l` to `None`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
 //!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
-//!     * If verification of `c` fails, immediately broadcast `nullify(v)`
+//!     * If the parent is not available (missing certificates), do nothing
+//!     * If verification of `c` fails: set `t_l` to `0`
+//!
+//! Upon receiving first `nullify(v)` from `l`:
+//!   * Set `t_l` to `0`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
-//! * Cancel `t_a`
 //! * Mark `c` as notarized
-//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
+//! * Construct `notarization(c,v)` (even if we have not verified `c`)
+//!
+//! Upon constructing or receiving the first `notarization(c,v)`:
+//! * Broadcast `notarization(c,v)`
 //! * Attempt to certify `c` (see [Certification](#certification))
-//!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
-//!     * On failure: broadcast `nullify(v)`
+//!     * On success: set `t_a` to `None`, broadcast `finalize(c,v)` if have not broadcast `nullify(v)` and enter `v+1`
+//!     * On failure: set `t_l` and `t_a` to `0`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
+//! * Construct `nullification(v)`
+//!
+//! Upon constructing or receiving the first `nullification(v)`:
+//! * Set `t_l` and `t_a` to `None`
+//! * If `nullify(v)` and `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
+//! * Construct `finalization(c, v)`
+//!
+//! Upon constructing or receiving the first `finalization(c, v)`:
+//! * Set `t_l` and `t_a` to `None`
 //! * Mark `c` as finalized (and recursively finalize its parents)
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
+//! * Enter `v+1`
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast `nullify(v)`
-//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//! * If `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T`
 //!
-//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! Upon `t_r` firing:
+//! * Broadcast `nullify(v)` and either `finalization(c, v-1)`, `notarization(c, v-1)` or `nullification(v-1)`
+//! * Set `t_r` to `now+T`
+//!
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
 //! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
 //! the protocol._
@@ -71,7 +99,9 @@
 //! ### Joining Consensus
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! enter `v+1`. Notarizations advance the view if-and-only-if certification succeeds, where
+//! certification is either locally inferred for locally built proposals or returned by the
+//! application for non-local proposals (see [Certification](#certification)).
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -85,10 +115,19 @@
 //! to wait until they have received enough shards to reconstruct and validate the full block before
 //! voting to finalize.
 //!
-//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
-//! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
-//! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
-//! Thus, a payload can only be finalized if a quorum of participants certify it.
+//! Certification has two branches depending on how the notarized proposal entered this participant's state:
+//! * **Locally built** (this participant is `leader(v)` and produced `c` by calling `propose(v, parent)`):
+//!   certification is inferred locally as success. `CertifiableAutomaton::certify` is **not** invoked;
+//!   the application already endorsed `c` when it handed it to the voter from `propose`.
+//! * **Non-local** (the proposal was observed from another replica's `notarize` vote, or recovered from a
+//!   `notarization` / `finalization` certificate, even when this participant happens to be `leader(v)`):
+//!   the participant invokes `CertifiableAutomaton::certify` and acts on its result.
+//!
+//! If certification succeeds (locally inferred or `certify` returns `true`), the participant broadcasts
+//! a `finalize` vote for the payload and enters the next view. If `certify` returns `false`, the participant
+//! broadcasts `nullify` for the view instead (treating it as an immediate timeout), and will refuse to
+//! build upon the proposal or notarize proposals that build upon it. Thus, a payload can only be finalized
+//! if a quorum of participants certify it (either locally-inferred or application-approved).
 //!
 //! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
 //! Until then (say a nullification certificate for a view arrives before certification completes), the application should continue
@@ -106,16 +145,463 @@
 //! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "certification timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Skip "leader timeout" and "advance timeout" for non-leaders when the designated leader has
+//!   not participated in the local lookback window.
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
 //! * Treat local verification failure as immediate timeout expiry and broadcast `nullify(v)`.
 //! * Consider the current leader's `nullify(v)` as immediate timeout expiry and broadcast `nullify(v)`.
-//! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
-//!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
-//!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
+//! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, run certification
+//!   (see [Certification](#certification)): locally inferred as success when this participant built `c` itself
+//!   via `propose(v, parent)`, or via `CertifiableAutomaton::certify` otherwise. Only move to view `v+1`
+//!   and broadcast `finalize(c,v)` if certification succeeds; if `certify` returns `false`, broadcast
+//!   `nullify(v)` and refuse to build upon `c`.
+//!
+//! ## Protocol Informal Specification
+//!
+//! # Specification
+//!
+//! ## 1. Introduction
+//!
+//! This is a specification of modification of the [Simplex Consensus](https://eprint.iacr.org/2023/463). It targets:
+//!
+//! - Network-speed view latency (about `2` network hops to notarization).
+//! - Optimal finalization latency (about `3` network hops).
+//! - Partial synchrony.
+//!
+//! Simplex externalizes proof artifacts (`notarization`, `nullification`, `finalization`) so downstream systems can consume standalone certificates of progress.
+//! This specification does not model optional implementation-level liveness features
+//! that are disabled by default, such as proposal forwarding policies.
+//!
+//! ## 2. Model & Parameters
+//!
+//! - Replicas proceed in views `v = 1, 2, ...`.
+//! - Genesis is view `0` and is implicitly finalized.
+//! - Partial synchrony: after GST, messages arrive within `Δ`.
+//! - Byzantine threshold is parameterized by `f`, with quorum threshold `Q` according to `utils/src/faults.rs`.
+//! - `activity_timeout` controls how many views behind `last_finalized` are retained locally.
+//!   Rounds with view `< last_finalized - activity_timeout` may be discarded.
+//! - `skip_timeout` is the maximum inbound-message silence window tolerated for a
+//!   leader before fast timeout. Replica `r` considers leader `l` inactive at local
+//!   view `v` once `v - r.latest_seen[l] >= skip_timeout`, after `r` has tracked at
+//!   least `skip_timeout` views locally. Any inbound vote or certificate from `l`
+//!   for view `u` updates `r.latest_seen[l] = max(r.latest_seen[l], u)`. Must
+//!   satisfy `skip_timeout <= activity_timeout`.
+//! - `T` is the retry period used by the retry timer.
+//!
+//! ## 3. Quorums and Certificates
+//!
+//! - `Q` votes from unique replicas are required to assemble a certificate.
+//! - Vote/certificate pairs:
+//!   - `notarize(c, v)` -> `notarization(c, v)`
+//!   - `nullify(v)` -> `nullification(v)`
+//!   - `finalize(c, v)` -> `finalization(c, v)`
+//!
+//! When `Q` votes of a given type are collected from distinct participants, the corresponding certificate can be assembled and disseminated as proof of progress.
+//!
+//! ## 4. Message Types
+//!
+//! | Message | Purpose                                                                  |
+//! |---------|--------------------------------------------------------------------------|
+//! | `genesis` | Initial finalized state at view `0` (implicit finalization certificate). |
+//! | `notarize(c, v)` | Leader proposal and replica vote for container `c` in view `v`.          |
+//! | `notarization(c, v)` | Certificate of `≥ Q` `notarize(c, v)` votes.                             |
+//! | `nullify(v)` | Vote to abandon progress in view `v` and advance.                        |
+//! | `nullification(v)` | Certificate of `≥ Q` `nullify(v)` votes.                              |
+//! | `finalize(c, v)` | Vote to finalize container `c` in view `v` after certification.          |
+//! | `finalization(c, v)` | Certificate of `≥ Q` `finalize(c, v)` votes.                          |
+//!
+//! ## 5. Replica State and Timers
+//!
+//! Replica `r` tracks, per view `v`:
+//!
+//! - `view` is the replica view, initially `1`.
+//! - `last_finalized` is the view of the last finalized container, initially `0` (genesis).
+//! - `round` is a map `View -> RoundState` tracking per-view state, where `RoundState` is:
+//!   - `leader`: `Option<replica>`, the elected leader for this view, initially `None`.
+//!   - `notarization`: `Option<notarization(c, v)>`, initially `None`.
+//!   - `nullification`: `Option<nullification(v)>`, initially `None`.
+//!   - `finalization`: `Option<finalization(c, v)>`, initially `None`.
+//!   - `broadcast_notarize`: `bool`, whether `notarize(c, v)` has been broadcast, initially `false`.
+//!   - `broadcast_notarization`: `bool`, whether `notarization(c, v)` has been broadcast, initially `false`.
+//!   - `broadcast_nullify`: `bool`, whether `nullify(v)` has been broadcast, initially `false`.
+//!   - `broadcast_nullification`: `bool`, whether `nullification(v)` has been broadcast, initially `false`.
+//!   - `broadcast_finalize`: `bool`, whether `finalize(c, v)` has been broadcast, initially `false`.
+//!   - `broadcast_finalization`: `bool`, whether `finalization(c, v)` has been broadcast, initially `false`.
+//!     Receiving a certificate does not change `broadcast_notarize` or `broadcast_finalize`.
+//!   - `proposal`: `Option<c>`, the container for this view, initially `None`.
+//!   - `proposal_status`: `None | Unverified | Verified(bool) | Equivocated`, initially `None`.
+//!     A proposal recovered from a certificate (or observed from another replica's
+//!     `notarize` vote) is authenticated but remains `Unverified` until local
+//!     `verify(c)` succeeds.
+//!     `proposal_status` is `Verified(_)` only once local validity has been
+//!     established. Within `Verified(_)`, the boolean is:
+//!     - `true` iff this replica built `c` itself by calling `propose(v, parent)`
+//!       as leader of view `v` (no `verify(c)` is needed; the proposal is
+//!       self-verified by construction and skips the `Unverified` stage).
+//!     - `false` when `c` was observed externally (a `notarize` vote, or recovered
+//!       from a `notarization` / `finalization` certificate) and local `verify(c)`
+//!       subsequently succeeded, i.e., the slot transitioned `Unverified -> Verified(false)`.
+//!       This holds even when we happen to be `leader(v)` for a view whose
+//!       proposal we did not build.
+//!     Only `Verified(true)` triggers the auto-certify shortcut in §7.3;
+//!     `Verified(false)` and `Unverified` both require invoking `certify(c)`.
+//!   - `certified`: `Option<bool>`, where `None` means certification is pending,
+//!     `Some(true)` means certified, and `Some(false)` means rejected.
+//!   - `t_l`: leader proposal timeout.
+//!   - `t_a`: advance/certification timeout.
+//!   - `t_r`: retry timeout.
+//! - `messages` is a map `View -> (Replica -> Set<Message>)` storing received vote messages
+//!   (`notarize`, `nullify`, `finalize`) grouped by view then sender.
+//! - `latest_seen` is a map `Replica -> View` recording the highest view number seen in
+//!   any inbound vote or certificate from that replica, initially `0` for every replica.
+//!
+//! Pruning: entries in `round` and `messages` with view `< min_active(r)` may be discarded.
+//! Incoming messages for views that are not `interesting` are dropped on arrival.
+//!
+//! Timer semantics:
+//!
+//! - `t_x = Some(d)` means timer `t_x` is armed with deadline `d`.
+//! - `t_x = None` means timer `t_x` is canceled.
+//! - `t_x = 0` is shorthand for immediate expiry (`Some(now)`).
+//! - Timer `t_x` fires iff `t_x = Some(d)` and `now >= d`.
+//!
+//! ## 6. External Functions / Predicates
+//!
+//! ```text
+//! // Deterministic leader selection.
+//! fn leader(v) -> r;
+//!
+//! // Build or fetch a container to propose in view v on top of parent `(c_parent, v_parent)`.
+//! fn propose(v, (c_parent, v_parent)) -> Option<c>;
+//!
+//! // Verify container c against protocol/application validity rules.
+//! fn verify(c) -> bool;
+//!
+//! // Application-level certification gate for notarized containers.
+//! // Invoked only for proposals this replica did not build locally, i.e. proposals
+//! // recovered from a certificate or seen from another replica via `notarize`.
+//! // Containers built locally by this replica in view `v` (via `propose`) are
+//! // certified automatically on notarization; see §7.3.
+//! fn certify(c) -> bool;
+//!
+//! ```
+//!
+//! ### 6.1 Helpers
+//!
+//! ```text
+//! // Selects the best parent proof for a leader proposal in view `v`.
+//! // Returns either a parent `(c_parent, v_parent)` or a missing view `v_m`.
+//! fn find_parent(r, v) -> Result<(c_parent, v_parent), v_m> {
+//!     let i = v - 1;
+//!     while i > 0 {
+//!         if r.round[i].finalization = finalization(c_parent, i) {
+//!             return Ok((c_parent, i));
+//!         }
+//!         if r.round[i].notarization = notarization(c_parent, i) and r.round[i].certified == Some(true) {
+//!             return Ok((c_parent, i));
+//!         }
+//!         if r.round[i].nullification != None {
+//!             i -= 1;
+//!             continue;
+//!         }
+//!         return Err(i);
+//!     }
+//!     return Ok((genesis, 0));
+//! }
+//!
+//! fn is_certified(r, v) -> Option<c> {
+//!     if v == 0 {
+//!         return Some(genesis);
+//!     }
+//!     if r.round[v].finalization = finalization(c, v) {
+//!         return Some(c);
+//!     }
+//!     if r.round[v].notarization = notarization(c, v) and r.round[v].certified == Some(true) {
+//!         return Some(c);
+//!     }
+//!     return None;
+//! }
+//!
+//! fn can_finalize(r, v) -> Option<c> {
+//!     if r.round[v].broadcast_nullify or r.round[v].broadcast_finalize {
+//!         return None;
+//!     }
+//!     if r.round[v].proposal_status == Equivocated {
+//!         return None;
+//!     }
+//!     if r.round[v].notarization != notarization(c, v) {
+//!         return None;
+//!     }
+//!     if r.round[v].certified != Some(true) {
+//!         return None;
+//!     }
+//!     if r.round[v].proposal != Some(c) {
+//!         return None;
+//!     }
+//!     return Some(c);
+//! }
+//!
+//! fn parent_certificate(r, v) -> Option<certificate> {
+//!     if r.round[v].proposal = proposal(c, v) {
+//!         let v_parent = c.parent;
+//!         if r.round[v_parent].finalization = finalization(c_parent, v_parent) {
+//!             return Some(finalization(c_parent, v_parent));
+//!         }
+//!         if r.round[v_parent].notarization = notarization(c_parent, v_parent) {
+//!             return Some(notarization(c_parent, v_parent));
+//!         }
+//!     }
+//!     return None;
+//! }
+//!
+//! fn parent_payload(r, v, v_parent) -> Option<c_parent> {
+//!     if v <= v_parent {
+//!         return None;
+//!     }
+//!     if v_parent < r.last_finalized {
+//!         return None;
+//!     }
+//!     let i = v_parent+1;
+//!     while i < v {
+//!         if r.round[i].nullification == None {
+//!             return None;
+//!         }
+//!         i += 1;
+//!     }
+//!     return is_certified(r, v_parent);
+//! }
+//!
+//! // The lowest view that must remain in memory.
+//! fn min_active(r) -> View {
+//!     return r.last_finalized - activity_timeout;  // saturates at 0
+//! }
+//!
+//! // Whether a message for view `pending` is relevant.
+//! fn interesting(r, pending, allow_future) -> bool {
+//!     if pending == 0 {
+//!         return false;
+//!     }
+//!     if pending < min_active(r) {
+//!         return false;
+//!     }
+//!     if !allow_future and pending > r.view + 1 {
+//!         return false;
+//!     }
+//!     return true;
+//! }
+//!
+//! // Records message `m` from replica `r'`. Returns true only on the first observation.
+//! fn record_message(r, r', m) -> bool {
+//!     if m.v ∉ r.messages {
+//!         r.messages[m.v] = {};
+//!     }
+//!     if r' ∉ r.messages[m.v] {
+//!         r.messages[m.v][r'] = {};
+//!     }
+//!     if m ∉ r.messages[m.v][r'] {
+//!         r.messages[m.v][r'].add(m);
+//!         return true;
+//!     }
+//!     return false;
+//! }
+//!
+//! fn record_activity(r, r', v) {
+//!     r.latest_seen[r'] = max(r.latest_seen[r'], v);
+//! }
+//!
+//! fn is_active(r, r') -> bool {
+//!     if size(r.round) < skip_timeout {
+//!         return true;
+//!     }
+//!     return r.view - r.latest_seen[r'] < skip_timeout;
+//! }
+//!
+//! // Records container `c` for view `v`. If a different container already exists,
+//! // marks the proposal as equivocated. Returns the equivocating leader if detected.
+//! // `recovered` indicates whether `c` came from a certificate (true) or a vote (false).
+//! // `local` is `true` iff this replica produced `c` itself by calling
+//! // `propose(v, parent)` as leader of view `v`; it is `false` when `c` was observed
+//! // from another replica's `notarize` vote or recovered from a certificate. When
+//! // `local` is `true`, the slot transitions directly to `Verified(true)`, skipping
+//! // `Unverified` (the leader does not re-verify its own propose output).
+//! fn record_proposal(r, v, c, recovered, local) -> Option<leader> {
+//!     if r.round[v].proposal_status == Equivocated {
+//!         return None;
+//!     }
+//!     if r.round[v].proposal == None {
+//!         r.round[v].proposal = Some(c);
+//!         r.round[v].proposal_status = if local { Verified(true) } else { Unverified };
+//!         return None;
+//!     }
+//!     if r.round[v].proposal == Some(c) {
+//!         return None;
+//!     }
+//!     // Equivocation: only overwrite with certificate-backed proposals.
+//!     if recovered { r.round[v].proposal = Some(c); }
+//!     r.round[v].proposal_status = Equivocated;
+//!     return Some(leader(v));
+//! }
+//!
+//! // Sets the leader for view `v` if not already set.
+//! fn set_leader(r, v) {
+//!     if r.round[v].leader != None {
+//!         return;
+//!     }
+//!     r.round[v].leader = Some(leader(v));
+//! }
+//!
+//! // Replica `r` enters `next` iff `next` is ahead of the current view.
+//! fn enter_view(r, next) {
+//!     if r.view >= next {
+//!         return;
+//!     }
+//!     r.view = next;
+//!     r.round[next].t_l = now + 2Δ;
+//!     r.round[next].t_r = None;
+//!     r.round[next].t_a = now + 3Δ;
+//!     let leader = r.round[next].leader;
+//!     if leader != None and r != leader and !is_active(r, leader) {
+//!         r.round[next].t_l = 0;
+//!         r.round[next].t_a = 0;
+//!     }
+//! }
+//!
+//! // Returns the strongest certificate known for view `v`.
+//! // Mirrors `get_best_certificate` behavior in voter state.
+//! // Priority: finalization > nullification > notarization.
+//! fn get_best_certificate(r, v) -> Option<certificate> {
+//!     if v == 0 {
+//!         return None;
+//!     }
+//!     if r.round[v].finalization = finalization(c, v) {
+//!         return finalization(c, v);
+//!     }
+//!     if r.round[v].nullification != None {
+//!         return r.round[v].nullification;
+//!     }
+//!     if r.round[v].notarization = notarization(c, v) {
+//!         return notarization(c, v);
+//!     }
+//!     return None;
+//! }
+//! ```
+//!
+//! ## 7. Protocol for Replica `r` in View `v`
+//!
+//! ### 7.0. Initialization
+//!
+//! 1. At startup, after initializing replica state with genesis (view `0`) implicitly finalized,
+//!    call `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
+//! 1. On receiving any interesting inbound vote or certificate message `m` from replica `r'`,
+//!    call `record_activity(r, r', m.v)` before processing `m`.
+//!
+//! ### 7.1. View Entry
+//!
+//! 1. On entering view `v`:
+//!    1. Let `l = r.round[v].leader`.
+//!    1. If `r != l` and `!is_active(r, l)`,
+//!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!    1. If `r == l`, attempt to propose:
+//!       1. Let `parent = find_parent(r, v)`.
+//!       1. If `parent = Err(_)`, return.
+//!       1. Let `c = propose(v, parent)`.
+//!       1. If `c = None`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`, and return.
+//!       1. Call `record_proposal(r, v, c, true, true)` (recovered-authoritative and locally built).
+//!       1. Set `r.round[v].broadcast_notarize = true`.
+//!       1. Broadcast `notarize(c, v)`.
+//!
+//! ### 7.2. Leader Notarize
+//!
+//! 1. On receiving `notarize(c, v)` from replica `r' = leader(v)`:
+//!    1. If `!record_message(r, r', notarize(c, v))`, return.
+//!    1. If `r.round[v].broadcast_nullify`, return.
+//!    1. Set `r.round[v].t_l = None`.
+//!    1. Call `record_proposal(r, v, c, false, false)`.
+//!    1. Let `v_parent` be `c`'s declared parent view.
+//!    1. If `parent_payload(r, v, v_parent) = None`, return.
+//!    1. Verify `c`.
+//!    1. If verification succeeds, set `r.round[v].proposal_status = Verified(false)`, set `r.round[v].broadcast_notarize = true`, and broadcast `notarize(c, v)`.
+//!    1. If verification fails, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!
+//! ### 7.3. Notarization Path
+//!
+//! 1. On receiving `notarize(c, v)` from replica `r'`:
+//!    1. If `r' == leader(v)`, return.
+//!    1. If `!record_message(r, r', notarize(c, v))`, return.
+//! 1. On observing `≥ Q` `notarize(c, v)` votes:
+//!    1. Mark `c` as notarized.
+//!    1. Assemble `notarization(c, v)` (even if `c` itself is not yet verified locally).
+//! 1. On constructing or receiving the first `notarization(c, v)`:
+//!    1. Set `r.round[v].notarization = notarization(c, v)`.
+//!    1. Call `set_leader(r, v + 1)`.
+//!    1. Call `record_proposal(r, v, c, true, false)`.
+//!    1. If `!r.round[v].broadcast_notarization`, set `r.round[v].broadcast_notarization = true` and broadcast `notarization(c, v)`.
+//!    1. Do not modify `r.round[v].broadcast_notarize`.
+//!    1. Attempt certification:
+//!       1. If `r.round[v].proposal_status == Verified(true)` (this replica built `c`
+//!          itself in view `v` via `propose`), auto-certify without invoking the
+//!          application: treat certification as success. Note: being `leader(v)`
+//!          alone does not trigger this shortcut; the proposal currently held in
+//!          `r.round[v]` must be the one we built (as recorded by the
+//!          `Verified(true)` slot). A leader-owned round whose proposal was instead
+//!          recovered from a certificate has `proposal_status = Unverified` or
+//!          `Verified(false)` and takes the non-local branch below.
+//!       1. Otherwise, call `certify(c)`.
+//!       1. On success (locally inferred or `certify(c) = true`):
+//!          1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
+//!          1. Set `r.round[v].certified = Some(true)`.
+//!          1. If `can_finalize(r, v) = Some(c)`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
+//!          1. Call `enter_view(r, v + 1)`.
+//!       1. On failure (`certify(c) = false`):
+//!          1. Set `r.round[v].certified = Some(false)`.
+//!          1. If `v == r.view` and `r.round[v].t_l != 0` and `r.round[v].t_a != 0`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!
+//! ### 7.4. Nullification Path
+//!
+//! 1. On receiving `nullify(v)` from replica `r'`:
+//!    1. If `!record_message(r, r', nullify(v))`, return.
+//!    2. If `r' == leader(v)`:
+//!       1. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//! 1. On observing `≥ Q` `nullify(v)` votes:
+//!    1. Assemble `nullification(v)`.
+//! 1. On constructing or receiving the first `nullification(v)`:
+//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
+//!    1. Set `r.round[v].nullification = nullification(v)`.
+//!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
+//!    1. If `r == leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
+//!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
+//!
+//! ### 7.5. Finalization Path
+//!
+//! 1. On receiving `finalize(c, v)` from replica `r'`:
+//!    1. If `!record_message(r, r', finalize(c, v))`, return.
+//! 1. On observing `≥ Q` `finalize(c, v)` votes:
+//!    1. Assemble `finalization(c, v)`.
+//! 1. On constructing or receiving the first `finalization(c, v)`:
+//!    1. Do not modify `r.round[v].broadcast_finalize`.
+//!    1. if `v > r.last_finalized` set `r.last_finalized = v`.
+//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
+//!    1. Set `r.round[v].finalization = finalization(c, v)`.
+//!    1. Call `record_proposal(r, v, c, true, false)`.
+//!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
+//!    1. Mark `c` finalized (views `<= last_finalized` are implicitly finalized).
+//!    1. If `!r.round[v].broadcast_finalization`, set `r.round[v].broadcast_finalization = true` and broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
+//!
+//! ### 7.6. Timeout Behavior
+//!
+//! 1. `nullify(v)` may be broadcast only when `v = r.view`.
+//! 1. On `r.round[v].t_l` or `r.round[v].t_a` firing:
+//!    1. If `!r.round[v].broadcast_finalize`:
+//!       1. Set `r.round[v].broadcast_nullify = true`.
+//!       1. Broadcast `nullify(v)`.
+//!       1. Set `r.round[v].t_r = now + T`.
+//! 1. On `r.round[v].t_r` firing:
+//!    1. Broadcast `nullify(v)`.
+//!    1. Let `cert = get_best_certificate(r, v - 1)`.
+//!    1. If `cert != None`, broadcast `cert`.
+//!    1. Set `r.round[v].t_r = now + T`.
 //!
 //! ## Protocol Properties
 //!
@@ -127,14 +613,14 @@
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
 //!    and possess nullification certificates for every view between `v_p` and `v+k`.
 //! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
-//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
-//!    or when certification fails.
+//! 3. An honest participant broadcasts `nullify(v)` in exactly two cases:
+//!    a timeout fires (`t_l`, `t_r` or `t_a`), or certification fails.
 //!
 //! Therefore, if view `v` completes without timeout and certification succeeds, no honest
-//! participant has broadcast `nullify(v)`. With at most `f` Byzantine participants, at most `f`
-//! `nullify(v)` votes exist, which is insufficient to form a nullification certificate. Without
-//! that certificate, no future leader can skip view `v`, and the notarized payload must be
-//! included as an ancestor in all subsequent proposals.
+//! participant has broadcast a pre-certificate `nullify(v)`. With at most `f` Byzantine participants,
+//! at most `f` such votes exist, which is insufficient to form `nullification(v)`.
+//! Without that certificate, no future leader can skip view `v`, and the notarized payload
+//! must be included as an ancestor in all subsequent proposals.
 //!
 //! ### Optimistic Finality
 //!
@@ -308,7 +794,7 @@
 //!
 //! ## Persistence
 //!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior

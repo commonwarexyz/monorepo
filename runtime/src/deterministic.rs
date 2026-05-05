@@ -368,6 +368,10 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
+
+    /// Waker for a pending [Quiescer] future. When set, the executor drains
+    /// all ready tasks without advancing virtual time before waking the caller.
+    quiesce: Mutex<Option<Waker>>,
 }
 
 impl Executor {
@@ -539,6 +543,7 @@ impl Runner {
 
         // Process tasks until root task completes or progress stalls.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        let mut quiesce_start_time: Option<SystemTime> = None;
         let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
@@ -633,6 +638,51 @@ impl Runner {
             // If the root task has completed, exit as soon as possible
             if let Some(output) = output {
                 break output;
+            }
+
+            // Handle quiesce: drain ready tasks without advancing virtual time.
+            // When a Quiescer future is pending, keep polling until no tasks are
+            // ready, then wake the requester. This guarantees all channel-driven
+            // pipeline work completes without triggering timer-based events.
+            {
+                let has_quiesce = executor.quiesce.lock().is_some();
+                if has_quiesce {
+                    // Record time when quiesce begins
+                    let start = *quiesce_start_time
+                        .get_or_insert_with(|| *executor.time.lock());
+
+                    // Assert time has not advanced during quiesce
+                    debug_assert_eq!(
+                        *executor.time.lock(),
+                        start,
+                        "virtual time must not advance during quiesce"
+                    );
+
+                    if executor.tasks.ready() > 0 {
+                        // More tasks ready -- re-drain without advancing time
+                        executor.metrics.iterations.inc();
+                        continue;
+                    }
+
+                    // All tasks idle -- quiescence achieved
+                    debug_assert_eq!(
+                        executor.tasks.ready(),
+                        0,
+                        "no tasks should be ready after quiescence"
+                    );
+                    debug_assert_eq!(
+                        *executor.time.lock(),
+                        start,
+                        "virtual time must not advance during quiesce"
+                    );
+
+                    if let Some(waker) = executor.quiesce.lock().take() {
+                        quiesce_start_time = None;
+                        waker.wake();
+                        executor.metrics.iterations.inc();
+                        continue;
+                    }
+                }
             }
 
             // Advance time (skipping ahead if no tasks are ready yet)
@@ -963,6 +1013,7 @@ impl Context {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             dns: Mutex::new(HashMap::new()),
+            quiesce: Mutex::new(None),
         });
 
         (
@@ -1034,6 +1085,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            quiesce: Mutex::new(None),
         });
         (
             Self {
@@ -1080,6 +1132,21 @@ impl Context {
     /// disabling fault injection during a test.
     pub fn storage_fault_config(&self) -> Arc<RwLock<FaultConfig>> {
         self.storage.inner().inner().config()
+    }
+
+    /// Drain all ready tasks to quiescence without advancing virtual time.
+    ///
+    /// When awaited, the executor repeatedly polls all ready tasks without
+    /// advancing the simulated clock. This ensures all pending channel-driven
+    /// work (e.g. internal actor mailbox messages) completes while timer-based
+    /// events (e.g. consensus timeouts) are not triggered.
+    ///
+    /// Returns once no more tasks are ready.
+    pub fn quiesce(&self) -> impl Future<Output = ()> + Send + 'static {
+        Quiescer {
+            executor: self.executor.clone(),
+            registered: false,
+        }
     }
 
     /// Register a DNS mapping for a hostname.
@@ -1347,6 +1414,32 @@ impl Future for Sleeper {
             });
         }
         Poll::Pending
+    }
+}
+
+/// A future that resolves when all currently ready tasks have been drained
+/// without advancing virtual time. This ensures all pending channel-driven
+/// work completes (e.g. batcher-to-voter pipeline messages) while timer-based
+/// work (consensus timeouts) is not triggered.
+struct Quiescer {
+    executor: Weak<Executor>,
+    registered: bool,
+}
+
+impl Future for Quiescer {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+        if !self.registered {
+            self.registered = true;
+            if let Some(executor) = self.executor.upgrade() {
+                *executor.quiesce.lock() = Some(cx.waker().clone());
+            }
+            Poll::Pending
+        } else {
+            // Woken by the executor after quiescence was achieved
+            Poll::Ready(())
+        }
     }
 }
 
@@ -2295,5 +2388,61 @@ mod tests {
             results1, results3,
             "different seeds should produce different patterns"
         );
+    }
+
+    #[test]
+    fn test_quiesce_drains_pipeline() {
+        use commonware_utils::channel::mpsc;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let n = 100;
+
+            // Build a 3-stage pipeline: producer -> transformer -> collector
+            let (tx1, mut rx1) = mpsc::channel::<u64>(n);
+            let (tx2, mut rx2) = mpsc::channel::<u64>(n);
+            let collected = Arc::new(Mutex::new(Vec::new()));
+
+            // Stage 1: forward and transform
+            context.with_label("stage1").spawn({
+                let tx2 = tx2;
+                move |_| async move {
+                    while let Some(val) = rx1.recv().await {
+                        tx2.send(val * 2).await.unwrap();
+                    }
+                }
+            });
+
+            // Stage 2: collect results
+            context.with_label("stage2").spawn({
+                let collected = collected.clone();
+                move |_| async move {
+                    while let Some(val) = rx2.recv().await {
+                        collected.lock().push(val);
+                    }
+                }
+            });
+
+            // Send all messages then drop sender to close pipeline
+            for i in 0..n as u64 {
+                tx1.send(i).await.unwrap();
+            }
+            drop(tx1);
+
+            // Before quiesce: pipeline has not fully propagated
+            let before = collected.lock().len();
+            assert!(
+                before < n,
+                "pipeline should not be fully drained yet (got {before}/{n})"
+            );
+
+            // Drain the pipeline (debug_asserts inside the executor verify
+            // that no ready tasks remain and time did not advance)
+            context.quiesce().await;
+
+            // After quiesce: all messages fully processed through both stages
+            let after = collected.lock().len();
+            assert_eq!(after, n, "all messages must reach collector after quiesce");
+        });
     }
 }

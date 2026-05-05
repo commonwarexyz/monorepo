@@ -1,11 +1,21 @@
 use arbitrary::Arbitrary;
-use commonware_cryptography::PublicKey;
+use commonware_consensus::simplex::mocks::application;
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::{Clock, Quota};
 use std::{collections::HashMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+/// Returns the deterministic certification policy used by trace fuzzing.
+///
+/// This mirrors the trace encoder's block-hash policy: `last_byte % 11 < 9`.
+pub fn sometimes_certifier<D: Digest>() -> application::Certifier<D> {
+    application::Certifier::Custom(Box::new(|_, payload| {
+        (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9
+    }))
+}
 
 #[derive(Clone)]
 pub enum Action {

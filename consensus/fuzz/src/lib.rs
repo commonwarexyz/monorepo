@@ -1,12 +1,22 @@
+pub mod apalache;
 pub mod bounds;
+#[cfg(feature = "mocks")]
+pub mod certificate_mock;
 pub mod disrupter;
 pub mod invariants;
+pub mod ist;
+pub mod quint_model;
+pub mod replayer;
 pub mod simplex;
 pub mod strategy;
+pub mod tlc;
+pub mod trace_mutator;
+pub mod tracing;
 pub mod types;
 pub mod utils;
 
 use crate::{
+    config::ForwardingPolicy,
     disrupter::Disrupter,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{link_peers, register, Action, Partition},
@@ -18,7 +28,7 @@ use commonware_consensus::{
         config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
-        Engine, ForwardingPolicy,
+        Engine,
     },
     types::{Delta, Epoch, View},
     Monitor, Viewable,
@@ -39,6 +49,8 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
+#[cfg(feature = "mocks")]
+pub use simplex::SimplexCertificateMock;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
@@ -47,7 +59,7 @@ use std::{
     collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -57,8 +69,10 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
-const MIN_REQUIRED_CONTAINERS: u64 = 5;
-const MAX_REQUIRED_CONTAINERS: u64 = 50;
+const DEFAULT_MIN_REQUIRED_CONTAINERS: u64 = 5;
+const DEFAULT_MAX_REQUIRED_CONTAINERS: u64 = 50;
+const MIN_REQUIRED_CONTAINERS_ENV: &str = "MIN_REQUIRED_CONTAINERS";
+const MAX_REQUIRED_CONTAINERS_ENV: &str = "MAX_REQUIRED_CONTAINERS";
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
@@ -85,6 +99,8 @@ impl Configuration {
     }
 }
 
+/// 4 nodes, 0 faulty, 4 correct (honest, no Byzantine)
+pub const N4F0C4: Configuration = Configuration::new(4, 0, 4);
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
 pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
@@ -120,6 +136,30 @@ async fn setup_degraded_network<E: Clock>(
     }
 }
 
+/// Which byzantine actor to use for node 0 in tracing runs.
+#[derive(Debug, Clone, Copy)]
+pub enum ByzantineActor {
+    Disrupter,
+    Equivocator,
+    Conflicter,
+    Nuller,
+    NullifyOnly,
+    Outdated,
+}
+
+impl ByzantineActor {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disrupter => "simplex_ed25519_quint_disrupter",
+            Self::Equivocator => "simplex_ed25519_quint_equivocator",
+            Self::Conflicter => "simplex_ed25519_quint_conflicter",
+            Self::Nuller => "simplex_ed25519_quint_nuller",
+            Self::NullifyOnly => "simplex_ed25519_quint_nullify_only",
+            Self::Outdated => "simplex_ed25519_quint_outdated",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
@@ -128,6 +168,10 @@ pub struct FuzzInput {
     pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
+    /// Byzantine actor for node 0. `None` means all-honest (e.g. the
+    /// `run_quint_honest_tracing` path); byzantine-variant targets require
+    /// this to be `Some(...)`.
+    pub byzantine_actor: Option<ByzantineActor>,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -151,8 +195,9 @@ impl Arbitrary<'_> for FuzzInput {
             && configuration == N4F1C3
             && u.int_in_range(0..=99)? == 1;
 
+        let required_containers_range = configured_required_containers_range();
         let required_containers =
-            u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+            u.int_in_range(required_containers_range.min..=required_containers_range.max)?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -173,6 +218,14 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
+        let byzantine_actor = Some(match u.int_in_range(0..=4)? {
+            0 => ByzantineActor::Equivocator,
+            1 => ByzantineActor::Conflicter,
+            2 => ByzantineActor::Nuller,
+            3 => ByzantineActor::NullifyOnly,
+            _ => ByzantineActor::Outdated,
+        });
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -184,6 +237,7 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             strategy,
+            byzantine_actor,
         })
     }
 }
@@ -470,8 +524,10 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        let replayed = invariants::extract_replayed(&reporters, config.n as usize);
+        let states = invariants::extract(&reporters, config.n as usize);
+        invariants::check::<P>(config.n, &states);
+        invariants::check_vote_invariants(&replayed, config.faults as usize);
     });
 }
 
@@ -696,8 +752,10 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        let replayed = invariants::extract_replayed(&reporters, config.n as usize);
+        let states = invariants::extract(&reporters, config.n as usize);
+        invariants::check::<P>(config.n, &states);
+        invariants::check_vote_invariants(&replayed, config.faults as usize);
     });
 }
 
@@ -715,6 +773,43 @@ pub struct Twinable;
 
 impl FuzzMode for Twinable {
     const TWIN: bool = true;
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RequiredContainersRange {
+    min: u64,
+    max: u64,
+}
+
+impl RequiredContainersRange {
+    fn from_env() -> Result<Self, String> {
+        let min = parse_u64_env(MIN_REQUIRED_CONTAINERS_ENV, DEFAULT_MIN_REQUIRED_CONTAINERS)?;
+        let max = parse_u64_env(MAX_REQUIRED_CONTAINERS_ENV, DEFAULT_MAX_REQUIRED_CONTAINERS)?;
+        if min == 0 {
+            return Err(format!("{MIN_REQUIRED_CONTAINERS_ENV} must be at least 1"));
+        }
+        if min > max {
+            return Err(format!(
+                "{MIN_REQUIRED_CONTAINERS_ENV}={min} exceeds {MAX_REQUIRED_CONTAINERS_ENV}={max}"
+            ));
+        }
+        Ok(Self { min, max })
+    }
+}
+
+fn configured_required_containers_range() -> &'static RequiredContainersRange {
+    static RANGE: OnceLock<RequiredContainersRange> = OnceLock::new();
+    RANGE.get_or_init(|| RequiredContainersRange::from_env().unwrap_or_else(|msg| panic!("{msg}")))
+}
+
+fn parse_u64_env(name: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|err| format!("failed to parse {name}={value}: {err}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(format!("failed to read {name}: {err}")),
+    }
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
@@ -735,3 +830,21 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
         }
     }
 }
+
+pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_twins_tracing(input, corpus_bytes);
+}
+
+pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_disrupter_tracing(input, corpus_bytes);
+}
+
+pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_byzantine_tracing(actor, input, corpus_bytes);
+}
+
+pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_honest_tracing(input, corpus_bytes);
+}
+
+pub use tlc::run_quint_tlc_honest_model;

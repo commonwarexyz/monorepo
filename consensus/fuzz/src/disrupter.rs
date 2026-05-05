@@ -14,7 +14,10 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use rand::Rng;
 use rand_core::CryptoRngCore;
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
@@ -35,6 +38,7 @@ pub struct Disrupter<
     last_nullified_view: u64,
     last_notarized_view: u64,
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
+    messages_per_view: HashMap<u64, usize>,
 }
 
 impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>, St: Strategy + 'static>
@@ -50,6 +54,7 @@ where
             last_nullified_view: 0,
             last_notarized_view: 0,
             latest_proposals: VecDeque::new(),
+            messages_per_view: HashMap::new(),
             context,
             scheme,
             strategy,
@@ -86,6 +91,21 @@ where
             .max(self.last_notarized_view)
             .max(self.last_finalized_view)
             .max(self.last_nullified_view)
+    }
+
+    /// Returns true if the per-view message limit allows sending another
+    /// message for the current view. Always true when the strategy has no limit.
+    fn can_send(&mut self) -> bool {
+        let Some(max) = self.strategy.max_messages_per_view() else {
+            return true;
+        };
+        let view = self.current_view();
+        let count = self.messages_per_view.entry(view).or_insert(0);
+        if *count >= max {
+            return false;
+        }
+        *count += 1;
+        true
     }
 
     fn is_faulty_view(&self, view: u64) -> bool {
@@ -273,7 +293,7 @@ where
             self.latest_proposals.push_back(notarize.proposal.clone());
         }
 
-        if !self.is_faulty_view(self.last_vote_view) {
+        if !self.is_faulty_view(self.last_vote_view) || !self.can_send() {
             return;
         }
 
@@ -352,7 +372,7 @@ where
             }
         };
 
-        if !self.is_faulty_view(view) {
+        if !self.is_faulty_view(view) || !self.can_send() {
             return;
         }
 
@@ -366,7 +386,7 @@ where
     }
 
     async fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
-        if !self.is_faulty_view(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) || !self.can_send() {
             return;
         }
         // Optionally send malformed resolver data
@@ -379,7 +399,7 @@ where
     }
 
     async fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
-        if !self.is_faulty_view(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) || !self.can_send() {
             return;
         }
         let Some(me) = self.scheme.me() else {
@@ -421,7 +441,7 @@ where
     }
 
     async fn send_proposal(&mut self, sender: &mut impl Sender) {
-        if !self.is_faulty_view(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) || !self.can_send() {
             return;
         }
         let proposal = self.get_proposal();
@@ -438,7 +458,7 @@ where
     }
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
-        if !self.is_faulty_view(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) || !self.can_send() {
             return;
         }
         let cert = self.bytes();
@@ -454,7 +474,7 @@ where
         sender: &mut impl Sender<PublicKey = S::PublicKey>,
         recipients: Recipients<S::PublicKey>,
     ) {
-        if !self.is_faulty_view(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) || !self.can_send() {
             return;
         }
         let proposal = self.get_proposal();
