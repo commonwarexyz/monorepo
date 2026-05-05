@@ -174,6 +174,9 @@ where
     /// sync target because the sync engine verifies batches against the ops root, not the canonical
     /// root.
     ///
+    /// External consumers that receive a trusted canonical `current` root should use
+    /// [`Self::ops_root_witness`] to authenticate this ops root against it.
+    ///
     /// See the [Root structure](super) section in the module documentation.
     pub const fn ops_root(&self) -> H::Digest {
         self.any.root()
@@ -286,7 +289,9 @@ where
     /// Returns an ops-level historical proof for the specified range.
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
-    /// activity bitmap, this returns standard range proofs suitable for state sync.
+    /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
+    /// verifiers should use the same Merkle hasher configuration as QMDB sync:
+    /// [`Bagging::BackwardFold`].
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,

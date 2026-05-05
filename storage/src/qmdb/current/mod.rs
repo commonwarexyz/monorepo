@@ -225,7 +225,7 @@
 //!
 //! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
-//!   against this root using standard Merkle range proofs.
+//!   against this root using ops-tree range proofs.
 //!
 //! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
 //!   with ops subtree roots). Used for proofs about operation values and their activity status.
@@ -238,11 +238,12 @@
 //! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
 //! verifies batches against the ops root, not the canonical root.
 //!
-//! For state sync, the sync engine targets the ops root and verifies each batch against it.
-//! After sync, the bitmap and grafted tree are reconstructed deterministically from the
-//! operations, and the canonical root is computed. [proof::OpsRootWitness] can be used to validate
-//! that a particular ops root is committed by a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
+//! verifying ops proofs directly should use the same Merkle hasher configuration as sync. After
+//! sync, the bitmap and grafted tree are reconstructed deterministically from the operations, and
+//! the canonical root is computed. [proof::OpsRootWitness] can be used to validate that a particular
+//! ops root is committed by a trusted canonical root; the sync engine does not perform this check
+//! itself.
 
 use crate::{
     index::Factory as IndexFactory,

@@ -89,15 +89,18 @@ where
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.reader().await;
-            let loc = reader
-                .bounds()
+            let bounds = reader.bounds();
+            let loc = bounds
                 .end
                 .checked_sub(1)
-                .expect("journal should not be empty");
-            let op = reader.read(loc).await?;
-            let floor = op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
+                .ok_or(qmdb::Error::HistoricalFloorPruned(Location::new(
+                    bounds.end,
+                )))?;
+            let floor =
+                qmdb::find_inactivity_floor_at::<F, _>(&reader, Location::new(bounds.end), |op| {
+                    op.has_floor()
+                })
+                .await?;
             (Location::new(loc), floor)
         };
         let inactive_peaks = F::inactive_peaks(

@@ -570,10 +570,19 @@ where
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
             let bounds = reader.bounds();
-            let last_commit_loc = bounds.end.checked_sub(1).expect("commit should exist");
-            let last_commit = reader.read(last_commit_loc).await?;
-            let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
-            if *inactivity_floor_loc > last_commit_loc {
+            let last_commit_loc = Location::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+            );
+            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
+                &reader,
+                Location::new(bounds.end),
+                |op| op.has_floor(),
+            )
+            .await?;
+            if inactivity_floor_loc > last_commit_loc {
                 return Err(crate::qmdb::Error::DataCorrupted(
                     "inactivity floor exceeds last commit",
                 ));
@@ -629,12 +638,7 @@ where
             // last_commit_loc)` for each CommitFloor op, so the per-op push above already
             // encodes this.
 
-            (
-                Location::new(last_commit_loc),
-                inactivity_floor_loc,
-                active_keys,
-                bitmap,
-            )
+            (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
 
         // The bitmap must have exactly one bit per retained log location.

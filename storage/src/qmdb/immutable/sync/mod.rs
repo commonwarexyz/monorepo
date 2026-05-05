@@ -100,14 +100,18 @@ where
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let last_commit_loc =
-                Location::<F>::new(bounds.end.checked_sub(1).expect("commit should exist"));
-
-            // Read the floor from the last commit operation.
-            let last_op = reader.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
+            let last_commit_loc = Location::<F>::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+            );
+            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
+                &reader,
+                Location::new(bounds.end),
+                |op| op.has_floor(),
+            )
+            .await?;
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(

@@ -1,12 +1,15 @@
 //! Shared synchronization logic for [crate::qmdb::any] databases.
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
+//!
+//! Callers verifying `any` sync proofs directly should use the same Merkle hasher configuration as
+//! the sync engine.
 
 use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable},
+        contiguous::{fixed, variable, Mutable, Reader as _},
     },
     merkle::{self, full, hasher::Standard as StandardHasher, Location},
     qmdb::{
@@ -185,12 +188,24 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
+                let Ok(journal) = <$journal>::init(
+                    context.with_label("local_target_journal_probe"),
+                    config.journal_config.clone(),
+                )
+                .await
+                else {
+                    return false;
+                };
+                if Location::new(journal.reader().await.bounds().start) > target.range.start() {
+                    return false;
+                }
+
                 let inactive_peaks = F::inactive_peaks(
                     F::location_to_position(target.range.end()),
                     target.range.start(),
                 );
                 qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context,
+                    context.with_label("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,
