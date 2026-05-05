@@ -97,8 +97,8 @@ where
     D: Digest,
     Update<K, V>: Read,
 {
-    /// `(max_digests, update_cfg, value_cfg)`: max digest count for the embedded operation proof,
-    /// the read configuration for [Update], and the read configuration for the value type.
+    /// `(max_digests, update_cfg, value_cfg)`: per-field digest cap for the embedded operation
+    /// proof, the read configuration for [Update], and the read configuration for the value type.
     type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
     fn read_cfg(
@@ -117,6 +117,27 @@ where
                 Ok(Self::Commit(op_proof, value))
             }
             tag => Err(commonware_codec::Error::InvalidEnum(tag)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F, K, V, D, const N: usize> arbitrary::Arbitrary<'_> for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let op_proof = u.arbitrary()?;
+        if u.arbitrary()? {
+            Ok(Self::KeyValue(op_proof, u.arbitrary()?))
+        } else {
+            Ok(Self::Commit(op_proof, u.arbitrary()?))
         }
     }
 }
@@ -982,5 +1003,28 @@ pub mod tests {
         bytes.extend_from_slice(&[0u8; 32]); // garbage
         let result = CodecExclusionProof::decode_cfg(bytes.as_slice(), &(MAX_DIGESTS, (), ()));
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::{
+            merkle::{mmb, mmr},
+            qmdb::{
+                any::value::{FixedEncoding, VariableEncoding},
+                current::ordered::{db::KeyValueProof, ExclusionProof},
+            },
+        };
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+        use commonware_utils::sequence::U64;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<KeyValueProof<mmr::Family, U64, Sha256Digest, 32>>,
+            CodecConformance<KeyValueProof<mmb::Family, U64, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmr::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmr::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmb::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmb::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+        }
     }
 }

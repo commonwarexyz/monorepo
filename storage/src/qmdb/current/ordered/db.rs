@@ -47,7 +47,7 @@ impl<F: merkle::Family, K: Key, D: Digest, const N: usize> EncodeSize
 }
 
 impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
-    /// `(max_digests, key_cfg)`: the max digest count for the embedded operation proof and the
+    /// `(max_digests, key_cfg)`: the per-field digest cap for the embedded operation proof and the
     /// read configuration for the key type.
     type Cfg = (usize, <K as Read>::Cfg);
 
@@ -58,6 +58,21 @@ impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Read for KeyValueProo
         let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
         let next_key = K::read_cfg(buf, key_cfg)?;
         Ok(Self { proof, next_key })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: merkle::Family, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
+    for KeyValueProof<F, K, D, N>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            proof: u.arbitrary()?,
+            next_key: u.arbitrary()?,
+        })
     }
 }
 

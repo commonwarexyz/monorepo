@@ -96,6 +96,19 @@ impl<D: Digest> Read for OpsRootWitness<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for OpsRootWitness<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            grafted_root: u.arbitrary()?,
+            partial_chunk: u.arbitrary()?,
+        })
+    }
+}
+
 /// An inventory of all structural peaks for a Merkle-family tree, mapped linearly top-to-bottom
 /// relative to the bounds of a verified range proof.
 ///
@@ -927,9 +940,10 @@ impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
 }
 
 impl<F: Family, D: Digest> Read for RangeProof<F, D> {
-    /// The maximum number of digests in the proof, also used as the upper bound on the
-    /// number of unfolded prefix and suffix peaks (each itself bounded by the structural peak
-    /// count).
+    /// The maximum number of digests allowed in each digest vector.
+    ///
+    /// This is a per-field cap, not a total allocation budget across the whole range proof. It
+    /// bounds `proof.digests`, `unfolded_prefix_peaks`, and `unfolded_suffix_peaks` separately.
     type Cfg = usize;
 
     fn read_cfg(
@@ -947,6 +961,22 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
             unfolded_suffix_peaks,
             partial_chunk_digest,
             ops_root,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for RangeProof<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            proof: u.arbitrary()?,
+            unfolded_prefix_peaks: u.arbitrary()?,
+            unfolded_suffix_peaks: u.arbitrary()?,
+            partial_chunk_digest: u.arbitrary()?,
+            ops_root: u.arbitrary()?,
         })
     }
 }
@@ -1040,7 +1070,7 @@ impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N
 }
 
 impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
-    /// The maximum number of digests in the embedded range proof.
+    /// The per-field digest cap forwarded to the embedded range proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -1054,6 +1084,20 @@ impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
             loc,
             chunk,
             range_proof,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest, const N: usize> arbitrary::Arbitrary<'_> for OperationProof<F, D, N>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            loc: u.arbitrary()?,
+            chunk: u.arbitrary()?,
+            range_proof: u.arbitrary()?,
         })
     }
 }
@@ -1862,5 +1906,21 @@ mod tests {
             let mut verify_hasher = Sha256::new();
             assert!(proof.verify(&mut verify_hasher, loc, &[element], &[chunk], &root));
         });
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::super::{OperationProof, OpsRootWitness, RangeProof};
+        use crate::merkle::{mmb, mmr};
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<OpsRootWitness<Sha256Digest>>,
+            CodecConformance<RangeProof<mmr::Family, Sha256Digest>>,
+            CodecConformance<RangeProof<mmb::Family, Sha256Digest>>,
+            CodecConformance<OperationProof<mmr::Family, Sha256Digest, 32>>,
+            CodecConformance<OperationProof<mmb::Family, Sha256Digest, 32>>,
+        }
     }
 }
