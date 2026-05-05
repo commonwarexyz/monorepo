@@ -843,6 +843,7 @@ impl<const N: usize> Write for BitMap<N> {
         // Prefix with the number of bits
         self.len().write(buf);
 
+        // Write all chunks
         let (front, back) = self.chunks.as_slices();
         buf.put_slice(front.as_flattened());
         buf.put_slice(back.as_flattened());
