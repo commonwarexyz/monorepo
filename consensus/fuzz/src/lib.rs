@@ -55,7 +55,7 @@ use std::{
     collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
-    sync::Arc,
+    sync::{Arc, Once},
     time::Duration,
 };
 pub const EPOCH: u64 = 333;
@@ -1466,8 +1466,42 @@ impl FuzzMode for ByzzfuzzLiveness {
     const MODE: Mode = Mode::ByzzfuzzLiveness;
 }
 
+/// Install (once per process) a panic-hook chain that drains and prints the
+/// ByzzFuzz decision log when the `BYZZFUZZ_LOG` environment variable is
+/// set (any value). Off by default to keep the libfuzzer crash output
+/// terse. The log is dumped *before* the previous hook runs: libfuzzer-sys
+/// installs a panic hook that prints + `abort()`s the process, so anything
+/// queued after it would never reach the terminal. With this ordering the
+/// output reads: log -> default panic message -> libfuzzer stack trace /
+/// `Failing input` / `Debug`.
+fn install_byzzfuzz_panic_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        // Sample the env var once at install time -- the hook itself runs
+        // in panic context and shouldn't touch global env state.
+        let dump = std::env::var_os("BYZZFUZZ_LOG").is_some();
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if dump {
+                let log = byzzfuzz::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- ByzzFuzz decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of ByzzFuzz decision log ----");
+                }
+            }
+            prev(info);
+        }));
+    });
+}
+
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
+    if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+        install_byzzfuzz_panic_hook();
+    }
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -1502,20 +1536,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         }
         Err(payload) => {
             println!("Panicked with raw_bytes: {:?}", raw_bytes);
-            // Dump the on-panic decision log for ByzzFuzz so the operator
-            // sees the schedule + the per-message drop / intercept /
-            // replace / omit trail that led to the failure. Other modes
-            // leave the buffer empty (no pushes), so this is a no-op.
-            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
-                let log = byzzfuzz::log::take();
-                if !log.is_empty() {
-                    eprintln!("---- ByzzFuzz decision log ({} entries) ----", log.len());
-                    for line in &log {
-                        eprintln!("{line}");
-                    }
-                    eprintln!("---- end of ByzzFuzz decision log ----");
-                }
-            }
+            // The ByzzFuzz decision log is dumped by the panic hook
+            // installed in `install_byzzfuzz_panic_hook` (fires during the
+            // panic itself, before unwinding reaches here). No work needed
+            // in this arm.
             panic::resume_unwind(payload);
         }
     }
