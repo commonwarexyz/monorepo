@@ -76,6 +76,7 @@ enum PendingVerification<S: CertificateScheme, V: Variant> {
 struct PendingAck<V: Variant, A: Acknowledgement> {
     height: Height,
     commitment: V::Commitment,
+    round: Option<Round>,
     #[pin]
     receiver: A::Waiter,
 }
@@ -147,18 +148,23 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
     fn complete_current(
         &mut self,
         result: <A::Waiter as Future>::Output,
-    ) -> (Height, V::Commitment, <A::Waiter as Future>::Output) {
+    ) -> (Height, V::Commitment, Option<Round>, <A::Waiter as Future>::Output) {
         let PendingAck {
-            height, commitment, ..
+            round,
+            height,
+            commitment,
+            ..
         } = self.current.take().expect("ack state must be present");
         if let Some(next) = self.queue.pop_front() {
             self.current.replace(next);
         }
-        (height, commitment, result)
+        (height, commitment, round, result)
     }
 
     /// If the current ack is already resolved, takes it and arms the next ack.
-    fn pop_ready(&mut self) -> Option<(Height, V::Commitment, <A::Waiter as Future>::Output)> {
+    fn pop_ready(
+        &mut self,
+    ) -> Option<(Height, V::Commitment, Option<Round>, <A::Waiter as Future>::Output)> {
         let pending = self.current.as_mut()?;
         let result = Pin::new(&mut pending.receiver).now_or_never()?;
         Some(self.complete_current(result))
@@ -243,6 +249,8 @@ where
     last_processed_height: Height,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
+    // Finalization rounds retained for the current pending-ack window
+    finalization_rounds: BTreeMap<Height, Round>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -339,6 +347,7 @@ where
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
+                finalization_rounds: BTreeMap::new(),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -447,12 +456,12 @@ where
                 // Start with the ack that woke this `select_loop!` arm.
                 let mut pending = Some(self.pending_acks.complete_current(result));
                 let last_acked_commitment = loop {
-                    let (height, commitment, result) =
+                    let (height, commitment, round, result) =
                         pending.take().expect("pending ack must exist");
                     match result {
                         Ok(()) => {
                             // Apply in-memory progress updates for this acknowledged block.
-                            self.handle_block_processed(height, commitment, &mut resolver)
+                            self.handle_block_processed(height, commitment, round, &mut resolver)
                                 .await;
                         }
                         Err(e) => {
@@ -725,6 +734,7 @@ where
                         // an in-process block from being processed that is below the new floor
                         // updating `last_processed_height`.
                         self.pending_acks.clear();
+                        self.finalization_rounds.retain(|h, _| *h > height);
 
                         // Prune data in the finalized archives below the new floor.
                         if let Err(err) = self.prune_finalized_archives(height).await {
@@ -1272,7 +1282,7 @@ where
             let next_height = self
                 .pending_acks
                 .next_dispatch_height(self.last_processed_height);
-            let Some(block) = self.get_ready_finalized_block(next_height).await else {
+            let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
             assert_eq!(
@@ -1289,6 +1299,7 @@ where
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
+                round: self.finalization_rounds.remove(&height),
                 receiver: ack_waiter,
             });
         }
@@ -1302,6 +1313,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
+        round: Option<Round>,
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
     ) {
         // Update the processed height (buffered, not synced)
@@ -1312,7 +1324,15 @@ where
             .cancel(Request::<V::Commitment>::Block(commitment))
             .await;
 
-        if let Some(finalization) = self.get_finalization_by_height(height).await {
+        let round = match round {
+            Some(round) => Some(round),
+            None => self
+                .get_finalization_by_height(height)
+                .await
+                .map(|finalization| finalization.round()),
+        };
+
+        if let Some(round) = round {
             // Trail the previous processed finalized block by the timeout
             let lpr = self.last_processed_round;
             let prune_round = Round::new(
@@ -1324,7 +1344,6 @@ where
             self.cache.prune(prune_round).await;
 
             // Update the last processed round
-            let round = finalization.round();
             self.last_processed_round = round;
 
             // Cancel useless requests
@@ -1395,18 +1414,6 @@ where
     }
 
     // -------------------- Immutable Storage --------------------
-
-    /// Get a finalized block that is known to be within the finalized archive tip.
-    async fn get_ready_finalized_block(&self, height: Height) -> Option<V::Block> {
-        if !self
-            .finalized_blocks
-            .last_index()
-            .is_some_and(|last| last >= height)
-        {
-            return None;
-        }
-        self.get_finalized_block(height).await
-    }
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {
@@ -1492,6 +1499,17 @@ where
             }
         ) {
             panic!("failed to finalize: {e}");
+        }
+
+        if let Some(round) = round {
+            let max_cached_height = Height::new(
+                self.last_processed_height
+                    .get()
+                    .saturating_add(self.pending_acks.max as u64),
+            );
+            if height <= max_cached_height {
+                self.finalization_rounds.insert(height, round);
+            }
         }
 
         // Update metrics and application
@@ -1740,6 +1758,7 @@ where
                 Ok::<_, BoxedError>(())
             }
         )?;
+        self.finalization_rounds.retain(|h, _| *h >= height);
         Ok(())
     }
 }

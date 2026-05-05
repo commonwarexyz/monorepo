@@ -124,14 +124,22 @@ impl Blocks for SyntheticBlocks {
     }
 
     async fn get(&self, id: ArchiveID<'_, D>) -> Result<Option<Self::Block>, Self::Error> {
-        self.delay().await;
         let block = match id {
-            ArchiveID::Index(index) => self.by_height.get(&Height::new(index)).cloned(),
-            ArchiveID::Key(digest) => self
-                .by_digest
-                .get(digest)
-                .and_then(|height| self.by_height.get(height))
-                .cloned(),
+            ArchiveID::Index(index) => {
+                // The real ordinal archive rejects index misses from in-memory intervals.
+                let Some(block) = self.by_height.get(&Height::new(index)).cloned() else {
+                    return Ok(None);
+                };
+                self.delay().await;
+                Some(block)
+            }
+            ArchiveID::Key(digest) => {
+                self.delay().await;
+                self.by_digest
+                    .get(digest)
+                    .and_then(|height| self.by_height.get(height))
+                    .cloned()
+            }
         };
         Ok(block)
     }
@@ -239,14 +247,22 @@ impl Certificates for SyntheticCertificates {
         &self,
         id: ArchiveID<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
-        self.delay().await;
         let finalization = match id {
-            ArchiveID::Index(index) => self.by_height.get(&Height::new(index)).cloned(),
-            ArchiveID::Key(digest) => self
-                .by_digest
-                .get(digest)
-                .and_then(|height| self.by_height.get(height))
-                .cloned(),
+            ArchiveID::Index(index) => {
+                // The real ordinal archive rejects index misses from in-memory intervals.
+                let Some(finalization) = self.by_height.get(&Height::new(index)).cloned() else {
+                    return Ok(None);
+                };
+                self.delay().await;
+                Some(finalization)
+            }
+            ArchiveID::Key(digest) => {
+                self.delay().await;
+                self.by_digest
+                    .get(digest)
+                    .and_then(|height| self.by_height.get(height))
+                    .cloned()
+            }
         };
         Ok(finalization)
     }
