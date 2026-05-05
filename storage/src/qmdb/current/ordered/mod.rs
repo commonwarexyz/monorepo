@@ -46,26 +46,26 @@ pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const
     Commit(OperationProof<F, D, N>, Option<V::Value>),
 }
 
-const EXCLUSION_TAG_KEY_VALUE: u8 = 0;
-const EXCLUSION_TAG_COMMIT: u8 = 1;
+const KEY_VALUE_CONTEXT: u8 = 0;
+const COMMIT_CONTEXT: u8 = 1;
 
 impl<F, K, V, D, const N: usize> Write for ExclusionProof<F, K, V, D, N>
 where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
-    Update<K, V>: Write,
     D: Digest,
+    Update<K, V>: Write,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::KeyValue(op_proof, update) => {
-                EXCLUSION_TAG_KEY_VALUE.write(buf);
+                KEY_VALUE_CONTEXT.write(buf);
                 op_proof.write(buf);
                 update.write(buf);
             }
             Self::Commit(op_proof, value) => {
-                EXCLUSION_TAG_COMMIT.write(buf);
+                COMMIT_CONTEXT.write(buf);
                 op_proof.write(buf);
                 value.write(buf);
             }
@@ -78,8 +78,8 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
-    Update<K, V>: EncodeSize,
     D: Digest,
+    Update<K, V>: EncodeSize,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
@@ -94,37 +94,29 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
-    Update<K, V>: Read,
     D: Digest,
+    Update<K, V>: Read,
 {
     /// `(max_digests, update_cfg, value_cfg)`: max digest count for the embedded operation proof,
     /// the read configuration for [Update], and the read configuration for the value type.
-    type Cfg = (
-        usize,
-        <Update<K, V> as Read>::Cfg,
-        <<V as ValueEncoding>::Value as Read>::Cfg,
-    );
+    type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
     fn read_cfg(
         buf: &mut impl Buf,
         (max_digests, update_cfg, value_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            EXCLUSION_TAG_KEY_VALUE => {
+        match u8::read(buf)? {
+            KEY_VALUE_CONTEXT => {
                 let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
                 let update = Update::<K, V>::read_cfg(buf, update_cfg)?;
                 Ok(Self::KeyValue(op_proof, update))
             }
-            EXCLUSION_TAG_COMMIT => {
+            COMMIT_CONTEXT => {
                 let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
                 let value = Option::<V::Value>::read_cfg(buf, value_cfg)?;
                 Ok(Self::Commit(op_proof, value))
             }
-            _ => Err(commonware_codec::Error::Invalid(
-                "ExclusionProof",
-                "unknown variant tag",
-            )),
+            tag => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
     }
 }
@@ -948,10 +940,7 @@ mod codec_tests {
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
-        let mut chunk = [0u8; N];
-        for (i, byte) in chunk.iter_mut().enumerate() {
-            *byte = i as u8;
-        }
+        let chunk: [u8; N] = core::array::from_fn(|i| i as u8);
         OperationProof {
             loc: mmb::Location::new(5),
             chunk,

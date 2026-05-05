@@ -1160,10 +1160,7 @@ mod tests {
             ops_root: Sha256::hash(b"ops"),
         };
 
-        let mut chunk = [0u8; N];
-        for (i, byte) in chunk.iter_mut().enumerate() {
-            *byte = i as u8;
-        }
+        let chunk: [u8; N] = core::array::from_fn(|i| i as u8);
 
         let proof = OperationProof::<F, sha256::Digest, N> {
             loc: mmb::Location::new(5),
