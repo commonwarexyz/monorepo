@@ -32,6 +32,15 @@ pub trait BlockProvider: Clone + Send + 'static {
         self,
         digest: <Self::Block as Digestible>::Digest,
     ) -> impl Future<Output = Option<Self::Block>> + Send;
+
+    /// A request to retrieve the parent of a known block.
+    fn fetch_parent(
+        self,
+        block: Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send {
+        let digest = block.parent();
+        self.fetch_block(digest)
+    }
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
@@ -97,8 +106,7 @@ where
             let should_fetch_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_fetch_parent && end_of_buffered {
-                let parent_digest = block.parent();
-                let future = this.marshal.clone().fetch_block(parent_digest).boxed();
+                let future = this.marshal.clone().fetch_parent(block.clone()).boxed();
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -130,8 +138,7 @@ where
                 let height = block.height();
                 let should_fetch_parent = height > END_BOUND;
                 if should_fetch_parent {
-                    let parent_digest = block.parent();
-                    let future = this.marshal.clone().fetch_block(parent_digest).boxed();
+                    let future = this.marshal.clone().fetch_parent(block.clone()).boxed();
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,

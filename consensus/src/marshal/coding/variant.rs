@@ -54,6 +54,11 @@ where
         block.context().parent.1
     }
 
+    fn application_parent_commitment(block: &Self::ApplicationBlock) -> Self::Commitment {
+        // Parent commitment is embedded in the consensus context.
+        block.context().parent.1
+    }
+
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
         block.into_inner()
     }

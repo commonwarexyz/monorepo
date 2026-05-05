@@ -54,7 +54,7 @@ mod tests {
                     BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
                     PAGE_SIZE, QUORUM, S, UNRELIABLE_LINK, V,
                 },
-                verifying::MockVerifyingApp,
+                verifying::{AncestryVerifyingApp, MockVerifyingApp},
             },
             resolver::handler,
             Identifier, Update,
@@ -1139,6 +1139,150 @@ mod tests {
                 Self::Inline(inline) => inline.certify(round, digest).await,
                 Self::Deferred(deferred) => deferred.certify(round, digest).await,
             }
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_marshaled_fetches_digest_ancestor_above_tip() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(60));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(3),
+                    participants.clone(),
+                )
+                .await;
+
+                let victim = participants[0].clone();
+                let peer = participants[1].clone();
+                let victim_setup = StandardHarness::setup_validator(
+                    context.with_label("victim"),
+                    &mut oracle,
+                    victim.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let mut peer_mailbox = StandardHarness::setup_validator(
+                    context.with_label("peer"),
+                    &mut oracle,
+                    peer,
+                    ConstantProvider::new(schemes[1].clone()),
+                )
+                .await
+                .mailbox;
+
+                setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let round1 = Round::new(Epoch::zero(), View::new(1));
+                let round2 = Round::new(Epoch::zero(), View::new(2));
+                let round3 = Round::new(Epoch::zero(), View::new(3));
+
+                let ctx1 = Ctx {
+                    round: round1,
+                    leader: victim.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let block1 = B::new::<Sha256>(ctx1, genesis.digest(), Height::new(1), 100);
+                let ctx2 = Ctx {
+                    round: round2,
+                    leader: victim.clone(),
+                    parent: (View::new(1), block1.digest()),
+                };
+                let block2 = B::new::<Sha256>(ctx2, block1.digest(), Height::new(2), 200);
+                let ctx3 = Ctx {
+                    round: round3,
+                    leader: victim,
+                    parent: (View::new(2), block2.digest()),
+                };
+                let block3 = B::new::<Sha256>(ctx3.clone(), block2.digest(), Height::new(3), 300);
+
+                for (round, parent_view, block) in [
+                    (round1, View::zero(), block1.clone()),
+                    (round2, View::new(1), block2.clone()),
+                    (round3, View::new(2), block3.clone()),
+                ] {
+                    assert!(peer_mailbox.verified(round, block.clone()).await);
+                    let notarization = StandardHarness::make_notarization(
+                        Proposal::new(round, parent_view, block.digest()),
+                        &schemes,
+                        QUORUM,
+                    );
+                    StandardHarness::report_notarization(&mut peer_mailbox, notarization).await;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+
+                let app = AncestryVerifyingApp::<B, S>::new(
+                    genesis,
+                    vec![Height::new(3), Height::new(2), Height::new(1)],
+                );
+                let block1_digest = block1.digest();
+                let victim_mailbox = victim_setup.mailbox.clone();
+                let marshal = victim_setup.mailbox;
+
+                match kind {
+                    WrapperKind::Inline => {
+                        let mut wrapper = Inline::new(
+                            context.clone(),
+                            app,
+                            marshal,
+                            FixedEpocher::new(BLOCKS_PER_EPOCH),
+                        );
+                        let verify = wrapper.verify(ctx3, block3.digest()).await;
+                        select! {
+                            result = verify => {
+                                assert!(
+                                    result.expect("verify result missing"),
+                                    "inline verify should fetch the missing height-1 ancestor by digest"
+                                );
+                            },
+                            _ = context.sleep(Duration::from_secs(10)) => {
+                                panic!("inline verify stalled fetching digest ancestor above tip");
+                            },
+                        }
+                    }
+                    WrapperKind::Deferred => {
+                        let mut wrapper = Deferred::new(
+                            context.clone(),
+                            app,
+                            marshal,
+                            FixedEpocher::new(BLOCKS_PER_EPOCH),
+                        );
+                        let verify = wrapper.verify(ctx3, block3.digest()).await;
+                        assert!(
+                            verify.await.expect("optimistic verify result missing"),
+                            "deferred verify should pass optimistic pre-checks"
+                        );
+                        let certify = wrapper.certify(round3, block3.digest()).await;
+                        select! {
+                            result = certify => {
+                                assert!(
+                                    result.expect("certify result missing"),
+                                    "deferred certify should fetch the missing height-1 ancestor by digest"
+                                );
+                            },
+                            _ = context.sleep(Duration::from_secs(10)) => {
+                                panic!("deferred certify stalled fetching digest ancestor above tip");
+                            },
+                        }
+                    }
+                }
+
+                assert!(
+                    victim_mailbox.get_block(&block1_digest).await.is_some(),
+                    "digest-fetched ancestor should be retained locally"
+                );
+            });
         }
     }
 

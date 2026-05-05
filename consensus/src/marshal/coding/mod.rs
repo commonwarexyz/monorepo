@@ -77,12 +77,12 @@ mod tests {
                     CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
                     NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
                 },
-                verifying::MockVerifyingApp,
+                verifying::{AncestryVerifyingApp, MockVerifyingApp},
             },
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton,
+        Automaton, CertifiableAutomaton, CertifiableBlock,
     };
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
@@ -361,6 +361,136 @@ mod tests {
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_marshaled_fetches_digest_ancestor_above_tip() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
+
+            let victim_setup = CodingHarness::setup_validator(
+                context.with_label("victim"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let peer_setup = CodingHarness::setup_validator(
+                context.with_label("peer"),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            let mut peer_handle = harness::ValidatorHandle::<CodingHarness> {
+                mailbox: peer_setup.mailbox,
+                extra: peer_setup.extra,
+            };
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let block1 = CodingHarness::make_test_block(
+                genesis.digest(),
+                genesis_commitment(),
+                Height::new(1),
+                100,
+                NUM_VALIDATORS as u16,
+            );
+            let block2 = CodingHarness::make_test_block(
+                CodingHarness::digest(&block1),
+                CodingHarness::commitment(&block1),
+                Height::new(2),
+                200,
+                NUM_VALIDATORS as u16,
+            );
+            let block3 = CodingHarness::make_test_block(
+                CodingHarness::digest(&block2),
+                CodingHarness::commitment(&block2),
+                Height::new(3),
+                300,
+                NUM_VALIDATORS as u16,
+            );
+
+            for (round, parent_view, block) in [
+                (
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block1.clone(),
+                ),
+                (
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block2.clone(),
+                ),
+                (
+                    Round::new(Epoch::zero(), View::new(3)),
+                    View::new(2),
+                    block3.clone(),
+                ),
+            ] {
+                CodingHarness::propose(&mut peer_handle, round, &block).await;
+                let notarization = CodingHarness::make_notarization(
+                    Proposal {
+                        round,
+                        parent: parent_view,
+                        payload: CodingHarness::commitment(&block),
+                    },
+                    &schemes,
+                    QUORUM,
+                );
+                CodingHarness::report_notarization(&mut peer_handle.mailbox, notarization).await;
+            }
+            context.sleep(Duration::from_millis(100)).await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+            let app = AncestryVerifyingApp::<CodingB, S>::new(
+                genesis,
+                vec![Height::new(3), Height::new(2), Height::new(1)],
+            );
+            let cfg = MarshaledConfig {
+                application: app,
+                marshal: victim_setup.mailbox.clone(),
+                shards: victim_setup.extra.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let commitment = CodingHarness::commitment(&block3);
+            let _verify = marshaled.verify(block3.context(), commitment).await;
+            let certify = marshaled.certify(round, commitment).await;
+
+            select! {
+                result = certify => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "coding certify should fetch the missing height-1 ancestor by digest"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("coding certify stalled fetching digest ancestor above tip");
+                },
+            }
+
+            assert!(
+                victim_setup.mailbox.get_block(&block1.digest()).await.is_some(),
+                "digest-fetched ancestor should be retained locally"
             );
         });
     }

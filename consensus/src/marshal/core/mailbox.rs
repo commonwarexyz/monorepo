@@ -6,7 +6,7 @@ use crate::{
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Reporter,
+    Heightable, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
@@ -81,6 +81,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The round in which the block was notarized. This is an optimization
         /// to help locate the block.
         round: Option<Round>,
+        /// The height at which this commitment is expected in the ancestry.
+        height: Option<Height>,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
         /// A channel to send the retrieved block.
@@ -283,6 +285,28 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         self.sender
             .send_lossy(Message::SubscribeByCommitment {
                 round,
+                height: None,
+                commitment,
+                response: tx,
+            })
+            .await;
+        rx
+    }
+
+    /// Subscribe to a block by commitment with a height hint.
+    ///
+    /// The height lets marshal cancel unresolved ancestry fetches once the
+    /// application has processed past the requested ancestor.
+    pub async fn subscribe_by_commitment_at_height(
+        &self,
+        height: Height,
+        commitment: V::Commitment,
+    ) -> oneshot::Receiver<V::Block> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send_lossy(Message::SubscribeByCommitment {
+                round: None,
+                height: Some(height),
                 commitment,
                 response: tx,
             })
@@ -389,6 +413,15 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
 
     async fn fetch_block(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
         let subscription = self.subscribe_by_digest(None, digest).await;
+        subscription.await.ok().map(V::into_inner)
+    }
+
+    async fn fetch_parent(self, block: Self::Block) -> Option<Self::Block> {
+        let parent_height = block.height().previous()?;
+        let commitment = V::application_parent_commitment(&block);
+        let subscription = self
+            .subscribe_by_commitment_at_height(parent_height, commitment)
+            .await;
         subscription.await.ok().map(V::into_inner)
     }
 }

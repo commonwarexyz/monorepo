@@ -98,6 +98,7 @@ impl<D: Digest> Producer for Handler<D> {
 /// A request for backfilling data.
 #[derive(Clone)]
 pub enum Request<D: Digest> {
+    /// Fetch a block by consensus commitment.
     Block(D),
     Finalized { height: Height },
     Notarized { round: Round },
@@ -135,7 +136,7 @@ impl<D: Digest> Write for Request<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.subject().write(buf);
         match self {
-            Self::Block(digest) => digest.write(buf),
+            Self::Block(commitment) => commitment.write(buf),
             Self::Finalized { height } => height.write(buf),
             Self::Notarized { round } => round.write(buf),
         }
@@ -163,7 +164,7 @@ impl<D: Digest> Read for Request<D> {
 impl<D: Digest> EncodeSize for Request<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Block(block) => block.encode_size(),
+            Self::Block(commitment) => commitment.encode_size(),
             Self::Finalized { height } => height.encode_size(),
             Self::Notarized { round } => round.encode_size(),
         }
@@ -206,7 +207,7 @@ impl<D: Digest> Hash for Request<D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.subject().hash(state);
         match self {
-            Self::Block(digest) => digest.hash(state),
+            Self::Block(commitment) => commitment.hash(state),
             Self::Finalized { height } => height.hash(state),
             Self::Notarized { round } => round.hash(state),
         }
@@ -216,7 +217,7 @@ impl<D: Digest> Hash for Request<D> {
 impl<D: Digest> Display for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(digest) => write!(f, "Block({digest:?})"),
+            Self::Block(commitment) => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -226,7 +227,7 @@ impl<D: Digest> Display for Request<D> {
 impl<D: Digest> Debug for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(digest) => write!(f, "Block({digest:?})"),
+            Self::Block(commitment) => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }

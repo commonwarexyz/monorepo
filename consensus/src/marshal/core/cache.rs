@@ -1,13 +1,13 @@
 use crate::{
     marshal::core::Variant,
     simplex::types::{Finalization, Notarization},
-    types::{Epoch, Round, View},
+    types::{Epoch, Height, Round, View},
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
-    archive::{self, prunable, Archive as _, Identifier},
+    archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
     metadata::{self, Metadata},
     translator::TwoCap,
 };
@@ -102,6 +102,9 @@ where
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
+    /// Blocks fetched by digest during ancestry verification, indexed by height.
+    digest_blocks: prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+
     /// A map from epoch to its cache
     caches: BTreeMap<Epoch, Cache<R, V, S>>,
 }
@@ -128,6 +131,9 @@ where
         )
         .await
         .expect("failed to initialize metadata");
+        let digest_blocks =
+            Self::init_height_archive(&context, &cfg, "digest_blocks", block_codec_config.clone())
+                .await;
 
         // We don't eagerly initialize any epoch caches here, they will be
         // initialized on demand, otherwise there could be coordination issues
@@ -137,6 +143,7 @@ where
             cfg,
             block_codec_config,
             metadata,
+            digest_blocks,
             caches: BTreeMap::new(),
         }
     }
@@ -271,6 +278,33 @@ where
         archive
     }
 
+    /// Helper to initialize a height-indexed archive.
+    async fn init_height_archive<T: CodecShared>(
+        ctx: &R,
+        cfg: &Config,
+        name: &str,
+        codec_config: T::Cfg,
+    ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
+        let start = ctx.current();
+        let archive_cfg = prunable::Config {
+            translator: TwoCap,
+            key_partition: format!("{}-height-{name}-key", cfg.partition_prefix),
+            key_page_cache: cfg.key_page_cache.clone(),
+            value_partition: format!("{}-height-{name}-value", cfg.partition_prefix),
+            items_per_section: cfg.prunable_items_per_section,
+            compression: None,
+            codec_config,
+            replay_buffer: cfg.replay_buffer,
+            key_write_buffer: cfg.key_write_buffer,
+            value_write_buffer: cfg.value_write_buffer,
+        };
+        let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
+            .await
+            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
+        info!(elapsed = ?ctx.current().duration_since(start).unwrap_or(Duration::ZERO), "restored {name} archive");
+        archive
+    }
+
     /// Add a verified block to the prunable archive.
     pub(crate) async fn put_verified(
         &mut self,
@@ -286,6 +320,32 @@ where
             .put_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "verified");
+    }
+
+    /// Add a digest-fetched block to the height-indexed archive.
+    pub(crate) async fn put_digest_block(
+        &mut self,
+        height: Height,
+        digest: <V::Block as Digestible>::Digest,
+        block: V::StoredBlock,
+    ) {
+        match self.digest_blocks.has(Identifier::Key(&digest)).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => panic!("failed to check digest block: {e}"),
+        }
+
+        match self
+            .digest_blocks
+            .put_multi_sync(height.get(), digest, block)
+            .await
+        {
+            Ok(()) => debug!(%height, "cached digest block"),
+            Err(archive::Error::AlreadyPrunedTo(_)) => {
+                debug!(%height, "digest block already pruned");
+            }
+            Err(e) => panic!("failed to insert digest block: {e}"),
+        }
     }
 
     /// Add a notarized block to the prunable archive.
@@ -401,6 +461,15 @@ where
         &self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::StoredBlock> {
+        if let Some(block) = self
+            .digest_blocks
+            .get(Identifier::Key(&digest))
+            .await
+            .expect("failed to get digest block")
+        {
+            return Some(block);
+        }
+
         // Check in reverse order
         for cache in self.caches.values().rev() {
             // Check verified blocks
@@ -462,5 +531,13 @@ where
         if let Some(prunable) = self.caches.get_mut(&round.epoch()) {
             prunable.prune(min_view).await;
         }
+    }
+
+    /// Prune digest-fetched blocks below the given height.
+    pub(crate) async fn prune_digest_blocks(&mut self, height: Height) {
+        self.digest_blocks
+            .prune(height.get())
+            .await
+            .expect("failed to prune digest blocks");
     }
 }
