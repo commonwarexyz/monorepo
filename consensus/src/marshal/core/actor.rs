@@ -1042,7 +1042,7 @@ where
                         self.store_finalization(height, digest, block, finalization, application)
                             .await
                     }
-                    BlockFetchContext::Floor { .. } | BlockFetchContext::Finalized { .. } => {
+                    BlockFetchContext::Finalized { .. } => {
                         self.store_finalization(height, digest, block, finalization, application)
                             .await
                     }

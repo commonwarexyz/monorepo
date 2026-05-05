@@ -100,8 +100,6 @@ impl<D: Digest> Producer for Handler<D> {
 pub enum BlockFetchContext {
     /// A block requested only to satisfy ancestry verification.
     Ancestry { height: Height },
-    /// A block requested while establishing a floor.
-    Floor { round: Round },
     /// A block requested because its finalization is known.
     Finalized { round: Round },
     /// A block requested while repairing an internal finalized-chain gap.
@@ -232,9 +230,7 @@ impl<D: Digest> ResolverKey<D> {
             (
                 Self::Request(Request::Notarized { round: mine }),
                 Self::Block {
-                    context:
-                        BlockFetchContext::Floor { round: theirs }
-                        | BlockFetchContext::Finalized { round: theirs },
+                    context: BlockFetchContext::Finalized { round: theirs },
                     ..
                 },
             ) => *theirs > *mine,
@@ -460,28 +456,6 @@ impl<D: Digest> Debug for ResolverKey<D> {
                 commitment,
                 context,
             } => write!(f, "Block({commitment:?}, {context:?})"),
-        }
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for BlockFetchContext {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.int_in_range(0..=3)?;
-        match choice {
-            0 => Ok(Self::Ancestry {
-                height: u.arbitrary()?,
-            }),
-            1 => Ok(Self::Floor {
-                round: u.arbitrary()?,
-            }),
-            2 => Ok(Self::Finalized {
-                round: u.arbitrary()?,
-            }),
-            3 => Ok(Self::Repair {
-                height: u.arbitrary()?,
-            }),
-            _ => unreachable!(),
         }
     }
 }
@@ -723,17 +697,10 @@ mod tests {
                 round: Round::new(Epoch::new(1), View::new(10)),
             },
         );
-        let drop_floor = ResolverKey::block_request(
-            digest,
-            BlockFetchContext::Floor {
-                round: Round::new(Epoch::new(1), View::new(9)),
-            },
-        );
 
         let predicate = round_floor.predicate();
         assert!(predicate(&keep_finalized));
         assert!(!predicate(&drop_finalized));
-        assert!(!predicate(&drop_floor));
     }
 
     #[test]
