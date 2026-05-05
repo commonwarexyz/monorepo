@@ -183,6 +183,7 @@ stability_scope!(BETA {
         /// Add a key-value attribute to this context's identity.
         ///
         /// This consumes the handle and does not create a supervision-tree edge.
+        /// If the key already exists, its value is replaced.
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self
         where
