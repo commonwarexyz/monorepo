@@ -544,7 +544,7 @@ impl Plan {
                             }
                         }
                         PrunableOp::PruneBelow(threshold) => {
-                            p.prune_below(u64::from(*threshold));
+                            p.prune(u64::from(*threshold));
                         }
                     }
                 }

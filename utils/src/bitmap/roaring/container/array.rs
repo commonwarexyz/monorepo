@@ -34,6 +34,18 @@ impl Array {
         Self { values: Vec::new() }
     }
 
+    /// Creates an array from values that are expected to already be valid.
+    ///
+    /// In debug builds, this asserts the same invariants enforced by decoding:
+    /// values must be sorted, unique, and `len <= MAX_CARDINALITY`.
+    pub(super) fn from(values: Vec<u16>) -> Self {
+        debug_assert!(
+            validate_values(&values).is_ok(),
+            "Array::from requires sorted unique values with len <= MAX_CARDINALITY"
+        );
+        Self { values }
+    }
+
     /// Returns the number of values in the container.
     pub const fn len(&self) -> usize {
         self.values.len()
@@ -47,6 +59,34 @@ impl Array {
     /// Checks if the container contains the given value.
     pub fn contains(&self, value: u16) -> bool {
         self.values.binary_search(&value).is_ok()
+    }
+
+    /// Returns how many existing values fall within `range`.
+    pub fn count_in_range(&self, range: &Range<u16>) -> usize {
+        if range.is_empty() || self.values.is_empty() {
+            return 0;
+        }
+
+        let start = range.start;
+        let end = range.end;
+        let start_pos = self.values.partition_point(|&x| x < start);
+        let end_pos = self.values.partition_point(|&x| x < end);
+        end_pos.saturating_sub(start_pos)
+    }
+
+    /// Returns the number of maximal consecutive runs in the stored values.
+    pub(super) fn run_count(&self) -> usize {
+        if self.values.is_empty() {
+            return 0;
+        }
+
+        let mut runs = 1usize;
+        for pair in self.values.windows(2) {
+            if (pair[1] as u32) != (pair[0] as u32) + 1 {
+                runs += 1;
+            }
+        }
+        runs
     }
 
     /// Inserts a value into the container.
@@ -76,28 +116,30 @@ impl Array {
     /// After insertion, convert to `Bitmap` if the cardinality exceeds
     /// [`MAX_CARDINALITY`].
     pub fn insert_range(&mut self, range: Range<u16>) -> usize {
-        let Range { start, end } = range;
-        if start >= end {
+        if range.is_empty() {
             return 0;
         }
 
-        let range_len = (end - start) as usize;
+        let range_len = range.len();
+        let start = range.start;
+        let end = range.end;
 
         // Fast path for empty array
-        if self.values.is_empty() {
-            self.values = (start..end).collect();
+        let Some(&last) = self.values.last() else {
+            self.values = range.collect();
             return range_len;
-        }
+        };
 
         // Fast path: range is entirely after all existing values
-        if start > *self.values.last().unwrap() {
-            self.values.extend(start..end);
+        if start > last {
+            self.values.extend(range);
             return range_len;
         }
 
         // Fast path: range is entirely before all existing values
-        if end <= *self.values.first().unwrap() {
-            let mut new_vec: Vec<u16> = (start..end).collect();
+        if end <= self.values[0] {
+            let mut new_vec = Vec::with_capacity(range_len + self.values.len());
+            new_vec.extend(range);
             new_vec.extend_from_slice(&self.values);
             self.values = new_vec;
             return range_len;
@@ -397,14 +439,47 @@ impl Array {
         (Self { values: result }, count)
     }
 
-    /// Returns the total memory footprint of this `Array` in bytes (stack + heap).
-    ///
-    /// Counts the inline `Vec` header plus the heap-allocated value buffer at full
-    /// `capacity`, which may exceed `len * 2` due to `Vec`'s growth strategy. Available
-    /// only for tests and the `analysis` feature; not compiled into production builds.
-    #[cfg(any(test, feature = "analysis"))]
-    pub const fn byte_size(&self) -> usize {
-        core::mem::size_of::<Self>() + self.values.capacity() * core::mem::size_of::<u16>()
+    /// Returns `true` if every value in this array is present in `other`.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        if self.values.len() > other.values.len() {
+            return false;
+        }
+
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < self.values.len() && j < other.values.len() {
+            let a = self.values[i];
+            let b = other.values[j];
+            if a == b {
+                i += 1;
+                j += 1;
+            } else if a > b {
+                j += 1;
+            } else {
+                return false;
+            }
+        }
+
+        i == self.values.len()
+    }
+
+    /// Returns `true` if this array shares at least one value with `other`.
+    pub fn intersects(&self, other: &Self) -> bool {
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < self.values.len() && j < other.values.len() {
+            let a = self.values[i];
+            let b = other.values[j];
+            if a == b {
+                return true;
+            }
+            if a < b {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        false
     }
 }
 
@@ -427,7 +502,7 @@ impl Read for Array {
         let values = Vec::<u16>::read_cfg(buf, &(RangeCfg::new(..=MAX_CARDINALITY), ()))?;
 
         validate_values(&values)?;
-        Ok(Self { values })
+        Ok(Self::from(values))
     }
 }
 
@@ -436,7 +511,7 @@ impl TryFrom<Vec<u16>> for Array {
 
     fn try_from(values: Vec<u16>) -> Result<Self, Self::Error> {
         validate_values(&values)?;
-        Ok(Self { values })
+        Ok(Self::from(values))
     }
 }
 
@@ -599,35 +674,56 @@ mod tests {
     }
 
     #[test]
-    fn test_byte_size_empty() {
-        let a = Array::new();
-        // No heap when empty.
-        assert_eq!(a.byte_size(), core::mem::size_of::<Array>());
+    fn test_is_subset() {
+        let a = Array::try_from(vec![1, 3, 5]).unwrap();
+        let b = Array::try_from(vec![0, 1, 2, 3, 4, 5, 6]).unwrap();
+        let c = Array::try_from(vec![1, 3, 6]).unwrap();
+
+        assert!(a.is_subset(&b));
+        assert!(!a.is_subset(&c));
     }
 
     #[test]
-    fn test_byte_size_with_values() {
+    fn test_intersects() {
+        let a = Array::try_from(vec![1, 3, 5]).unwrap();
+        let b = Array::try_from(vec![2, 4, 6]).unwrap();
+        let c = Array::try_from(vec![0, 3, 8]).unwrap();
+
+        assert!(!a.intersects(&b));
+        assert!(a.intersects(&c));
+    }
+
+    #[test]
+    fn test_encode_size_empty() {
+        let a = Array::new();
+        assert_eq!(a.encode_size(), 0usize.encode_size());
+    }
+
+    #[test]
+    fn test_encode_size_with_values() {
         let mut a = Array::new();
         for i in 0..100u16 {
             a.insert(i);
         }
-        // Lower bound: 100 u16s = 200 bytes plus the Vec header.
-        assert!(a.byte_size() >= core::mem::size_of::<Array>() + 200);
-        // Upper bound: Vec capacity grows by doubling, so capacity is at most ~2x len.
-        assert!(a.byte_size() <= core::mem::size_of::<Array>() + 512);
+        assert_eq!(
+            a.encode_size(),
+            100usize.encode_size() + 100 * core::mem::size_of::<u16>()
+        );
     }
 
     #[test]
-    fn test_byte_size_grows_with_inserts() {
+    fn test_encode_size_grows_with_inserts() {
         let mut a = Array::new();
-        let s0 = a.byte_size();
+        let s0 = a.encode_size();
         for i in 0..1000u16 {
             a.insert(i);
         }
-        let s1 = a.byte_size();
+        let s1 = a.encode_size();
         assert!(s1 > s0);
-        // 1000 u16s = 2000 bytes minimum.
-        assert!(s1 >= core::mem::size_of::<Array>() + 2000);
+        assert_eq!(
+            s1,
+            1000usize.encode_size() + 1000 * core::mem::size_of::<u16>()
+        );
     }
 
     #[test]

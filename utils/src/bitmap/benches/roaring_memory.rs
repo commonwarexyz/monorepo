@@ -1,4 +1,4 @@
-//! Memory profile of `Bitmap` workloads, side by side with `roaring-rs`'s
+//! Serialization-size profile of `Bitmap` workloads, side by side with `roaring-rs`'s
 //! `RoaringTreemap`.
 //!
 //! Run with:
@@ -11,15 +11,8 @@
 //! workloads (a near-saturated range at varying gap counts, plus a few sparse and
 //! multi-shelf cases for context) and prints a markdown table comparing:
 //!
-//! - `ours_bytes` — exact heap+stack footprint of our [`Bitmap`] via
-//!   [`Bitmap::byte_size`] (gated by the `analysis` feature). The BTreeMap node
-//!   overhead is approximate.
 //! - `ours_wire` — bytes our codec emits via `EncodeSize::encode_size`.
 //! - `theirs_wire` — bytes `roaring-rs` emits via `RoaringTreemap::serialized_size`.
-//!
-//! Heap-footprint comparison against `roaring-rs` is not possible without reaching for an
-//! external heap profiler (their internals are opaque). Wire size is the only directly
-//! comparable axis; it correlates with heap size strongly enough to be informative.
 
 use commonware_codec::EncodeSize;
 use commonware_utils::bitmap::roaring::Bitmap;
@@ -87,17 +80,15 @@ fn measure(name: &str, ours: &Bitmap, theirs: &RoaringTreemap) {
     );
     let (a, b, r) = ours.container_variant_counts();
     let containers = ours.container_count();
-    let ours_bytes = ours.byte_size();
     let ours_wire = ours.encode_size();
     let theirs_wire = theirs.serialized_size();
     let abr = format!("A={a} B={b} R={r}");
     println!(
-        "| {:38} | {:>11} | {:>10} | {:>14} | {:>10} | {:>10} | {:>11} |",
+        "| {:38} | {:>11} | {:>10} | {:>14} | {:>10} | {:>11} |",
         name,
         ours.len(),
         containers,
         abr,
-        ours_bytes,
         ours_wire,
         theirs_wire
     );
@@ -105,18 +96,12 @@ fn measure(name: &str, ours: &Bitmap, theirs: &RoaringTreemap) {
 
 fn print_header() {
     println!(
-        "| {:38} | {:>11} | {:>10} | {:>14} | {:>10} | {:>10} | {:>11} |",
-        "workload",
-        "cardinality",
-        "containers",
-        "A/B/R (ours)",
-        "ours_bytes",
-        "ours_wire",
-        "theirs_wire"
+        "| {:38} | {:>11} | {:>10} | {:>14} | {:>10} | {:>11} |",
+        "workload", "cardinality", "containers", "A/B/R (ours)", "ours_wire", "theirs_wire"
     );
     println!(
-        "|{:-<40}|{:->13}|{:->12}|{:->16}|{:->12}|{:->12}|{:->13}|",
-        "", ":", ":", "", ":", ":", ":"
+        "|{:-<40}|{:->13}|{:->12}|{:->16}|{:->12}|{:->13}|",
+        "", ":", ":", "", ":", ":"
     );
 }
 
@@ -159,14 +144,8 @@ fn main() {
     println!();
     println!("**Notes**");
     println!();
-    println!("- `ours_bytes` is the analytical heap+stack estimate via `byte_size()`. The");
-    println!("  BTreeMap-overhead constants in the source are approximate (no exposed");
-    println!("  layout in stdlib); see the `byte_size()` doc comments.");
     println!("- `ours_wire` and `theirs_wire` use *different* serialization formats and are");
     println!("  not byte-comparable, but both reflect the underlying density and so are");
     println!("  proxies for relative encoded size.");
-    println!("- Heap footprint of `roaring-rs` is opaque from outside the crate; comparing");
-    println!("  `ours_bytes` to a comparable number for `roaring-rs` would require an");
-    println!("  external heap profiler (e.g. `dhat`, `valgrind --tool=massif`).");
     println!("- `A/B/R` is the count of Array/Bitmap/Run container variants in the result.");
 }

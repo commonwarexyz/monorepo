@@ -18,6 +18,10 @@ hash = "ff9e014856a66d9261cc56e6ce19a00dd5d3fe4233dca825563246d70d8bf650"
 n_cases = 65536
 hash = "f6d15e3ed08ac365085cae1c4cd278046674888e2b2f6026fd908530d2069e5e"
 
+["commonware_utils::bitmap::roaring::container::tests::conformance::ContainerTransitionsConformance"]
+n_cases = 1024
+hash = "bada4ef8a7eb22bba8e2f95c169aae79e64dae1e09fce3eae9dc5bf297d5b030"
+
 ["commonware_utils::bitmap::roaring::prunable::tests::conformance::CodecConformance<super::Prunable>"]
 n_cases = 65536
 hash = "61dac7820a46cb70b46c9f44ce735c111c73e5faafc068d0cf03bad8773ed631"

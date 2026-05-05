@@ -8,7 +8,7 @@
 //! with all ranges disjoint and non-adjacent — adjacent and overlapping runs are
 //! automatically merged during insertion. Lookups use binary search.
 
-use super::bitmap;
+use super::{array, bitmap};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -39,6 +39,32 @@ pub struct Run {
 impl Default for Run {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<&array::Array> for Run {
+    fn from(array: &array::Array) -> Self {
+        let values = array.as_slice();
+        if values.is_empty() {
+            return Self::new();
+        }
+
+        let mut runs: Vec<(u16, u16)> = Vec::new();
+        let mut run_start = values[0];
+        let mut run_end = values[0];
+
+        for &value in &values[1..] {
+            if (value as u32) == (run_end as u32) + 1 {
+                run_end = value;
+            } else {
+                runs.push((run_start, run_end));
+                run_start = value;
+                run_end = value;
+            }
+        }
+
+        runs.push((run_start, run_end));
+        Self { runs }
     }
 }
 
@@ -138,6 +164,49 @@ impl Run {
         value <= end
     }
 
+    /// Returns `true` if every value in this run container is present in `other`.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < self.runs.len() {
+            let (a_start, a_end) = self.runs[i];
+
+            while j < other.runs.len() && other.runs[j].1 < a_start {
+                j += 1;
+            }
+            if j == other.runs.len() {
+                return false;
+            }
+
+            let (b_start, b_end) = other.runs[j];
+            if b_start > a_start || b_end < a_end {
+                return false;
+            }
+            i += 1;
+        }
+
+        true
+    }
+
+    /// Returns `true` if this run container shares at least one value with `other`.
+    pub fn intersects(&self, other: &Self) -> bool {
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < self.runs.len() && j < other.runs.len() {
+            let (a_start, a_end) = self.runs[i];
+            let (b_start, b_end) = other.runs[j];
+
+            if a_end < b_start {
+                i += 1;
+            } else if b_end < a_start {
+                j += 1;
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Inserts a value into the container.
     ///
     /// Automatically merges with adjacent runs.
@@ -196,13 +265,13 @@ impl Run {
     ///
     /// Returns the number of values newly inserted.
     pub fn insert_range(&mut self, range: Range<u16>) -> u32 {
-        let Range { start, end } = range;
-        if start >= end {
+        if range.is_empty() {
             return 0;
         }
 
-        let end_inclusive = end - 1;
-        let range_size = (end - start) as u32;
+        let start = range.start;
+        let end_inclusive = range.end - 1;
+        let range_size = range.len() as u32;
 
         // First overlapping/adjacent run: smallest index `i` where `runs[i].end + 1 >= start`,
         // i.e. the run is not entirely before [start, end_inclusive].
@@ -270,25 +339,7 @@ impl Run {
     pub fn max(&self) -> Option<u16> {
         self.runs.last().map(|&(_, end)| end)
     }
-
-    /// Returns the approximate total memory footprint of this `Run` in bytes.
-    ///
-    /// Counts the inline `Vec` header plus the heap-allocated buffer at full `capacity`.
-    /// Each entry costs [`VEC_BYTES_PER_RUN`] = 4 bytes (a `(u16, u16)` pair); `Vec` may
-    /// over-allocate by up to ~2x due to its growth strategy. Available only for tests
-    /// and the `analysis` feature; not compiled into production builds.
-    #[cfg(any(test, feature = "analysis"))]
-    pub const fn byte_size(&self) -> usize {
-        core::mem::size_of::<Self>() + self.runs.capacity() * VEC_BYTES_PER_RUN
-    }
 }
-
-/// Bytes per run in the heap-allocated `Vec<(u16, u16)>` buffer. Each run is two `u16`s.
-/// This is exact (unlike a `BTreeMap`-based store, which has opaque per-entry overhead),
-/// but the actual heap usage is `capacity * VEC_BYTES_PER_RUN`, where `Vec` may
-/// over-allocate.
-#[cfg(any(test, feature = "analysis"))]
-const VEC_BYTES_PER_RUN: usize = core::mem::size_of::<(u16, u16)>();
 
 impl Write for Run {
     fn write(&self, buf: &mut impl BufMut) {
@@ -311,25 +362,34 @@ impl Read for Run {
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         // Read as Vec of (start, end) pairs with bounded count to prevent OOM.
         let runs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..=MAX_RUNS), ((), ())))?;
+        Self::from_runs_checked(runs)
+    }
+}
 
-        let mut prev_end: Option<u16> = None;
-        for &(start, end) in &runs {
-            if start > end {
-                return Err(CodecError::Invalid("Run", "start must be <= end"));
-            }
-            if let Some(p) = prev_end {
-                if start <= p.saturating_add(1) {
-                    return Err(CodecError::Invalid(
-                        "Run",
-                        "runs must be sorted, non-overlapping, and non-adjacent",
-                    ));
-                }
-            }
-            prev_end = Some(end);
-        }
-
+impl Run {
+    pub(crate) fn from_runs_checked(runs: Vec<(u16, u16)>) -> Result<Self, CodecError> {
+        validate_runs(&runs)?;
         Ok(Self { runs })
     }
+}
+
+fn validate_runs(runs: &[(u16, u16)]) -> Result<(), CodecError> {
+    let mut prev_end: Option<u16> = None;
+    for &(start, end) in runs {
+        if start > end {
+            return Err(CodecError::Invalid("Run", "start must be <= end"));
+        }
+        if let Some(p) = prev_end {
+            if start <= p.saturating_add(1) {
+                return Err(CodecError::Invalid(
+                    "Run",
+                    "runs must be sorted, non-overlapping, and non-adjacent",
+                ));
+            }
+        }
+        prev_end = Some(end);
+    }
+    Ok(())
 }
 
 /// Iterator over values in a run container.
@@ -640,6 +700,49 @@ mod tests {
     }
 
     #[test]
+    fn test_is_subset() {
+        let mut a = Run::new();
+        a.insert_range(10..20);
+        a.insert_range(30..40);
+
+        let mut b = Run::new();
+        b.insert_range(0..25);
+        b.insert_range(30..50);
+
+        let mut c = Run::new();
+        c.insert_range(10..20);
+        c.insert_range(31..40);
+
+        let mut d = Run::new();
+        d.insert(10);
+        d.insert(12);
+        d.insert(14);
+
+        let mut e = Run::new();
+        e.insert_range(10..15);
+
+        assert!(a.is_subset(&b));
+        assert!(!a.is_subset(&c));
+        assert!(d.is_subset(&e));
+    }
+
+    #[test]
+    fn test_intersects() {
+        let mut a = Run::new();
+        a.insert_range(10..20);
+        a.insert_range(30..40);
+
+        let mut b = Run::new();
+        b.insert_range(20..30);
+
+        let mut c = Run::new();
+        c.insert_range(35..45);
+
+        assert!(!a.intersects(&b));
+        assert!(a.intersects(&c));
+    }
+
+    #[test]
     fn test_iter_range_empty_size_hint() {
         let mut container = Run::new();
         container.insert_range(1..4);
@@ -677,40 +780,50 @@ mod tests {
     }
 
     #[test]
-    fn test_byte_size_empty() {
-        let r = Run::new();
-        assert_eq!(r.byte_size(), core::mem::size_of::<Run>());
+    fn test_from_array() {
+        let mut array = array::Array::new();
+        for value in [1, 2, 3, 10, 12, 13, 14, u16::MAX] {
+            assert!(array.insert(value));
+        }
+
+        let run = Run::from(&array);
+        assert_eq!(
+            run.runs().collect::<Vec<_>>(),
+            vec![(1, 3), (10, 10), (12, 14), (u16::MAX, u16::MAX)]
+        );
+        assert_eq!(run.len(), 8);
     }
 
     #[test]
-    fn test_byte_size_grows_per_run() {
+    fn test_encode_size_empty() {
+        let r = Run::new();
+        assert_eq!(r.encode_size(), 0usize.encode_size());
+    }
+
+    #[test]
+    fn test_encode_size_grows_per_run() {
         let mut r = Run::new();
-        let s0 = r.byte_size();
+        let s0 = r.encode_size();
         // Insert 5 non-adjacent runs (gaps prevent merging).
         for i in 0..5 {
             let start = i * 100;
             r.insert_range(start..start + 50);
         }
-        let s5 = r.byte_size();
-        // With Vec storage, capacity may overshoot len due to doubling growth.
-        // 5 entries × 4 bytes = 20 bytes minimum; capacity of 8 (next power of 2) × 4 = 32 max.
-        let entry_bytes = 5 * super::VEC_BYTES_PER_RUN;
-        assert!(s5 - s0 >= entry_bytes, "{} < {}", s5 - s0, entry_bytes);
-        assert!(
-            s5 - s0 <= 2 * entry_bytes,
-            "{} > {}",
-            s5 - s0,
-            2 * entry_bytes
+        let s5 = r.encode_size();
+        assert!(s5 > s0);
+        assert_eq!(
+            s5,
+            5usize.encode_size() + 5 * core::mem::size_of::<(u16, u16)>()
         );
     }
 
     #[test]
-    fn test_byte_size_full_container() {
-        // A fully-saturated Run is just one merged run [0, 65535] with capacity 1.
+    fn test_encode_size_full_container() {
+        // A fully-saturated Run is one merged run [0, 65535].
         let r = Run::full();
         assert_eq!(
-            r.byte_size(),
-            core::mem::size_of::<Run>() + super::VEC_BYTES_PER_RUN
+            r.encode_size(),
+            1usize.encode_size() + core::mem::size_of::<(u16, u16)>()
         );
     }
 

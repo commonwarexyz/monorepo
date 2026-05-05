@@ -52,7 +52,7 @@
 //! | Run    | Data with few maximal runs (any density) | Sorted `Vec<(u16, u16)>` |
 //!
 //! Containers automatically convert between variants on each `insert` /
-//! `insert_range` to maintain a compact representation. The Bitmap->Run
+//! `insert_range` to maintain a compact representation. The Bitmap→Run
 //! transition uses a hysteresis band on the bitmap's run count, so a container
 //! that hovers near break-even doesn't thrash between variants. See the container module
 //! for the full transition table and threshold values.
@@ -309,33 +309,7 @@ impl Bitmap {
         }
         counts
     }
-
-    /// Returns the approximate total memory footprint of this `Bitmap` in bytes
-    /// (stack + heap), summed across the outer `BTreeMap` and every container.
-    ///
-    /// Each container entry adds: an 8-byte `u64` key, the `Container` value (whose own
-    /// stack is inline in the BTreeMap node), and an estimated
-    /// [`BTREE_BYTES_PER_CONTAINER`] of B-tree node bookkeeping. The component coming
-    /// from `BTreeMap`'s opaque internal layout is approximate. Available only for
-    /// tests and the `analysis` feature; not compiled into production builds.
-    #[cfg(any(test, feature = "analysis"))]
-    pub fn byte_size(&self) -> usize {
-        let mut total = core::mem::size_of::<Self>();
-        for container in self.containers.values() {
-            // container.byte_size() includes size_of::<Container>(), which IS the value
-            // stored inline in the BTreeMap leaf — so no double-counting.
-            total +=
-                core::mem::size_of::<u64>() + container.byte_size() + BTREE_BYTES_PER_CONTAINER;
-        }
-        total
-    }
 }
-
-/// Approximate per-entry overhead for the outer `BTreeMap<u64, Container>`. Captures
-/// amortized B-tree leaf-node bookkeeping (parent pointer, length, alignment padding)
-/// across an assumed half-full leaf.
-#[cfg(any(test, feature = "analysis"))]
-const BTREE_BYTES_PER_CONTAINER: usize = 8;
 
 impl Extend<u64> for Bitmap {
     fn extend<I: IntoIterator<Item = u64>>(&mut self, iter: I) {
@@ -399,7 +373,6 @@ impl arbitrary::Arbitrary<'_> for Bitmap {
             if key > MAX_KEY {
                 break;
             }
-
             // `Container::arbitrary` can produce an empty container (zero-length
             // Array/Run, all-zero Bitmap). Bitmap rejects empty containers via
             // `try_from` and the decoder, so skip them here to keep generated
@@ -419,6 +392,7 @@ impl arbitrary::Arbitrary<'_> for Bitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode;
 
     #[test]
     fn test_new_and_empty() {
@@ -693,7 +667,7 @@ mod tests {
             }
         }
 
-        // Dense shelves: 5000 alternating values. Above MAX_CARDINALITY (Array->Bitmap)
+        // Dense shelves: 5000 alternating values. Above MAX_CARDINALITY (Array→Bitmap)
         // with run count above the Run-conversion threshold so they stay Bitmap.
         for shelf in 200..400u64 {
             let base = shelf * 65_536;
@@ -702,8 +676,8 @@ mod tests {
             }
         }
 
-        // Run shelves: one contiguous range. After Array->Bitmap conversion at
-        // MAX_CARDINALITY, the single-run state triggers Bitmap->Run.
+        // Run shelves: one contiguous range. After Array→Bitmap conversion at
+        // MAX_CARDINALITY, the single-run state triggers Bitmap→Run.
         for shelf in 400..600u64 {
             let base = shelf * 65_536;
             bitmap.insert_range(base..base + 50_000);
@@ -863,39 +837,37 @@ mod tests {
     }
 
     #[test]
-    fn test_byte_size_empty() {
+    fn test_encode_size_empty() {
         let bm = Bitmap::new();
-        // No containers, no heap.
-        assert_eq!(bm.byte_size(), core::mem::size_of::<Bitmap>());
+        assert_eq!(bm.encode_size(), bm.encode().len());
     }
 
     #[test]
-    fn test_byte_size_grows_with_containers() {
+    fn test_encode_size_grows_with_containers() {
         let mut bm = Bitmap::new();
-        let s0 = bm.byte_size();
+        let s0 = bm.encode_size();
         // Three values in three different high-48-bit shelves => three containers.
         bm.insert(0);
         bm.insert(65_536);
         bm.insert(131_072);
-        let s3 = bm.byte_size();
+        let s3 = bm.encode_size();
         assert_eq!(bm.container_count(), 3);
         assert!(s3 > s0);
-        // Each entry adds at least size_of::<u64>() + size_of::<Container>().
-        let entry_floor = core::mem::size_of::<u64>() + core::mem::size_of::<Container>();
-        assert!(s3 - s0 >= 3 * entry_floor);
+        assert_eq!(s3, bm.encode().len());
     }
 
     #[test]
-    fn test_byte_size_dense_uses_bitmap_container() {
-        // Force a single container past the Array->Bitmap threshold AND keep it there by
-        // using alternating values that produce many runs, defeating the Bitmap->Run
+    fn test_encode_size_dense_uses_bitmap_container() {
+        // Force a single container past the Array→Bitmap threshold AND keep it there by
+        // using alternating values that produce many runs, defeating the Bitmap→Run
         // auto-conversion (which fires only when run_count is below the threshold).
         let mut bm = Bitmap::new();
         for i in 0u64..5000 {
             bm.insert(i * 2);
         }
         // Bitmap container alone is ~8 KB.
-        assert!(bm.byte_size() >= 8192);
+        assert!(bm.encode_size() >= 8192);
+        assert_eq!(bm.encode_size(), bm.encode().len());
     }
 
     #[cfg(feature = "arbitrary")]

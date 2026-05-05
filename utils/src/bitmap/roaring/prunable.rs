@@ -7,10 +7,10 @@
 //! # Granularity
 //!
 //! Pruning is **container-aligned**: thresholds are rounded down to the nearest multiple of
-//! 65536 (the size of a roaring container). [`Prunable::prune_below`] returns the threshold
+//! 65536 (the size of a roaring container). [`Prunable::prune`] returns the threshold
 //! actually applied, which the caller can inspect via [`Prunable::pruned_below`].
 //!
-//! For example, `prune_below(70_000)` will:
+//! For example, `prune(70_000)` will:
 //!
 //! - Drop the container at key `0` (covering values `0..65536`).
 //! - Keep the container at key `1` (covering values `65536..131072`) entirely, including
@@ -101,6 +101,9 @@ impl Prunable {
     /// Panics if `start < pruned_below()`.
     pub fn insert_range(&mut self, range: Range<u64>) -> u64 {
         let Range { start, end } = range;
+        if start >= end {
+            return 0;
+        }
         assert!(
             start >= self.pruned_below,
             "start pruned: {start} < pruned_below {}",
@@ -130,7 +133,7 @@ impl Prunable {
     /// new value of [`Self::pruned_below`].
     ///
     /// No-op if the rounded threshold is `<= pruned_below()`.
-    pub fn prune_below(&mut self, threshold: u64) -> u64 {
+    pub fn prune(&mut self, threshold: u64) -> u64 {
         let aligned = threshold & !CONTAINER_MASK;
         if aligned <= self.pruned_below {
             return self.pruned_below;
@@ -163,6 +166,9 @@ impl Prunable {
     /// Panics if `start < pruned_below()`.
     pub fn iter_range(&self, range: Range<u64>) -> impl Iterator<Item = u64> + '_ {
         let Range { start, end } = range;
+        if start >= end {
+            return self.bitmap.iter_range(0..0);
+        }
         assert!(
             start >= self.pruned_below,
             "start pruned: {start} < pruned_below {}",
@@ -174,21 +180,6 @@ impl Prunable {
     /// Clears all values from the bitmap. Does not reset [`Self::pruned_below`].
     pub fn clear(&mut self) {
         self.bitmap.clear();
-    }
-
-    /// Returns the approximate total memory footprint of this `Prunable` in bytes.
-    ///
-    /// Combines `size_of::<Self>()` (which already includes the inline
-    /// [`Bitmap`] stack and the `pruned_below` field) with the inner bitmap's
-    /// heap allocations. Inherits the BTreeMap-overhead approximation from
-    /// [`Bitmap::byte_size`]. Available only for tests and the `analysis`
-    /// feature; not compiled into production builds.
-    #[cfg(any(test, feature = "analysis"))]
-    pub fn byte_size(&self) -> usize {
-        // size_of::<Self>() already includes the inline Bitmap header. Subtract
-        // size_of::<Bitmap>() before adding bitmap.byte_size() to avoid
-        // double-counting.
-        core::mem::size_of::<Self>() + self.bitmap.byte_size() - core::mem::size_of::<Bitmap>()
     }
 }
 
@@ -264,10 +255,10 @@ impl arbitrary::Arbitrary<'_> for Prunable {
         };
 
         // Pick an arbitrary threshold within the bitmap's value range and apply it.
-        // prune_below itself enforces the invariant.
+        // `prune` itself enforces the invariant.
         let max = p.bitmap.max().unwrap_or(0);
         let threshold = u.int_in_range(0..=max)?;
-        p.prune_below(threshold);
+        p.prune(threshold);
         Ok(p)
     }
 }
@@ -298,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_below_drops_containers() {
+    fn test_prune_drops_containers() {
         let mut p = Prunable::new();
         p.insert(100); // container 0
         p.insert(70_000); // container 1
@@ -307,7 +298,7 @@ mod tests {
         assert_eq!(p.len(), 4);
 
         // Prune at the start of container 2 (boundary = 2 * 65536 = 131_072).
-        let returned = p.prune_below(131_072);
+        let returned = p.prune(131_072);
         assert_eq!(returned, 131_072);
         assert_eq!(p.pruned_below(), 131_072);
         assert_eq!(p.len(), 2);
@@ -316,14 +307,14 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_below_rounds_down() {
+    fn test_prune_rounds_down() {
         let mut p = Prunable::new();
         p.insert(100); // container 0
         p.insert(70_000); // container 1
 
         // Threshold lies inside container 1 (boundary = 65_536).
         // Container 0 dropped; container 1 (with 70_000) preserved.
-        let returned = p.prune_below(70_000);
+        let returned = p.prune(70_000);
         assert_eq!(returned, 65_536);
         assert_eq!(p.pruned_below(), 65_536);
         assert_eq!(p.len(), 1);
@@ -331,13 +322,13 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_below_partial_container_lingers() {
+    fn test_prune_partial_container_lingers() {
         let mut p = Prunable::new();
         p.insert(65_500); // container 0, near top
         p.insert(70_000); // container 1, near bottom
 
-        // prune_below(70_000) rounds down to 65_536, drops container 0 only.
-        p.prune_below(70_000);
+        // prune(70_000) rounds down to 65_536, drops container 0 only.
+        p.prune(70_000);
         // 65_500 (was in dropped container 0) is gone.
         // We can't call contains(65_500) directly (it'd panic), so check the inner bitmap.
         assert!(!p.bitmap.contains(65_500));
@@ -346,31 +337,31 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_below_idempotent_below_watermark() {
+    fn test_prune_idempotent_below_watermark() {
         let mut p = Prunable::new();
         p.insert(70_000);
-        p.prune_below(65_536);
+        p.prune(65_536);
         assert_eq!(p.pruned_below(), 65_536);
         // Calling with a smaller threshold returns the existing watermark.
-        let returned = p.prune_below(0);
+        let returned = p.prune(0);
         assert_eq!(returned, 65_536);
         assert_eq!(p.pruned_below(), 65_536);
     }
 
     #[test]
-    fn test_prune_below_then_insert_above() {
+    fn test_prune_then_insert_above() {
         let mut p = Prunable::new();
-        p.prune_below(131_072);
+        p.prune(131_072);
         p.insert(200_000);
         assert!(p.contains(200_000));
         assert_eq!(p.len(), 1);
     }
 
     #[test]
-    fn test_prune_below_zero_no_op() {
+    fn test_prune_zero_no_op() {
         let mut p = Prunable::new();
         p.insert(100);
-        let returned = p.prune_below(0);
+        let returned = p.prune(0);
         assert_eq!(returned, 0);
         assert_eq!(p.pruned_below(), 0);
         assert_eq!(p.len(), 1);
@@ -380,7 +371,7 @@ mod tests {
     #[should_panic(expected = "value pruned")]
     fn test_panic_on_insert_below_pruned() {
         let mut p = Prunable::new();
-        p.prune_below(131_072);
+        p.prune(131_072);
         p.insert(50);
     }
 
@@ -388,7 +379,7 @@ mod tests {
     #[should_panic(expected = "value pruned")]
     fn test_panic_on_contains_below_pruned() {
         let mut p = Prunable::new();
-        p.prune_below(131_072);
+        p.prune(131_072);
         let _ = p.contains(50);
     }
 
@@ -396,7 +387,7 @@ mod tests {
     #[should_panic(expected = "start pruned")]
     fn test_panic_on_insert_range_below_pruned() {
         let mut p = Prunable::new();
-        p.prune_below(131_072);
+        p.prune(131_072);
         p.insert_range(50..100);
     }
 
@@ -404,8 +395,33 @@ mod tests {
     #[should_panic(expected = "start pruned")]
     fn test_panic_on_iter_range_below_pruned() {
         let mut p = Prunable::new();
-        p.prune_below(131_072);
+        p.prune(131_072);
         let _ = p.iter_range(50..200_000);
+    }
+
+    #[test]
+    fn test_empty_insert_ranges_below_pruned_are_no_ops() {
+        let mut p = Prunable::new();
+        p.insert(200_000);
+        p.prune(131_072);
+
+        assert_eq!(p.insert_range(50..50), 0);
+        let start = 50u64;
+        let end = 10u64;
+        assert_eq!(p.insert_range(start..end), 0);
+        assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_iter_ranges_below_pruned_are_empty() {
+        let mut p = Prunable::new();
+        p.insert(200_000);
+        p.prune(131_072);
+
+        assert!(p.iter_range(50..50).next().is_none());
+        let start = 50u64;
+        let end = 10u64;
+        assert!(p.iter_range(start..end).next().is_none());
     }
 
     #[test]
@@ -414,7 +430,7 @@ mod tests {
         for v in [200_000u64, 100, 70_000, 5] {
             p.insert(v);
         }
-        p.prune_below(131_072);
+        p.prune(131_072);
         let collected: Vec<u64> = p.iter().collect();
         assert_eq!(collected, vec![200_000]);
     }
@@ -423,7 +439,7 @@ mod tests {
     fn test_clear_preserves_pruned_below() {
         let mut p = Prunable::new();
         p.insert(200_000);
-        p.prune_below(131_072);
+        p.prune(131_072);
         p.clear();
         assert!(p.is_empty());
         assert_eq!(p.pruned_below(), 131_072);
@@ -449,7 +465,7 @@ mod tests {
     fn test_extend_after_pruning() {
         let mut p = Prunable::new();
         p.insert(200_000);
-        p.prune_below(131_072);
+        p.prune(131_072);
 
         // All values >= pruned_below, so extend works.
         p.extend([200_001u64, 300_000]);
@@ -461,7 +477,7 @@ mod tests {
     #[should_panic(expected = "value pruned")]
     fn test_extend_below_pruned_panics() {
         let mut p = Prunable::new();
-        p.prune_below(131_072);
+        p.prune(131_072);
         // 50 is below pruned_below; should panic via insert.
         p.extend([200_000u64, 50]);
     }
@@ -480,7 +496,7 @@ mod tests {
         p.insert(200_000);
         p.insert(300_000);
         p.insert(1_000_000);
-        p.prune_below(131_072);
+        p.prune(131_072);
         let encoded = p.encode();
         let decoded = Prunable::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(p, decoded);
@@ -521,29 +537,32 @@ mod tests {
     }
 
     #[test]
-    fn test_byte_size_empty() {
+    fn test_encode_size_empty() {
         let p = Prunable::new();
-        assert_eq!(p.byte_size(), core::mem::size_of::<Prunable>());
+        assert_eq!(
+            p.encode_size(),
+            0u64.encode_size() + Bitmap::new().encode_size()
+        );
     }
 
     #[test]
-    fn test_byte_size_grows_with_data() {
-        let s0 = Prunable::new().byte_size();
+    fn test_encode_size_grows_with_data() {
+        let s0 = Prunable::new().encode_size();
         let mut p = Prunable::new();
         p.insert(100);
         p.insert(65_537);
         p.insert(131_073);
-        assert!(p.byte_size() > s0);
+        assert!(p.encode_size() > s0);
     }
 
     #[test]
-    fn test_byte_size_unaffected_by_pruning_alone() {
-        // Pruning that removes nothing (threshold below all data) shouldn't change size.
+    fn test_encode_size_unaffected_by_pruning_alone() {
+        // Pruning that removes nothing (threshold below all data) should not change encoding.
         let mut p = Prunable::new();
         p.insert(200_000);
-        let before = p.byte_size();
-        p.prune_below(0);
-        assert_eq!(p.byte_size(), before);
+        let before = p.encode_size();
+        p.prune(0);
+        assert_eq!(p.encode_size(), before);
     }
 
     #[cfg(feature = "arbitrary")]

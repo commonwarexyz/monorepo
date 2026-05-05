@@ -171,6 +171,22 @@ impl Bitmap {
         (self.words[word_idx] & (1u64 << bit_idx)) != 0
     }
 
+    /// Returns `true` if every bit set in `self` is also set in `other`.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.words
+            .iter()
+            .zip(other.words.iter())
+            .all(|(&a, &b)| (a & !b) == 0)
+    }
+
+    /// Returns `true` if `self` and `other` share at least one set bit.
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.words
+            .iter()
+            .zip(other.words.iter())
+            .any(|(&a, &b)| (a & b) != 0)
+    }
+
     /// Inserts a value into the container.
     ///
     /// Returns `true` if the value was newly inserted, `false` if it already existed.
@@ -216,11 +232,12 @@ impl Bitmap {
     ///
     /// Returns the number of values newly inserted.
     pub fn insert_range(&mut self, range: Range<u16>) -> u32 {
-        let Range { start, end } = range;
-        if start >= end {
+        if range.is_empty() {
             return 0;
         }
 
+        let start = range.start;
+        let end = range.end;
         let start_word = (start >> 6) as usize;
         let end_word = ((end - 1) >> 6) as usize;
         let start_bit = start & 63;
@@ -412,16 +429,6 @@ impl Bitmap {
             run_count,
         }
     }
-
-    /// Returns the total memory footprint of this `Bitmap` in bytes.
-    ///
-    /// All storage is inline (no heap allocations), so this is just `size_of::<Self>()`,
-    /// which is approximately 8 KB regardless of cardinality. Available only for tests
-    /// and the `analysis` feature; not compiled into production builds.
-    #[cfg(any(test, feature = "analysis"))]
-    pub const fn byte_size(&self) -> usize {
-        core::mem::size_of::<Self>()
-    }
 }
 
 /// Counts the number of maximal consecutive `1`-bit sequences in the bitmap, in a single
@@ -466,9 +473,13 @@ impl Read for Bitmap {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let bytes = <[u8; ENCODED_BYTES]>::read(buf)?;
+
         let mut words = [0u64; WORDS];
-        for word in &mut words {
-            *word = u64::read(buf)?;
+        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+            let mut word_bytes = [0u8; 8];
+            word_bytes.copy_from_slice(chunk);
+            *word = u64::from_be_bytes(word_bytes);
         }
         Ok(Self::from(words))
     }
@@ -698,6 +709,43 @@ mod tests {
     }
 
     #[test]
+    fn test_is_subset() {
+        let mut a = Bitmap::new();
+        a.insert(1);
+        a.insert(100);
+
+        let mut b = Bitmap::new();
+        b.insert(1);
+        b.insert(50);
+        b.insert(100);
+
+        let mut c = Bitmap::new();
+        c.insert(1);
+        c.insert(99);
+
+        assert!(a.is_subset(&b));
+        assert!(!a.is_subset(&c));
+    }
+
+    #[test]
+    fn test_intersects() {
+        let mut a = Bitmap::new();
+        a.insert(1);
+        a.insert(1000);
+
+        let mut b = Bitmap::new();
+        b.insert(2);
+        b.insert(2000);
+
+        let mut c = Bitmap::new();
+        c.insert(1000);
+        c.insert(3000);
+
+        assert!(!a.intersects(&b));
+        assert!(a.intersects(&c));
+    }
+
+    #[test]
     fn test_from_array() {
         let mut array = array::Array::new();
         array.insert(5);
@@ -785,23 +833,20 @@ mod tests {
     }
 
     #[test]
-    fn test_byte_size() {
+    fn test_encode_size() {
         let b = Bitmap::new();
-        // Bitmap is fully inline: no heap.
-        assert_eq!(b.byte_size(), core::mem::size_of::<Bitmap>());
-        // Sanity: at least the 1024 u64 inline storage (8 KB).
-        assert!(b.byte_size() >= 8192);
+        assert_eq!(b.encode_size(), ENCODED_BYTES);
     }
 
     #[test]
-    fn test_byte_size_independent_of_cardinality() {
-        // A Bitmap's footprint does not change as values are added.
-        let empty_size = Bitmap::new().byte_size();
+    fn test_encode_size_independent_of_cardinality() {
+        // A Bitmap's encoded size is fixed regardless of cardinality.
+        let empty_size = Bitmap::new().encode_size();
         let mut full = Bitmap::new();
         for i in 0..=u16::MAX {
             full.insert(i);
         }
-        assert_eq!(full.byte_size(), empty_size);
+        assert_eq!(full.encode_size(), empty_size);
     }
 
     // -----------------------------------------------------------------------------

@@ -76,9 +76,8 @@ arbitrary = [
 	"num-bigint?/arbitrary",
 	"std",
 ]
-# Enables analytical helpers (e.g. `byte_size()` on roaring bitmap types) used by
-# memory-profiling benchmarks. Off by default; tests turn it on automatically via
-# `cfg(test)`.
+# Enables analytical helpers used by roaring analysis benchmarks.
+# Off by default; tests turn it on automatically via `cfg(test)`.
 analysis = []
 # Exposes the `pub mod fuzz` Plan + run harness used by both `cargo fuzz` and the
 # in-test `minifuzz`-driven property test. Off by default. Tests pick it up via the

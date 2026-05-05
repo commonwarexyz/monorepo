@@ -10,24 +10,26 @@
 //! # Auto-conversion
 //!
 //! Containers automatically convert between variants on each `insert` / `insert_range`
-//! call to maintain the most compact representation:
+//! call to maintain a compact in-memory representation with hysteresis:
 //!
 //! | From    | To      | Trigger                                         |
 //! |---------|---------|-------------------------------------------------|
-//! | Array   | Bitmap  | `Array::len() > 4096` (full)                    |
+//! | Array   | Bitmap  | `Array::len() > 4096`                           |
 //! | Bitmap  | Run     | `Bitmap::run_count() < BITMAP_TO_RUN_THRESHOLD` |
 //! | Run     | Bitmap  | `Run::run_count() > RUN_TO_BITMAP_THRESHOLD`    |
 //!
-//! The Bitmap-Run thresholds form a hysteresis around the ~2048-run break-even point so
-//! that small run-count fluctuations near break-even do not cause thrashing.
+//! The Bitmap-Run thresholds form a hysteresis band around the ~2048-run break-even
+//! point so small fluctuations do not cause variant thrashing while mutating.
 //!
-//! [`Bitmap::run_count`] is maintained incrementally on `insert` (O(1) per call) and
-//! recomputed via a single word scan on bulk paths (`insert_range`, AND/OR/XOR ops).
-//! Auto-conversion adds only a constant-time threshold compare per insert in the steady
-//! state, so callers never need to call an explicit `optimize()` — there is no such API.
+//! Serialization uses a canonical wire form chosen by encoded size with a deterministic
+//! tie-breaker `Array > Run > Bitmap`. Canonical selection uses metadata and closed-form
+//! size math:
+//! - Array size: `varint(cardinality) + 2 * cardinality`
+//! - Run size: `varint(run_count) + 4 * run_count`
+//! - Bitmap size: fixed 8192 bytes
 //!
-//! Decoded shapes from peer-supplied wire data are validated and then normalized through the
-//! same threshold rules used by mutation paths. Codec bounds (per-container `MAX_RUNS`,
+//! Decoded shapes from peer-supplied wire data are validated and preserved as provided.
+//! Codec bounds (per-container `MAX_RUNS`,
 //! top-level `RangeCfg`) enforce DOS resistance independently.
 
 pub mod array;
@@ -39,15 +41,17 @@ use alloc::{boxed::Box, vec::Vec};
 pub use array::Array;
 pub use bitmap::Bitmap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::ops::Range;
 pub use run::Run;
 
-/// A container that stores u16 values using the most efficient representation.
+/// A container that stores u16 values using an adaptive representation.
 ///
 /// Automatically converts between container types during insertion:
 /// - Array -> Bitmap when cardinality exceeds 4096
-/// - Bitmap -> Run when container becomes fully saturated (65536 values)
+/// - Bitmap <-> Run based on run-count hysteresis thresholds
+///
+/// Serialization emits a canonical representation chosen by encoded size.
 #[derive(Clone, Debug)]
 pub enum Container {
     /// Sparse container using a sorted array.
@@ -104,29 +108,13 @@ impl Container {
     /// Automatically converts the container type if needed; see the [module
     /// documentation](self) for the full transition table.
     pub fn insert(&mut self, value: u16) -> bool {
-        match self {
-            Self::Array(a) => {
-                let inserted = a.insert(value);
-                if a.len() > array::MAX_CARDINALITY {
-                    self.convert_array_to_bitmap();
-                }
-                inserted
-            }
-            Self::Bitmap(b) => {
-                let inserted = b.insert(value);
-                if (b.run_count() as usize) < BITMAP_TO_RUN_THRESHOLD {
-                    self.convert_bitmap_to_run();
-                }
-                inserted
-            }
-            Self::Run(r) => {
-                let inserted = r.insert(value);
-                if r.run_count() > RUN_TO_BITMAP_THRESHOLD {
-                    self.convert_run_to_bitmap();
-                }
-                inserted
-            }
-        }
+        let inserted = match self {
+            Self::Array(a) => a.insert(value),
+            Self::Bitmap(b) => b.insert(value),
+            Self::Run(r) => r.insert(value),
+        };
+        self.normalize_in_memory();
+        inserted
     }
 
     /// Inserts a range of values into the container.
@@ -136,45 +124,44 @@ impl Container {
     /// Automatically converts the container type if needed; see the [module
     /// documentation](self) for the full transition table.
     pub fn insert_range(&mut self, range: Range<u16>) -> u32 {
-        let Range { start, end } = range;
-        if start >= end {
+        if range.is_empty() {
             return 0;
         }
 
         match self {
             Self::Array(a) => {
-                let range_len = (end - start) as usize;
+                let range_len = range.len();
 
                 // Fast path: empty array with consecutive range - use Run container
                 // directly. Run stores `(start, end)` pairs, so a single range is just
                 // 4 bytes vs Array which would be 2 bytes per value.
                 if a.is_empty() && range_len >= 64 {
                     let mut run = Run::new();
-                    let inserted = run.insert_range(start..end);
+                    let inserted = run.insert_range(range);
                     *self = Self::Run(run);
                     return inserted;
                 }
 
-                // If result would exceed array capacity, convert to bitmap.
-                if a.len() + range_len > array::MAX_CARDINALITY {
+                // Convert only if the range would add enough NEW values to overflow
+                // array capacity.
+                let new_values = range_len - a.count_in_range(&range);
+                if a.len() + new_values > array::MAX_CARDINALITY {
                     self.convert_array_to_bitmap();
-                    return self.insert_range(start..end);
+                    return self.insert_range(range);
                 }
 
-                a.insert_range(start..end) as u32
+                let inserted = a.insert_range(range) as u32;
+                self.normalize_in_memory();
+                inserted
             }
             Self::Bitmap(b) => {
-                let inserted = b.insert_range(start..end);
-                if (b.run_count() as usize) < BITMAP_TO_RUN_THRESHOLD {
-                    self.convert_bitmap_to_run();
-                }
+                let inserted = b.insert_range(range);
+                self.normalize_in_memory();
                 inserted
             }
             Self::Run(r) => {
-                let inserted = r.insert_range(start..end);
-                if r.run_count() > RUN_TO_BITMAP_THRESHOLD {
-                    self.convert_run_to_bitmap();
-                }
+                let inserted = r.insert_range(range);
+                self.normalize_in_memory();
                 inserted
             }
         }
@@ -263,7 +250,9 @@ impl Container {
             let result = Bitmap::or_new(a, b);
             let len = result.len() as u64;
             if len <= limit {
-                return (Self::Bitmap(Box::new(result)), len);
+                let mut container = Self::Bitmap(Box::new(result));
+                container.normalize_in_memory();
+                return (container, len);
             }
             return Self::Bitmap(Box::new(result)).limit(limit);
         }
@@ -318,7 +307,9 @@ impl Container {
             let result = Bitmap::and_new(a, b);
             let len = result.len() as u64;
             if len <= limit {
-                return (Self::Bitmap(Box::new(result)), len);
+                let mut container = Self::Bitmap(Box::new(result));
+                container.normalize_in_memory();
+                return (container, len);
             }
             return Self::Bitmap(Box::new(result)).limit(limit);
         }
@@ -358,7 +349,9 @@ impl Container {
             let result = Bitmap::and_not_new(a, b);
             let len = result.len() as u64;
             if len <= limit {
-                return (Self::Bitmap(Box::new(result)), len);
+                let mut container = Self::Bitmap(Box::new(result));
+                container.normalize_in_memory();
+                return (container, len);
             }
             return Self::Bitmap(Box::new(result)).limit(limit);
         }
@@ -383,38 +376,32 @@ impl Container {
         if self.len() > other.len() {
             return false;
         }
+
+        match (self, other) {
+            (Self::Array(a), Self::Array(b)) => return a.is_subset(b),
+            (Self::Bitmap(a), Self::Bitmap(b)) => return a.is_subset(b),
+            (Self::Run(a), Self::Run(b)) => return a.is_subset(b),
+            _ => {}
+        }
+
         self.iter().all(|value| other.contains(value))
     }
 
     /// Returns `true` if the containers share at least one value.
     pub fn intersects(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Array(a), Self::Array(b)) => return a.intersects(b),
+            (Self::Bitmap(a), Self::Bitmap(b)) => return a.intersects(b),
+            (Self::Run(a), Self::Run(b)) => return a.intersects(b),
+            _ => {}
+        }
+
         let (smaller, larger) = if self.len() <= other.len() {
             (self, other)
         } else {
             (other, self)
         };
         smaller.iter().any(|value| larger.contains(value))
-    }
-
-    /// Returns the approximate total memory footprint of this `Container` in bytes
-    /// (stack + heap).
-    ///
-    /// `size_of::<Self>()` covers the enum discriminant plus inline storage for the
-    /// largest variant. The match arm adds heap allocations specific to the active
-    /// variant: `Array`'s `Vec` buffer, the boxed `Bitmap`, or `Run`'s `BTreeMap`
-    /// nodes. The `Run` component is approximate (see [`Run::byte_size`]). Available
-    /// only for tests and the `analysis` feature; not compiled into production builds.
-    #[cfg(any(test, feature = "analysis"))]
-    pub fn byte_size(&self) -> usize {
-        core::mem::size_of::<Self>()
-            + match self {
-                // The Vec header is inline in the enum; only its heap buffer counts here.
-                Self::Array(a) => a.byte_size() - core::mem::size_of::<Array>(),
-                // The whole Bitmap struct lives on the heap behind the Box.
-                Self::Bitmap(b) => b.byte_size(),
-                // The BTreeMap header is inline in the enum; only its heap nodes count here.
-                Self::Run(r) => r.byte_size() - core::mem::size_of::<Run>(),
-            }
     }
 
     /// Converts an Array container to a Bitmap container.
@@ -428,7 +415,7 @@ impl Container {
     fn convert_bitmap_to_array(&mut self) {
         if let Self::Bitmap(b) = self {
             let values: Vec<u16> = b.iter().collect();
-            *self = Self::Array(Array::try_from(values).expect("bitmap values are sorted"));
+            *self = Self::Array(Array::from(values));
         }
     }
 
@@ -439,59 +426,134 @@ impl Container {
         }
     }
 
-    /// Converts a Run container to a Bitmap container. Used when a Run grows past the
-    /// hysteresis upper bound and a Bitmap becomes the more compact representation.
+    /// Converts a Run container to a Bitmap container.
     fn convert_run_to_bitmap(&mut self) {
         if let Self::Run(r) = self {
             *self = Self::Bitmap(Box::new(Bitmap::from(&*r)));
         }
     }
 
-    /// Applies the same representation thresholds used by mutation paths.
-    fn normalize(&mut self) {
+    /// Returns the run count for the current container representation.
+    fn run_count(&self) -> usize {
+        match self {
+            Self::Array(a) => a.run_count(),
+            Self::Bitmap(b) => b.run_count() as usize,
+            Self::Run(r) => r.run_count(),
+        }
+    }
+
+    /// Returns the canonical container type for current values:
+    /// smallest encoded size, with deterministic tie-breaker Array > Run > Bitmap.
+    fn canonical_kind(&self) -> CanonicalKind {
+        if self.is_empty() {
+            return CanonicalKind::Array;
+        }
+
+        let cardinality = self.len() as usize;
+        let run_count = self.run_count();
+
+        let run_size = run_count.encode_size() + run_count * RUN_ENCODED_BYTES;
+        let mut best_kind = CanonicalKind::Run;
+        let mut best_size = run_size;
+
+        if cardinality <= array::MAX_CARDINALITY {
+            let array_size = cardinality.encode_size() + cardinality * ARRAY_VALUE_ENCODED_BYTES;
+            if array_size <= best_size {
+                best_kind = CanonicalKind::Array;
+                best_size = array_size;
+            }
+        }
+
+        if BITMAP_ENCODED_BYTES < best_size {
+            best_kind = CanonicalKind::Bitmap;
+        }
+
+        best_kind
+    }
+
+    /// Applies in-memory representation normalization with hysteresis.
+    fn normalize_in_memory(&mut self) {
         if self.is_empty() {
             *self = Self::Array(Array::new());
             return;
         }
 
-        match self {
-            Self::Array(_) => {}
-            Self::Bitmap(b) if b.len() as usize <= array::MAX_CARDINALITY => {
-                self.convert_bitmap_to_array();
+        loop {
+            match self {
+                Self::Array(a) => {
+                    if a.len() > array::MAX_CARDINALITY {
+                        self.convert_array_to_bitmap();
+                        continue;
+                    }
+                    return;
+                }
+                Self::Bitmap(b) => {
+                    if b.len() as usize <= array::MAX_CARDINALITY {
+                        self.convert_bitmap_to_array();
+                        return;
+                    }
+                    if (b.run_count() as usize) < BITMAP_TO_RUN_THRESHOLD {
+                        self.convert_bitmap_to_run();
+                        continue;
+                    }
+                    return;
+                }
+                Self::Run(r) => {
+                    if r.run_count() > RUN_TO_BITMAP_THRESHOLD {
+                        self.convert_run_to_bitmap();
+                        continue;
+                    }
+                    return;
+                }
             }
-            Self::Bitmap(b) if (b.run_count() as usize) < BITMAP_TO_RUN_THRESHOLD => {
-                self.convert_bitmap_to_run();
-            }
-            Self::Run(r) if r.run_count() > RUN_TO_BITMAP_THRESHOLD => {
-                self.convert_run_to_bitmap();
-            }
-            _ => {}
         }
     }
 }
 
 impl PartialEq for Container {
     fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && self.iter().eq(other.iter())
+        if self.len() != other.len() {
+            return false;
+        }
+        match (self, other) {
+            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Bitmap(a), Self::Bitmap(b)) => a == b,
+            (Self::Run(a), Self::Run(b)) => a == b,
+            _ => self.iter().eq(other.iter()),
+        }
     }
 }
 
 impl Eq for Container {}
 
-/// Convert a Bitmap to a Run when the run count drops below this threshold.
+/// Convert a Bitmap to a Run when run count drops below this threshold.
 ///
-/// At ~4 bytes per Run entry vs 8192 bytes for a Bitmap, the break-even is roughly 2048.
-/// We pick 1500 (a 50% buffer below break-even) so that crossing the threshold is a clear
-/// memory win rather than a marginal one. Paired with [`RUN_TO_BITMAP_THRESHOLD`] for
-/// hysteresis: the gap between the two thresholds prevents thrashing when run count
-/// hovers near break-even.
+/// The Bitmap/Run break-even is near 2048 runs (8192 bytes / 4 bytes per run
+/// entry), so this lower threshold introduces slack to avoid representation
+/// thrashing on small local updates.
 const BITMAP_TO_RUN_THRESHOLD: usize = 1500;
 
-/// Convert a Run to a Bitmap when the run count exceeds this threshold.
+/// Convert a Run to a Bitmap when run count exceeds this threshold.
 ///
-/// Mirror of [`BITMAP_TO_RUN_THRESHOLD`], placed 50% above the ~2048 break-even so a
-/// container near the break-even doesn't bounce between variants on each insert.
+/// This upper threshold pairs with [`BITMAP_TO_RUN_THRESHOLD`] to maintain a
+/// hysteresis band around break-even.
 const RUN_TO_BITMAP_THRESHOLD: usize = 2500;
+
+/// Fixed-size bitmap payload: 1024 u64 words.
+const BITMAP_ENCODED_BYTES: usize = bitmap::WORDS * core::mem::size_of::<u64>();
+
+/// Array payload stores one u16 per value.
+const ARRAY_VALUE_ENCODED_BYTES: usize = core::mem::size_of::<u16>();
+
+/// Run payload stores one (start, end) pair per run.
+const RUN_ENCODED_BYTES: usize = core::mem::size_of::<(u16, u16)>();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalKind {
+    Array,
+    Bitmap,
+    Run,
+}
 
 /// Iterator over values in a container.
 pub enum Iter<'a> {
@@ -564,18 +626,33 @@ const CONTAINER_TYPE_RUN: u8 = 2;
 
 impl Write for Container {
     fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Array(a) => {
+        match self.canonical_kind() {
+            CanonicalKind::Array => {
                 CONTAINER_TYPE_ARRAY.write(buf);
-                a.write(buf);
+
+                match self {
+                    Self::Array(a) => a.write(buf),
+                    Self::Bitmap(b) => Array::from(b.iter().collect()).write(buf),
+                    Self::Run(r) => Array::from(r.iter().collect()).write(buf),
+                }
             }
-            Self::Bitmap(b) => {
+            CanonicalKind::Bitmap => {
                 CONTAINER_TYPE_BITMAP.write(buf);
-                b.write(buf);
+
+                match self {
+                    Self::Array(a) => Bitmap::from(a).write(buf),
+                    Self::Bitmap(b) => b.write(buf),
+                    Self::Run(r) => Bitmap::from(r).write(buf),
+                }
             }
-            Self::Run(r) => {
+            CanonicalKind::Run => {
                 CONTAINER_TYPE_RUN.write(buf);
-                r.write(buf);
+
+                match self {
+                    Self::Array(a) => Run::from(a).write(buf),
+                    Self::Bitmap(b) => Run::from(b.as_ref()).write(buf),
+                    Self::Run(r) => r.write(buf),
+                }
             }
         }
     }
@@ -583,11 +660,18 @@ impl Write for Container {
 
 impl EncodeSize for Container {
     fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Array(a) => a.encode_size(),
-            Self::Bitmap(b) => b.encode_size(),
-            Self::Run(r) => r.encode_size(),
-        }
+        let cardinality = self.len() as usize;
+        let run_count = self.run_count();
+
+        let payload_size = match self.canonical_kind() {
+            CanonicalKind::Array => {
+                cardinality.encode_size() + cardinality * ARRAY_VALUE_ENCODED_BYTES
+            }
+            CanonicalKind::Bitmap => BITMAP_ENCODED_BYTES,
+            CanonicalKind::Run => run_count.encode_size() + run_count * RUN_ENCODED_BYTES,
+        };
+
+        1 + payload_size
     }
 }
 
@@ -596,13 +680,44 @@ impl Read for Container {
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let container_type = u8::read(buf)?;
-        let mut container = match container_type {
+        let container = match container_type {
             CONTAINER_TYPE_ARRAY => Ok(Self::Array(Array::read(buf)?)),
             CONTAINER_TYPE_BITMAP => Ok(Self::Bitmap(Box::new(Bitmap::read(buf)?))),
-            CONTAINER_TYPE_RUN => Ok(Self::Run(Run::read(buf)?)),
+            CONTAINER_TYPE_RUN => {
+                let run_count = usize::read_cfg(buf, &RangeCfg::new(..=run::MAX_RUNS))?;
+
+                // If run payload is already larger than bitmap payload, this can never be
+                // canonical and we can reject before reading all run entries.
+                let run_payload_size = run_count.encode_size() + run_count * RUN_ENCODED_BYTES;
+                if run_payload_size > BITMAP_ENCODED_BYTES {
+                    return Err(CodecError::Invalid(
+                        "Container",
+                        "container type is not canonical for payload",
+                    ));
+                }
+
+                let mut runs = Vec::with_capacity(run_count);
+                for _ in 0..run_count {
+                    runs.push(<(u16, u16)>::read_cfg(buf, &((), ()))?);
+                }
+                Ok(Self::Run(Run::from_runs_checked(runs)?))
+            }
             _ => Err(CodecError::InvalidEnum(container_type)),
         }?;
-        container.normalize();
+
+        let expected = match container.canonical_kind() {
+            CanonicalKind::Array => CONTAINER_TYPE_ARRAY,
+            CanonicalKind::Bitmap => CONTAINER_TYPE_BITMAP,
+            CanonicalKind::Run => CONTAINER_TYPE_RUN,
+        };
+
+        if container_type != expected {
+            return Err(CodecError::Invalid(
+                "Container",
+                "container type is not canonical for payload",
+            ));
+        }
+
         Ok(container)
     }
 }
@@ -622,6 +737,7 @@ impl arbitrary::Arbitrary<'_> for Container {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
 
     #[test]
@@ -669,23 +785,81 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_normalizes_sparse_bitmap_container() {
+    fn test_decode_rejects_noncanonical_sparse_bitmap_container() {
         let mut bitmap = Bitmap::new();
         bitmap.insert(1);
         bitmap.insert(3);
         bitmap.insert(5);
-        let encoded = Container::Bitmap(Box::new(bitmap)).encode();
 
+        let mut encoded = BytesMut::new();
+        CONTAINER_TYPE_BITMAP.write(&mut encoded);
+        bitmap.write(&mut encoded);
+
+        let decoded = Container::decode_cfg(encoded, &());
+        assert!(matches!(
+            decoded,
+            Err(CodecError::Invalid(
+                "Container",
+                "container type is not canonical for payload"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_decode_rejects_noncanonical_full_bitmap_container() {
+        let bitmap = Bitmap::from([!0u64; bitmap::WORDS]);
+
+        let mut encoded = BytesMut::new();
+        CONTAINER_TYPE_BITMAP.write(&mut encoded);
+        bitmap.write(&mut encoded);
+
+        let decoded = Container::decode_cfg(encoded, &());
+        assert!(matches!(
+            decoded,
+            Err(CodecError::Invalid(
+                "Container",
+                "container type is not canonical for payload"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_encode_canonicalizes_sparse_bitmap_container() {
+        let mut bitmap = Bitmap::new();
+        bitmap.insert(1);
+        bitmap.insert(3);
+        bitmap.insert(5);
+
+        let encoded = Container::Bitmap(Box::new(bitmap)).encode();
         let decoded = Container::decode_cfg(encoded, &()).unwrap();
+
         assert!(matches!(decoded, Container::Array(_)));
     }
 
     #[test]
-    fn test_decode_normalizes_full_bitmap_container() {
+    fn test_encode_canonicalizes_full_bitmap_container() {
         let encoded = Container::Bitmap(Box::new(Bitmap::from([!0u64; bitmap::WORDS]))).encode();
-
         let decoded = Container::decode_cfg(encoded, &()).unwrap();
+
         assert!(matches!(decoded, Container::Run(_)));
+    }
+
+    #[test]
+    fn test_decode_normalization_is_idempotent_after_run_to_bitmap() {
+        let mut run = Run::new();
+        for i in 0..=RUN_TO_BITMAP_THRESHOLD as u16 {
+            assert!(run.insert(i * 2));
+        }
+        assert_eq!(run.run_count(), RUN_TO_BITMAP_THRESHOLD + 1);
+        assert!(run.len() as usize <= array::MAX_CARDINALITY);
+
+        let mut decoded_once = Container::decode_cfg(Container::Run(run).encode(), &()).unwrap();
+        decoded_once.normalize_in_memory();
+
+        let encoded_once = decoded_once.encode();
+        let decoded_twice = Container::decode_cfg(encoded_once.clone(), &()).unwrap();
+
+        assert_eq!(encoded_once, decoded_twice.encode());
     }
 
     #[test]
@@ -720,6 +894,20 @@ mod tests {
     }
 
     #[test]
+    fn test_max_cardinality_serializes_as_bitmap() {
+        let mut container = Container::new();
+        for i in 0..array::MAX_CARDINALITY as u16 {
+            assert!(container.insert(i * 2));
+        }
+
+        assert!(matches!(container, Container::Array(_)));
+
+        let encoded = container.encode();
+        let decoded = Container::decode_cfg(encoded, &()).unwrap();
+        assert!(matches!(decoded, Container::Bitmap(_)));
+    }
+
+    #[test]
     fn test_auto_convert_bitmap_to_run() {
         let mut container = Container::Bitmap(Box::default());
 
@@ -743,6 +931,19 @@ mod tests {
 
         let values: Vec<_> = container.iter().collect();
         assert_eq!(values, vec![5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_insert_range_overlap_noop_does_not_force_bitmap_conversion() {
+        let mut container = Container::new();
+        assert!(container.insert(0));
+        assert_eq!(container.insert_range(1..4000), 3999);
+        assert!(matches!(container, Container::Array(_)));
+
+        // Fully overlapped insertion is a no-op and should not trigger Array->Bitmap.
+        assert_eq!(container.insert_range(0..1000), 0);
+        assert!(matches!(container, Container::Array(_)));
+        assert_eq!(container.len(), 4000);
     }
 
     #[test]
@@ -771,18 +972,18 @@ mod tests {
     }
 
     #[test]
-    fn test_byte_size_array_variant() {
+    fn test_encode_size_array_variant() {
         let mut c = Container::new();
         c.insert(5);
         assert!(matches!(c, Container::Array(_)));
-        // Sanity floor: at least the enum's stack footprint.
-        assert!(c.byte_size() >= core::mem::size_of::<Container>());
-        // Sanity ceiling: a 1-value Array has at most a small Vec capacity.
-        assert!(c.byte_size() <= core::mem::size_of::<Container>() + 64);
+        assert_eq!(
+            c.encode_size(),
+            1 + 1usize.encode_size() + ARRAY_VALUE_ENCODED_BYTES
+        );
     }
 
     #[test]
-    fn test_byte_size_bitmap_variant() {
+    fn test_encode_size_bitmap_variant() {
         // Force conversion to Bitmap (cardinality > 4096) AND keep it there by inserting
         // alternating values (many isolated runs) so auto-conversion to Run doesn't fire.
         let mut c = Container::new();
@@ -790,18 +991,17 @@ mod tests {
             c.insert(i * 2);
         }
         assert!(matches!(c, Container::Bitmap(_)));
-        // Boxed Bitmap is roughly 8 KB on top of the enum's own stack.
-        assert!(c.byte_size() >= core::mem::size_of::<Container>() + 8192);
+        assert_eq!(c.encode_size(), 1 + BITMAP_ENCODED_BYTES);
     }
 
     #[test]
-    fn test_byte_size_run_variant() {
+    fn test_encode_size_run_variant() {
         let mut c = Container::Run(Run::full());
         c.insert(0); // already there, no growth
-                     // Run with one full-saturation entry.
-        assert!(c.byte_size() >= core::mem::size_of::<Container>());
-        // Should be far smaller than a Bitmap variant.
-        assert!(c.byte_size() < 1024);
+        assert_eq!(
+            c.encode_size(),
+            1 + 1usize.encode_size() + RUN_ENCODED_BYTES
+        );
     }
 
     // -----------------------------------------------------------------------------
@@ -819,8 +1019,8 @@ mod tests {
         assert!(matches!(c, Container::Bitmap(_)));
 
         // insert_range over a contiguous span absorbs all the singletons into one run,
-        // dropping run_count to 1 — well under BITMAP_TO_RUN_THRESHOLD. The bitmap should
-        // auto-convert to Run.
+        // dropping run_count to 1 - well below BITMAP_TO_RUN_THRESHOLD - so the
+        // container should convert to Run.
         c.insert_range(0..u16::MAX);
         assert!(matches!(c, Container::Run(_)));
     }
@@ -832,67 +1032,175 @@ mod tests {
         c.insert_range(0..5_000);
         assert!(matches!(c, Container::Run(_)));
 
-        // Insert ~3000 isolated, non-adjacent values to push run_count past
-        // RUN_TO_BITMAP_THRESHOLD (= 2500). Use values >= 10_000 with gaps so they don't
-        // merge with the existing [0, 4999] run or each other.
+        // Insert many isolated, non-adjacent values. This inflates run_count so Run
+        // grows past the Run->Bitmap hysteresis threshold and should flip to Bitmap.
+        // Use values >= 10_000 with gaps so they don't merge with the existing
+        // [0, 4999] run or each other.
         let mut value = 10_000u16;
         for _ in 0..3_000 {
             c.insert(value);
             value += 2; // gap of 1 between successive inserts to keep them disjoint.
         }
 
-        // Should have flipped to Bitmap once run_count crossed 2500.
+        // Should have flipped to Bitmap once run_count crossed the upper threshold.
         assert!(matches!(c, Container::Bitmap(_)));
     }
 
     #[test]
     fn test_no_thrash_in_hysteresis_band() {
-        // Inside [BITMAP_TO_RUN_THRESHOLD, RUN_TO_BITMAP_THRESHOLD], neither conversion
-        // direction triggers. We construct a Bitmap with run_count squarely inside the
-        // band and verify a series of small fluctuations does not flip variants.
+        // Inside [BITMAP_TO_RUN_THRESHOLD, RUN_TO_BITMAP_THRESHOLD], neither
+        // conversion direction triggers. We construct a Bitmap with run_count
+        // inside the band and verify small fluctuations do not flip variants.
         let mut c = Container::new();
-        // 2000 isolated singletons -> forces conversion to Bitmap (Array overflows at
-        // 4096). Run count = 2000, comfortably between 1500 and 2500.
         for i in 0..2_000u16 {
-            c.insert(i * 3); // gaps of 2 keep them isolated
+            c.insert(i * 3);
         }
-        // Past 4096? No — 2000 values is < 4096, so we're still in Array.
-        // Push past Array threshold with more isolated values.
         for i in 2_000..5_000u16 {
             c.insert(i * 3);
         }
-        // 5000 isolated values -> run_count == 5000 -> in Bitmap with run_count > 2500.
         assert!(matches!(c, Container::Bitmap(_)));
-        // Now collapse some runs to bring run_count into the hysteresis band.
-        // Bridging adjacent singletons: insert i*3 + 1 for some i to merge with neighbor.
-        // We want to land run_count ~2000.
-        // Each bridge between singletons (i*3) and ((i+1)*3) requires filling i*3+1 and
-        // i*3+2. Each bridge removes 1 run net. To go from 5000 -> 2000, do ~3000 bridges.
+
         for i in 0..3_000u16 {
             c.insert(i * 3 + 1);
             c.insert(i * 3 + 2);
         }
-        // Now run_count is around 2000-ish, in the hysteresis band.
         assert!(matches!(c, Container::Bitmap(_)));
 
-        // Add a few more inserts that touch run_count up and down by small amounts.
-        // None should flip the variant.
         for i in 3_000..3_010u16 {
-            c.insert(i * 3 + 1); // bridges another pair -> run_count -= 1 each time
+            c.insert(i * 3 + 1);
         }
         assert!(matches!(c, Container::Bitmap(_)));
+
         for i in 6_000..6_010u16 {
-            c.insert(i * 3); // adds an isolated singleton -> run_count += 1 each time
+            c.insert(i * 3);
         }
         assert!(matches!(c, Container::Bitmap(_)));
     }
 
+    #[test]
+    fn test_union_bitmap_fast_path_normalizes_to_run() {
+        let mut bitmap = Bitmap::new();
+        assert_eq!(bitmap.insert_range(0..5_000), 5_000);
+        let left = Container::Bitmap(Box::new(bitmap.clone()));
+        let right = Container::Bitmap(Box::new(bitmap));
+
+        let (result, count) = left.union(&right, u64::MAX);
+        assert_eq!(count, 5_000);
+        assert!(matches!(result, Container::Run(_)));
+    }
+
+    #[test]
+    fn test_intersection_bitmap_fast_path_normalizes_to_array_when_sparse() {
+        let mut a = Bitmap::new();
+        let mut b = Bitmap::new();
+        for i in 0..=array::MAX_CARDINALITY as u16 {
+            assert!(a.insert(i * 2));
+            assert!(b.insert(i * 2 + 1));
+        }
+        assert!(b.insert(42));
+
+        let left = Container::Bitmap(Box::new(a));
+        let right = Container::Bitmap(Box::new(b));
+        let (result, count) = left.intersection(&right, u64::MAX);
+        assert_eq!(count, 1);
+        assert!(matches!(result, Container::Array(_)));
+        assert_eq!(result.iter().collect::<Vec<_>>(), vec![42]);
+    }
+
+    #[test]
+    fn test_difference_bitmap_fast_path_normalizes_to_array_when_sparse() {
+        let mut a = Bitmap::new();
+        let mut b = Bitmap::new();
+        for i in 0..=array::MAX_CARDINALITY as u16 {
+            assert!(a.insert(i * 2));
+            assert!(b.insert(i * 2));
+        }
+        assert!(a.insert(9_999));
+
+        let left = Container::Bitmap(Box::new(a));
+        let right = Container::Bitmap(Box::new(b));
+        let (result, count) = left.difference(&right, u64::MAX);
+        assert_eq!(count, 1);
+        assert!(matches!(result, Container::Array(_)));
+        assert_eq!(result.iter().collect::<Vec<_>>(), vec![9_999]);
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use commonware_codec::conformance::CodecConformance;
+        use commonware_codec::{conformance::CodecConformance, Decode, Encode};
+        use commonware_conformance::Conformance;
+
+        struct ContainerTransitionsConformance;
+
+        fn variant_tag(container: &super::Container) -> u8 {
+            match container {
+                super::Container::Array(_) => 0,
+                super::Container::Bitmap(_) => 1,
+                super::Container::Run(_) => 2,
+            }
+        }
+
+        fn append_snapshot(out: &mut Vec<u8>, container: &super::Container) {
+            let encoded = container.encode();
+            let decoded = super::Container::decode_cfg(encoded.clone(), &())
+                .expect("container snapshot must roundtrip through canonical decode");
+            assert_eq!(
+                encoded,
+                decoded.encode(),
+                "canonical encode/decode must be idempotent"
+            );
+
+            out.push(variant_tag(container));
+            out.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            out.extend_from_slice(&encoded);
+        }
+
+        impl Conformance for ContainerTransitionsConformance {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let mut out = Vec::new();
+
+                // Start from a dense contiguous range so in-memory normalization picks Run.
+                let mut up = super::Container::new();
+                let dense_span = 5_000u16 + (seed % 1_000) as u16;
+                up.insert_range(0..dense_span);
+                assert!(matches!(up, super::Container::Run(_)));
+                append_snapshot(&mut out, &up);
+
+                // Increase run count above the hysteresis upper bound to force Run -> Bitmap.
+                let extra_runs = super::RUN_TO_BITMAP_THRESHOLD + 64 + (seed as usize % 128);
+                let mut value = 10_001u16;
+                for _ in 0..extra_runs {
+                    up.insert(value);
+                    value += 2;
+                }
+                assert!(matches!(up, super::Container::Bitmap(_)));
+                append_snapshot(&mut out, &up);
+
+                // Fill almost the full shelf so run count collapses and Bitmap -> Run fires.
+                up.insert_range(0..u16::MAX);
+                assert!(matches!(up, super::Container::Run(_)));
+                append_snapshot(&mut out, &up);
+
+                // Start from a sparse alternating pattern that normalizes to Bitmap.
+                let mut down = super::Container::new();
+                for i in 0..=super::array::MAX_CARDINALITY as u16 {
+                    down.insert(i * 2);
+                }
+                assert!(matches!(down, super::Container::Bitmap(_)));
+                append_snapshot(&mut out, &down);
+
+                // Decrease run count by filling gaps, forcing Bitmap -> Run.
+                down.insert_range(0..u16::MAX);
+                assert!(matches!(down, super::Container::Run(_)));
+                append_snapshot(&mut out, &down);
+
+                out
+            }
+        }
 
         commonware_conformance::conformance_tests! {
             CodecConformance<super::Container>,
+            ContainerTransitionsConformance => 1024,
         }
     }
 }
