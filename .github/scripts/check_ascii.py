@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 
-SKIP_DIRS = {".git", ".next", "build", "dist", "node_modules", "target"}
+SKIP_DIRS = {".git", "target"}
 SOURCE_SUFFIXES = {
     ".js",
     ".jsx",
