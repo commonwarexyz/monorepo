@@ -47,7 +47,7 @@ impl<F: merkle::Family, K: Key, D: Digest, const N: usize> EncodeSize
 }
 
 impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
-    /// `(max_digests, key_cfg)`: the per-field digest cap for the embedded operation proof and the
+    /// `(max_digests, key_cfg)`: the total digest cap for the embedded operation proof and the
     /// read configuration for the key type.
     type Cfg = (usize, <K as Read>::Cfg);
 

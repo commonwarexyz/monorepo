@@ -940,10 +940,7 @@ impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
 }
 
 impl<F: Family, D: Digest> Read for RangeProof<F, D> {
-    /// The maximum number of digests allowed in each digest vector.
-    ///
-    /// This is a per-field cap, not a total allocation budget across the whole range proof. It
-    /// bounds `proof.digests`, `unfolded_prefix_peaks`, and `unfolded_suffix_peaks` separately.
+    /// The maximum number of digests allowed across all digest vectors in the range proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -951,8 +948,12 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=*max_digests)?;
-        let unfolded_suffix_peaks = Vec::<D>::read_range(buf, ..=*max_digests)?;
+        let remaining = max_digests.checked_sub(proof.digests.len()).ok_or(
+            commonware_codec::Error::Invalid("RangeProof", "digest budget exceeded"),
+        )?;
+        let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=remaining)?;
+        let remaining = remaining - unfolded_prefix_peaks.len();
+        let unfolded_suffix_peaks = Vec::<D>::read_range(buf, ..=remaining)?;
         let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
@@ -1070,7 +1071,7 @@ impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N
 }
 
 impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
-    /// The per-field digest cap forwarded to the embedded range proof.
+    /// The total digest cap forwarded to the embedded range proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -1135,6 +1136,12 @@ mod tests {
         }
     }
 
+    fn range_proof_digest_count<F: Family, D: Digest>(proof: &RangeProof<F, D>) -> usize {
+        proof.proof.digests.len()
+            + proof.unfolded_prefix_peaks.len()
+            + proof.unfolded_suffix_peaks.len()
+    }
+
     #[test]
     fn test_range_proof_codec_roundtrip() {
         type F = mmb::Family;
@@ -1188,6 +1195,33 @@ mod tests {
     }
 
     #[test]
+    fn test_range_proof_codec_enforces_total_digest_budget() {
+        type F = mmb::Family;
+
+        let proof = RangeProof {
+            proof: Proof::<F, sha256::Digest> {
+                leaves: mmb::Location::new(42),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"d0")],
+            },
+            unfolded_prefix_peaks: vec![Sha256::hash(b"u0")],
+            unfolded_suffix_peaks: vec![Sha256::hash(b"s0")],
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops-root"),
+        };
+
+        let encoded = proof.encode();
+        let total_digests = range_proof_digest_count(&proof);
+
+        let decoded =
+            RangeProof::<F, sha256::Digest>::decode_cfg(encoded.clone(), &total_digests).unwrap();
+        assert_eq!(decoded, proof);
+        assert!(
+            RangeProof::<F, sha256::Digest>::decode_cfg(encoded, &(total_digests - 1)).is_err()
+        );
+    }
+
+    #[test]
     fn test_operation_proof_codec_roundtrip() {
         type F = mmb::Family;
         const N: usize = 32;
@@ -1218,6 +1252,40 @@ mod tests {
         let decoded =
             OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &MAX_DIGESTS).unwrap();
         assert_eq!(decoded, proof);
+    }
+
+    #[test]
+    fn test_operation_proof_codec_enforces_total_digest_budget() {
+        type F = mmb::Family;
+        const N: usize = 32;
+
+        let range_proof = RangeProof {
+            proof: Proof::<F, sha256::Digest> {
+                leaves: mmb::Location::new(7),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"sib")],
+            },
+            unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
+            unfolded_suffix_peaks: vec![Sha256::hash(b"suf")],
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops"),
+        };
+        let total_digests = range_proof_digest_count(&range_proof);
+        let proof = OperationProof::<F, sha256::Digest, N> {
+            loc: mmb::Location::new(5),
+            chunk: core::array::from_fn(|i| i as u8),
+            range_proof,
+        };
+
+        let encoded = proof.encode();
+        let decoded =
+            OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded.clone(), &total_digests)
+                .unwrap();
+        assert_eq!(decoded, proof);
+        assert!(
+            OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &(total_digests - 1))
+                .is_err()
+        );
     }
 
     #[test_traced]

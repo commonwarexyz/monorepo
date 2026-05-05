@@ -97,7 +97,7 @@ where
     D: Digest,
     Update<K, V>: Read,
 {
-    /// `(max_digests, update_cfg, value_cfg)`: per-field digest cap for the embedded operation
+    /// `(max_digests, update_cfg, value_cfg)`: total digest cap for the embedded operation
     /// proof, the read configuration for [Update], and the read configuration for the value type.
     type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
@@ -956,6 +956,12 @@ pub mod tests {
         }
     }
 
+    fn op_proof_digest_count(proof: &OperationProof<mmb::Family, Digest, 32>) -> usize {
+        proof.range_proof.proof.digests.len()
+            + proof.range_proof.unfolded_prefix_peaks.len()
+            + proof.range_proof.unfolded_suffix_peaks.len()
+    }
+
     type CodecExclusionProof =
         ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
     type CodecKeyValueProof = db::KeyValueProof<mmb::Family, Digest, Digest, 32>;
@@ -972,6 +978,21 @@ pub mod tests {
         assert_eq!(encoded.len(), proof.encode_size());
         let decoded = CodecKeyValueProof::decode_cfg(encoded, &(MAX_DIGESTS, ())).unwrap();
         assert_eq!(decoded, proof);
+    }
+
+    #[test]
+    fn test_key_value_proof_codec_enforces_total_digest_budget() {
+        let proof = CodecKeyValueProof {
+            proof: sample_op_proof(),
+            next_key: Sha256::hash(b"next-key"),
+        };
+        let total_digests = op_proof_digest_count(&proof.proof);
+
+        let encoded = proof.encode();
+        let decoded =
+            CodecKeyValueProof::decode_cfg(encoded.clone(), &(total_digests, ())).unwrap();
+        assert_eq!(decoded, proof);
+        assert!(CodecKeyValueProof::decode_cfg(encoded, &(total_digests - 1, ())).is_err());
     }
 
     #[test]
@@ -994,6 +1015,37 @@ pub mod tests {
             assert_eq!(encoded.len(), proof.encode_size());
             let decoded = CodecExclusionProof::decode_cfg(encoded, &(MAX_DIGESTS, (), ())).unwrap();
             assert_eq!(decoded, proof);
+        }
+    }
+
+    #[test]
+    fn test_exclusion_proof_codec_enforces_total_digest_budget() {
+        let cases = [
+            CodecExclusionProof::KeyValue(
+                sample_op_proof(),
+                Update {
+                    key: Sha256::hash(b"key"),
+                    value: Sha256::hash(b"value"),
+                    next_key: Sha256::hash(b"next-key"),
+                },
+            ),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(b"metadata"))),
+            CodecExclusionProof::Commit(sample_op_proof(), None),
+        ];
+
+        for proof in cases {
+            let total_digests = match &proof {
+                CodecExclusionProof::KeyValue(op_proof, _) => op_proof_digest_count(op_proof),
+                CodecExclusionProof::Commit(op_proof, _) => op_proof_digest_count(op_proof),
+            };
+
+            let encoded = proof.encode();
+            let decoded =
+                CodecExclusionProof::decode_cfg(encoded.clone(), &(total_digests, (), ())).unwrap();
+            assert_eq!(decoded, proof);
+            assert!(
+                CodecExclusionProof::decode_cfg(encoded, &(total_digests - 1, (), ())).is_err()
+            );
         }
     }
 
