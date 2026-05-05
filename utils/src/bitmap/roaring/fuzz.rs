@@ -55,7 +55,7 @@ pub enum MixedOp {
 }
 
 /// Operation scoped to a single 16-bit shelf (single `Container`). Used by the
-/// `ConcentratedShelf` variant to cross the Array→Bitmap and Bitmap↔Run
+/// `ConcentratedShelf` variant to cross the Array->Bitmap and Bitmap↔Run
 /// auto-conversion thresholds repeatedly within one container's lifetime.
 #[derive(Arbitrary, Debug)]
 pub enum ShelfOp {
@@ -126,7 +126,7 @@ pub enum Plan {
         ops: Vec<MixedOp>,
     },
     /// Concentrate many inserts inside a single 16-bit shelf so that
-    /// Array→Bitmap→Run and Run→Bitmap auto-conversion paths get crossed
+    /// Array->Bitmap->Run and Run->Bitmap auto-conversion paths get crossed
     /// repeatedly within one container's lifetime. Codec roundtrip at the end
     /// implicitly verifies `Bitmap::run_count` correctness (decode recomputes
     /// from `words`).

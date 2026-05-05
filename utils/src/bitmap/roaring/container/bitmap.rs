@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn test_run_count_after_insert_range() {
         let mut b = Bitmap::new();
-        // Sparse isolated bits → many runs.
+        // Sparse isolated bits -> many runs.
         for i in 0u16..100 {
             b.insert(i * 2);
         }

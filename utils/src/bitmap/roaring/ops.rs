@@ -344,7 +344,7 @@ mod tests {
         // Both containers in `Bitmap` variant at the same key. Exercises the
         // bitmap-bitmap fast path in `Container::union` (`Bitmap::or_new`).
         // Inserting alternating values past the Array threshold yields a Bitmap with
-        // many isolated runs, well above the Bitmap→Run threshold so it stays Bitmap.
+        // many isolated runs, well above the Bitmap->Run threshold so it stays Bitmap.
         let mut a = Bitmap::new();
         let mut b = Bitmap::new();
         for i in 0..4097u64 {

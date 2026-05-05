@@ -692,7 +692,7 @@ mod tests {
     fn test_auto_convert_array_to_bitmap() {
         let mut container = Container::new();
 
-        // Insert alternating values past the Array→Bitmap threshold.
+        // Insert alternating values past the Array->Bitmap threshold.
         // Using `i * 2` produces isolated singletons, so the resulting Bitmap has many
         // runs (one per inserted value) and stays in Bitmap form rather than auto-
         // converting to Run.
@@ -851,7 +851,7 @@ mod tests {
         // direction triggers. We construct a Bitmap with run_count squarely inside the
         // band and verify a series of small fluctuations does not flip variants.
         let mut c = Container::new();
-        // 2000 isolated singletons → forces conversion to Bitmap (Array overflows at
+        // 2000 isolated singletons -> forces conversion to Bitmap (Array overflows at
         // 4096). Run count = 2000, comfortably between 1500 and 2500.
         for i in 0..2_000u16 {
             c.insert(i * 3); // gaps of 2 keep them isolated
@@ -861,13 +861,13 @@ mod tests {
         for i in 2_000..5_000u16 {
             c.insert(i * 3);
         }
-        // 5000 isolated values → run_count == 5000 → in Bitmap with run_count > 2500.
+        // 5000 isolated values -> run_count == 5000 -> in Bitmap with run_count > 2500.
         assert!(matches!(c, Container::Bitmap(_)));
         // Now collapse some runs to bring run_count into the hysteresis band.
         // Bridging adjacent singletons: insert i*3 + 1 for some i to merge with neighbor.
         // We want to land run_count ~2000.
         // Each bridge between singletons (i*3) and ((i+1)*3) requires filling i*3+1 and
-        // i*3+2. Each bridge removes 1 run net. To go from 5000 → 2000, do ~3000 bridges.
+        // i*3+2. Each bridge removes 1 run net. To go from 5000 -> 2000, do ~3000 bridges.
         for i in 0..3_000u16 {
             c.insert(i * 3 + 1);
             c.insert(i * 3 + 2);
@@ -878,11 +878,11 @@ mod tests {
         // Add a few more inserts that touch run_count up and down by small amounts.
         // None should flip the variant.
         for i in 3_000..3_010u16 {
-            c.insert(i * 3 + 1); // bridges another pair → run_count -= 1 each time
+            c.insert(i * 3 + 1); // bridges another pair -> run_count -= 1 each time
         }
         assert!(matches!(c, Container::Bitmap(_)));
         for i in 6_000..6_010u16 {
-            c.insert(i * 3); // adds an isolated singleton → run_count += 1 each time
+            c.insert(i * 3); // adds an isolated singleton -> run_count += 1 each time
         }
         assert!(matches!(c, Container::Bitmap(_)));
     }

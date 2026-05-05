@@ -52,7 +52,7 @@
 //! | Run    | Data with few maximal runs (any density) | Sorted `Vec<(u16, u16)>` |
 //!
 //! Containers automatically convert between variants on each `insert` /
-//! `insert_range` to maintain a compact representation. The Bitmap→Run
+//! `insert_range` to maintain a compact representation. The Bitmap->Run
 //! transition uses a hysteresis band on the bitmap's run count, so a container
 //! that hovers near break-even doesn't thrash between variants. See the container module
 //! for the full transition table and threshold values.
@@ -281,6 +281,7 @@ impl Bitmap {
             .last_key_value()
             .and_then(|(&key, container)| container.max().map(|index| combine(key, index)))
     }
+
     #[cfg(test)]
     const fn containers(&self) -> &BTreeMap<u64, Container> {
         &self.containers
@@ -398,6 +399,7 @@ impl arbitrary::Arbitrary<'_> for Bitmap {
             if key > MAX_KEY {
                 break;
             }
+
             // `Container::arbitrary` can produce an empty container (zero-length
             // Array/Run, all-zero Bitmap). Bitmap rejects empty containers via
             // `try_from` and the decoder, so skip them here to keep generated
@@ -691,7 +693,7 @@ mod tests {
             }
         }
 
-        // Dense shelves: 5000 alternating values. Above MAX_CARDINALITY (Array→Bitmap)
+        // Dense shelves: 5000 alternating values. Above MAX_CARDINALITY (Array->Bitmap)
         // with run count above the Run-conversion threshold so they stay Bitmap.
         for shelf in 200..400u64 {
             let base = shelf * 65_536;
@@ -700,8 +702,8 @@ mod tests {
             }
         }
 
-        // Run shelves: one contiguous range. After Array→Bitmap conversion at
-        // MAX_CARDINALITY, the single-run state triggers Bitmap→Run.
+        // Run shelves: one contiguous range. After Array->Bitmap conversion at
+        // MAX_CARDINALITY, the single-run state triggers Bitmap->Run.
         for shelf in 400..600u64 {
             let base = shelf * 65_536;
             bitmap.insert_range(base..base + 50_000);
@@ -885,8 +887,8 @@ mod tests {
 
     #[test]
     fn test_byte_size_dense_uses_bitmap_container() {
-        // Force a single container past the Array→Bitmap threshold AND keep it there by
-        // using alternating values that produce many runs, defeating the Bitmap→Run
+        // Force a single container past the Array->Bitmap threshold AND keep it there by
+        // using alternating values that produce many runs, defeating the Bitmap->Run
         // auto-conversion (which fires only when run_count is below the threshold).
         let mut bm = Bitmap::new();
         for i in 0u64..5000 {

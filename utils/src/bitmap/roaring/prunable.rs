@@ -236,8 +236,9 @@ impl Read for Prunable {
                 "pruned_below must be a multiple of 65536",
             ));
         }
-        let bitmap = Bitmap::read_cfg(buf, cfg)?;
+
         // Validate invariant: no container key < pruned_below >> 16.
+        let bitmap = Bitmap::read_cfg(buf, cfg)?;
         let target_key = pruned_below >> 16;
         if let Some((&first_key, _)) = bitmap.containers.first_key_value() {
             if first_key < target_key {
@@ -261,6 +262,7 @@ impl arbitrary::Arbitrary<'_> for Prunable {
             bitmap: Bitmap::arbitrary(u)?,
             pruned_below: 0,
         };
+
         // Pick an arbitrary threshold within the bitmap's value range and apply it.
         // prune_below itself enforces the invariant.
         let max = p.bitmap.max().unwrap_or(0);

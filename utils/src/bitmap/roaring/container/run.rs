@@ -457,6 +457,8 @@ impl arbitrary::Arbitrary<'_> for Run {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
+    use commonware_codec::{Decode, Write};
 
     #[test]
     fn test_new_and_empty() {
@@ -744,9 +746,6 @@ mod tests {
     fn test_codec_rejects_adjacent_runs() {
         // Second run is adjacent (start == prev_end + 1). A correctly-encoded Run
         // would have merged these into a single run.
-        use bytes::BytesMut;
-        use commonware_codec::{Decode, Write};
-
         let runs: Vec<(u16, u16)> = vec![(0, 10), (11, 20)];
         let mut buf = BytesMut::new();
         runs.as_slice().write(&mut buf);
