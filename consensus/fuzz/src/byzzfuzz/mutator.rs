@@ -1,14 +1,15 @@
-//! ByzzFuzz content mutator: wraps `SmallScope` and biases toward
-//! observed-value mutations (replay observed payloads/proposals/certs,
-//! swap resolver request views) before falling back to local edits.
+//! ByzzFuzz content mutator: wraps `SmallScope` and biases vote/nullify
+//! mutations toward observed-value replay (seen payloads, proposals,
+//! finalized/notarized views) before falling back to local edits.
+//! Certificate and resolver byte mutators delegate straight to the inner
+//! `SmallScope` because ByzzFuzz process faults on those channels are
+//! omit-only and never call them.
 
 use crate::{
-    byzzfuzz::observed::{CertKinds, KnownViewKinds, ObservedState},
+    byzzfuzz::observed::{KnownViewKinds, ObservedState},
     strategy::{SmallScope, Strategy},
     EPOCH,
 };
-use bytes::BytesMut;
-use commonware_codec::Write;
 use commonware_consensus::{
     simplex::types::Proposal,
     types::{Epoch, Round, View},
@@ -122,7 +123,23 @@ impl Strategy for ByzzFuzzMutator {
                 }
             }
         }
-        self.inner.mutate_proposal(rng, proposal, a, b, c, d)
+        // SmallScope fallback can also return the original (e.g. parent=0
+        // with saturating_sub(1), or a payload tweak that happens to be a
+        // no-op). Force a distinct proposal by bumping the view by one --
+        // symmetric to the nullify guard: try +1, then -1 for u64::MAX.
+        let mutated = self.inner.mutate_proposal(rng, proposal, a, b, c, d);
+        if mutated != *proposal {
+            return mutated;
+        }
+        let view = proposal.view().get();
+        let bumped = self
+            .inner
+            .proposal_with_view(proposal, view.saturating_add(1));
+        if bumped != *proposal {
+            return bumped;
+        }
+        self.inner
+            .proposal_with_view(proposal, view.saturating_sub(1))
     }
 
     fn mutate_nullify_view(&self, rng: &mut impl Rng, a: u64, b: u64, c: u64, d: u64) -> u64 {
@@ -158,82 +175,16 @@ impl Strategy for ByzzFuzzMutator {
             .unwrap_or_else(|| self.inner.random_payload(rng))
     }
 
+    // Cert and resolver byte mutators are intentionally NOT overridden.
+    // ByzzFuzz process faults on those channels are omit-only (see
+    // `ByzzFuzzInjector::handle`); the trait methods below delegate to
+    // the inner SmallScope so the trait remains usable from other modes
+    // unchanged, but the injector never calls them in Byzzfuzz mode.
     fn mutate_certificate_bytes(&self, rng: &mut impl Rng, cert: &[u8]) -> Vec<u8> {
-        // Higher-signal mutations: replay observed cert bytes (often a
-        // valid cert in a semantically awkward context), or apply a
-        // structural edit. Byte-flip is the fallback parser-fuzzing path.
-        if cert.is_empty() {
-            return self.inner.mutate_certificate_bytes(rng, cert);
-        }
-        match rng.gen_range(0..6) {
-            0 | 1 => {
-                if let Some(observed) = self.pool.random_cert_bytes(rng, CertKinds::ALL) {
-                    if observed != cert {
-                        return observed;
-                    }
-                }
-                self.inner.mutate_certificate_bytes(rng, cert)
-            }
-            2 => {
-                // Tag swap: flip the discriminator byte to a different
-                // valid tag. Certificate enum tag is the first byte (per
-                // simplex/types.rs Write impl).
-                let mut out = cert.to_vec();
-                let new_tag = (out[0].wrapping_add(rng.gen_range(1..3))) % 3;
-                out[0] = new_tag;
-                out
-            }
-            3 => {
-                // Truncate.
-                let n = cert.len();
-                let cut = rng.gen_range(1..=n);
-                cert[..n - cut.min(n)].to_vec()
-            }
-            4 => {
-                // Extend.
-                let mut out = cert.to_vec();
-                let extra = rng.gen_range(1..=16);
-                for _ in 0..extra {
-                    out.push(rng.gen());
-                }
-                out
-            }
-            _ => self.inner.mutate_certificate_bytes(rng, cert),
-        }
+        self.inner.mutate_certificate_bytes(rng, cert)
     }
 
     fn mutate_resolver_bytes(&self, rng: &mut impl Rng, msg: &[u8]) -> Vec<u8> {
-        // Resolver wire: id (8 BE bytes) + tag (1 byte) + payload.
-        // Tag 0 = Request(U64), tag 1 = Response(Bytes), tag 2 = Error.
-        if msg.len() == 17 && msg[8] == 0 {
-            // Request: rewrite the U64 view bytes to an observed view.
-            if let Some(observed) = self.pool.random_resolver_request_view(rng) {
-                let mut current_be = [0u8; 8];
-                current_be.copy_from_slice(&msg[9..17]);
-                let current = u64::from_be_bytes(current_be);
-                if observed != current && rng.gen_bool(0.7) {
-                    let mut out = msg.to_vec();
-                    out[9..17].copy_from_slice(&observed.to_be_bytes());
-                    return out;
-                }
-            }
-        }
-        if msg.len() >= 9 && msg[8] == 1 {
-            // Response: replace embedded cert bytes with an observed cert.
-            if let Some(cert) = self.pool.random_cert_bytes(rng, CertKinds::ALL) {
-                if rng.gen_bool(0.5) {
-                    let mut len_buf = BytesMut::new();
-                    cert.len().write(&mut len_buf);
-                    let mut out = Vec::with_capacity(9 + len_buf.len() + cert.len());
-                    out.extend_from_slice(&msg[..9]);
-                    out.extend_from_slice(&len_buf);
-                    out.extend_from_slice(&cert);
-                    if out != msg {
-                        return out;
-                    }
-                }
-            }
-        }
         self.inner.mutate_resolver_bytes(rng, msg)
     }
 

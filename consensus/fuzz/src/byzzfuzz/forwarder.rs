@@ -37,14 +37,14 @@
 use crate::{
     byzzfuzz::{
         fault::{NetworkFault, ProcessFault},
-        intercept::{Intercept, InterceptChannel, SenderViewCell},
+        intercept::{self, Intercept, InterceptChannel, SenderViewCell},
         log,
         observed::ObservedState,
         scope::{self, FaultScope},
     },
     utils::SetPartition,
 };
-use commonware_codec::{Decode, DecodeExt, RangeCfg, Read};
+use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     simplex::{
         scheme::Scheme,
@@ -150,7 +150,7 @@ fn apply_proc_faults<P: PublicKey>(
         let mut line = String::new();
         let _ = write!(
             line,
-            "byzzfuzz: intercept channel={:?} view={} sender={} targets={:?} seed={} omit={} scope={:?}",
+            "byzzfuzz: intercept channel={:?} view={} sender={} targets={:?} seed={} scheduled_omit={} scope={:?}",
             channel, view, sender_idx, target_idx, fault.seed, fault.omit, fault.scope,
         );
         log::push(line);
@@ -291,7 +291,7 @@ where
                 Some(kept) => Some(Recipients::Some(kept)),
             };
         };
-        pool.observe_certificate::<S, S::PublicKey>(&msg, message.as_ref());
+        pool.observe_certificate::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
         let kind = scope::certificate_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
@@ -351,43 +351,16 @@ where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
-        // Decode the wire shape (8-byte id + 1-byte tag + payload) and fold
-        // any extracted view into the sender's round cell *before* reading
-        // it -- otherwise the resolver send would be filtered against a
-        // stale rnd(m).
-        let bytes = message.as_ref();
-        if bytes.len() >= 9 {
-            let tag = bytes[8];
-            let payload = &bytes[9..];
-            match tag {
-                // Request(U64): exactly 8 BE bytes.
-                0 if payload.len() == 8 => {
-                    let mut be = [0u8; 8];
-                    be.copy_from_slice(payload);
-                    let v = u64::from_be_bytes(be);
-                    pool.observe_resolver_request(v);
-                    sender_view.update(v);
-                }
-                // Response(Bytes): varint length, then exactly that many
-                // certificate bytes.
-                1 => {
-                    let mut buf = payload;
-                    let range: RangeCfg<usize> = (..).into();
-                    if let Ok(len) = usize::read_cfg(&mut buf, &range) {
-                        if buf.len() == len {
-                            let cert_slice = &buf[..len];
-                            if let Ok(c) = Certificate::<S, Sha256Digest>::decode_cfg(
-                                &mut &cert_slice[..],
-                                &cert_codec,
-                            ) {
-                                pool.observe_certificate::<S, S::PublicKey>(&c, cert_slice);
-                                sender_view.update(c.view().get());
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+        // Fold any view carried by the outgoing wire bytes into the
+        // sender's round cell *before* reading it; otherwise the resolver
+        // send would be filtered against a stale rnd(m). Wire decode +
+        // pool observation is shared with the inbound extractor via
+        // `observe_resolver_wire_view` so a future wire-format change has
+        // a single update site.
+        if let Some(v) =
+            intercept::observe_resolver_wire_view::<S>(message.as_ref(), &cert_codec, &pool)
+        {
+            sender_view.update(v);
         }
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);

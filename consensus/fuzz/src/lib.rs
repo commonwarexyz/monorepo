@@ -1424,13 +1424,17 @@ impl FuzzMode for FaultyNet {
 ///   undecodable bytes) -- network partitions are total at their round.
 ///   Outside scheduled views the topology is fully connected.
 /// - **Process faults**: a fixed byzantine identity, whose outgoing
-///   protocol messages are intercepted and corrupted (or omitted) per a
-///   schedule of `(view, receivers, seed, omit, scope)` entries. `scope`
-///   optionally narrows a fault to a specific channel + message kind
-///   (e.g. only Notarize votes); `Any` matches every byzantine outgoing
-///   message at the view. Corruptions are mutations of the *actual*
-///   intercepted message: vote variants are re-signed under the byzantine
-///   identity; certificate and resolver bytes are mutated in place.
+///   protocol messages are intercepted per a schedule of
+///   `(view, receivers, seed, omit, scope)` entries. `scope` optionally
+///   narrows a fault to a specific channel + message kind (e.g. only
+///   Notarize votes); `Any` matches every byzantine outgoing message at
+///   the view. Vote process faults semantically mutate the *actual*
+///   intercepted vote and re-sign it under the byzantine identity (the
+///   byzantine signer can plausibly equivocate). Certificate and resolver
+///   process faults are **omit-only** -- a single byzantine node cannot
+///   forge a valid quorum certificate or a meaningful recovery response,
+///   so the forwarder drops the original to the targeted recipients and
+///   the injector emits nothing on those channels.
 ///
 /// Round attribution uses each message sender's current protocol round
 /// (the maximum view that sender has sent or received): network faults

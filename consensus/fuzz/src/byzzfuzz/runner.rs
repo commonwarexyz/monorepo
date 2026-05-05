@@ -91,21 +91,21 @@ where
         // Intercept queue. Forwarders push (sync); injector consumes (async).
         let (intercept_tx, intercept_rx) = intercept::channel::<PublicKeyOf<P>>();
 
-        // Observed-value pool shared by every extractor (populated by
-        // decoded vote/cert/resolver bytes flowing in either direction)
-        // and by the byzantine injector's mutator (replays observed
-        // payloads / proposals / certs / request views).
+        // Observed-value pool shared by every extractor and by the
+        // byzantine injector's vote mutator (replays observed payloads /
+        // proposals; uses observed notarized/finalized/nullified views
+        // for nullify-target selection).
         let pool = ObservedState::new();
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
 
-        // Cloned byzantine senders for the injector. Grabbed BEFORE
-        // split_with so injector emissions bypass the forwarder.
+        // Cloned byzantine vote sender for the injector. Grabbed BEFORE
+        // split_with so injector emissions bypass the forwarder. Cert and
+        // resolver process faults are omit-only, so no clones needed for
+        // those channels.
         let mut injector_vote_sender = None;
-        let mut injector_cert_sender = None;
-        let mut injector_resolver_sender = None;
 
         for i in 0..config.n as usize {
             let validator = participants[i].clone();
@@ -117,8 +117,6 @@ where
 
             if i == BYZANTINE_IDX {
                 injector_vote_sender = Some(vote_sender.clone());
-                injector_cert_sender = Some(cert_sender.clone());
-                injector_resolver_sender = Some(resolver_sender.clone());
             }
 
             let sender_view = intercept::SenderViewCell::new();
@@ -206,9 +204,10 @@ where
         // Closes the intercept queue once all forwarder-held clones drop.
         drop(intercept_tx);
 
-        // Mutator: observed-value pool first, SmallScope local edits as
-        // fallback. Replays seen payloads / proposals / certs / request
-        // views so byzantine messages stay consensus-relevant.
+        // Vote mutator: observed-value-first replay (seen payloads /
+        // proposals / known views), SmallScope local edits as fallback.
+        // Cert/resolver process faults are omit-only so the injector
+        // doesn't need their senders.
         let injector_ctx = context.with_label("byzzfuzz_injector");
         let injector = ByzzFuzzInjector::new(
             injector_ctx,
@@ -217,8 +216,6 @@ where
         );
         injector.start(
             injector_vote_sender.expect("byzantine vote sender cloned"),
-            injector_cert_sender.expect("byzantine cert sender cloned"),
-            injector_resolver_sender.expect("byzantine resolver sender cloned"),
             intercept_rx,
         );
 

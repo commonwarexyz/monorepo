@@ -41,9 +41,9 @@ use std::{
     },
 };
 
-/// Channel an intercepted message came from. Determines which mutator the
-/// injector applies (vote -> decode + re-sign; cert / resolver -> byte-level
-/// strategy mutation) and which sender clone it sends the result through.
+/// Channel an intercepted message came from. The injector decode-mutates
+/// + re-signs `Vote` content; `Cert` and `Resolver` intercepts are
+/// omit-only (the forwarder's drop is the entire fault).
 #[derive(Clone, Copy, Debug)]
 pub enum InterceptChannel {
     Vote,
@@ -190,7 +190,9 @@ pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
 }
 
 /// Build a `Certificate`-decoding extractor. Also populates the
-/// observed-value pool with the raw cert bytes for later replay.
+/// observed-value pool with certificate-derived views and proposals
+/// (notarized/finalized/nullified view sets, embedded proposal payloads
+/// for Notarization/Finalization).
 pub fn certificate_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
@@ -200,25 +202,23 @@ where
 {
     move |bytes: &[u8]| {
         let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &bytes[..], &cert_codec).ok()?;
-        pool.observe_certificate::<S, S::PublicKey>(&c, bytes);
+        pool.observe_certificate::<S, S::PublicKey>(&c);
         Some(c.view().get())
     }
 }
 
-/// Build a resolver-wire extractor for [`RoundTrackingReceiver`].
+/// Hand-decode a resolver wire message and return its carried view --
+/// `Request(U64)`'s view, or the view of the [`Certificate`] embedded in
+/// `Response(Bytes)`. Returns `None` for `Error`, undecodable payloads,
+/// and trailing-byte violations the real decoder would reject. Folds the
+/// embedded certificate (when present) into the observed-value pool;
+/// request views are not retained because cert/resolver process faults
+/// are omit-only.
 ///
-/// Decodes [`commonware_resolver::p2p`]'s on-wire `Message<U64>` shape and
-/// returns the carried view -- `Request`'s `U64` view, or the
-/// `Response`'s embedded [`Certificate`]'s view. This closes the resolver
-/// inbound rnd(m) attribution loop: a node receiving a fetch request for
-/// view `v` (without ever having voted on `v` itself) raises its
-/// [`SenderViewCell`] to `v`, so any subsequent outbound forwarding is
-/// attributed to `max(v, prior)` rather than the stale prior round.
-///
-/// The wire format (`commonware_resolver::p2p::wire::Message`) is private
-/// to that crate; we hand-decode the small fixed prefix here and only
-/// invoke the canonical [`Certificate`] codec on the response payload, so
-/// no cross-crate visibility change is required.
+/// Single source of truth for the private resolver wire layout
+/// (`commonware_resolver::p2p::wire::Message`); both the outbound
+/// resolver forwarder and the inbound `RoundTrackingReceiver` extractor
+/// call this so a future wire-format change has only one update site.
 ///
 /// Wire layout decoded:
 ///   bytes 0..8   -- `id: u64` (BE) -- ignored;
@@ -227,6 +227,47 @@ where
 ///   tag 1:  varint length + Bytes -- length-prefixed serialized
 ///                                    [`Certificate`];
 ///   tag 2:  no payload.
+pub(crate) fn observe_resolver_wire_view<S: Scheme<Sha256Digest>>(
+    bytes: &[u8],
+    cert_codec: &<S::Certificate as Read>::Cfg,
+    pool: &crate::byzzfuzz::observed::ObservedState,
+) -> Option<u64> {
+    if bytes.len() < 9 {
+        return None;
+    }
+    let tag = bytes[8];
+    let payload = &bytes[9..];
+    match tag {
+        0 => {
+            // Request(U64) -- exactly 8 BE bytes, no trailing data.
+            if payload.len() != 8 {
+                return None;
+            }
+            let mut be = [0u8; 8];
+            be.copy_from_slice(payload);
+            Some(u64::from_be_bytes(be))
+        }
+        1 => {
+            // Response(Bytes) -- varint usize length, then exactly that
+            // many bytes. `Certificate::decode_cfg` enforces exact
+            // consumption inside the cert payload.
+            let mut buf = payload;
+            let range: RangeCfg<usize> = (..).into();
+            let len = usize::read_cfg(&mut buf, &range).ok()?;
+            if buf.len() != len {
+                return None;
+            }
+            let cert_slice = &buf[..len];
+            let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &cert_slice[..], cert_codec)
+                .ok()?;
+            pool.observe_certificate::<S, S::PublicKey>(&c);
+            Some(c.view().get())
+        }
+        // Error / unknown tag / Error-with-junk: do not advance rnd(m).
+        _ => None,
+    }
+}
+
 pub fn resolver_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
@@ -234,54 +275,5 @@ pub fn resolver_view_extractor<S: Scheme<Sha256Digest>>(
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
-    move |bytes: &[u8]| {
-        // The real p2p decode wrapper goes through `V::decode_cfg`, which
-        // rejects messages with trailing bytes. We mirror that strictness
-        // here so the cell never advances on a payload the resolver engine
-        // would itself reject -- otherwise a mutated `Request(view) || junk`
-        // could move `rnd(m)` ahead of what the protocol observes.
-        //
-        // 8-byte id + 1-byte tag minimum.
-        if bytes.len() < 9 {
-            return None;
-        }
-        let tag = bytes[8];
-        let payload = &bytes[9..];
-        match tag {
-            0 => {
-                // Request(U64) -- exactly 8 BE bytes, no trailing data.
-                if payload.len() != 8 {
-                    return None;
-                }
-                let mut be = [0u8; 8];
-                be.copy_from_slice(payload);
-                let view = u64::from_be_bytes(be);
-                pool.observe_resolver_request(view);
-                Some(view)
-            }
-            1 => {
-                // Response(Bytes) -- varint usize length, then exactly that
-                // many bytes (no trailing data after the inner Bytes).
-                // `Certificate::decode_cfg` then enforces exact consumption
-                // of the certificate within those bytes.
-                let mut buf = payload;
-                let range: RangeCfg<usize> = (..).into();
-                let len = usize::read_cfg(&mut buf, &range).ok()?;
-                if buf.len() != len {
-                    return None;
-                }
-                let cert_slice = &buf[..len];
-                let c =
-                    Certificate::<S, Sha256Digest>::decode_cfg(&mut &cert_slice[..], &cert_codec)
-                        .ok()?;
-                pool.observe_certificate::<S, S::PublicKey>(&c, cert_slice);
-                Some(c.view().get())
-            }
-            // Error: no payload -- mirror Decode strictness on trailing bytes.
-            2 if payload.is_empty() => None,
-            // Anything else (including Error with junk, or unknown tag) is
-            // rejected by the canonical decoder; do not advance rnd(m).
-            _ => None,
-        }
-    }
+    move |bytes: &[u8]| observe_resolver_wire_view::<S>(bytes, &cert_codec, &pool)
 }

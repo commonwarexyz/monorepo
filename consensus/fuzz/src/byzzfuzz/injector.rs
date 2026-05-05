@@ -1,14 +1,19 @@
-//! ByzzFuzz process-fault injector. Drives Algorithm 1's *replace* half:
-//! per [`Intercept`] pushed by the byzantine forwarders it decodes the
-//! *actual* intercepted message, applies the strategy mutator (votes are
-//! re-signed with the byzantine keys; certs / resolver are byte-mutated),
-//! and emits the result via cloned senders that bypass the forwarder.
+//! ByzzFuzz process-fault injector.
 //!
-//! One mutation per intercepted byzantine message -- faithful to
-//! `m' = mutate(m, seed)` rather than synthesizing fresh adversarial
-//! messages. The mutator RNG is keyed only by the per-fault `seed`, so
-//! given the same intercepted message, observed-value pool, and seed the
-//! produced fault is identical.
+//! - **Vote**: decode the *actual* intercepted vote, apply the strategy
+//!   mutator semantically, re-sign under the byzantine keys, and emit
+//!   the result via the cloned vote sender (bypasses the forwarder).
+//! - **Certificate / Resolver**: omit-only. The forwarder has already
+//!   dropped the original to the targeted recipients; the injector emits
+//!   nothing. A single byzantine node cannot forge a valid quorum
+//!   certificate or a meaningful recovery response, so byte mutation on
+//!   those channels would be parser-fuzzing rather than consensus-semantic
+//!   byzantine behavior. Omission + partition faults already cover
+//!   delayed/missing certificate and recovery traffic.
+//!
+//! Vote mutation is deterministic: the per-fault RNG is keyed only by the
+//! `seed`, so given the same intercepted message, observed-value pool,
+//! and seed the produced fault is identical.
 
 use crate::{
     byzzfuzz::{
@@ -34,10 +39,9 @@ use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
 use std::sync::Arc;
 
-/// The injector byte-mutates certificate / resolver bytes (no decode) and
-/// re-signs votes via [`Notarize::sign`] / [`Finalize::sign`] /
-/// [`Nullify::sign`]; it has no codec dependency on `S::Certificate::Cfg`,
-/// so unlike the forwarders it does not require `Cfg: Default`.
+/// Re-signs votes via [`Notarize::sign`] / [`Finalize::sign`] /
+/// [`Nullify::sign`]; cert and resolver process faults are omit-only so
+/// no certificate-codec dependency is required.
 pub struct ByzzFuzzInjector<S, St, E>
 where
     S: Scheme<Sha256Digest>,
@@ -64,129 +68,91 @@ where
     }
 
     /// Spawn the injector loop. Runs until `intercept_rx` closes (when all
-    /// forwarder-held senders are dropped at end-of-run).
-    pub fn start<VS, CS, RS>(
+    /// forwarder-held senders are dropped at end-of-run). Only the vote
+    /// sender is needed -- cert / resolver process faults are omit-only.
+    pub fn start<VS>(
         self,
         vote_sender: VS,
-        cert_sender: CS,
-        resolver_sender: RS,
         intercept_rx: UnboundedReceiver<Intercept<S::PublicKey>>,
     ) -> Handle<()>
     where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey> + 'static,
-        CS: commonware_p2p::Sender<PublicKey = S::PublicKey> + 'static,
-        RS: commonware_p2p::Sender<PublicKey = S::PublicKey> + 'static,
     {
         let context = self.context.clone();
-        context.spawn(move |_| self.run(vote_sender, cert_sender, resolver_sender, intercept_rx))
+        context.spawn(move |_| self.run(vote_sender, intercept_rx))
     }
 
-    async fn run<VS, CS, RS>(
+    async fn run<VS>(
         self,
         mut vote_sender: VS,
-        mut cert_sender: CS,
-        mut resolver_sender: RS,
         mut intercept_rx: UnboundedReceiver<Intercept<S::PublicKey>>,
     ) where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
-        CS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
-        RS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
         while let Some(item) = intercept_rx.recv().await {
-            self.handle(
-                &mut vote_sender,
-                &mut cert_sender,
-                &mut resolver_sender,
-                item,
-            )
-            .await;
+            self.handle(&mut vote_sender, item).await;
         }
     }
 
-    async fn handle<VS, CS, RS>(
-        &self,
-        vote_sender: &mut VS,
-        cert_sender: &mut CS,
-        resolver_sender: &mut RS,
-        item: Intercept<S::PublicKey>,
-    ) where
+    async fn handle<VS>(&self, vote_sender: &mut VS, item: Intercept<S::PublicKey>)
+    where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
-        CS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
-        RS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
-        if item.omit {
+        // Cert and resolver process faults are omit-only: a single byzantine
+        // node cannot forge a valid quorum certificate or a meaningful
+        // recovery response, so byte mutation on those channels would be
+        // parser-fuzzing rather than consensus-semantic byzantine behavior.
+        // The forwarder's drop has already removed the original from the
+        // targeted recipients; the injector emits nothing.
+        let omit_only_channel = matches!(
+            item.channel,
+            InterceptChannel::Cert | InterceptChannel::Resolver
+        );
+        if item.omit || omit_only_channel {
+            // `reason` records the *dominant* cause (channel policy beats
+            // schedule); `scheduled_omit` preserves the schedule's flag so
+            // a Cert/Resolver intercept with `scheduled_omit=true` still
+            // shows both facts in the trace.
+            let reason = if omit_only_channel {
+                "omit_only_channel"
+            } else {
+                "scheduled_omit"
+            };
             log::push(format!(
-                "byzzfuzz: omit channel={:?} view={} targets_n={} seed={}",
+                "byzzfuzz: omit channel={:?} view={} targets_n={} seed={} scheduled_omit={} reason={reason}",
                 item.channel,
                 item.view,
                 item.targets.len(),
                 item.fault_seed,
+                item.omit,
             ));
             return;
         }
         // Per-fault deterministic RNG keyed only by `seed`.
         let mut rng = StdRng::seed_from_u64(item.fault_seed);
-        match item.channel {
-            InterceptChannel::Vote => {
-                let Ok(vote) = Vote::<S, Sha256Digest>::decode(IoBuf::from(item.bytes.clone()))
-                else {
-                    log::push(format!(
-                        "byzzfuzz: skip view={} reason=undecodable_vote seed={}",
-                        item.view, item.fault_seed,
-                    ));
-                    return;
-                };
-                let Some((variant, bytes)) = self.mutate_vote(vote, &mut rng) else {
-                    return;
-                };
-                log::push(format!(
-                    "byzzfuzz: replace channel=Vote view={} variant={} targets_n={} seed={}",
-                    item.view,
-                    variant,
-                    item.targets.len(),
-                    item.fault_seed,
-                ));
-                let _ = vote_sender
-                    .send(commonware_p2p::Recipients::Some(item.targets), bytes, true)
-                    .await;
-            }
-            InterceptChannel::Cert => {
-                let mutated = self
-                    .strategy
-                    .mutate_certificate_bytes(&mut rng, &item.bytes);
-                log::push(format!(
-                    "byzzfuzz: replace channel=Cert view={} targets_n={} seed={} bytes={}",
-                    item.view,
-                    item.targets.len(),
-                    item.fault_seed,
-                    mutated.len(),
-                ));
-                let _ = cert_sender
-                    .send(
-                        commonware_p2p::Recipients::Some(item.targets),
-                        mutated,
-                        true,
-                    )
-                    .await;
-            }
-            InterceptChannel::Resolver => {
-                let mutated = self.strategy.mutate_resolver_bytes(&mut rng, &item.bytes);
-                log::push(format!(
-                    "byzzfuzz: replace channel=Resolver view={} targets_n={} seed={} bytes={}",
-                    item.view,
-                    item.targets.len(),
-                    item.fault_seed,
-                    mutated.len(),
-                ));
-                let _ = resolver_sender
-                    .send(
-                        commonware_p2p::Recipients::Some(item.targets),
-                        mutated,
-                        true,
-                    )
-                    .await;
-            }
-        }
+        // Vote is the only channel with content mutation: a byzantine
+        // signer can sign conflicting votes, so semantic mutation +
+        // re-signing under the byzantine keys is meaningful.
+        let Ok(vote) = Vote::<S, Sha256Digest>::decode(IoBuf::from(item.bytes.clone())) else {
+            log::push(format!(
+                "byzzfuzz: skip view={} reason=undecodable_vote seed={}",
+                item.view, item.fault_seed,
+            ));
+            return;
+        };
+        let Some((variant, bytes)) = self.mutate_vote(vote, &mut rng) else {
+            return;
+        };
+        log::push(format!(
+            "byzzfuzz: replace channel=Vote view={} variant={} targets_n={} seed={}",
+            item.view,
+            variant,
+            item.targets.len(),
+            item.fault_seed,
+        ));
+        let _ = vote_sender
+            .send(commonware_p2p::Recipients::Some(item.targets), bytes, true)
+            .await;
     }
 
     /// True per-message mutate: take the actual decoded `Vote`, run the
@@ -222,9 +188,18 @@ where
                 ))
             }
             Vote::Nullify(_) => {
-                let nullify_view = self
+                let mut nullify_view = self
                     .strategy
                     .mutate_nullify_view(rng, view, view, view, view);
+                // Identity guard: a Nullify mutation that returns the same
+                // view re-signs identical content -- a no-op for the
+                // receiver. Force a nearby different view.
+                if nullify_view == view {
+                    nullify_view = view.saturating_add(1);
+                    if nullify_view == view {
+                        nullify_view = view.saturating_sub(1);
+                    }
+                }
                 let round = Round::new(Epoch::new(EPOCH), View::new(nullify_view));
                 let signed = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round)?;
                 Some((

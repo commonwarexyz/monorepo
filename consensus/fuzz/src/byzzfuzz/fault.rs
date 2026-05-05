@@ -6,9 +6,11 @@ use commonware_cryptography::PublicKey;
 
 /// A single ByzzFuzz process fault. When the byzantine sender's `rnd(m)`
 /// equals `view`, its deliveries to anyone in `receivers` whose
-/// channel/kind matches `scope` are replaced by `mutate(_, seed)`. When
-/// `omit` is true the mutation is the empty message set and the injector
-/// emits nothing.
+/// channel/kind matches `scope` are intercepted. The forwarder drops the
+/// original to those receivers; the injector then either replaces it
+/// (Vote: semantic mutation by `seed`, re-signed under the byzantine
+/// keys) or emits nothing (Cert / Resolver: omit-only; or Vote when
+/// `omit` is true).
 #[derive(Clone, Debug)]
 pub struct ProcessFault<P: PublicKey> {
     pub view: u64,

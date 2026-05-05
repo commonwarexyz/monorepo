@@ -1,12 +1,13 @@
-//! Observed-value pool. Forwarders/extractors populate it from successfully
-//! decoded vote/cert/resolver bytes (both outgoing forwarder paths and
-//! inbound `RoundTrackingReceiver`s); the mutator draws from it for
-//! semantic mutations (replay valid certs, reuse seen payloads, swap
-//! resolver request views).
+//! Observed-value pool used by ByzzFuzz vote mutation. Forwarders /
+//! extractors populate it from successfully decoded outgoing and inbound
+//! vote and certificate traffic; the mutator replays seen payloads /
+//! proposals and uses observed notarized/finalized/nullified views to
+//! pick semantically interesting nullify targets. Certificate and
+//! resolver process faults are omit-only so this pool deliberately does
+//! not retain raw cert bytes or resolver request views.
 //!
-//! BTree containers are used everywhere so iteration order is deterministic
-//! across process runs -- selection by RNG-driven index from the same fuzz
-//! input must yield the same observed value every time.
+//! BTree containers are used everywhere so iteration order is
+//! deterministic across process runs.
 
 use commonware_consensus::{
     simplex::types::{Certificate, Proposal, Vote},
@@ -26,10 +27,6 @@ pub struct ObservedState {
     pub notarized_views: Mutex<BTreeSet<u64>>,
     pub finalized_views: Mutex<BTreeSet<u64>>,
     pub nullified_views: Mutex<BTreeSet<u64>>,
-    pub notarization_bytes: Mutex<BTreeMap<u64, Vec<Vec<u8>>>>,
-    pub nullification_bytes: Mutex<BTreeMap<u64, Vec<Vec<u8>>>>,
-    pub finalization_bytes: Mutex<BTreeMap<u64, Vec<Vec<u8>>>>,
-    pub resolver_request_views: Mutex<BTreeSet<u64>>,
 }
 
 impl ObservedState {
@@ -68,7 +65,7 @@ impl ObservedState {
         self.payloads.lock().insert(p.payload);
     }
 
-    pub fn observe_certificate<S, P>(&self, c: &Certificate<S, Sha256Digest>, bytes: &[u8])
+    pub fn observe_certificate<S, P>(&self, c: &Certificate<S, Sha256Digest>)
     where
         S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest, PublicKey = P>,
         P: PublicKey,
@@ -78,34 +75,15 @@ impl ObservedState {
             Certificate::Notarization(n) => {
                 self.notarized_views.lock().insert(view);
                 self.observe_proposal(&n.proposal);
-                self.notarization_bytes
-                    .lock()
-                    .entry(view)
-                    .or_default()
-                    .push(bytes.to_vec());
             }
             Certificate::Nullification(_) => {
                 self.nullified_views.lock().insert(view);
-                self.nullification_bytes
-                    .lock()
-                    .entry(view)
-                    .or_default()
-                    .push(bytes.to_vec());
             }
             Certificate::Finalization(f) => {
                 self.finalized_views.lock().insert(view);
                 self.observe_proposal(&f.proposal);
-                self.finalization_bytes
-                    .lock()
-                    .entry(view)
-                    .or_default()
-                    .push(bytes.to_vec());
             }
         }
-    }
-
-    pub fn observe_resolver_request(&self, view: u64) {
-        self.resolver_request_views.lock().insert(view);
     }
 
     pub fn random_payload(&self, rng: &mut impl rand::Rng) -> Option<Sha256Digest> {
@@ -166,37 +144,6 @@ impl ObservedState {
         }
         Some(union[rng.gen_range(0..union.len())])
     }
-
-    pub fn random_resolver_request_view(&self, rng: &mut impl rand::Rng) -> Option<u64> {
-        let v = self.resolver_request_views.lock();
-        if v.is_empty() {
-            return None;
-        }
-        v.iter().nth(rng.gen_range(0..v.len())).copied()
-    }
-
-    pub fn random_cert_bytes(&self, rng: &mut impl rand::Rng, kinds: CertKinds) -> Option<Vec<u8>> {
-        let mut all: Vec<Vec<u8>> = Vec::new();
-        if kinds.notarization {
-            for v in self.notarization_bytes.lock().values() {
-                all.extend_from_slice(v);
-            }
-        }
-        if kinds.nullification {
-            for v in self.nullification_bytes.lock().values() {
-                all.extend_from_slice(v);
-            }
-        }
-        if kinds.finalization {
-            for v in self.finalization_bytes.lock().values() {
-                all.extend_from_slice(v);
-            }
-        }
-        if all.is_empty() {
-            return None;
-        }
-        Some(all.swap_remove(rng.gen_range(0..all.len())))
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -204,19 +151,4 @@ pub struct KnownViewKinds {
     pub notarized: bool,
     pub finalized: bool,
     pub nullified: bool,
-}
-
-#[derive(Clone, Copy)]
-pub struct CertKinds {
-    pub notarization: bool,
-    pub nullification: bool,
-    pub finalization: bool,
-}
-
-impl CertKinds {
-    pub const ALL: Self = Self {
-        notarization: true,
-        nullification: true,
-        finalization: true,
-    };
 }

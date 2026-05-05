@@ -4,9 +4,10 @@
 //! sampled without replacement, and process receiver subsets are
 //! non-empty. Each *process* fault carries a
 //! [`super::scope::FaultScope`] for per-(channel, kind) targeting;
-//! network faults are total at their view. Content mutation of
-//! intercepted messages is delegated to [`crate::strategy::Strategy`]
-//! (`SmallScope` is forced by the runner).
+//! network faults are total at their view. Vote process faults are
+//! semantically mutated + re-signed (see
+//! [`super::injector::ByzzFuzzInjector`]); cert and resolver process
+//! faults are omit-only.
 
 use crate::{
     byzzfuzz::{
