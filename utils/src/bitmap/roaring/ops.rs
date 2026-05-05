@@ -64,12 +64,18 @@ impl Bitmap {
         let mut result = BTreeMap::new();
         let mut remaining = limit;
 
-        for (&key, container) in self.containers.iter() {
+        let (smaller, larger) = if self.containers.len() <= other.containers.len() {
+            (&self.containers, &other.containers)
+        } else {
+            (&other.containers, &self.containers)
+        };
+
+        for (&key, container) in smaller.iter() {
             if remaining == 0 {
                 break;
             }
 
-            if let Some(other_container) = other.containers.get(&key) {
+            if let Some(other_container) = larger.get(&key) {
                 let (container, count) = container.intersection(other_container, remaining);
                 if count > 0 {
                     result.insert(key, container);
@@ -311,10 +317,12 @@ mod tests {
 
         let mut a = Bitmap::new();
         let mut b = Bitmap::new();
-        // 4000 even + 4000 odd values in shelf 0; each side stays in Array variant.
+        // Two interleaved every-fourth-value sequences in shelf 0; each side stays in
+        // Array variant. The union forms 4000 two-element runs (e.g. 0,1, 4,5, 8,9, ...),
+        // which exceeds RUN_TO_BITMAP_THRESHOLD and thus normalizes to Bitmap (not Run).
         for i in 0..4000u64 {
-            a.insert(i * 2);
-            b.insert(i * 2 + 1);
+            a.insert(i * 4);
+            b.insert(i * 4 + 1);
         }
         assert!(matches!(
             a.containers().get(&0).unwrap(),
