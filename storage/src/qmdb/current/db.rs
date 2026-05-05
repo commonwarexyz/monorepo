@@ -1029,7 +1029,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{mmb, mmr},
+        merkle::{mmb, mmr, Bagging::ForwardFold},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let r1 = combine_roots(&hasher, &ops, &grafted, None);
@@ -1089,7 +1089,7 @@ mod tests {
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
@@ -1101,7 +1101,7 @@ mod tests {
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");

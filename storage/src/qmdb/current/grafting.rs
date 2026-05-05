@@ -392,7 +392,7 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
         bagging: merkle::Bagging,
     ) -> Self {
         Self {
-            hasher: merkle::hasher::Standard::with_bagging(bagging),
+            hasher: merkle::hasher::Standard::new(bagging),
             grafting_height,
             chunks,
             start_chunk_index,
@@ -567,6 +567,7 @@ mod tests {
         merkle::{
             conformance::{build_test_mem, build_test_mmr},
             mem::Mem,
+            Bagging::ForwardFold,
         },
         mmb, mmr,
         mmr::{
@@ -607,7 +608,7 @@ mod tests {
         if !chunks.is_empty() {
             // Use a separate hasher for leaf digest computation to avoid borrow conflict
             // with grafted_hasher (which borrows standard via fork()).
-            let leaf_hasher = StandardHasher::<Sha256>::new();
+            let leaf_hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let batch = {
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -639,7 +640,7 @@ mod tests {
 
         if !chunks.is_empty() {
             let ops_size = ops.size();
-            let leaf_hasher = StandardHasher::<Sha256>::new();
+            let leaf_hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let merkleized = {
                 let mut batch = grafted_tree.new_batch();
                 for (chunk_idx, chunk) in chunks.iter().enumerate() {
@@ -759,7 +760,7 @@ mod tests {
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let standard: StandardHasher<Sha256> = StandardHasher::new();
+            let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
             let mmr = Mmr::new();
             let ops_mmr = build_test_mmr(&standard, mmr, NUM_ELEMENTS);
 
@@ -802,7 +803,7 @@ mod tests {
 
     #[test_traced]
     fn test_merkleize_grafted() {
-        let standard: StandardHasher<Sha256> = StandardHasher::new();
+        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
@@ -826,7 +827,7 @@ mod tests {
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let batch = {
-            let leaf_hasher = StandardHasher::<Sha256>::new();
+            let leaf_hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()
@@ -859,7 +860,7 @@ mod tests {
             let b2 = Sha256::fill(0x02);
             let b3 = Sha256::fill(0x03);
             let b4 = Sha256::fill(0x04);
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
 
             // Build an ops MMR with 4 leaves.
             let mut ops_mmr = Mmr::new();
@@ -918,7 +919,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
@@ -936,7 +937,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         1,
                         vec![&c2],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
@@ -957,7 +958,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         1,
                         vec![&c2],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
@@ -980,7 +981,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
@@ -989,7 +990,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         2,
                         vec![&c2],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
                 }
@@ -1009,7 +1010,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1, &c2],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(proof.verify_range_inclusion(
                         &verifier,
@@ -1023,7 +1024,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1],
-                        merkle::Bagging::ForwardFold,
+                        ForwardFold,
                     );
                     assert!(!proof.verify_range_inclusion(
                         &verifier,
@@ -1072,20 +1073,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let verifier = Verifier::<mmr::Family, Sha256>::new(
-                GRAFTING_HEIGHT,
-                0,
-                vec![&c1],
-                merkle::Bagging::ForwardFold,
-            );
+            let verifier =
+                Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1], ForwardFold);
             assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
-            let verifier = Verifier::<mmr::Family, Sha256>::new(
-                GRAFTING_HEIGHT,
-                0,
-                vec![],
-                merkle::Bagging::ForwardFold,
-            );
+            let verifier =
+                Verifier::<mmr::Family, Sha256>::new(GRAFTING_HEIGHT, 0, vec![], ForwardFold);
             let loc = Location::new(4);
             let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                 .await
@@ -1097,7 +1090,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_mmr_basic() {
         let grafting_height = 1u32;
-        let standard: StandardHasher<Sha256> = StandardHasher::new();
+        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
 
         // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
@@ -1131,7 +1124,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_mmr_with_pruning() {
         let grafting_height = 1u32;
-        let standard: StandardHasher<Sha256> = StandardHasher::new();
+        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
 
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
@@ -1166,7 +1159,7 @@ mod tests {
         executor.start(|_| async move {
             type F = mmb::Family;
 
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
             let grafting_height = 2u32;
             let mut exercised = 0usize;
 
@@ -1229,7 +1222,7 @@ mod tests {
     fn test_grafted_leaf_digests_mmb_for_multi_peak_chunks() {
         type F = mmb::Family;
 
-        let hasher: StandardHasher<Sha256> = StandardHasher::new();
+        let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
         let grafting_height = 2u32;
         let mut exercised = 0usize;
 

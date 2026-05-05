@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
-use commonware_storage::{MerkleizedBitMap, UnmerkleizedBitMap};
+use commonware_storage::{merkle::Bagging::ForwardFold, MerkleizedBitMap, UnmerkleizedBitMap};
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
@@ -59,7 +59,7 @@ fn fuzz(input: FuzzInput) {
     const PARTITION: &str = "fuzz-mmr-bitmap-test-partition";
 
     runner.start(|context| async move {
-        let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
+        let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new(ForwardFold);
         let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
             context.with_label("bitmap"),
             PARTITION,

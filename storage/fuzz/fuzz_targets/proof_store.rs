@@ -4,7 +4,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::merkle::{
-    self, mmb, mmr, verification::ProofStore, Family as MerkleFamily, Location, Position, Proof,
+    self, mmb, mmr, verification::ProofStore, Bagging::BackwardFold, Family as MerkleFamily,
+    Location, Position, Proof,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -57,7 +58,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
-    let hasher = merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
         inactive_peaks: input.inactive_peaks,

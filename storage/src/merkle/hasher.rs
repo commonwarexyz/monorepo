@@ -1,6 +1,10 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use crate::merkle::{Bagging, Error, Family, Location, Position};
+use crate::merkle::{
+    Bagging,
+    Bagging::{BackwardFold, ForwardFold},
+    Error, Family, Location, Position,
+};
 use alloc::vec::Vec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
@@ -154,27 +158,22 @@ pub struct Standard<H: CHasher> {
 }
 
 impl<H: CHasher> Standard<H> {
-    /// Creates a new [Standard] hasher with the default forward-fold bagging.
-    pub const fn new() -> Self {
-        Self::forward()
-    }
-
-    /// Creates a new [Standard] hasher with forward-fold bagging.
-    pub const fn forward() -> Self {
-        Self::with_bagging(Bagging::ForwardFold)
-    }
-
-    /// Creates a new [Standard] hasher with backward-fold bagging.
-    pub const fn backward() -> Self {
-        Self::with_bagging(Bagging::BackwardFold)
-    }
-
     /// Creates a new [Standard] hasher with the given bagging policy.
-    pub const fn with_bagging(bagging: Bagging) -> Self {
+    pub const fn new(bagging: Bagging) -> Self {
         Self {
             _hasher: PhantomData,
             bagging,
         }
+    }
+
+    /// Creates a new [Standard] hasher with forward-fold bagging.
+    pub const fn forward() -> Self {
+        Self::new(ForwardFold)
+    }
+
+    /// Creates a new [Standard] hasher with backward-fold bagging.
+    pub const fn backward() -> Self {
+        Self::new(BackwardFold)
     }
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
@@ -189,12 +188,6 @@ impl<H: CHasher> Standard<H> {
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
         self.hash(core::iter::once(data))
-    }
-}
-
-impl<H: CHasher> Default for Standard<H> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -225,7 +218,10 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Location, Position, StandardHasher as Standard};
+    use crate::merkle::{
+        mmr::{Location, Position, StandardHasher as Standard},
+        Bagging::ForwardFold,
+    };
     use alloc::vec::Vec;
     use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
 
@@ -292,7 +288,7 @@ mod tests {
     }
 
     fn test_leaf_digest<H: CHasher>() {
-        let mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
@@ -310,7 +306,7 @@ mod tests {
     }
 
     fn test_node_digest<H: CHasher>() {
-        let mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
 
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
@@ -345,7 +341,7 @@ mod tests {
     }
 
     fn test_root<H: CHasher>() {
-        let mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);

@@ -417,7 +417,7 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
-        merkle::{self, mmb, mmr},
+        merkle::{self, mmb, mmr, Bagging::ForwardFold},
         qmdb::{
             self,
             any::{
@@ -3680,7 +3680,7 @@ pub mod tests {
             ));
 
             // Sanity: the plain Merkle default must not accept this proof.
-            let plain = Standard::<Sha256>::new();
+            let plain = Standard::<Sha256>::new(ForwardFold);
             assert!(!verify_proof(
                 &plain,
                 &proof,

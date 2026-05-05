@@ -12,6 +12,7 @@ mod tests {
     use crate::merkle::{
         hasher::{Hasher as _, Standard},
         mmb::{Error, Location, Position},
+        Bagging::ForwardFold,
     };
     use commonware_cryptography::Sha256;
 
@@ -19,7 +20,7 @@ mod tests {
     type H = Standard<Sha256>;
 
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mmb = Mmb::new();
         let batch = {
             let mut batch = mmb.new_batch();
@@ -34,7 +35,7 @@ mod tests {
 
     #[test]
     fn test_append_and_size() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mmb = Mmb::new();
 
         for i in 0u64..8 {
@@ -161,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_init_size_validation() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
 
         assert!(Mmb::<D>::init(Config {
             nodes: vec![],

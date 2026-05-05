@@ -5,7 +5,10 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Bagging, Family},
+        merkle::{
+            hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Bagging, Bagging::ForwardFold,
+            Family,
+        },
         mmb::Location,
     };
     use commonware_cryptography::Sha256;
@@ -15,7 +18,7 @@ mod tests {
 
     /// Build an in-memory MMB with `n` elements (element i = i.to_be_bytes()).
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mmb = Mmb::new();
         let batch = {
             let mut batch = mmb.new_batch();
@@ -58,7 +61,7 @@ mod tests {
     fn test_last_element_proof_size_is_two() {
         // An MMB property is that the most recent item always has a small proof
         // (at most 2 digests). Verify this holds as the tree grows.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let (_, mut mmb) = make_mmb(1000);
         let mut n = 1000u64;
 

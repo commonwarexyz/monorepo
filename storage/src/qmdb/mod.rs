@@ -80,7 +80,7 @@ pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
 /// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
 pub const fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
-    StandardHasher::with_bagging(ROOT_BAGGING)
+    StandardHasher::new(ROOT_BAGGING)
 }
 
 /// Look up the inactivity floor declared at the commit immediately preceding `op_count`.

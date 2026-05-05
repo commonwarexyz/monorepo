@@ -1243,6 +1243,7 @@ mod tests {
         mem::Mem,
         mmb, mmr,
         proof::{nodes_required_for_multi_proof, Blueprint, Proof},
+        Bagging::ForwardFold,
         Family, Location, LocationRangeExt as _,
     };
     use alloc::vec;
@@ -1297,7 +1298,7 @@ mod tests {
 
     /// Hasher tuned for `bagging` so callers can mix forward/backward and full/split policies.
     fn hasher_for_bagging(bagging: Bagging) -> H {
-        Standard::with_bagging(bagging)
+        Standard::new(bagging)
     }
 
     fn push_unique_shape(shapes: &mut Vec<(Bagging, usize)>, shape: (Bagging, usize)) {
@@ -1340,7 +1341,7 @@ mod tests {
     }
 
     fn range_proofs_verify_for_supported_root_shapes<F: Family>() {
-        let mem = build_raw::<F>(&H::new(), 123);
+        let mem = build_raw::<F>(&H::new(ForwardFold), 123);
         let leaves = mem.leaves();
 
         for (bagging, inactive_peaks) in supported_root_shapes::<F>(leaves) {
@@ -1387,7 +1388,7 @@ mod tests {
     }
 
     fn multi_proofs_verify_for_supported_root_shapes<F: Family>() {
-        let mem = build_raw::<F>(&H::new(), 123);
+        let mem = build_raw::<F>(&H::new(ForwardFold), 123);
         let leaves = mem.leaves();
 
         for (bagging, inactive_peaks) in supported_root_shapes::<F>(leaves) {
@@ -1554,7 +1555,7 @@ mod tests {
 
     fn empty_proof<F: Family>() {
         // Test that an empty proof authenticates an empty structure.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mem = Mem::<F, D>::new();
         let root = plain_root(&mem, &hasher);
         let proof: Proof<F, D> = Proof::default();
@@ -1591,7 +1592,7 @@ mod tests {
     fn verify_element<F: Family>() {
         // Create an 11 element structure and test single-element inclusion proofs.
         let element = D::from(*b"01234567012345670123456701234567");
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let batch = {
             let mut batch = mem.new_batch();
@@ -1680,7 +1681,7 @@ mod tests {
 
     fn verify_range<F: Family>() {
         // Create a structure and add 49 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -1795,7 +1796,7 @@ mod tests {
 
     fn retained_nodes_provable_after_pruning<F: Family>() {
         // Create a structure and add 49 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -1833,7 +1834,7 @@ mod tests {
 
     fn ranges_provable_after_pruning<F: Family>() {
         // Create a structure and add 49 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -1901,7 +1902,7 @@ mod tests {
 
     fn proof_serialization<F: Family>() {
         // Create a structure and add 25 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..25).map(test_digest).collect();
         let batch = {
@@ -1968,7 +1969,7 @@ mod tests {
 
     fn multi_proof_generation_and_verify<F: Family>() {
         // Create a structure with 20 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..20).map(test_digest).collect();
         let batch = {
@@ -2114,7 +2115,7 @@ mod tests {
         ));
 
         // Empty multi-proof.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let empty_mem = Mem::<F, D>::new();
         let empty_root = plain_root(&empty_mem, &hasher);
         let empty_proof: Proof<F, D> = Proof::default();
@@ -2131,7 +2132,7 @@ mod tests {
     }
 
     fn multi_proof_deduplication<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..30).map(test_digest).collect();
         let batch = {
@@ -2179,7 +2180,7 @@ mod tests {
     }
 
     fn proof_leaves_malleability<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
 
         // 252 leaves. Leaf 240 sits in a peak preceded by prefix peaks.
@@ -2264,7 +2265,7 @@ mod tests {
 
     fn single_element_proof_reconstruction<F: Family>() {
         for n in 1u64..=64 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2286,7 +2287,7 @@ mod tests {
 
     fn range_proof_reconstruction<F: Family>() {
         for n in 2u64..=32 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2323,7 +2324,7 @@ mod tests {
 
     fn verify_element_inclusion<F: Family>() {
         for n in 1u64..=32 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2352,7 +2353,7 @@ mod tests {
 
     fn full_range<F: Family>() {
         for n in 1u64..=32 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2375,7 +2376,7 @@ mod tests {
     }
 
     fn empty_proof_verifies_empty_tree<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mem = Mem::<F, D>::new();
         let root = plain_root(&mem, &hasher);
         let proof = Proof::<F, D>::default();
@@ -2403,7 +2404,7 @@ mod tests {
 
     fn every_element_contributes_to_root<F: Family>() {
         for n in [8u64, 13, 20, 32] {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2433,7 +2434,7 @@ mod tests {
     }
 
     fn multi_proof_generation_and_verify_raw<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mem = build_raw::<F>(&hasher, 20);
         let root = plain_root(&mem, &hasher);
 
@@ -2497,7 +2498,7 @@ mod tests {
         ));
 
         // Empty multi-proof on empty tree.
-        let hasher2 = H::new();
+        let hasher2 = H::new(ForwardFold);
         let empty_mem = Mem::<F, D>::new();
         let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
@@ -2521,7 +2522,7 @@ mod tests {
 
     fn tampered_proof_digests_rejected<F: Family>() {
         for n in [8u64, 13, 20, 32] {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2547,7 +2548,7 @@ mod tests {
     fn no_duplicate_positions<F: Family>() {
         use alloc::collections::BTreeSet;
         for n in 1u64..=64 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let leaves = mem.leaves();
             for loc in 0..n {
@@ -2595,7 +2596,7 @@ mod tests {
             (2000, 500),
         ];
 
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         for &(n, start) in cases {
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);

@@ -15,6 +15,7 @@ use crate::{
         full::Merkle,
         hasher::{Hasher as _, Standard as StandardHasher},
         mem::Mem,
+        Bagging::ForwardFold,
         Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
@@ -226,7 +227,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     {
         UnmerkleizedBatch {
             inner: self.inner.new_batch(),
-            hasher: StandardHasher::new(),
+            hasher: StandardHasher::new(ForwardFold),
             items: Vec::new(),
             parent: Some(Arc::clone(self)),
         }
@@ -318,7 +319,7 @@ where
         let root = self.merkle.to_batch();
         UnmerkleizedBatch {
             inner: root.new_batch(),
-            hasher: StandardHasher::new(),
+            hasher: StandardHasher::new(ForwardFold),
             items: Vec::new(),
             parent: None,
         }
@@ -709,7 +710,7 @@ macro_rules! impl_journal_new {
                     $journal_mod::Journal::init(context.with_label("journal"), journal_cfg).await?;
                 journal.rewind_to(rewind_predicate).await?;
 
-                let hasher = StandardHasher::<H>::with_bagging(bagging);
+                let hasher = StandardHasher::<H>::new(bagging);
                 let mut merkle =
                     Merkle::init(context.with_label("merkle"), &hasher, merkle_cfg).await?;
                 Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
@@ -934,7 +935,7 @@ mod tests {
             merkle_cfg,
             journal_cfg,
             |op: &TestOp<F>| op.is_commit(),
-            crate::merkle::Bagging::ForwardFold,
+            ForwardFold,
         )
         .await
         .unwrap()
@@ -981,7 +982,7 @@ mod tests {
         ContiguousJournal<deterministic::Context, TestOp<F>>,
         StandardHasher<Sha256>,
     ) {
-        let hasher = StandardHasher::new();
+        let hasher = StandardHasher::new(ForwardFold);
         let merkle = Merkle::<F, _, Digest>::init(
             context.with_label("mmr"),
             &hasher,
@@ -1378,7 +1379,7 @@ mod tests {
                 merkle_cfg,
                 journal_cfg,
                 |op| op.is_commit(),
-                crate::merkle::Bagging::ForwardFold,
+                ForwardFold,
             )
             .await
             .unwrap();
@@ -1958,7 +1959,7 @@ mod tests {
         }
 
         // Verify the proof is valid
-        let hasher = StandardHasher::new();
+        let hasher = StandardHasher::new(ForwardFold);
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
@@ -2000,7 +2001,7 @@ mod tests {
         }
 
         // Verify the proof is valid
-        let hasher = StandardHasher::new();
+        let hasher = StandardHasher::new(ForwardFold);
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
@@ -2047,7 +2048,7 @@ mod tests {
         }
 
         // Verify the proof is valid
-        let hasher = StandardHasher::new();
+        let hasher = StandardHasher::new(ForwardFold);
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
@@ -2141,7 +2142,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "proof_historical", 50).await;
 
         // Capture root at historical state
-        let hasher = StandardHasher::new();
+        let hasher = StandardHasher::new(ForwardFold);
         let historical_root = journal_root(&journal);
         let historical_size = journal.size().await;
 
