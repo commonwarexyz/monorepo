@@ -447,6 +447,7 @@ where
                                 reason = "block building failed",
                                 "skipping proposal"
                             );
+                            build_timer.observe(&runtime_context);
                             return;
                         }
                     },

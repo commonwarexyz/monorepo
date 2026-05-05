@@ -1191,8 +1191,12 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper =
-                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+                let mut wrapper = Wrapper::new(
+                    kind,
+                    context.child("wrapper_under_test"),
+                    mock_app,
+                    marshal.clone(),
+                );
 
                 // Non-boundary propose should drop the response because mock app cannot build.
                 let non_boundary_context = Ctx {
@@ -1204,6 +1208,12 @@ mod tests {
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
+                );
+                assert!(
+                    context
+                        .encode()
+                        .contains("wrapper_under_test_build_duration_count 1"),
+                    "{kind:?}: failed application builds should still be timed"
                 );
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
