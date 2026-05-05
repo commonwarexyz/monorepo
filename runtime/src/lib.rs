@@ -167,14 +167,43 @@ stability_scope!(BETA {
     }
 
     /// Interface for creating supervised child contexts and carrying context identity.
+    ///
+    /// # Mental Model: Identity, Metrics, and Tracing
+    ///
+    /// A context carries multiple pieces of observability state. They compose
+    /// freely, but they do not all feed into the same sinks:
+    ///
+    /// - `label` (set by [`Supervisor::child`]): prefix applied to metrics
+    ///   registered with [`Metrics::register`]. It also populates the `name`
+    ///   field of runtime-internal task metrics (`runtime_tasks_spawned`,
+    ///   `runtime_tasks_running`).
+    /// - `attributes` (set by [`Supervisor::with_attribute`]): Prometheus label
+    ///   dimensions on metrics registered with [`Metrics::register`]. They are
+    ///   also emitted as OpenTelemetry attributes on the per-task tracing span
+    ///   when [`Tracing::with_span`] is enabled. Runtime task metrics ignore
+    ///   attributes to keep their cardinality bounded.
+    /// - `span` (set by [`Tracing::with_span`]): wraps the next spawned task in
+    ///   a `tracing` span populated from the current `label` and `attributes`.
+    ///   It never touches metrics.
+    ///
+    /// | Builder | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span |
+    /// | --- | :---: | :---: | :---: | :---: |
+    /// | `child` | prefix | - | `name` | `name` field when `with_span` is set |
+    /// | `with_attribute` | - | label dimension | - | OTel attribute when `with_span` is set |
+    /// | `with_span` | - | - | - | enables span creation |
     pub trait Supervisor: Send + Sync + 'static {
         /// Return the current label prefix and attributes.
         fn name(&self) -> Name;
 
         /// Create a named child context with a new supervision-tree node.
         ///
-        /// Labels must be static role names. Dynamic values belong in
+        /// This appends `label` to the current metric prefix and creates a
+        /// child in the supervision tree. Use static role names like
+        /// `"engine"`, `"worker"`, or `"resolver"`. Dynamic values belong in
         /// [`Supervisor::with_attribute`] so metric names remain bounded.
+        ///
+        /// Labels must start with `[a-zA-Z]` and contain only
+        /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
         #[must_use]
         fn child(&self, label: &'static str) -> Self
         where
@@ -182,8 +211,68 @@ stability_scope!(BETA {
 
         /// Add a key-value attribute to this context's identity.
         ///
-        /// This consumes the handle and does not create a supervision-tree edge.
-        /// If the key already exists, its value is replaced.
+        /// Attributes are attached to metrics registered in this context and
+        /// any child contexts. Unlike [`Supervisor::child`], attributes do not
+        /// affect metric names and do not create a supervision-tree edge. This
+        /// makes them the right place for dynamic values like epochs, rounds,
+        /// shards, or peer identifiers.
+        ///
+        /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+        /// Values can be any string. If the key already exists, its value is
+        /// replaced.
+        ///
+        /// ```text
+        /// context
+        ///   |-- child("orchestrator")
+        ///         |-- with_attribute("epoch", "5")
+        ///               |-- counter: votes      -> orchestrator_votes{epoch="5"}
+        ///               |-- counter: proposals  -> orchestrator_proposals{epoch="5"}
+        ///               |-- child("engine")
+        ///                     |-- gauge: height -> orchestrator_engine_height{epoch="5"}
+        /// ```
+        ///
+        /// This pattern avoids wrapping every metric in a `Family` and avoids
+        /// putting dynamic values in metric names like
+        /// `orchestrator_epoch_5_votes`.
+        ///
+        /// Attributes do not reduce cardinality. N epochs still means N time
+        /// series. They just make metrics easier to query, filter, and
+        /// aggregate.
+        ///
+        /// # Family Label Conflicts
+        ///
+        /// When using `Family` metrics, avoid attribute keys that match the
+        /// family's label field names. A conflict produces duplicate labels in
+        /// the encoded output, which is invalid Prometheus format.
+        ///
+        /// ```ignore
+        /// #[derive(EncodeLabelSet)]
+        /// struct Labels { env: String }
+        ///
+        /// // Bad: attribute "env" conflicts with Family field "env".
+        /// let ctx = context.child("api").with_attribute("env", "prod");
+        /// let family: Family<Labels, Counter> = Family::default();
+        /// ctx.register("requests", "help", family);
+        ///
+        /// // Good: use distinct names.
+        /// let ctx = context.child("api").with_attribute("region", "us_east");
+        /// ```
+        ///
+        /// # Querying The Latest Attribute
+        ///
+        /// To query the latest attribute value dynamically, create a gauge to
+        /// track the current value:
+        ///
+        /// ```ignore
+        /// let latest_epoch = context
+        ///     .child("orchestrator")
+        ///     .register("latest_epoch", "current epoch", Gauge::default());
+        /// latest_epoch.set(current_epoch);
+        /// ```
+        ///
+        /// A dashboard can then query `max(orchestrator_latest_epoch)` and use
+        /// the result as a variable in queries such as
+        /// `consensus_engine_votes_total{epoch="$latest_epoch"}`.
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self
         where
@@ -192,7 +281,7 @@ stability_scope!(BETA {
 
     /// Interface that any task scheduler must implement to spawn tasks.
     pub trait Spawner: Supervisor {
-        /// Configure the next spawned task to run on the runtime's shared executor.
+        /// Return a [`Spawner`] that schedules the next task onto the runtime's shared executor.
         ///
         /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
         /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
@@ -200,27 +289,19 @@ stability_scope!(BETA {
         /// [`Spawner::dedicated`] instead.
         ///
         /// The shared executor with `blocking == false` is the default spawn mode.
-        #[must_use = "the spawn builder must be used to spawn a task"]
-        fn shared(self, blocking: bool) -> SpawnBuilder<Self>
+        fn shared(self, blocking: bool) -> Self
         where
-            Self: Sized,
-        {
-            SpawnBuilder::new(self, Execution::Shared(blocking))
-        }
+            Self: Sized;
 
-        /// Configure the next spawned task to run on a dedicated thread when the runtime supports it.
+        /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
         ///
         /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
         /// shared executor.
         ///
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
-        #[must_use = "the spawn builder must be used to spawn a task"]
-        fn dedicated(self) -> SpawnBuilder<Self>
+        fn dedicated(self) -> Self
         where
-            Self: Sized,
-        {
-            SpawnBuilder::new(self, Execution::Dedicated)
-        }
+            Self: Sized;
 
         /// Spawn a task with the current context.
         ///
@@ -250,26 +331,13 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// [`Spawner::dedicated`] and [`Spawner::shared`] return a [`SpawnBuilder`], so executor
-        /// configuration is consumed by the next spawn and cannot be accidentally carried through later
-        /// identity or observability changes.
+        /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
+        /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
+        /// both start child task contexts from a clean spawn configuration.
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-        where
-            Self: Sized,
-            F: FnOnce(Self) -> Fut + Send + 'static,
-            Fut: Future<Output = T> + Send + 'static,
-            T: Send + 'static;
-
-        /// Spawn a task using an explicit execution mode.
-        ///
-        /// Most callers should use [`Spawner::spawn`], [`Spawner::shared`], or
-        /// [`Spawner::dedicated`]. Runtime implementations provide this hook so
-        /// [`SpawnBuilder`] can consume one-time spawn configuration without storing
-        /// it on the context.
-        fn spawn_with<F, Fut, T>(self, execution: Execution, f: F) -> Handle<T>
         where
             Self: Sized,
             F: FnOnce(Self) -> Fut + Send + 'static,
@@ -310,29 +378,6 @@ stability_scope!(BETA {
         fn stopped(&self) -> signal::Signal;
     }
 
-    /// Terminal step in the spawn-configuration chain.
-    #[must_use]
-    pub struct SpawnBuilder<S: Spawner> {
-        inner: S,
-        execution: Execution,
-    }
-
-    impl<S: Spawner> SpawnBuilder<S> {
-        pub(crate) const fn new(inner: S, execution: Execution) -> Self {
-            Self { inner, execution }
-        }
-
-        /// Spawn a task using the configured execution mode.
-        pub fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-        where
-            F: FnOnce(S) -> Fut + Send + 'static,
-            Fut: Future<Output = T> + Send + 'static,
-            T: Send + 'static,
-        {
-            self.inner.spawn_with(self.execution, f)
-        }
-    }
-
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
     /// placed on dedicated threads via [Spawner].
     pub trait ThreadPooler: Spawner {
@@ -369,8 +414,29 @@ stability_scope!(BETA {
     pub trait Tracing: Supervisor {
         /// Return a context that wraps the next spawned task in a `tracing` span.
         ///
-        /// This consumes the handle. The span is derived from [`Supervisor::name`]
-        /// by concrete context implementations.
+        /// The span's `name` field and OpenTelemetry attributes are derived from
+        /// [`Supervisor::name`]. The flag is consumed by the next
+        /// [`Spawner::spawn`] call on the returned context.
+        ///
+        /// [`Supervisor::child`] creates a new child context and does not inherit
+        /// the span flag. [`Supervisor::with_attribute`], [`Spawner::shared`],
+        /// and [`Spawner::dedicated`] keep operating on the same handle, so they
+        /// can be chained before the spawn:
+        ///
+        /// ```ignore
+        /// context
+        ///     .child("verify")
+        ///     .with_attribute("round", round)
+        ///     .with_span()
+        ///     .dedicated()
+        ///     .spawn(|context| async move {
+        ///         // work
+        ///     });
+        /// ```
+        ///
+        /// Enabling the span only affects tracing. It does not change which
+        /// metrics are registered, nor does it widen the cardinality of runtime
+        /// task metrics.
         #[must_use]
         fn with_span(self) -> Self
         where
@@ -381,7 +447,9 @@ stability_scope!(BETA {
     pub trait Metrics: Supervisor {
         /// Register a metric with the runtime.
         ///
-        /// Any registered metric will include (as a prefix) the label of the current context.
+        /// Any registered metric includes the current context label as its name
+        /// prefix and the current context attributes as Prometheus labels. See
+        /// [`Supervisor`] for the identity model and examples.
         ///
         /// The returned [`telemetry::metrics::Registered`] value must be retained for as long as the
         /// metric should remain exposed. Dropping the returned handle unregisters

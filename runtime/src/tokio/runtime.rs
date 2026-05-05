@@ -540,23 +540,22 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        self.spawn_with(Execution::default(), f)
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
     }
 
-    fn spawn_with<F, Fut, T>(mut self, execution: Execution, f: F) -> Handle<T>
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
+    }
+
+    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.execution = execution;
-
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
