@@ -49,11 +49,17 @@ impl Default for Bitmap {
 
 impl From<&array::Array> for Bitmap {
     fn from(array: &array::Array) -> Self {
-        let mut container = Self::new();
+        let mut words = [0u64; WORDS];
         for value in array.iter() {
-            container.insert(value);
+            let word_idx = (value >> 6) as usize;
+            let bit_idx = value & 63;
+            words[word_idx] |= 1u64 << bit_idx;
         }
-        container
+        Self {
+            words,
+            cardinality: array.len() as u32,
+            run_count: count_runs(&words),
+        }
     }
 }
 

@@ -35,7 +35,7 @@ pub mod bitmap;
 pub mod run;
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 pub use array::Array;
 pub use bitmap::Bitmap;
 use bytes::{Buf, BufMut};
