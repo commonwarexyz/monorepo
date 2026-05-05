@@ -744,8 +744,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_to_batch_reflects_live_state() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db =
-                open_db::<mmr::Family>(context.child("db"), "keyless-to-batch-live").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-to-batch-live").await;
             let floor = db.inactivity_floor_loc();
 
             let pre_apply_root = db.root();

@@ -230,29 +230,29 @@ where
             .child("deferred_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-                // Shared non-reproposal verification:
-                // - fetch parent (using trusted round hint from consensus context)
-                // - validate standard ancestry invariants
-                // - run application verification over ancestry
-                //
-                // The helper preserves the prior early-exit behavior and returns
-                // `None` when work should stop (for example receiver dropped or
-                // parent unavailable).
-                let application_valid = match verify_with_parent(
-                    runtime_context,
-                    context,
-                    block,
-                    &mut application,
-                    &mut marshal,
-                    &mut tx,
-                    stage,
-                )
-                .await
-                {
-                    Some(valid) => valid,
-                    None => return,
-                };
-                tx.send_lossy(application_valid);
+            // Shared non-reproposal verification:
+            // - fetch parent (using trusted round hint from consensus context)
+            // - validate standard ancestry invariants
+            // - run application verification over ancestry
+            //
+            // The helper preserves the prior early-exit behavior and returns
+            // `None` when work should stop (for example receiver dropped or
+            // parent unavailable).
+            let application_valid = match verify_with_parent(
+                runtime_context,
+                context,
+                block,
+                &mut application,
+                &mut marshal,
+                &mut tx,
+                stage,
+            )
+            .await
+            {
+                Some(valid) => valid,
+                None => return,
+            };
+            tx.send_lossy(application_valid);
         });
 
         rx
@@ -333,133 +333,84 @@ where
             .child("propose")
             .with_attribute("round", consensus_context.round);
         context.spawn(move |runtime_context| async move {
-                // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal).
-                //
-                // Building a fresh block would land on the same prunable archive
-                // index and be silently dropped, so the stored block is the only proposal
-                // we can broadcast for this round.
-                //
-                // The recovered block is safe to reuse only if its embedded
-                // context matches the context simplex just recovered. Otherwise the
-                // cached block was built against a different parent and cannot be
-                // broadcast under the current header, so drop the receiver
-                // and let the voter nullify the view via timeout.
-                if let Some(block) = marshal.get_verified(consensus_context.round).await {
-                    let block_context = block.context();
-                    if block_context != consensus_context {
-                        debug!(
-                            round = ?consensus_context.round,
-                            ?consensus_context,
-                            ?block_context,
-                            "skipping proposal: cached verified block context no longer matches"
-                        );
-                        return;
-                    }
-                    let digest = block.digest();
-                    let success = tx.send_lossy(digest);
+            // On leader recovery, marshal may already hold a verified block
+            // for this round (persisted by a pre-crash propose whose
+            // notarize vote never reached the journal).
+            //
+            // Building a fresh block would land on the same prunable archive
+            // index and be silently dropped, so the stored block is the only proposal
+            // we can broadcast for this round.
+            //
+            // The recovered block is safe to reuse only if its embedded
+            // context matches the context simplex just recovered. Otherwise the
+            // cached block was built against a different parent and cannot be
+            // broadcast under the current header, so drop the receiver
+            // and let the voter nullify the view via timeout.
+            if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                let block_context = block.context();
+                if block_context != consensus_context {
                     debug!(
                         round = ?consensus_context.round,
-                        ?digest,
-                        success,
-                        "reused verified block from marshal on leader recovery"
+                        ?consensus_context,
+                        ?block_context,
+                        "skipping proposal: cached verified block context no longer matches"
                     );
                     return;
                 }
-
-                let (parent_view, parent_digest) = consensus_context.parent;
-                let parent_request = fetch_parent(
-                    parent_digest,
-                    // We are guaranteed that the parent round for any `consensus_context` is
-                    // in the same epoch (recall, the boundary block of the previous epoch
-                    // is the genesis block of the current epoch).
-                    Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
-                    &mut marshal,
-                )
-                .await;
-
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                ?parent_digest,
-                                reason = "failed to fetch parent block",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-
-                // Special case: If the parent block is the last block in the epoch,
-                // re-propose it as to not produce any blocks that will be cut out
-                // by the epoch transition.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
-                if parent.height() == last_in_epoch {
-                    let digest = parent.digest();
-                    if !marshal.verified(consensus_context.round, parent).await {
-                        debug!(
-                            round = ?consensus_context.round,
-                            ?digest,
-                            "marshal rejected re-proposed boundary block"
-                        );
-                        return;
-                    }
-                    let success = tx.send_lossy(digest);
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?digest,
-                        success,
-                        "re-proposed parent block at epoch boundary"
-                    );
-                    return;
-                }
-
-                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
-                let build_request = application.propose(
-                    (
-                        runtime_context.child("app_propose"),
-                        consensus_context.clone(),
-                    ),
-                    ancestor_stream,
+                let digest = block.digest();
+                let success = tx.send_lossy(digest);
+                debug!(
+                    round = ?consensus_context.round,
+                    ?digest,
+                    success,
+                    "reused verified block from marshal on leader recovery"
                 );
+                return;
+            }
 
-                let build_timer = build_duration.timer(&runtime_context);
-                let built_block = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+            let (parent_view, parent_digest) = consensus_context.parent;
+            let parent_request = fetch_parent(
+                parent_digest,
+                // We are guaranteed that the parent round for any `consensus_context` is
+                // in the same epoch (recall, the boundary block of the previous epoch
+                // is the genesis block of the current epoch).
+                Some(Round::new(consensus_context.epoch(), parent_view)),
+                &mut application,
+                &mut marshal,
+            )
+            .await;
+
+            let parent = select! {
+                _ = tx.closed() => {
+                    debug!(reason = "consensus dropped receiver", "skipping proposal");
+                    return;
+                },
+                result = parent_request => match result {
+                    Ok(parent) => parent,
+                    Err(_) => {
+                        debug!(
+                            ?parent_digest,
+                            reason = "failed to fetch parent block",
+                            "skipping proposal"
+                        );
                         return;
-                    },
-                    result = build_request => match result {
-                        Some(block) => block,
-                        None => {
-                            debug!(
-                                ?parent_digest,
-                                reason = "block building failed",
-                                "skipping proposal"
-                            );
-                            build_timer.observe(&runtime_context);
-                            return;
-                        }
-                    },
-                };
-                build_timer.observe(&runtime_context);
+                    }
+                },
+            };
 
-                let digest = built_block.digest();
-                if !marshal.proposed(consensus_context.round, built_block).await {
+            // Special case: If the parent block is the last block in the epoch,
+            // re-propose it as to not produce any blocks that will be cut out
+            // by the epoch transition.
+            let last_in_epoch = epocher
+                .last(consensus_context.epoch())
+                .expect("current epoch should exist");
+            if parent.height() == last_in_epoch {
+                let digest = parent.digest();
+                if !marshal.verified(consensus_context.round, parent).await {
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
-                        "marshal rejected proposed block"
+                        "marshal rejected re-proposed boundary block"
                     );
                     return;
                 }
@@ -468,8 +419,57 @@ where
                     round = ?consensus_context.round,
                     ?digest,
                     success,
-                    "proposed new block"
+                    "re-proposed parent block at epoch boundary"
                 );
+                return;
+            }
+
+            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let build_request = application.propose(
+                (
+                    runtime_context.child("app_propose"),
+                    consensus_context.clone(),
+                ),
+                ancestor_stream,
+            );
+
+            let build_timer = build_duration.timer(&runtime_context);
+            let built_block = select! {
+                _ = tx.closed() => {
+                    debug!(reason = "consensus dropped receiver", "skipping proposal");
+                    return;
+                },
+                result = build_request => match result {
+                    Some(block) => block,
+                    None => {
+                        debug!(
+                            ?parent_digest,
+                            reason = "block building failed",
+                            "skipping proposal"
+                        );
+                        build_timer.observe(&runtime_context);
+                        return;
+                    }
+                },
+            };
+            build_timer.observe(&runtime_context);
+
+            let digest = built_block.digest();
+            if !marshal.proposed(consensus_context.round, built_block).await {
+                debug!(
+                    round = ?consensus_context.round,
+                    ?digest,
+                    "marshal rejected proposed block"
+                );
+                return;
+            }
+            let success = tx.send_lossy(digest);
+            debug!(
+                round = ?consensus_context.round,
+                ?digest,
+                success,
+                "proposed new block"
+            );
         });
         rx
     }
@@ -622,58 +622,58 @@ where
             .child("certify")
             .with_attribute("round", round);
         context.spawn(move |_| async move {
-                let block = select! {
-                    _ = tx.closed() => {
+            let block = select! {
+                _ = tx.closed() => {
+                    debug!(
+                        reason = "consensus dropped receiver",
+                        "skipping certification"
+                    );
+                    return;
+                },
+                result = block_rx => match result {
+                    Ok(block) => block,
+                    Err(_) => {
                         debug!(
-                            reason = "consensus dropped receiver",
+                            ?digest,
+                            reason = "failed to fetch block for certification",
                             "skipping certification"
                         );
                         return;
-                    },
-                    result = block_rx => match result {
-                        Ok(block) => block,
-                        Err(_) => {
-                            debug!(
-                                ?digest,
-                                reason = "failed to fetch block for certification",
-                                "skipping certification"
-                            );
-                            return;
-                        }
-                    },
-                };
-
-                // Re-proposal detection for certify path: we don't have the consensus context,
-                // only the block's embedded context from original proposal. Infer re-proposal from:
-                // 1. Block is at epoch boundary (only boundary blocks can be re-proposed)
-                // 2. Certification round's view > embedded context's view (re-proposals retain their
-                //    original embedded context, so a later view indicates the block was re-proposed)
-                // 3. Same epoch (re-proposals don't cross epoch boundaries)
-                let embedded_context = block.context();
-                let is_reproposal = is_inferred_reproposal_at_certify(
-                    &epocher,
-                    block.height(),
-                    embedded_context.round,
-                    round,
-                );
-                if is_reproposal {
-                    // Certifier holds a notarization for this block, so route
-                    // the write to the notarized cache. `certified` is
-                    // idempotent, so crash-recovery double-invocation is safe.
-                    if !marshaled.marshal.certified(round, block).await {
-                        debug!(?round, "marshal unable to accept block");
-                        return;
                     }
-                    tx.send_lossy(true);
+                },
+            };
+
+            // Re-proposal detection for certify path: we don't have the consensus context,
+            // only the block's embedded context from original proposal. Infer re-proposal from:
+            // 1. Block is at epoch boundary (only boundary blocks can be re-proposed)
+            // 2. Certification round's view > embedded context's view (re-proposals retain their
+            //    original embedded context, so a later view indicates the block was re-proposed)
+            // 3. Same epoch (re-proposals don't cross epoch boundaries)
+            let embedded_context = block.context();
+            let is_reproposal = is_inferred_reproposal_at_certify(
+                &epocher,
+                block.height(),
+                embedded_context.round,
+                round,
+            );
+            if is_reproposal {
+                // Certifier holds a notarization for this block, so route
+                // the write to the notarized cache. `certified` is
+                // idempotent, so crash-recovery double-invocation is safe.
+                if !marshaled.marshal.certified(round, block).await {
+                    debug!(?round, "marshal unable to accept block");
                     return;
                 }
+                tx.send_lossy(true);
+                return;
+            }
 
-                let verify_rx = marshaled
-                    .deferred_verify(embedded_context, block, Stage::Certified)
-                    .await;
-                if let Ok(result) = verify_rx.await {
-                    tx.send_lossy(result);
-                }
+            let verify_rx = marshaled
+                .deferred_verify(embedded_context, block, Stage::Certified)
+                .await;
+            if let Ok(result) = verify_rx.await {
+                tx.send_lossy(result);
+            }
         });
         rx
     }
@@ -1110,12 +1110,8 @@ mod tests {
                 leader: me,
                 parent: (View::zero(), genesis.digest()),
             };
-            let block = B::new::<Sha256>(
-                block_context.clone(),
-                genesis.digest(),
-                Height::new(1),
-                100,
-            );
+            let block =
+                B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
             let verify_rx = marshaled.verify(block_context, digest).await;

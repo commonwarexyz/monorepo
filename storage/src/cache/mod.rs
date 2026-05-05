@@ -127,7 +127,9 @@ mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Observer as _, Runner, Supervisor as _};
+    use commonware_runtime::{
+        deterministic, test_utils::has_metric_value, Observer as _, Runner, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
@@ -212,7 +214,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 5"));
+            assert!(has_metric_value(&buffer, "items_tracked", 5));
 
             // Prune sections less than 3
             cache.prune(3).await.expect("Failed to prune");
@@ -230,7 +232,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 3"));
+            assert!(has_metric_value(&buffer, "items_tracked", 3));
 
             // Try to prune older section
             cache.prune(2).await.expect("Failed to prune");
@@ -291,8 +293,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {num_items:?}");
-            assert!(buffer.contains(&tracked));
+            assert!(has_metric_value(&buffer, "items_tracked", num_items));
 
             // Sync and drop the cache
             cache.sync().await.expect("Failed to sync cache");
@@ -349,8 +350,11 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {:?}", num_items - removed);
-            assert!(buffer.contains(&tracked));
+            assert!(has_metric_value(
+                &buffer,
+                "items_tracked",
+                num_items - removed
+            ));
 
             context.auditor().state()
         })

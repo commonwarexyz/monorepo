@@ -725,10 +725,9 @@ mod tests {
                 strategy: Sequential,
             };
 
-            let mut merkle =
-                TestMerkle::<mmr::Family>::init(context.child("first"), cfg.clone())
-                    .await
-                    .unwrap();
+            let mut merkle = TestMerkle::<mmr::Family>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
             append_and_sync(&mut merkle, &[b"a"]).await;
             let slot = merkle.active_slot();
             drop(merkle);

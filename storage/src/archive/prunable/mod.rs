@@ -222,7 +222,9 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Observer as _, Runner, Supervisor as _};
+    use commonware_runtime::{
+        deterministic, test_utils::has_metric_value, Observer as _, Runner, Supervisor as _,
+    };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
@@ -367,7 +369,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 2"));
+            assert!(has_metric_value(&buffer, "items_tracked", 2));
             assert!(buffer.contains("unnecessary_reads_total 1"));
             assert!(buffer.contains("gets_total 2"));
         });
@@ -472,7 +474,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 5"));
+            assert!(has_metric_value(&buffer, "items_tracked", 5));
 
             // Prune sections less than 3
             archive.prune(3).await.expect("Failed to prune");
@@ -492,9 +494,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 3"));
-            assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("pruned_total 0")); // no lazy cleanup yet
+            assert!(has_metric_value(&buffer, "items_tracked", 3));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
+            assert!(has_metric_value(&buffer, "pruned_total", 0)); // no lazy cleanup yet
 
             // Try to prune older section
             archive.prune(2).await.expect("Failed to prune");
@@ -514,9 +516,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
-            assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("pruned_total 1"));
+            assert!(has_metric_value(&buffer, "items_tracked", 4)); // lazily remove one, add one
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
+            assert!(has_metric_value(&buffer, "pruned_total", 1));
         });
     }
 
@@ -581,9 +583,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {num_keys:?}");
-            assert!(buffer.contains(&tracked));
-            assert!(buffer.contains("pruned_total 0"));
+            assert!(has_metric_value(&buffer, "items_tracked", num_keys));
+            assert!(has_metric_value(&buffer, "pruned_total", 0));
 
             // Sync and drop the archive
             archive.sync().await.expect("Failed to sync archive");
@@ -662,11 +663,13 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {:?}", num_keys - removed);
-            assert!(buffer.contains(&tracked));
-            let pruned = format!("indices_pruned_total {removed}");
-            assert!(buffer.contains(&pruned));
-            assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
+            assert!(has_metric_value(
+                &buffer,
+                "items_tracked",
+                num_keys - removed
+            ));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
+            assert!(has_metric_value(&buffer, "pruned_total", 0)); // have not lazily removed keys yet
 
             context.auditor().state()
         })
@@ -806,7 +809,7 @@ mod tests {
             archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
 
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 2"));
+            assert!(has_metric_value(&buffer, "items_tracked", 2));
 
             // Prune below index 3
             archive.prune(3).await.unwrap();
@@ -837,8 +840,8 @@ mod tests {
             );
 
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 1"));
-            assert!(buffer.contains("indices_pruned_total 1"));
+            assert!(has_metric_value(&buffer, "items_tracked", 1));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 1));
 
             // put_multi below pruned index is rejected
             let result = archive.put_multi(2, test_key("ddd"), 40).await;

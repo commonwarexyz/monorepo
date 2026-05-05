@@ -172,9 +172,15 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
+        test_utils::has_metric_value,
         Observer as _, Runner, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use rand::Rng;
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -183,11 +189,6 @@ mod tests {
         buf[..key.len()].copy_from_slice(key);
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
-    use rand::Rng;
-    use std::{
-        collections::BTreeMap,
-        num::{NonZeroU16, NonZeroUsize},
-    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -893,7 +894,7 @@ mod tests {
 
         // items_tracked reflects unique indices, not total items
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 1"));
+        assert!(has_metric_value(&buffer, "items_tracked", 1));
     }
 
     #[test_traced]
@@ -926,7 +927,7 @@ mod tests {
         ));
 
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 2"));
+        assert!(has_metric_value(&buffer, "items_tracked", 2));
     }
 
     #[test_traced]
@@ -1085,7 +1086,7 @@ mod tests {
 
         // items_tracked reflects two unique indices after restart
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 2"));
+        assert!(has_metric_value(&buffer, "items_tracked", 2));
     }
 
     #[test_traced]
@@ -1154,7 +1155,7 @@ mod tests {
         assert!(next.is_none());
 
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 3"));
+        assert!(has_metric_value(&buffer, "items_tracked", 3));
     }
 
     #[test_traced]

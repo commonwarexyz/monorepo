@@ -27,6 +27,73 @@ pub use cell::Cell as ContextCell;
 mod shared;
 pub use shared::Shared;
 
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    fn matches_metric_name(full: &str, name: &str) -> bool {
+        full == name
+            || full
+                .strip_suffix(name)
+                .is_some_and(|prefix| prefix.ends_with('_'))
+    }
+
+    /// Return `true` if encoded Prometheus metrics contain a sample with `name` and `value`.
+    ///
+    /// `name` may be either the full encoded metric name or its unprefixed suffix.
+    /// Labels attached to the sample are ignored.
+    #[must_use]
+    pub fn has_metric_value(metrics: &str, name: &str, value: impl std::fmt::Display) -> bool {
+        let value = value.to_string();
+        metrics.lines().any(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return false;
+            }
+
+            let Some(sample_end) = line.find(|c: char| c == '{' || c.is_whitespace()) else {
+                return false;
+            };
+            let sample_name = &line[..sample_end];
+            if !matches_metric_name(sample_name, name) {
+                return false;
+            }
+
+            let mut rest = &line[sample_end..];
+            if let Some(labeled) = rest.strip_prefix('{') {
+                let Some(labels_end) = labeled.find('}') else {
+                    return false;
+                };
+                rest = &labeled[labels_end + 1..];
+            }
+            if !rest.chars().next().is_some_and(char::is_whitespace) {
+                return false;
+            }
+
+            rest.split_whitespace().next() == Some(value.as_str())
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::has_metric_value;
+
+        #[test]
+        fn test_has_metric_value_unlabeled() {
+            let metrics = "# HELP storage_items_tracked items\nstorage_items_tracked 2\n";
+            assert!(has_metric_value(metrics, "items_tracked", 2));
+            assert!(has_metric_value(metrics, "storage_items_tracked", 2));
+            assert!(!has_metric_value(metrics, "items_tracked_extra", 2));
+            assert!(!has_metric_value(metrics, "items_tracked", 3));
+        }
+
+        #[test]
+        fn test_has_metric_value_labeled() {
+            let metrics = r#"storage_init_items_tracked{index="2"} 2"#;
+            assert!(has_metric_value(metrics, "items_tracked", 2));
+            assert!(has_metric_value(metrics, "storage_init_items_tracked", 2));
+        }
+    }
+}
+
 pub(crate) mod supervision;
 
 /// The execution mode of a task.

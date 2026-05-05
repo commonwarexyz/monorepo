@@ -93,10 +93,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new();
-            let peek =
-                Mmr::<_, Digest>::peek_root(context.child("storage"), test_config(&context), &hasher, 0)
-                    .await
-                    .unwrap();
+            let peek = Mmr::<_, Digest>::peek_root(
+                context.child("storage"),
+                test_config(&context),
+                &hasher,
+                0,
+            )
+            .await
+            .unwrap();
 
             let empty_root = mem::Mmr::new().root(&hasher, 0).unwrap();
             assert_eq!(peek, Some((Location::new(0), Location::new(0), empty_root)));
