@@ -43,11 +43,6 @@ where
         block.parent()
     }
 
-    fn application_parent_commitment(block: &Self::ApplicationBlock) -> Self::Commitment {
-        // In standard mode, commitments are digests, so parent commitment is parent digest.
-        block.parent()
-    }
-
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
         block
     }

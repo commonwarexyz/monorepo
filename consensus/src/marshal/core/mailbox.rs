@@ -68,9 +68,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
-        /// The round in which the block was notarized. This is an optimization
-        /// to help locate the block.
-        round: Option<Round>,
+        /// Whether marshal should request the block if it is missing locally.
+        request: DigestRequest,
         /// The digest of the block to retrieve.
         digest: <V::Block as Digestible>::Digest,
         /// A channel to send the retrieved block.
@@ -78,11 +77,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
-        /// The round in which the block was notarized. This is an optimization
-        /// to help locate the block.
-        round: Option<Round>,
-        /// The height at which this commitment is expected in the ancestry.
-        height: Option<Height>,
+        /// Whether marshal should request the block if it is missing locally.
+        request: CommitmentRequest,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
         /// A channel to send the retrieved block.
@@ -163,6 +159,26 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
     },
+}
+
+/// How a digest subscription should behave when the block is missing locally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DigestRequest {
+    /// Wait for local availability only.
+    Wait,
+    /// Request the notarized proposal for `round` from peers.
+    FetchByRound { round: Round },
+}
+
+/// How a commitment subscription should behave when the block is missing locally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitmentRequest {
+    /// Wait for local availability only.
+    Wait,
+    /// Request the notarized proposal for `round` from peers.
+    FetchByRound { round: Round },
+    /// Request the exact commitment from peers and prune the request at `height`.
+    FetchByCommitment { height: Height },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::Actor).
@@ -246,20 +262,22 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
-    /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available. If the block is not finalized, it's possible that
-    /// it may never become available.
+    /// If the block is not available locally, the subscription will be registered and the caller
+    /// will be notified when the block is available. If the block is not finalized, it's possible
+    /// that it may never become available.
+    ///
+    /// The `request` parameter controls whether marshal also asks peers for the missing block.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub async fn subscribe_by_digest(
         &self,
-        round: Option<Round>,
         digest: <V::Block as Digestible>::Digest,
+        request: DigestRequest,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send_lossy(Message::SubscribeByDigest {
-                round,
+                request,
                 digest,
                 response: tx,
             })
@@ -271,42 +289,22 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
-    /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available. If the block is not finalized, it's possible that
-    /// it may never become available.
+    /// If the block is not available locally, the subscription will be registered and the caller
+    /// will be notified when the block is available. If the block is not finalized, it's possible
+    /// that it may never become available.
+    ///
+    /// The `request` parameter controls whether marshal also asks peers for the missing block.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub async fn subscribe_by_commitment(
         &self,
-        round: Option<Round>,
         commitment: V::Commitment,
+        request: CommitmentRequest,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send_lossy(Message::SubscribeByCommitment {
-                round,
-                height: None,
-                commitment,
-                response: tx,
-            })
-            .await;
-        rx
-    }
-
-    /// Subscribe to a block by commitment with a height hint.
-    ///
-    /// The height lets marshal cancel unresolved ancestry fetches once the
-    /// application has processed past the requested ancestor.
-    pub async fn subscribe_by_commitment_at_height(
-        &self,
-        height: Height,
-        commitment: V::Commitment,
-    ) -> oneshot::Receiver<V::Block> {
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::SubscribeByCommitment {
-                round: None,
-                height: Some(height),
+                request,
                 commitment,
                 response: tx,
             })
@@ -320,12 +318,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn ancestry(
         &self,
         (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
-    ) -> Option<AncestorStream<Self, V::ApplicationBlock>> {
-        self.subscribe_by_digest(start_round, start_digest)
-            .await
+    ) -> Option<AncestorStream<Self>> {
+        let request = match start_round {
+            Some(round) => DigestRequest::FetchByRound { round },
+            None => DigestRequest::Wait,
+        };
+        let receiver = self.subscribe_by_digest(start_digest, request).await;
+        receiver
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.clone(), [V::into_inner(block)]))
+            .map(|block| AncestorStream::new(self.clone(), [block]))
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -410,19 +412,29 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
 impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
+    type AncestryBlock = V::Block;
 
-    async fn fetch_block(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
-        let subscription = self.subscribe_by_digest(None, digest).await;
-        subscription.await.ok().map(V::into_inner)
+    async fn subscribe(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::AncestryBlock> {
+        let subscription = self.subscribe_by_digest(digest, DigestRequest::Wait).await;
+        subscription.await.ok()
     }
 
-    async fn fetch_parent(self, block: Self::Block) -> Option<Self::Block> {
+    async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
         let parent_height = block.height().previous()?;
-        let commitment = V::application_parent_commitment(&block);
+        let commitment = V::parent_commitment(&block);
         let subscription = self
-            .subscribe_by_commitment_at_height(parent_height, commitment)
+            .subscribe_by_commitment(
+                commitment,
+                CommitmentRequest::FetchByCommitment {
+                    height: parent_height,
+                },
+            )
             .await;
-        subscription.await.ok().map(V::into_inner)
+        subscription.await.ok()
+    }
+
+    fn into_block(block: Self::AncestryBlock) -> Self::Block {
+        V::into_inner(block)
     }
 }
 

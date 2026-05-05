@@ -4,7 +4,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::Mailbox,
+        core::{DigestRequest, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -236,11 +236,19 @@ where
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_digest(parent_round, parent_digest)
-                .await,
-        )
+        let receiver = match parent_round {
+            Some(round) => {
+                marshal
+                    .subscribe_by_digest(parent_digest, DigestRequest::FetchByRound { round })
+                    .await
+            }
+            None => {
+                marshal
+                    .subscribe_by_digest(parent_digest, DigestRequest::Wait)
+                    .await
+            }
+        };
+        Either::Right(receiver)
     }
 }
 

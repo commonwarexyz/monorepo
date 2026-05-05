@@ -77,7 +77,7 @@ use crate::{
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
-        core::Mailbox,
+        core::{DigestRequest, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -461,7 +461,14 @@ where
             .with_label("optimistic_verify")
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
-                let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
+                let block_request = marshal
+                    .subscribe_by_digest(
+                        digest,
+                        DigestRequest::FetchByRound {
+                            round: context.round,
+                        },
+                    )
+                    .await;
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -580,7 +587,10 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(digest, DigestRequest::FetchByRound { round })
+            .await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();

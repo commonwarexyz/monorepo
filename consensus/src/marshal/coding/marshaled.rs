@@ -345,7 +345,10 @@ where
                 } else {
                     // No prefetched block, fetch both parent and block
                     let block_request = marshal
-                        .subscribe_by_commitment(Some(round), commitment)
+                        .subscribe_by_commitment(
+                            commitment,
+                            core::CommitmentRequest::FetchByRound { round },
+                        )
                         .await;
                     let block_requests = try_join(parent_request, block_request);
 
@@ -394,10 +397,8 @@ where
                     return;
                 }
 
-                let ancestry_stream = AncestorStream::new(
-                    marshal.clone(),
-                    [block.clone().into_inner(), parent.into_inner()],
-                );
+                let ancestry_stream =
+                    AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request = application.verify(
                     (
                         runtime_context.with_label("app_verify"),
@@ -619,7 +620,7 @@ where
                     return;
                 }
 
-                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent.into_inner()]);
+                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
                 let build_request = application.propose(
                     (
                         runtime_context.with_label("app_propose"),
@@ -739,7 +740,12 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(Some(consensus_context.round), payload)
+                .subscribe_by_commitment(
+                    payload,
+                    core::CommitmentRequest::FetchByRound {
+                        round: consensus_context.round,
+                    },
+                )
                 .await;
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
@@ -882,7 +888,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(Some(round), payload)
+            .subscribe_by_commitment(payload, core::CommitmentRequest::FetchByRound { round })
             .await;
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
@@ -1064,11 +1070,11 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_commitment(parent_round, parent_commitment)
-                .await,
-        )
+        let request = match parent_round {
+            Some(round) => core::CommitmentRequest::FetchByRound { round },
+            None => core::CommitmentRequest::Wait,
+        };
+        Either::Right(marshal.subscribe_by_commitment(parent_commitment, request).await)
     }
 }
 

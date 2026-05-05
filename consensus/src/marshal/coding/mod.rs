@@ -1143,7 +1143,10 @@ mod tests {
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
             let block_rx = marshal
-                .subscribe_by_commitment(Some(round), missing_commitment)
+                .subscribe_by_commitment(
+                    missing_commitment,
+                    crate::marshal::core::CommitmentRequest::FetchByRound { round },
+                )
                 .await;
 
             // Allow core actor to register the underlying buffer subscription.

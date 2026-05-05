@@ -69,7 +69,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         None
     }
@@ -84,7 +84,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
+        mut ancestry: AncestorStream<A>,
     ) -> bool {
         let mut actual = Vec::with_capacity(self.expected_heights.len());
         while actual.len() < self.expected_heights.len() {
@@ -142,7 +142,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
@@ -157,7 +157,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> bool {
         self.verify_result
     }
@@ -210,7 +210,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         None
     }
@@ -225,7 +225,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

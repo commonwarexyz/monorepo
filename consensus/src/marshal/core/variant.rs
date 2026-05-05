@@ -60,9 +60,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the parent commitment referenced by `block`.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
-    /// Returns the parent commitment referenced by an application block.
-    fn application_parent_commitment(block: &Self::ApplicationBlock) -> Self::Commitment;
-
     /// Converts a working block to an application block.
     ///
     /// This conversion cannot use `Into` due to orphan rules when `Block` wraps

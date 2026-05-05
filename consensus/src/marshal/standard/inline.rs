@@ -46,7 +46,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::validation::Stage,
-        core::Mailbox,
+        core::{DigestRequest, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -391,7 +391,12 @@ where
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 let block_request = marshal
-                    .subscribe_by_digest(Some(context.round), digest)
+                    .subscribe_by_digest(
+                        digest,
+                        DigestRequest::FetchByRound {
+                            round: context.round,
+                        },
+                    )
                     .await;
                 let Some(block) =
                     await_block_subscription(&mut tx, block_request, &digest, "verification").await
@@ -485,7 +490,10 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(digest, DigestRequest::FetchByRound { round })
+            .await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context

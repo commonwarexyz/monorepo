@@ -1,6 +1,6 @@
 use super::{
     cache,
-    mailbox::{Mailbox, Message},
+    mailbox::{CommitmentRequest, DigestRequest, Mailbox, Message},
     Buffer, Variant,
 };
 use crate::{
@@ -679,10 +679,14 @@ where
                         resolver.fetch_targeted(request, targets).await;
                     }
                     Message::SubscribeByDigest {
-                        round,
+                        request,
                         digest,
                         response,
                     } => {
+                        let round = match request {
+                            DigestRequest::Wait => None,
+                            DigestRequest::FetchByRound { round } => Some(round),
+                        };
                         self.handle_subscribe(
                             round,
                             None,
@@ -695,11 +699,15 @@ where
                         .await;
                     }
                     Message::SubscribeByCommitment {
-                        round,
-                        height,
+                        request,
                         commitment,
                         response,
                     } => {
+                        let (round, height) = match request {
+                            CommitmentRequest::Wait => (None, None),
+                            CommitmentRequest::FetchByRound { round } => (Some(round), None),
+                            CommitmentRequest::FetchByCommitment { height } => (None, Some(height)),
+                        };
                         self.handle_subscribe(
                             round,
                             height,

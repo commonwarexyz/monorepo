@@ -11,7 +11,7 @@ use crate::{
             Coding,
         },
         config::Config,
-        core::{Actor, Mailbox},
+        core::{Actor, DigestRequest, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -3567,7 +3567,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
 
         let subscription_rx = handle
             .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest)
+            .subscribe_by_digest(digest, DigestRequest::Wait)
             .await;
 
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
@@ -3648,15 +3648,15 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
+            .subscribe_by_digest(digest1, DigestRequest::Wait)
             .await;
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2)
+            .subscribe_by_digest(digest2, DigestRequest::Wait)
             .await;
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
+            .subscribe_by_digest(digest1, DigestRequest::Wait)
             .await;
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
@@ -3741,11 +3741,11 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
+            .subscribe_by_digest(digest1, DigestRequest::Wait)
             .await;
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2)
+            .subscribe_by_digest(digest2, DigestRequest::Wait)
             .await;
 
         drop(sub1_rx);
@@ -3844,23 +3844,23 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block1))
+            .subscribe_by_digest(H::digest(&block1), DigestRequest::Wait)
             .await;
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block2))
+            .subscribe_by_digest(H::digest(&block2), DigestRequest::Wait)
             .await;
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block3))
+            .subscribe_by_digest(H::digest(&block3), DigestRequest::Wait)
             .await;
         let sub4_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block4))
+            .subscribe_by_digest(H::digest(&block4), DigestRequest::Wait)
             .await;
         let sub5_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block5))
+            .subscribe_by_digest(H::digest(&block5), DigestRequest::Wait)
             .await;
 
         // Block1: Broadcasted by the actor
