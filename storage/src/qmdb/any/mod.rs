@@ -69,11 +69,12 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{full::Config as MerkleConfig, Bagging, Family, Location},
+    merkle::{full::Config as MerkleConfig, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
         operation::Committable,
+        ROOT_BAGGING,
     },
     translator::Translator,
     Context,
@@ -158,7 +159,7 @@ where
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
-        Bagging::BackwardFold,
+        ROOT_BAGGING,
     )
     .await?;
 

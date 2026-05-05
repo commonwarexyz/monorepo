@@ -75,9 +75,12 @@ pub use verify::{
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
 
+/// Merkle peak bagging policy used by QMDB operation roots.
+pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
+
 /// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
 pub const fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
-    StandardHasher::with_bagging(Bagging::BackwardFold)
+    StandardHasher::with_bagging(ROOT_BAGGING)
 }
 
 /// Look up the inactivity floor declared at the commit immediately preceding `op_count`.

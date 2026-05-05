@@ -8,10 +8,10 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::{self, Family},
+    merkle::Family,
     qmdb::{
         any::{value::FixedEncoding, FixedValue},
-        Error,
+        Error, ROOT_BAGGING,
     },
     translator::Translator,
 };
@@ -58,7 +58,7 @@ impl<
             cfg.merkle_config,
             cfg.log,
             Operation::<F, K, V>::is_commit,
-            merkle::Bagging::BackwardFold,
+            ROOT_BAGGING,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator).await

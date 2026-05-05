@@ -11,7 +11,7 @@ use crate::{
         self,
         hasher::{Hasher, Standard as StandardHasher},
         storage::Storage,
-        Bagging, Family, Graftable, Location, Position, Proof,
+        Family, Graftable, Location, Position, Proof,
     },
     qmdb::{
         self,
@@ -801,7 +801,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             grafting_height,
             start_chunk,
             chunk_vec,
-            Bagging::BackwardFold,
+            qmdb::ROOT_BAGGING,
         );
 
         // For partial chunks, validate the last chunk digest from the proof.
