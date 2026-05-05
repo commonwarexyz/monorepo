@@ -34,14 +34,12 @@ pub fn push(line: String) {
     b.push_back(line);
 }
 
-/// Reset the buffer. Called by `runner::run` at the start of each run so that
-/// a panic dump only contains entries from the failing run.
+/// Reset the buffer to empty.
 pub fn clear() {
     buf().lock().clear();
 }
 
-/// Drain and return the current contents. Called by `fuzz()` when a
-/// `Mode::Byzzfuzz` run panics.
+/// Drain the buffer and return its contents in insertion order.
 pub fn take() -> Vec<String> {
     buf().lock().drain(..).collect()
 }
