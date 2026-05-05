@@ -766,14 +766,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let mut bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let mut bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             assert_eq!(bitmap.len(), 0);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0).unwrap();
@@ -915,14 +911,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push(true);
@@ -936,14 +928,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push(true);
@@ -957,14 +945,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.get_bit(256);
@@ -977,14 +961,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push_chunk(&test_chunk(b"test2"));
@@ -1001,14 +981,10 @@ mod tests {
         executor.start(|context| async move {
             // Build a starting test MMR with two chunks worth of bits.
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push_chunk(&test_chunk(b"test2"));
@@ -1057,14 +1033,10 @@ mod tests {
         executor.start(|context| async move {
             // Build a test MMR with a few chunks worth of bits.
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push_chunk(&test_chunk(b"test2"));
@@ -1264,14 +1236,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                context.child("bitmap"),
-                "test",
-                Sequential,
-                &hasher,
-            )
-            .await
-            .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             let bitmap = dirty.merkleize(&hasher).unwrap();
