@@ -1336,6 +1336,7 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
+    ByzzfuzzLiveness,
 }
 
 pub trait FuzzMode {
@@ -1446,6 +1447,25 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
+/// **ByzzfuzzLiveness mode** - liveness variant of the ByzzFuzz harness.
+///
+/// Same fault model as `Byzzfuzz`, but applies faults only during a bounded
+/// fault phase. After the phase elapses (or all non-byzantine reporters
+/// reach `required_containers`, whichever comes first), a shared `FaultGate`
+/// is healed: forwarders pass partition decisions through and the injector
+/// drops queued intercepts. Each non-byzantine reporter (every index except
+/// `BYZANTINE_IDX = 0`) must then finalize at least one new view within a
+/// fixed heal window; failure to advance panics with a liveness violation.
+///
+/// Mirrors Tendermint ByzzFuzz's `liveness.SetupLivenessTimer` boundary --
+/// the gate is what makes post-heal progress measurable; without it, a
+/// fuzzer that kept dropping/mutating forever at a stuck round would
+/// generate false liveness failures.
+pub struct ByzzfuzzLiveness;
+impl FuzzMode for ByzzfuzzLiveness {
+    const MODE: Mode = Mode::ByzzfuzzLiveness;
+}
+
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
@@ -1468,12 +1488,15 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
+        Mode::ByzzfuzzLiveness => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            byzzfuzz::run_liveness::<P>(input)
+        })),
     };
     match run_result {
         Ok(()) => {
             // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
             // or otherwise) starts clean. This is cheap when the log is empty.
-            if matches!(M::MODE, Mode::Byzzfuzz) {
+            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
                 let _ = byzzfuzz::log::take();
             }
         }
@@ -1483,7 +1506,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
             // sees the schedule + the per-message drop / intercept /
             // replace / omit trail that led to the failure. Other modes
             // leave the buffer empty (no pushes), so this is a no-op.
-            if matches!(M::MODE, Mode::Byzzfuzz) {
+            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
                 let log = byzzfuzz::log::take();
                 if !log.is_empty() {
                     eprintln!("---- ByzzFuzz decision log ({} entries) ----", log.len());

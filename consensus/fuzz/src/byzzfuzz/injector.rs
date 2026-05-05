@@ -17,7 +17,7 @@
 
 use crate::{
     byzzfuzz::{
-        intercept::{Intercept, InterceptChannel},
+        intercept::{FaultGate, Intercept, InterceptChannel},
         log,
     },
     strategy::Strategy,
@@ -51,6 +51,7 @@ where
     context: E,
     scheme: S,
     strategy: Arc<St>,
+    gate: FaultGate,
 }
 
 impl<S, St, E> ByzzFuzzInjector<S, St, E>
@@ -59,11 +60,12 @@ where
     St: Strategy + 'static,
     E: Clock + Spawner + CryptoRngCore,
 {
-    pub fn new(context: E, scheme: S, strategy: St) -> Self {
+    pub fn new(context: E, scheme: S, strategy: St, gate: FaultGate) -> Self {
         Self {
             context,
             scheme,
             strategy: Arc::new(strategy),
+            gate,
         }
     }
 
@@ -98,6 +100,17 @@ where
     where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
+        // After the fault phase ends, drain any in-flight intercepts
+        // without emitting -- liveness mode needs the post-heal protocol
+        // to run unperturbed even if intercepts captured before heal are
+        // still queued.
+        if self.gate.healed() {
+            log::push(format!(
+                "byzzfuzz: drop intercept channel={:?} view={} seed={} reason=post_heal",
+                item.channel, item.view, item.fault_seed,
+            ));
+            return;
+        }
         // Cert and resolver process faults are omit-only: a single byzantine
         // node cannot forge a valid quorum certificate or a meaningful
         // recovery response, so byte mutation on those channels would be

@@ -301,6 +301,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_cert_mock_byzzfuzz_liveness"
+path = "fuzz_targets/simplex_cert_mock_byzzfuzz_liveness.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_ed25519_faulty_net"
 path = "fuzz_targets/simplex_ed25519_faulty_net.rs"
 test = false

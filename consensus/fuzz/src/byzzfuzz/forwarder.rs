@@ -37,7 +37,7 @@
 use crate::{
     byzzfuzz::{
         fault::{NetworkFault, ProcessFault},
-        intercept::{self, Intercept, InterceptChannel, SenderViewCell},
+        intercept::{self, FaultGate, Intercept, InterceptChannel, SenderViewCell},
         log,
         observed::ObservedState,
         scope::{self, FaultScope},
@@ -181,13 +181,18 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
+    gate: FaultGate,
 ) -> impl SplitForwarder<S::PublicKey> {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
         let decoded = Vote::<S, Sha256Digest>::decode(message.clone()).ok();
         let Some(msg) = decoded else {
             // Undecodable: still apply the network partition (partitions
             // are total per their view) using sender_view.get(); skip
-            // proc faults because there is no kind to match.
+            // proc faults because there is no kind to match. After heal,
+            // pass through unchanged.
+            if gate.healed() {
+                return Some(recipients.clone());
+            }
             let view = sender_view.get();
             let expanded = expand(recipients, &participants);
             return match filter_by_partition(
@@ -209,6 +214,12 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
         };
         pool.observe_vote::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
+        // After the fault phase ends, decode + observe + sender_view
+        // updates still happen (rnd(m) attribution stays accurate), but
+        // no faults are applied -- the message passes through.
+        if gate.healed() {
+            return Some(recipients.clone());
+        }
         let kind = scope::vote_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);
@@ -261,6 +272,7 @@ pub fn make_certificate<S: Scheme<Sha256Digest>>(
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
+    gate: FaultGate,
 ) -> impl SplitForwarder<S::PublicKey>
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
@@ -271,7 +283,11 @@ where
         let Some(msg) = decoded else {
             // Undecodable: still apply the network partition (total per
             // its view) using sender_view.get(); skip proc faults
-            // because there is no kind to match.
+            // because there is no kind to match. After heal, pass through
+            // unchanged.
+            if gate.healed() {
+                return Some(recipients.clone());
+            }
             let view = sender_view.get();
             let expanded = expand(recipients, &participants);
             return match filter_by_partition(
@@ -293,6 +309,9 @@ where
         };
         pool.observe_certificate::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
+        if gate.healed() {
+            return Some(recipients.clone());
+        }
         let kind = scope::certificate_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);
@@ -346,6 +365,7 @@ pub fn make_resolver<S: Scheme<Sha256Digest>>(
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
+    gate: FaultGate,
 ) -> impl SplitForwarder<S::PublicKey>
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
@@ -361,6 +381,9 @@ where
             intercept::observe_resolver_wire_view::<S>(message.as_ref(), &cert_codec, &pool)
         {
             sender_view.update(v);
+        }
+        if gate.healed() {
+            return Some(recipients.clone());
         }
         let view = sender_view.get();
         let expanded = expand(recipients, &participants);

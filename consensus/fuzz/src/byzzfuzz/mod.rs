@@ -13,7 +13,11 @@
 //! certificate, and resolver traffic all participate in this tracking.
 //!
 //! Public surface used from `lib.rs`:
-//! - [`run`] is the `Mode::Byzzfuzz` entry point;
+//! - [`run`] is the `Mode::Byzzfuzz` (safety) entry point;
+//! - [`run_liveness`] is the `Mode::ByzzfuzzLiveness` entry point: applies
+//!   faults during a bounded fault phase, heals the [`intercept::FaultGate`],
+//!   then requires every non-byzantine reporter to make at least one new
+//!   finalization within a fixed heal window;
 //! - [`log`] stores the bounded decision trace drained on panic.
 
 mod fault;
@@ -27,7 +31,7 @@ mod runner;
 mod sampling;
 mod scope;
 
-pub use runner::run;
+pub use runner::{run, run_liveness};
 pub(crate) use sampling::ByzzFuzz;
 
 /// Byzantine index in `participants`. Single source of truth for the

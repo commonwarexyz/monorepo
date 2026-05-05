@@ -67,6 +67,29 @@ pub struct Intercept<P: PublicKey> {
     pub targets: Vec<P>,
 }
 
+/// Shared per-run flag that switches off ByzzFuzz fault application
+/// once the fault phase ends. Liveness mode flips it after the fault
+/// window so post-heal progress can be measured; safety mode constructs
+/// one and never heals (so the gate never triggers).
+///
+/// Cheap to clone (Arc).
+#[derive(Clone, Default)]
+pub struct FaultGate(Arc<std::sync::atomic::AtomicBool>);
+
+impl FaultGate {
+    pub fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    pub fn heal(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn healed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Per-sender cell holding the current `rnd(m)` view.
 /// Updated monotonically by outgoing forwarders when a message carries a
 /// decodable view, and by inbound `RoundTrackingReceiver`s. Read by every
