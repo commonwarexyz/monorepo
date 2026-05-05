@@ -909,15 +909,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 impl<F: Family, D: Digest> Write for RangeProof<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
-        self.pre_prefix_acc.is_some().write(buf);
-        if let Some(digest) = &self.pre_prefix_acc {
-            digest.write(buf);
-        }
+        self.pre_prefix_acc.write(buf);
         self.unfolded_prefix_peaks.write(buf);
-        self.partial_chunk_digest.is_some().write(buf);
-        if let Some(digest) = &self.partial_chunk_digest {
-            digest.write(buf);
-        }
+        self.partial_chunk_digest.write(buf);
         self.ops_root.write(buf);
     }
 }
@@ -925,15 +919,9 @@ impl<F: Family, D: Digest> Write for RangeProof<F, D> {
 impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
     fn encode_size(&self) -> usize {
         self.proof.encode_size()
-            + self
-                .pre_prefix_acc
-                .as_ref()
-                .map_or(1, |d| 1 + d.encode_size())
+            + self.pre_prefix_acc.encode_size()
             + self.unfolded_prefix_peaks.encode_size()
-            + self
-                .partial_chunk_digest
-                .as_ref()
-                .map_or(1, |d| 1 + d.encode_size())
+            + self.partial_chunk_digest.encode_size()
             + self.ops_root.encode_size()
     }
 }
@@ -948,17 +936,9 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let pre_prefix_acc = if bool::read(buf)? {
-            Some(D::read(buf)?)
-        } else {
-            None
-        };
+        let pre_prefix_acc = Option::<D>::read(buf)?;
         let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=*max_digests)?;
-        let partial_chunk_digest = if bool::read(buf)? {
-            Some(D::read(buf)?)
-        } else {
-            None
-        };
+        let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
             proof,

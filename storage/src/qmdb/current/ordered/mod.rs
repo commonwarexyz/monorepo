@@ -54,6 +54,7 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
+    Update<K, V>: Write,
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
@@ -61,17 +62,12 @@ where
             Self::KeyValue(op_proof, update) => {
                 EXCLUSION_TAG_KEY_VALUE.write(buf);
                 op_proof.write(buf);
-                update.key.write(buf);
-                update.value.write(buf);
-                update.next_key.write(buf);
+                update.write(buf);
             }
             Self::Commit(op_proof, value) => {
                 EXCLUSION_TAG_COMMIT.write(buf);
                 op_proof.write(buf);
-                value.is_some().write(buf);
-                if let Some(v) = value {
-                    v.write(buf);
-                }
+                value.write(buf);
             }
         }
     }
@@ -82,19 +78,13 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
+    Update<K, V>: EncodeSize,
     D: Digest,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::KeyValue(op_proof, update) => {
-                op_proof.encode_size()
-                    + update.key.encode_size()
-                    + update.value.encode_size()
-                    + update.next_key.encode_size()
-            }
-            Self::Commit(op_proof, value) => {
-                op_proof.encode_size() + value.as_ref().map_or(1, |v| 1 + v.encode_size())
-            }
+            Self::KeyValue(op_proof, update) => op_proof.encode_size() + update.encode_size(),
+            Self::Commit(op_proof, value) => op_proof.encode_size() + value.encode_size(),
         }
     }
 }
@@ -104,43 +94,31 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
+    Update<K, V>: Read,
     D: Digest,
 {
-    /// `(max_digests, key_cfg, value_cfg)`: max digest count for the embedded operation proof,
-    /// the read configuration for the key type, and the read configuration for the value type.
+    /// `(max_digests, update_cfg, value_cfg)`: max digest count for the embedded operation proof,
+    /// the read configuration for [Update], and the read configuration for the value type.
     type Cfg = (
         usize,
-        <K as Read>::Cfg,
+        <Update<K, V> as Read>::Cfg,
         <<V as ValueEncoding>::Value as Read>::Cfg,
     );
 
     fn read_cfg(
         buf: &mut impl Buf,
-        (max_digests, key_cfg, value_cfg): &Self::Cfg,
+        (max_digests, update_cfg, value_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
             EXCLUSION_TAG_KEY_VALUE => {
                 let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-                let key = K::read_cfg(buf, key_cfg)?;
-                let value = V::Value::read_cfg(buf, value_cfg)?;
-                let next_key = K::read_cfg(buf, key_cfg)?;
-                Ok(Self::KeyValue(
-                    op_proof,
-                    Update {
-                        key,
-                        value,
-                        next_key,
-                    },
-                ))
+                let update = Update::<K, V>::read_cfg(buf, update_cfg)?;
+                Ok(Self::KeyValue(op_proof, update))
             }
             EXCLUSION_TAG_COMMIT => {
                 let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-                let value = if bool::read(buf)? {
-                    Some(V::Value::read_cfg(buf, value_cfg)?)
-                } else {
-                    None
-                };
+                let value = Option::<V::Value>::read_cfg(buf, value_cfg)?;
                 Ok(Self::Commit(op_proof, value))
             }
             _ => Err(commonware_codec::Error::Invalid(
