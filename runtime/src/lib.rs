@@ -205,9 +205,7 @@ stability_scope!(BETA {
         /// Labels must start with `[a-zA-Z]` and contain only
         /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
         #[must_use]
-        fn child(&self, label: &'static str) -> Self
-        where
-            Self: Sized;
+        fn child(&self, label: &'static str) -> Self;
 
         /// Add a key-value attribute to this context's identity.
         ///
@@ -274,9 +272,7 @@ stability_scope!(BETA {
         /// the result as a variable in queries such as
         /// `consensus_engine_votes_total{epoch="$latest_epoch"}`.
         #[must_use]
-        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self
-        where
-            Self: Sized;
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
@@ -289,9 +285,8 @@ stability_scope!(BETA {
         /// [`Spawner::dedicated`] instead.
         ///
         /// The shared executor with `blocking == false` is the default spawn mode.
-        fn shared(self, blocking: bool) -> Self
-        where
-            Self: Sized;
+        #[must_use]
+        fn shared(self, blocking: bool) -> Self;
 
         /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
         ///
@@ -299,9 +294,8 @@ stability_scope!(BETA {
         /// shared executor.
         ///
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
-        fn dedicated(self) -> Self
-        where
-            Self: Sized;
+        #[must_use]
+        fn dedicated(self) -> Self;
 
         /// Spawn a task with the current context.
         ///
@@ -438,9 +432,7 @@ stability_scope!(BETA {
         /// metrics are registered, nor does it widen the cardinality of runtime
         /// task metrics.
         #[must_use]
-        fn with_span(self) -> Self
-        where
-            Self: Sized;
+        fn with_span(self) -> Self;
     }
 
     /// Interface to register and encode metrics.

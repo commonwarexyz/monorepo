@@ -172,7 +172,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        test_utils::has_metric_value,
+        telemetry::metrics::has_metric_value,
         Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};

@@ -128,7 +128,7 @@ mod tests {
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, test_utils::has_metric_value, Metrics as _, Runner, Supervisor as _,
+        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
