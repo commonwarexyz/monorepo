@@ -948,9 +948,7 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let remaining = max_digests.checked_sub(proof.digests.len()).ok_or(
-            commonware_codec::Error::Invalid("RangeProof", "digest budget exceeded"),
-        )?;
+        let remaining = max_digests - proof.digests.len();
         let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=remaining)?;
         let remaining = remaining - unfolded_prefix_peaks.len();
         let unfolded_suffix_peaks = Vec::<D>::read_range(buf, ..=remaining)?;
