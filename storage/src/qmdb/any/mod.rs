@@ -69,11 +69,12 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{full::Config as MerkleConfig, Bagging, Family, Location},
+    merkle::{full::Config as MerkleConfig, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
         operation::Committable,
+        ROOT_BAGGING,
     },
     translator::Translator,
     Context,
@@ -117,8 +118,6 @@ pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
-///
-/// The operations root uses split-root mode with backward-fold active bagging.
 pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
     cfg: Config<T, J::Config, S>,
@@ -134,29 +133,15 @@ where
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(
-        context,
-        cfg,
-        None,
-        true,
-        Bagging::BackwardFold,
-    )
-    .await
+    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
-///
-/// `split_root` selects whether the operations root commits to the inactive-prefix split, and
-/// `ops_root_bagging` selects its bagging policy. Public `Any` initialization uses split roots
-/// with backward-fold active bagging; `current::Db` passes a plain `ForwardFold` operations root
-/// because activity is committed through the grafted root instead.
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
     cfg: Config<T, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
-    split_root: bool,
-    ops_root_bagging: Bagging,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -174,7 +159,7 @@ where
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
-        ops_root_bagging,
+        ROOT_BAGGING,
     )
     .await?;
 
@@ -186,7 +171,7 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap, split_root).await
+    db::Db::init_from_log(index, log, bitmap).await
 }
 
 #[cfg(test)]
@@ -195,7 +180,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
+        qmdb::{
+            self,
+            any::{FixedConfig, MerkleConfig, VariableConfig},
+        },
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
@@ -274,7 +262,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as UnorderedIndex,
         journal::contiguous::Mutable,
-        merkle::{self, mmr},
+        merkle::mmr,
         qmdb::any::{
             db::Db as AnyDb,
             operation::{update::Update as UpdateTrait, Operation as AnyOperation},
@@ -643,7 +631,7 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
 
         const ELEMENTS: u64 = 1000;
 
@@ -705,7 +693,7 @@ pub(crate) mod test {
             }
         }
 
-        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
@@ -765,7 +753,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -795,7 +783,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         assert!(verify_proof(
             &hasher,
             &historical_proof,
@@ -844,7 +832,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
         // Apply two single-write batches and capture the commit-boundary size after the
@@ -874,7 +862,7 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         // Changing the proof digests should cause verification to fail
         {

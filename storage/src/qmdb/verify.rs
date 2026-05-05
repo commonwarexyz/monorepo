@@ -123,7 +123,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{build_range_proof, mem::Mem, LocationRangeExt as _},
+        merkle::{build_range_proof, mem::Mem, Bagging::ForwardFold, LocationRangeExt as _},
         mmb, mmr,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -136,7 +136,7 @@ mod tests {
     }
 
     fn test_hasher() -> Standard<Sha256> {
-        Standard::new()
+        Standard::new(ForwardFold)
     }
 
     fn qmdb_range_proof<F: Family>(

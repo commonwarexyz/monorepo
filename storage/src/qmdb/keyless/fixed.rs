@@ -7,12 +7,12 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::{self, Family},
+    merkle::Family,
     qmdb::{
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Error,
+        Error, ROOT_BAGGING,
     },
 };
 use commonware_cryptography::Hasher;
@@ -49,7 +49,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
             cfg.merkle,
             cfg.log,
             Operation::<F, V>::is_commit,
-            merkle::Bagging::BackwardFold,
+            ROOT_BAGGING,
         )
         .await?;
         Self::init_from_journal(journal).await

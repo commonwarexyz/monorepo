@@ -9,7 +9,9 @@ mod tests {
             StandardHasher as Standard,
         },
         proof::{nodes_required_for_multi_proof, Blueprint},
-        Bagging, Family as _, LocationRangeExt as _,
+        Bagging,
+        Bagging::ForwardFold,
+        Family as _, LocationRangeExt as _,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 
@@ -20,7 +22,7 @@ mod tests {
     #[test]
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
-        let hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -297,7 +299,7 @@ mod tests {
     /// node at position 0 (L0) which is a sibling within the range peak, not a fold-prefix peak.
     #[test]
     fn test_verify_proof_and_pinned_nodes_sibling_case() {
-        let hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         let elements: Vec<Digest> = (0..3).map(test_digest).collect();
         let batch = {
@@ -361,7 +363,7 @@ mod tests {
     /// Test verify_proof_and_pinned_nodes when pinned nodes ARE fold-prefix peaks.
     #[test]
     fn test_verify_proof_and_pinned_nodes_fold_prefix_case() {
-        let hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
         // start_loc=8 puts the first peak entirely in the fold prefix.

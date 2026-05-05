@@ -693,8 +693,8 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        merkle::{self, Family, Location},
-        qmdb::verify_proof,
+        merkle::{Family, Location},
+        qmdb::{self, verify_proof},
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
@@ -853,8 +853,7 @@ pub(super) mod test {
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         db.destroy().await.unwrap();
@@ -964,8 +963,7 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         let mut db = open_db(context.child("first")).await;
 
         let mut batch = db.new_batch();
@@ -1741,8 +1739,7 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         const BATCHES: u64 = 20;
         const KEYS_PER_BATCH: u64 = 5;
@@ -1885,8 +1882,7 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         const N: u64 = 500;
         let mut kvs: Vec<(Digest, Digest)> = Vec::new();

@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::merkle::{self, mem::Mem, Family};
+use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
@@ -32,7 +32,7 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let h = StandardHasher::<Sha256>::new();
+                            let h = StandardHasher::<Sha256>::new(ForwardFold);
                             let mut mem = Mem::<F, _>::new();
                             block_on(async {
                                 let batch = {
@@ -47,7 +47,7 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                             mem
                         },
                         |mem| {
-                            let h = StandardHasher::<Sha256>::new();
+                            let h = StandardHasher::<Sha256>::new(ForwardFold);
                             block_on(async {
                                 let mut batch = mem.new_batch();
                                 for digest in &additional {

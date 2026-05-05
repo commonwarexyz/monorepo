@@ -22,8 +22,9 @@
 
 use super::operation::Operation;
 use crate::{
-    merkle::{self, batch, compact as compact_merkle, Family, Location, Proof},
+    merkle::{batch, compact as compact_merkle, Family, Location, Proof},
     qmdb::{
+        self,
         any::value::ValueEncoding,
         compact_witness::{self, CachedServeState, WitnessSource},
         sync::compact as compact_sync,
@@ -192,7 +193,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
             ops.push(Operation::Append(value));
@@ -331,8 +332,8 @@ where
         };
 
         Ok(Self {
-            last_commit_loc,
             merkle,
+            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -389,7 +390,7 @@ where
     where
         F: Family,
     {
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(*self.last_commit_loc + 1)),
             self.inactivity_floor_loc,

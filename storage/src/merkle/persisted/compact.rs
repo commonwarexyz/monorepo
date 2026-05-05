@@ -483,7 +483,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 mod tests {
     use super::*;
     use crate::{
-        merkle::{hasher::Standard as StandardHasher, mmb, mmr},
+        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::Sha256;
@@ -505,7 +505,7 @@ mod tests {
     }
 
     async fn append_and_sync<F: Family>(merkle: &mut TestMerkle<F>, values: &[&[u8]]) {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let batch = {
             let mut b = merkle.new_batch();
             for v in values {
@@ -521,7 +521,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let cfg = Config {
             partition: partition.into(),
             strategy: Sequential,
@@ -572,7 +572,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut merkle = open::<F>(context, partition).await;
 
         append_and_sync(&mut merkle, &[b"a", b"b"]).await;
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn test_rewind_discards_uncommitted() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut merkle = open::<mmr::Family>(context, "rewind-uncommitted").await;
 
             append_and_sync(&mut merkle, &[b"a"]).await;
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn test_rewind_persists_across_reopen() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let partition = "rewind-reopen";
             let cfg = Config {
                 partition: partition.into(),
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn test_rewind_then_sync_then_rewind() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut merkle = open::<mmr::Family>(context, "rewind-resumable").await;
 
             append_and_sync(&mut merkle, &[b"a"]).await;

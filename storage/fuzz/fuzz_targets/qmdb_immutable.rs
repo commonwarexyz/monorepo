@@ -7,7 +7,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{self, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
@@ -151,8 +151,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 .await
                 .unwrap();
 
-            let hasher =
-                merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
             let mut last_commit_loc: Option<Location<F>> = None;

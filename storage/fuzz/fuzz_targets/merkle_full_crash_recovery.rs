@@ -10,7 +10,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
 };
 use commonware_storage::merkle::{
-    full::Config, hasher::Standard as StandardHasher, mmb, mmr, Family as MerkleFamily, Location,
+    full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
+    Family as MerkleFamily, Location,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
@@ -235,7 +236,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let partition_suffix = partition_suffix.clone();
         let operations = operations.clone();
         async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut merkle = Merkle::<F>::init(
                 ctx.child("merkle"),
                 &hasher,
@@ -267,7 +268,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut merkle = Merkle::<F>::init(
             ctx.child("recovered"),
             &hasher,

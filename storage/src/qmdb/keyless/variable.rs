@@ -7,12 +7,12 @@ use crate::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
-    merkle::{self, Family},
+    merkle::Family,
     qmdb::{
         any::value::{VariableEncoding, VariableValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Error,
+        Error, ROOT_BAGGING,
     },
 };
 use commonware_codec::Read;
@@ -54,7 +54,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: St
             cfg.merkle,
             cfg.log,
             Operation::<F, V>::is_commit,
-            merkle::Bagging::BackwardFold,
+            ROOT_BAGGING,
         )
         .await?;
         Self::init_from_journal(journal).await

@@ -168,35 +168,35 @@ hash = "22374a7cbdfa0bdac17e2e285422a54375fec27017942ef7abea2cf8da298c70"
 
 ["commonware_storage::qmdb::conformance::CurrentMmbOrderedFixedConf"]
 n_cases = 200
-hash = "f265ca1f2f7f571230ef4e576b949d3699b619f108cb0a4e2e28c352f7b32aee"
+hash = "c13c9100d657cd01fdf4cff19985bba9e65b7c057391785c5d401a13c976b0af"
 
 ["commonware_storage::qmdb::conformance::CurrentMmbOrderedVariableConf"]
 n_cases = 200
-hash = "74d3a4b1721216ed1bdfc564f5ae07759476b0ceae7dbd1e953c35538a1b0755"
+hash = "8fed62bd40fa5ef36f6aebff5152e37d1089e4a66f8dfb9eec8cb00132487efb"
 
 ["commonware_storage::qmdb::conformance::CurrentMmbUnorderedFixedConf"]
 n_cases = 200
-hash = "92b2d71ff19a0f24f337a934d43ee06e3f81a155cd4adc97c58b27cef5cde435"
+hash = "81fb100d508803580ae22a96b76955b6480f3526254703c9d75ebb56f0f053f1"
 
 ["commonware_storage::qmdb::conformance::CurrentMmbUnorderedVariableConf"]
 n_cases = 200
-hash = "bad7ded44c7cedc95d202dc3334e3de88877d3aeb63b5808b18bd12c2f59c0d9"
+hash = "c46b60791c970b54e936d47a8e2eaae45e9e34c9fb0e1278e678f378392a02f1"
 
 ["commonware_storage::qmdb::conformance::CurrentMmrOrderedFixedConf"]
 n_cases = 200
-hash = "95dc738adeb88d6546c62828e448213fe723d600f57bb4660ecf982ee76e29ef"
+hash = "0e5264ac6a0c0d56ace9ebc986635b128f9d7a118471875ad874b08e80f66ebb"
 
 ["commonware_storage::qmdb::conformance::CurrentMmrOrderedVariableConf"]
 n_cases = 200
-hash = "a52a284b8aec813f99234a0545d7c8e651b6f6c93d1912394be3e46075a2681d"
+hash = "66cd3cc0299ef062e23d4f9812d5d45896cd808ee0bc65d9745a4265895ae8b5"
 
 ["commonware_storage::qmdb::conformance::CurrentMmrUnorderedFixedConf"]
 n_cases = 200
-hash = "537f4c63d903b112fc045ed47f0127da3e2ca70e38c8406e6535a94b2dddc693"
+hash = "8ce052fef8ce8e4d817a2961144cf3a28aec4bd6eb75d32b013499116a6981da"
 
 ["commonware_storage::qmdb::conformance::CurrentMmrUnorderedVariableConf"]
 n_cases = 200
-hash = "93926373351527268aead35fc1884ff27ae2a154df38309dbed50c2c388d4870"
+hash = "0d0591823b7d5ed8dcb940d086ec214062eb3cfffd018e9fbadf9e16ce8da0f7"
 
 ["commonware_storage::qmdb::conformance::ImmutableMmbCompactFixedConf"]
 n_cases = 200
