@@ -938,7 +938,7 @@ mod test {
     #[test]
     fn test_dial_rejects_oversized_fixed_size_syn_ack_frame() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let dialer_crypto = PrivateKey::from_seed(42);
             let listener_crypto = PrivateKey::from_seed(24);
 
@@ -953,6 +953,8 @@ mod test {
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_config.time_information(&context);
+            let listener_public_key = listener_crypto.public_key();
+            let dialer_public_key = dialer_config.signing_key.public_key();
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
@@ -960,17 +962,17 @@ mod test {
                     current_time,
                     ok_timestamps.clone(),
                     dialer_config.signing_key.clone(),
-                    listener_crypto.public_key(),
+                    listener_public_key.clone(),
                 ),
             );
             let (_, syn_ack) = listen_start(
-                &mut context.child("listener"),
+                &mut context,
                 Context::new(
                     &Transcript::new(&dialer_config.namespace),
                     current_time,
                     ok_timestamps,
-                    listener_crypto.clone(),
-                    dialer_config.signing_key.public_key(),
+                    listener_crypto,
+                    dialer_public_key,
                 ),
                 syn,
             )
@@ -986,7 +988,7 @@ mod test {
             let result = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_public_key,
                 dialer_stream,
                 dialer_sink,
             )

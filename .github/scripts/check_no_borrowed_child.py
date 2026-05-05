@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 BORROWED_CHILD = re.compile(
-    r"&\s*\(?\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*child\s*\("
+    r"&\s*(?:mut\s+)?\(?\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*\s*\.\s*child\s*\("
 )
 SKIP_DIRS = {".git", "target"}
 
