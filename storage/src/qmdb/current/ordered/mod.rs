@@ -935,7 +935,8 @@ pub mod tests {
         }
     }
 
-    type CodecExclusionProof = ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
+    type CodecExclusionProof =
+        ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
     type CodecKeyValueProof = db::KeyValueProof<mmb::Family, Digest, Digest, 32>;
     const MAX_DIGESTS: usize = 64;
 
@@ -970,8 +971,7 @@ pub mod tests {
         for proof in cases {
             let encoded = proof.encode();
             assert_eq!(encoded.len(), proof.encode_size());
-            let decoded =
-                CodecExclusionProof::decode_cfg(encoded, &(MAX_DIGESTS, (), ())).unwrap();
+            let decoded = CodecExclusionProof::decode_cfg(encoded, &(MAX_DIGESTS, (), ())).unwrap();
             assert_eq!(decoded, proof);
         }
     }
