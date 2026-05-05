@@ -239,11 +239,9 @@ impl Container {
         if let (Self::Array(a), Self::Array(b)) = (self, other) {
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
             let (result, count) = a.union(b, limit);
-            if result.len() > array::MAX_CARDINALITY {
-                let bitmap = Bitmap::from(&result);
-                return (Self::Bitmap(Box::new(bitmap)), count as u64);
-            }
-            return (Self::Array(result), count as u64);
+            let mut container = Self::Array(result);
+            container.normalize_in_memory();
+            return (container, count as u64);
         }
 
         if let (Self::Bitmap(a), Self::Bitmap(b)) = (self, other) {
