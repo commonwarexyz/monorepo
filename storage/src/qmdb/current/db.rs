@@ -14,6 +14,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
+        self,
         any::{
             self,
             operation::{update::Update, Operation},
@@ -153,7 +154,7 @@ where
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            StandardHasher::<H>::new(),
+            qmdb::hasher::<H>(),
         )
     }
 
@@ -174,6 +175,9 @@ where
     /// sync target because the sync engine verifies batches against the ops root, not the canonical
     /// root.
     ///
+    /// External consumers that receive a trusted canonical `current` root should use
+    /// [`Self::ops_root_witness`] to authenticate this ops root against it.
+    ///
     /// See the [Root structure](super) section in the module documentation.
     pub const fn ops_root(&self) -> H::Digest {
         self.any.root()
@@ -187,9 +191,13 @@ where
         hasher: &mut StandardHasher<H>,
     ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
-        let grafted_root =
-            compute_grafted_root::<F, H, _, _, N>(hasher, self.any.bitmap.as_ref(), &storage)
-                .await?;
+        let grafted_root = compute_grafted_root::<F, H, _, _, N>(
+            hasher,
+            self.any.bitmap.as_ref(),
+            &storage,
+            self.any.inactivity_floor_loc,
+        )
+        .await?;
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
         Ok(OpsRootWitness {
@@ -223,7 +231,15 @@ where
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
-        OperationProof::new(hasher, self.any.bitmap.as_ref(), &storage, loc, ops_root).await
+        OperationProof::new(
+            hasher,
+            self.any.bitmap.as_ref(),
+            &storage,
+            self.any.inactivity_floor_loc,
+            loc,
+            ops_root,
+        )
+        .await
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -249,6 +265,7 @@ where
             hasher,
             self.any.bitmap.as_ref(),
             &storage,
+            self.any.inactivity_floor_loc,
             &self.any.log,
             start_loc,
             max_ops,
@@ -273,7 +290,8 @@ where
     /// Returns an ops-level historical proof for the specified range.
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
-    /// activity bitmap, this returns standard range proofs suitable for state sync.
+    /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
+    /// verifiers should use [`crate::qmdb::hasher`].
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,
@@ -544,7 +562,7 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any.rewind(size).await?;
 
-        let hasher = StandardHasher::<H>::new();
+        let hasher = qmdb::hasher::<H>();
         let grafted_tree = build_grafted_tree::<F, H, S, N>(
             &hasher,
             self.any.bitmap.as_ref(),
@@ -566,6 +584,7 @@ where
             self.any.bitmap.as_ref(),
             &storage,
             partial_chunk,
+            self.any.inactivity_floor_loc,
             &ops_root,
         )
         .await?;
@@ -746,9 +765,10 @@ pub(super) async fn compute_db_root<
     status: &B,
     storage: &S,
     partial_chunk: Option<([u8; N], u64)>,
+    inactivity_floor: Location<F>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
-    let grafted_root = compute_grafted_root(hasher, status, storage).await?;
+    let grafted_root = compute_grafted_root(hasher, status, storage, inactivity_floor).await?;
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
@@ -767,9 +787,10 @@ pub(super) async fn compute_db_root<
 /// grafting over MMB (Merkle Mountain Belt) structures. In an MMB, the trailing operations at the
 /// right edge of the structure might not be numerous enough to form a complete subtree at the
 /// grafting height. Therefore, a single bitmap chunk may span across multiple smaller ops peaks.
-/// `grafting::grafted_root` intercepts the folding process to group these sub-grafting-height
-/// peaks, hash them together with their corresponding bitmap chunks, and then complete the final
-/// fold. For MMR, this produces the exact same result as `hasher.root()`.
+/// `grafting::grafted_root` intercepts the folding process to group these sub-grafting-height peaks,
+/// hash them together with their corresponding bitmap chunks, and then complete the final fold using
+/// the hasher's peak-bagging policy. For MMR, each complete chunk already appears as a single
+/// grafted peak, so no extra peak regrouping is needed.
 pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
@@ -780,6 +801,7 @@ pub(super) async fn compute_grafted_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
+    inactivity_floor: Location<F>,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
     let leaves = Location::try_from(size)?;
@@ -798,9 +820,13 @@ pub(super) async fn compute_grafted_root<
     let complete_chunks = status.complete_chunks() as u64;
     let pruned_chunks = status.pruned_chunks() as u64;
 
+    let inactive_peaks =
+        grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
+
     Ok(grafting::grafted_root(
         hasher,
         leaves,
+        inactive_peaks,
         &peaks,
         grafting_height,
         |chunk_idx| {
@@ -817,7 +843,7 @@ pub(super) async fn compute_grafted_root<
                 None
             }
         },
-    ))
+    )?)
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
@@ -1003,7 +1029,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{mmb, mmr},
+        merkle::{mmb, mmr, Bagging::ForwardFold},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
@@ -1053,7 +1079,7 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let r1 = combine_roots(&hasher, &ops, &grafted, None);
@@ -1063,7 +1089,7 @@ mod tests {
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
@@ -1075,7 +1101,7 @@ mod tests {
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
@@ -1138,7 +1164,7 @@ mod tests {
                 next_idx += 1;
             }
 
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1170,7 +1196,7 @@ mod tests {
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
 
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1219,7 +1245,7 @@ mod tests {
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
 
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1246,7 +1272,7 @@ mod tests {
             .await
             .unwrap();
 
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();

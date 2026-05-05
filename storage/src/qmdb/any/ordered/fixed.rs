@@ -126,11 +126,11 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
-            self,
-            mmr::{self, Location, StandardHasher as Standard},
+            mmr::{self, Location},
             Location as GenericLocation,
         },
         qmdb::{
+            self,
             any::{
                 ordered::{
                     test::{
@@ -367,7 +367,7 @@ pub(crate) mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let mut db = open_db(context.with_label("first")).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -676,7 +676,7 @@ pub(crate) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let root_hash = db.root();
             let original_op_count = db.bounds().await.end;
 
@@ -730,7 +730,7 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
 
             let mut db = create_test_db(context.with_label("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
@@ -801,7 +801,7 @@ pub(crate) mod test {
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
 
-            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let root = db.root();
 
             let start_loc = Location::new(20);

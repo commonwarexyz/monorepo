@@ -356,7 +356,7 @@ impl<F: Family> commonware_codec::Read for Position<F> {
 mod tests {
     use super::{Location as GenericLocation, Position as GenericPosition};
     use crate::{
-        merkle::Family as _,
+        merkle::{Bagging::ForwardFold, Family as _},
         mmr::{self, mem::Mmr, StandardHasher as Standard},
     };
     use commonware_cryptography::Sha256;
@@ -534,7 +534,7 @@ mod tests {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
-        let hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new(ForwardFold);
         let mut mmr = Mmr::new();
         let digest = [1u8; 32];
         for _i in 0..10000 {

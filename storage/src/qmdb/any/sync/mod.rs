@@ -1,14 +1,16 @@
 //! Shared synchronization logic for [crate::qmdb::any] databases.
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
+//!
+//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
 
 use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable},
+        contiguous::{fixed, variable, Mutable, Reader as _},
     },
-    merkle::{self, full, hasher::Standard as StandardHasher, Location},
+    merkle::{self, full, Location},
     qmdb::{
         self,
         any::{
@@ -61,7 +63,6 @@ pub async fn has_local_target_state<F, E, H, S>(
     merkle_config: full::Config<S>,
     target: &qmdb::sync::Target<F, H::Digest>,
     inactive_peaks: usize,
-    bagging: merkle::Bagging,
 ) -> bool
 where
     F: merkle::Family,
@@ -69,7 +70,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::with_bagging(bagging);
+    let hasher = qmdb::hasher::<H>();
     let peek = full::Merkle::<F, _, _, S>::peek_root(
         context.with_label("local_target_probe"),
         merkle_config,
@@ -108,7 +109,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
-    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
 
     let merkle = full::Merkle::<F, _, _, S>::init_sync(
         context.with_label("merkle"),
@@ -129,7 +130,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None, true).await?;
+    let db = Db::init_from_log(index, log, None).await?;
 
     Ok(db)
 }
@@ -158,8 +159,6 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-            const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
-
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -187,16 +186,27 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
+                let Ok(journal) = <$journal>::init(
+                    context.with_label("local_target_journal_probe"),
+                    config.journal_config.clone(),
+                )
+                .await
+                else {
+                    return false;
+                };
+                if Location::new(journal.reader().await.bounds().start) > target.range.start() {
+                    return false;
+                }
+
                 let inactive_peaks = F::inactive_peaks(
                     F::location_to_position(target.range.end()),
                     target.range.start(),
                 );
                 qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context,
+                    context.with_label("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,
-                    merkle::Bagging::BackwardFold,
                 )
                 .await
             }

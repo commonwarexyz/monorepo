@@ -26,7 +26,7 @@ pub type Mmr<E, D, S = Sequential> = crate::merkle::full::Merkle<Family, E, D, S
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, Family as _},
+        merkle::{conformance::build_test_mmr, Bagging::ForwardFold, Family as _},
         mmr::{mem, Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -62,14 +62,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let test_mmr = mem::Mmr::new();
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&hasher, 0).unwrap();
 
             let mut mmr = Mmr::init(
                 context.clone(),
-                &Standard::<Sha256>::new(),
+                &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
             )
             .await
@@ -92,7 +92,7 @@ mod tests {
     fn test_full_mmr_peek_root_empty_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let peek =
                 Mmr::<_, Digest>::peek_root(context.clone(), test_config(&context), &hasher, 0)
                     .await
@@ -109,7 +109,7 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let cfg = test_config(&context);
             let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
 
@@ -234,12 +234,12 @@ mod tests {
     fn test_full_mmr_batch_stacking() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
             let mut mmr = Mmr::init(
                 context.clone(),
-                &Standard::<Sha256>::new(),
+                &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
             )
             .await
@@ -297,7 +297,7 @@ mod tests {
     fn test_init_sync_fresh_start_updates_journal_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
             let mut mmr =

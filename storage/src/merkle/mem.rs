@@ -463,7 +463,9 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, Bagging, Error, Location, Position};
+    use crate::merkle::{
+        hasher::Standard, Bagging, Bagging::ForwardFold, Error, Location, Position,
+    };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
@@ -513,7 +515,7 @@ mod tests {
     fn validity<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut mem = Mem::<F, D>::new();
             for i in 0u64..256 {
                 assert!(
@@ -539,7 +541,7 @@ mod tests {
     fn prune_all_then_append<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut mem = Mem::<F, D>::new();
             for i in 0u64..256 {
                 mem.prune_all();
@@ -556,7 +558,7 @@ mod tests {
     fn range_proof_out_of_bounds<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mem = Mem::<F, D>::new();
             assert!(matches!(
                 mem.range_proof(&hasher, Location::new(0)..Location::new(1), 0),
@@ -576,7 +578,7 @@ mod tests {
     fn proof_out_of_bounds<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mem = Mem::<F, D>::new();
             assert!(matches!(
                 mem.proof(&hasher, Location::new(0), 0),
@@ -594,7 +596,7 @@ mod tests {
     fn init_pinned_nodes_validation<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
 
             assert!(Mem::<F, D>::init(Config {
                 nodes: vec![],
@@ -636,7 +638,7 @@ mod tests {
     fn root_stable_under_pruning<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut reference = Mem::<F, D>::new();
             let mut pruned = Mem::<F, D>::new();
             for i in 0u64..200 {
@@ -693,7 +695,7 @@ mod tests {
     fn batch_update_leaf<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mem = build::<F>(&hasher, 200);
             do_batch_update(&hasher, mem, Sequential);
         });
@@ -702,7 +704,7 @@ mod tests {
     fn batch_parallel_update_leaf<F: Family>() {
         let executor = commonware_runtime::tokio::Runner::default();
         executor.start(|ctx| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mem = build::<F>(&hasher, 200);
             let strategy = ctx.create_strategy(NZUsize!(4)).unwrap();
             do_batch_update(&hasher, mem, strategy);
@@ -710,7 +712,7 @@ mod tests {
     }
 
     fn root_changes_with_each_append<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let mut prev_root = plain_root(&mem, &hasher);
         for i in 0u64..16 {
@@ -730,7 +732,7 @@ mod tests {
     }
 
     fn single_element_proof_roundtrip<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mem = build_raw::<F>(&hasher, 16);
         let root = plain_root(&mem, &hasher);
         for i in 0u64..16 {
@@ -746,7 +748,7 @@ mod tests {
 
     fn range_proof_roundtrip_exhaustive<F: Family>() {
         for n in 1u64..=24 {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -768,7 +770,7 @@ mod tests {
     }
 
     fn root_with_repeated_pruning<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build::<F>(&hasher, 32);
         let root = plain_root(&mem, &hasher);
 
@@ -801,7 +803,7 @@ mod tests {
     }
 
     fn append_after_partial_prune<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build_raw::<F>(&hasher, 20);
         mem.prune(Location::new(7)).unwrap();
 
@@ -832,7 +834,7 @@ mod tests {
     }
 
     fn update_leaf<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build_raw::<F>(&hasher, 11);
         let root_before = plain_root(&mem, &hasher);
 
@@ -889,7 +891,7 @@ mod tests {
 
     fn update_leaf_every_position<F: Family>() {
         let n = 20u64;
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build::<F>(&hasher, n);
 
         for update_loc in 0..n {
@@ -916,7 +918,7 @@ mod tests {
     }
 
     fn update_leaf_errors<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build::<F>(&hasher, 10);
 
         {
@@ -940,7 +942,7 @@ mod tests {
     }
 
     fn update_leaf_with_append<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build::<F>(&hasher, 8);
 
         let batch = {
@@ -974,7 +976,7 @@ mod tests {
     }
 
     fn update_leaf_under_merge_parent<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build::<F>(&hasher, 2);
         let batch = {
             let batch = mem.new_batch();
@@ -986,7 +988,7 @@ mod tests {
         };
         mem.apply_batch(&batch).unwrap();
 
-        let ref_hasher: H = Standard::new();
+        let ref_hasher: H = Standard::new(ForwardFold);
         let mut ref_mem = build::<F>(&ref_hasher, 2);
         let cs = {
             let batch = ref_mem.new_batch();
@@ -1026,7 +1028,7 @@ mod tests {
     /// nodes produced by `nodes_to_pin` under re-merkleization.
     fn update_leaf_after_prune<F: Family>() {
         let max_n = 20u64;
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         for n in 1..=max_n {
             for prune_to in 1..n {
                 let mut mem = build_raw::<F>(&hasher, n);
@@ -1062,7 +1064,7 @@ mod tests {
     /// Applying C (child of B, grandchild of A) after only A is applied
     /// must apply B's uncommitted data + C's data, skipping only A.
     fn apply_batch_skips_only_committed_ancestors<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
 
         // Chain: Mem -> A -> B -> C
@@ -1092,7 +1094,7 @@ mod tests {
     /// Dropping an uncommitted ancestor before merkleizing a descendant must
     /// be detected at apply time, not silently corrupt data.
     fn apply_batch_detects_dropped_ancestor<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
 
         let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
@@ -1109,7 +1111,7 @@ mod tests {
 
     /// Overwrite-only ancestor B must not be skipped when applying C after A.
     fn apply_batch_overwrite_only_ancestor<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let mut mem = build_raw::<F>(&hasher, 10);
 
         let pos0 = Position::<F>::try_from(Location::new(0)).unwrap();
@@ -1153,7 +1155,7 @@ mod tests {
     }
 
     fn split_root_matches_recompute<F: Family>() {
-        let hasher: H = Standard::new();
+        let hasher: H = Standard::new(ForwardFold);
         let plain = build::<F>(&hasher, 49);
         let inactive_peaks = 1;
         let peaks: Vec<_> = F::peaks(plain.size())

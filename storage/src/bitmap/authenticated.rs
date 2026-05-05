@@ -644,6 +644,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> Storage<mmr::Family>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::Bagging::ForwardFold;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -693,7 +694,7 @@ mod tests {
     fn test_bitmap_verify_empty_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let proof = Proof {
                 leaves: Location::new(100),
                 inactive_peaks: 0,
@@ -718,7 +719,7 @@ mod tests {
     fn test_bitmap_verify_rejects_nonzero_inactive_peaks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "inactive_peaks_canonical",
@@ -764,7 +765,7 @@ mod tests {
     fn test_bitmap_empty_then_one() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -841,7 +842,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let test_chunk = test_chunk(b"test");
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
 
             // Add each bit one at a time after the first chunk.
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
@@ -913,7 +914,7 @@ mod tests {
     fn test_bitmap_build_chunked_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -934,7 +935,7 @@ mod tests {
     fn test_bitmap_build_byte_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -955,7 +956,7 @@ mod tests {
     fn test_bitmap_get_out_of_bounds_bit_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -975,7 +976,7 @@ mod tests {
     fn test_bitmap_get_pruned_bit_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -999,7 +1000,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a starting test MMR with two chunks worth of bits.
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -1055,7 +1056,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a test MMR with a few chunks worth of bits.
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",
@@ -1133,7 +1134,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a bitmap with 10 chunks worth of bits.
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let bitmap: MerkleizedBitMap<TestContext, sha256::Digest, N> =
                 MerkleizedBitMap::init(context.with_label("bitmap"), "test", Sequential, &hasher)
                     .await
@@ -1189,7 +1190,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             // Initializing from an empty partition should result in an empty bitmap.
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("initial"),
@@ -1262,7 +1263,7 @@ mod tests {
     fn test_bitmap_proof_out_of_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 "test",

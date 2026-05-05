@@ -10,7 +10,7 @@ pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, hasher::Hasher as _},
+        merkle::{conformance::build_test_mmr, hasher::Hasher as _, Bagging::ForwardFold},
         mmr::{Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
@@ -24,7 +24,7 @@ mod tests {
     fn test_mem_mmr_add_eleven_values() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Mmr::new();
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Location> = Vec::new();
@@ -120,7 +120,7 @@ mod tests {
     fn test_mem_mmr_batched_root() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             const NUM_ELEMENTS: u64 = 199;
             let mut test_mmr = Mmr::new();
             test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
@@ -151,14 +151,14 @@ mod tests {
     fn test_mem_mmr_batched_root_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             const NUM_ELEMENTS: u64 = 199;
             let test_mmr = Mmr::new();
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&hasher, 0).unwrap();
 
             let strategy = context.create_strategy(NZUsize!(4)).unwrap();
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             let mut mmr = Mmr::init(Config {
                 nodes: vec![],
@@ -188,7 +188,7 @@ mod tests {
     fn test_init_size_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             assert!(Mmr::init(Config::<sha256::Digest> {
                 nodes: vec![],
                 pruning_boundary: Location::new(0),

@@ -225,7 +225,7 @@
 //!
 //! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
-//!   against this root using standard Merkle range proofs.
+//!   against this root using ops-tree range proofs.
 //!
 //! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
 //!   with ops subtree roots). Used for proofs about operation values and their activity status.
@@ -238,11 +238,12 @@
 //! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
 //! verifies batches against the ops root, not the canonical root.
 //!
-//! For state sync, the sync engine targets the ops root and verifies each batch against it.
-//! After sync, the bitmap and grafted tree are reconstructed deterministically from the
-//! operations, and the canonical root is computed. [proof::OpsRootWitness] can be used to validate
-//! that a particular ops root is committed by a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
+//! verifying ops proofs directly should use [`crate::qmdb::hasher`]. After sync, the bitmap and
+//! grafted tree are reconstructed deterministically from the operations, and the canonical root is
+//! computed.
+//! [proof::OpsRootWitness] can be used to validate that a particular ops root is committed by a
+//! trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -250,9 +251,9 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Bagging, Location},
-    mmr::StandardHasher,
+    merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
+        self,
         any::{
             self,
             operation::{Operation, Update},
@@ -349,23 +350,16 @@ where
         db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
-    // metadata, then hand it to `any` which becomes the sole owner. `any::init_from_log`
+    // metadata, then hand it to `any` which becomes the sole owner. `any::init_with_bitmap`
     // populates it during snapshot rebuild.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
-    let any = any::init_with_bitmap(
-        context.with_label("any"),
-        config.into(),
-        Some(bitmap),
-        false,
-        Bagging::ForwardFold,
-    )
-    .await?;
+    let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
@@ -389,6 +383,7 @@ where
         any.bitmap.as_ref(),
         &storage,
         partial_chunk,
+        any.inactivity_floor_loc,
         &ops_root,
     )
     .await?;
@@ -422,8 +417,9 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
-        merkle::{self, mmb, mmr},
+        merkle::{self, mmb, mmr, Bagging::ForwardFold},
         qmdb::{
+            self,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -438,7 +434,7 @@ pub mod tests {
         deterministic::{self, Context},
         BufferPooler, Metrics as _, Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::{
@@ -1027,7 +1023,6 @@ pub mod tests {
     use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{test_group, test_traced};
-    use commonware_utils::bitmap::Readable;
 
     type OrderedFixedDb =
         ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
@@ -3049,9 +3044,8 @@ pub mod tests {
             // Sanity: c's pending write is still readable via the any-layer diff chain.
             assert_eq!(c.get(&key(250), &db).await.unwrap(), Some(val(99_999)));
 
-            // The actual prune-interaction test: apply c after prune. `any.apply_batch` writes
-            // diff entries directly into the (now more-pruned) bitmap; bits for locations below
-            // the pruning boundary cannot exist and are filtered by snapshot precedence.
+            // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
+            // chunks below the current pruned boundary.
             db.apply_batch(c).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
@@ -3646,9 +3640,9 @@ pub mod tests {
         });
     }
 
-    /// Regression: MMB current-db ops proofs verify against the full-forward ops root.
+    /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
-    fn test_current_mmb_ops_historical_proof_verifies_with_full_forward_bagging() {
+    fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
         use crate::{merkle::hasher::Standard, qmdb::verify_proof};
         use commonware_utils::NZU64;
 
@@ -3662,6 +3656,7 @@ pub mod tests {
             .await
             .unwrap();
 
+            // Apply a batch and commit so an ops historical proof exists.
             let writes: Vec<(Digest, Option<Digest>)> =
                 (0u64..16).map(|i| (key(i), Some(val(i)))).collect();
             commit_writes(&mut db, writes).await.unwrap();
@@ -3673,9 +3668,8 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let hasher = Standard::<Sha256>::new();
-            let hasher_backward = Standard::<Sha256>::backward();
-
+            // Verifies under the QMDB ops-tree hasher configuration.
+            let hasher = qmdb::hasher::<Sha256>();
             assert!(verify_proof(
                 &hasher,
                 &proof,
@@ -3684,8 +3678,10 @@ pub mod tests {
                 &ops_root
             ));
 
+            // Sanity: a different Merkle hasher configuration must not accept this proof.
+            let plain = Standard::<Sha256>::new(ForwardFold);
             assert!(!verify_proof(
-                &hasher_backward,
+                &plain,
                 &proof,
                 Location::new(0),
                 &ops,

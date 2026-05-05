@@ -6,8 +6,8 @@ use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
     merkle::{
-        hasher::Standard, mem::Mem, mmb, mmr, verification, Bagging, Family as MerkleFamily,
-        Location,
+        hasher::Standard, mem::Mem, mmb, mmr, verification, Bagging, Bagging::ForwardFold,
+        Family as MerkleFamily, Location,
     },
 };
 use futures::executor::block_on;
@@ -143,7 +143,7 @@ fn supported_root_specs<F: MerkleFamily>(merkle: &Mem<F, Digest>) -> Vec<(Baggin
 }
 
 fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
-    let build_hasher = Standard::<Sha256>::new();
+    let build_hasher = Standard::<Sha256>::new(ForwardFold);
     let mut merkle = Mem::<F, Digest>::new();
     let batch = {
         let mut batch = merkle.new_batch();
@@ -155,7 +155,7 @@ fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
     merkle.apply_batch(&batch).unwrap();
 
     for (bagging, inactive_peaks) in supported_root_specs(&merkle) {
-        let hasher = Standard::<Sha256>::with_bagging(bagging);
+        let hasher = Standard::<Sha256>::new(bagging);
         let root = merkle.root(&hasher, inactive_peaks).unwrap();
         for (leaf, element) in digests.iter().enumerate() {
             let loc = Location::<F>::new(leaf as u64);
@@ -179,7 +179,7 @@ fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
 }
 
 fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = Standard::<Sha256>::new(ForwardFold);
     let mut merkle = Mem::<F, Digest>::new();
     let batch = {
         let mut batch = merkle.new_batch();
@@ -229,7 +229,7 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
     }
 
     for (bagging, inactive_peaks) in supported_root_specs(&merkle) {
-        let hasher = Standard::<Sha256>::with_bagging(bagging);
+        let hasher = Standard::<Sha256>::new(bagging);
         let root = merkle.root(&hasher, inactive_peaks).unwrap();
         let Ok(original_proof) = block_on(verification::historical_range_proof(
             &hasher,

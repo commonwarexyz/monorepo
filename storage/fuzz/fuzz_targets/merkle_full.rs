@@ -5,8 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::merkle::{
-    full::Config, hasher::Standard, mem::Mem, mmb, mmr, Error, Family as MerkleFamily, Location,
-    LocationRangeExt as _, Position,
+    full::Config, hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error,
+    Family as MerkleFamily, Location, LocationRangeExt as _, Position,
 };
 use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -92,7 +92,7 @@ fn historical_root<F: MerkleFamily>(
     leaves: &[Vec<u8>],
     requested_leaves: Location<F>,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = Standard::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     let batch = {
         let mut batch = mem.new_batch();
@@ -115,7 +115,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = input.operations.clone();
         async move {
             let mut leaves = Vec::new();
-            let hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new(ForwardFold);
             let mut merkle =
                 Merkle::<F, _, _>::init(context.clone(), &hasher, test_config(suffix, &context))
                     .await
@@ -258,7 +258,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             .await;
                         match result {
                             Ok(historical_proof) => {
-                                let verify_hasher = Standard::<Sha256>::new();
+                                let verify_hasher = Standard::<Sha256>::new(ForwardFold);
                                 assert!(historical_proof.verify_range_inclusion(
                                     &verify_hasher,
                                     &leaves[range.to_usize_range()],
