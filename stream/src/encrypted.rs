@@ -185,7 +185,7 @@ where
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
 pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
-    mut ctx: R,
+    ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
     mut stream: I,
@@ -203,7 +203,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn) = dial_start(
-            &mut ctx,
+            ctx,
             Context::new(
                 &Transcript::new(&config.namespace),
                 current_time,
@@ -251,7 +251,7 @@ pub async fn listen<
     Fut: Future<Output = bool>,
     F: FnOnce(S::PublicKey) -> Fut,
 >(
-    mut ctx: R,
+    ctx: R,
     bouncer: F,
     config: Config<S>,
     mut stream: I,
@@ -269,7 +269,7 @@ pub async fn listen<
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn_ack) = listen_start(
-            &mut ctx,
+            ctx,
             Context::new(
                 &Transcript::new(&config.namespace),
                 current_time,
@@ -938,7 +938,7 @@ mod test {
     #[test]
     fn test_dial_rejects_oversized_fixed_size_syn_ack_frame() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let dialer_crypto = PrivateKey::from_seed(42);
             let listener_crypto = PrivateKey::from_seed(24);
 
@@ -966,7 +966,7 @@ mod test {
                 ),
             );
             let (_, syn_ack) = listen_start(
-                &mut context,
+                context.child("listener"),
                 Context::new(
                     &Transcript::new(&dialer_config.namespace),
                     current_time,
