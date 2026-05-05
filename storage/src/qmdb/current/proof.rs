@@ -20,7 +20,9 @@ use crate::{
     },
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
+use commonware_codec::{
+    varint::UInt, Codec, EncodeSize, Read, ReadExt as _, ReadRangeExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::ops::Range;
@@ -904,6 +906,70 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     }
 }
 
+impl<F: Family, D: Digest> Write for RangeProof<F, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.proof.write(buf);
+        self.pre_prefix_acc.is_some().write(buf);
+        if let Some(digest) = &self.pre_prefix_acc {
+            digest.write(buf);
+        }
+        self.unfolded_prefix_peaks.write(buf);
+        self.partial_chunk_digest.is_some().write(buf);
+        if let Some(digest) = &self.partial_chunk_digest {
+            digest.write(buf);
+        }
+        self.ops_root.write(buf);
+    }
+}
+
+impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
+    fn encode_size(&self) -> usize {
+        self.proof.encode_size()
+            + self
+                .pre_prefix_acc
+                .as_ref()
+                .map_or(1, |d| 1 + d.encode_size())
+            + self.unfolded_prefix_peaks.encode_size()
+            + self
+                .partial_chunk_digest
+                .as_ref()
+                .map_or(1, |d| 1 + d.encode_size())
+            + self.ops_root.encode_size()
+    }
+}
+
+impl<F: Family, D: Digest> Read for RangeProof<F, D> {
+    /// The maximum number of digests in the proof, also used as the upper bound on the
+    /// number of unfolded prefix peaks (which is itself bounded by the structural peak count).
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        max_digests: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
+        let pre_prefix_acc = if bool::read(buf)? {
+            Some(D::read(buf)?)
+        } else {
+            None
+        };
+        let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=*max_digests)?;
+        let partial_chunk_digest = if bool::read(buf)? {
+            Some(D::read(buf)?)
+        } else {
+            None
+        };
+        let ops_root = D::read(buf)?;
+        Ok(Self {
+            proof,
+            pre_prefix_acc,
+            unfolded_prefix_peaks,
+            partial_chunk_digest,
+            ops_root,
+        })
+    }
+}
+
 /// A proof that a specific operation is currently active in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct OperationProof<F: Family, D: Digest, const N: usize> {
@@ -978,6 +1044,39 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     }
 }
 
+impl<F: Family, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.loc.write(buf);
+        self.chunk.write(buf);
+        self.range_proof.write(buf);
+    }
+}
+
+impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
+    fn encode_size(&self) -> usize {
+        self.loc.encode_size() + self.chunk.encode_size() + self.range_proof.encode_size()
+    }
+}
+
+impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
+    /// The maximum number of digests in the embedded range proof.
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        max_digests: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let loc = Location::<F>::read(buf)?;
+        let chunk = <[u8; N]>::read(buf)?;
+        let range_proof = RangeProof::<F, D>::read_cfg(buf, max_digests)?;
+        Ok(Self {
+            loc,
+            chunk,
+            range_proof,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,7 +1085,7 @@ mod tests {
         mmb,
         qmdb::current::{db, grafting},
     };
-    use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -1009,6 +1108,94 @@ mod tests {
             let decoded = OpsRootWitness::<sha256::Digest>::decode(encoded).unwrap();
             assert_eq!(decoded, witness);
         }
+    }
+
+    #[test]
+    fn test_range_proof_codec_roundtrip() {
+        type F = mmb::Family;
+        const MAX_DIGESTS: usize = 64;
+
+        let proof = Proof::<F, sha256::Digest> {
+            leaves: mmb::Location::new(42),
+            inactive_peaks: 0,
+            digests: vec![
+                Sha256::hash(b"d0"),
+                Sha256::hash(b"d1"),
+                Sha256::hash(b"d2"),
+            ],
+        };
+        let ops_root = Sha256::hash(b"ops-root");
+
+        let cases = [
+            // Minimal: no optional fields, no unfolded peaks.
+            RangeProof {
+                proof: proof.clone(),
+                pre_prefix_acc: None,
+                unfolded_prefix_peaks: vec![],
+                partial_chunk_digest: None,
+                ops_root,
+            },
+            // All optional fields populated, with unfolded peaks.
+            RangeProof {
+                proof,
+                pre_prefix_acc: Some(Sha256::hash(b"pre-prefix")),
+                unfolded_prefix_peaks: vec![Sha256::hash(b"u0"), Sha256::hash(b"u1")],
+                partial_chunk_digest: Some(Sha256::hash(b"partial")),
+                ops_root,
+            },
+            // Default proof with only partial chunk digest.
+            RangeProof {
+                proof: Proof::<F, sha256::Digest>::default(),
+                pre_prefix_acc: None,
+                unfolded_prefix_peaks: vec![],
+                partial_chunk_digest: Some(Sha256::hash(b"only-partial")),
+                ops_root,
+            },
+        ];
+
+        for proof in cases {
+            let encoded = proof.encode();
+            assert_eq!(encoded.len(), proof.encode_size());
+            let decoded =
+                RangeProof::<F, sha256::Digest>::decode_cfg(encoded, &MAX_DIGESTS).unwrap();
+            assert_eq!(decoded, proof);
+        }
+    }
+
+    #[test]
+    fn test_operation_proof_codec_roundtrip() {
+        type F = mmb::Family;
+        const N: usize = 32;
+        const MAX_DIGESTS: usize = 64;
+
+        let range_proof = RangeProof {
+            proof: Proof::<F, sha256::Digest> {
+                leaves: mmb::Location::new(7),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"sib")],
+            },
+            pre_prefix_acc: Some(Sha256::hash(b"pre")),
+            unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops"),
+        };
+
+        let mut chunk = [0u8; N];
+        for (i, byte) in chunk.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+
+        let proof = OperationProof::<F, sha256::Digest, N> {
+            loc: mmb::Location::new(5),
+            chunk,
+            range_proof,
+        };
+
+        let encoded = proof.encode();
+        assert_eq!(encoded.len(), proof.encode_size());
+        let decoded =
+            OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &MAX_DIGESTS).unwrap();
+        assert_eq!(decoded, proof);
     }
 
     #[test_traced]
