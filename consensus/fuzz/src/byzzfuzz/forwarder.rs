@@ -65,12 +65,37 @@ use std::{fmt::Write as _, sync::Arc};
 // Helpers
 // -----------------------------------------------------------------------------
 
-/// Expand a [`Recipients`] into an explicit list against the participant set.
-fn expand<P: PublicKey>(recipients: &Recipients<P>, participants: &[P]) -> Vec<P> {
+/// Expand a [`Recipients`] into an explicit list against the participant
+/// set, excluding the sender. The simulated network drops self-delivery
+/// later in the pipeline, but ByzzFuzz makes partition / proc-fault
+/// decisions on this list -- including the sender here would let a
+/// partition that isolates every real peer still appear as a non-empty
+/// kept set (`[sender]`), masking what is effectively a full drop.
+fn expand<P: PublicKey>(
+    recipients: &Recipients<P>,
+    participants: &[P],
+    sender_idx: usize,
+) -> Vec<P> {
+    let sender = participants.get(sender_idx);
     match recipients {
-        Recipients::All => participants.to_vec(),
-        Recipients::Some(v) => v.clone(),
-        Recipients::One(p) => vec![p.clone()],
+        Recipients::All => participants
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != sender_idx)
+            .map(|(_, p)| p.clone())
+            .collect(),
+        Recipients::Some(v) => v
+            .iter()
+            .filter(|p| Some(*p) != sender)
+            .cloned()
+            .collect(),
+        Recipients::One(p) => {
+            if Some(p) == sender {
+                Vec::new()
+            } else {
+                vec![p.clone()]
+            }
+        }
     }
 }
 
@@ -193,7 +218,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
                 return Some(recipients.clone());
             }
             let view = sender_view.get();
-            let expanded = expand(recipients, &participants);
+            let expanded = expand(recipients, &participants, sender_idx);
             return match filter_by_partition(
                 expanded.clone(),
                 &participants,
@@ -221,7 +246,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
         }
         let kind = scope::vote_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
-        let expanded = expand(recipients, &participants);
+        let expanded = expand(recipients, &participants, sender_idx);
         let kept = match filter_by_partition(
             expanded.clone(),
             &participants,
@@ -288,7 +313,7 @@ where
                 return Some(recipients.clone());
             }
             let view = sender_view.get();
-            let expanded = expand(recipients, &participants);
+            let expanded = expand(recipients, &participants, sender_idx);
             return match filter_by_partition(
                 expanded.clone(),
                 &participants,
@@ -313,7 +338,7 @@ where
         }
         let kind = scope::certificate_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
-        let expanded = expand(recipients, &participants);
+        let expanded = expand(recipients, &participants, sender_idx);
         let kept = match filter_by_partition(
             expanded.clone(),
             &participants,
@@ -385,7 +410,7 @@ where
             return Some(recipients.clone());
         }
         let view = sender_view.get();
-        let expanded = expand(recipients, &participants);
+        let expanded = expand(recipients, &participants, sender_idx);
         let kept = match filter_by_partition(
             expanded.clone(),
             &participants,
