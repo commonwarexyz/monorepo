@@ -943,16 +943,16 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
+                spawn_engines_with_handles(context.child("peers"), &oracle, schemes, connections);
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;
 
-            // Count running tasks under the engine prefix
-            let running_before = count_running_tasks(&context, "engine");
+            // Count running tasks under the peers prefix
+            let running_before = count_running_tasks(&context, "peers");
             assert!(
                 running_before > 0,
-                "at least one engine task should be running"
+                "at least one peer engine task should be running"
             );
 
             // Verify network is functional - send a request and expect a response
@@ -969,11 +969,11 @@ mod tests {
             }
             context.sleep(Duration::from_millis(100)).await;
 
-            // Verify all engine tasks are stopped
-            let running_after = count_running_tasks(&context, "engine");
+            // Verify all peer engine tasks are stopped
+            let running_after = count_running_tasks(&context, "peers");
             assert_eq!(
                 running_after, 0,
-                "all engine tasks should be stopped, but {running_after} still running"
+                "all peer engine tasks should be stopped, but {running_after} still running"
             );
         });
     }
