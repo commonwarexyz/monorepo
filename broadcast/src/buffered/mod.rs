@@ -879,11 +879,11 @@ mod tests {
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;
 
-            // Count running tasks under the engine prefix
+            // Count running tasks under the peers prefix
             let running_before = count_running_tasks(&context, "peers");
             assert!(
                 running_before > 0,
-                "at least one engine task should be running"
+                "at least one peer engine task should be running"
             );
 
             // Verify network is functional
@@ -909,11 +909,11 @@ mod tests {
             }
             context.sleep(Duration::from_millis(100)).await;
 
-            // Verify all engine tasks are stopped
-            let running_after = count_running_tasks(&context, "engine");
+            // Verify all peer engine tasks are stopped
+            let running_after = count_running_tasks(&context, "peers");
             assert_eq!(
                 running_after, 0,
-                "all engine tasks should be stopped, but {running_after} still running"
+                "all peer engine tasks should be stopped, but {running_after} still running"
             );
         });
     }
