@@ -313,16 +313,26 @@ where
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
-        let states = invariants::extract(reporters, config.n as usize);
+
+        // State-extraction invariants assume each reporter is honest;
+        // include only correct reporters here. Quorum thresholds still
+        // derive from the full validator set, so `config.n` is unchanged.
+        let correct_reporters = reporters
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
+            .collect();
+
+        let states = invariants::extract(correct_reporters, config.n as usize);
         invariants::check::<P>(config.n, states);
     });
 }
 
 /// Run the ByzzFuzz fault model on `input` in liveness mode. Faults apply
-/// during a bounded fault phase, then [`FaultGate::heal`] flips and each
+/// during a bounded fault phase, then the shared fault gate flips and each
 /// non-byzantine reporter must advance at least one finalized view inside
-/// [`BYZZFUZZ_HEAL_WINDOW`]. Failure to advance is a liveness violation
-/// (panics). Index [`BYZANTINE_IDX`] is excluded -- only correct-process
+/// the heal window. Failure to advance is a liveness violation (panics).
+/// The byzantine identity at index 0 is excluded -- only correct-process
 /// liveness is checked.
 ///
 /// Faults must stop at the boundary so the post-heal protocol can run unperturbed; a
@@ -459,7 +469,17 @@ where
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
-        let states = invariants::extract(reporters, config.n as usize);
+
+        // State-extraction invariants assume each reporter is honest;
+        // include only correct reporters here. Quorum thresholds still
+        // derive from the full validator set, so `config.n` is unchanged.
+        let correct_reporters = reporters
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
+            .collect();
+
+        let states = invariants::extract(correct_reporters, config.n as usize);
         invariants::check::<P>(config.n, states);
     });
 }
