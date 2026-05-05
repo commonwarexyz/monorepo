@@ -103,15 +103,12 @@ impl<
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify && !activity.verified() {
-            let verified = {
-                let mut rng = self.rng.lock();
-                activity.verify(&mut *rng, &self.scheme, &self.strategy)
-            };
-            if !verified {
-                // Drop unverified peer activity
-                return;
-            }
+        if self.verify
+            && !activity.verified()
+            && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
+        {
+            // Drop unverified peer activity
+            return;
         }
 
         // Filter based on scheme attributability

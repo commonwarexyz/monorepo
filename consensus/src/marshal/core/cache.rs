@@ -197,10 +197,7 @@ where
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let context = self
-            .context
-            .child("cache")
-            .with_attribute("epoch", epoch);
+        let context = self.context.child("cache").with_attribute("epoch", epoch);
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
                 &context,
