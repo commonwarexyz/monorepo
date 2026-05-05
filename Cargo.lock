@@ -1477,7 +1477,6 @@ dependencies = [
  "ctutils",
  "curve25519-dalek",
  "ecdsa 0.16.9",
- "ed25519-consensus",
  "getrandom 0.2.16",
  "num-rational",
  "num-traits",
@@ -3659,7 +3658,7 @@ dependencies = [
  "pin-utils",
  "scoped-tls",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
