@@ -140,10 +140,6 @@ stability_scope!(BETA {
     /// running tasks.
     pub trait Runner {
         /// Context defines the environment available to tasks.
-        /// Example of possible services provided by the context include:
-        /// - [Clock] for time-based operations
-        /// - [Network] for network operations
-        /// - [Storage] for storage operations
         type Context;
 
         /// Start running a root task.
@@ -166,31 +162,7 @@ stability_scope!(BETA {
         pub attributes: Vec<(String, String)>,
     }
 
-    /// Interface for creating supervised child contexts and carrying context identity.
-    ///
-    /// # Mental Model: Identity, Metrics, and Tracing
-    ///
-    /// A context carries multiple pieces of observability state. They compose
-    /// freely, but they do not all feed into the same sinks:
-    ///
-    /// - `label` (set by [`Supervisor::child`]): prefix applied to metrics
-    ///   registered with [`Metrics::register`]. It also populates the `name`
-    ///   field of runtime-internal task metrics (`runtime_tasks_spawned`,
-    ///   `runtime_tasks_running`).
-    /// - `attributes` (set by [`Supervisor::with_attribute`]): Prometheus label
-    ///   dimensions on metrics registered with [`Metrics::register`]. They are
-    ///   also emitted as OpenTelemetry attributes on the per-task tracing span
-    ///   when [`Tracing::with_span`] is enabled. Runtime task metrics ignore
-    ///   attributes to keep their cardinality bounded.
-    /// - `span` (set by [`Tracing::with_span`]): wraps the next spawned task in
-    ///   a `tracing` span populated from the current `label` and `attributes`.
-    ///   It never touches metrics.
-    ///
-    /// | Builder | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span |
-    /// | --- | :---: | :---: | :---: | :---: |
-    /// | `child` | prefix | - | `name` | `name` field when `with_span` is set |
-    /// | `with_attribute` | - | label dimension | - | OTel attribute when `with_span` is set |
-    /// | `with_span` | - | - | - | enables span creation |
+    /// Interface to track task hierarchy and identity.
     pub trait Supervisor: Send + Sync + 'static {
         /// Return the current label prefix and attributes.
         fn name(&self) -> Name;
@@ -404,7 +376,7 @@ stability_scope!(BETA {
         }
     }
 
-    /// Interface to configure task spans.
+    /// Interface to register task traces.
     pub trait Tracing: Supervisor {
         /// Return a context that wraps the next spawned task in a `tracing` span.
         ///
@@ -463,6 +435,31 @@ stability_scope!(BETA {
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }
+
+    /// Interface for both [`Tracing`] and [`Metrics`].
+    ///
+    /// A context carries multiple pieces of observability state. They compose
+    /// freely, but they do not all feed into the same sinks:
+    ///
+    /// - `label` (set by [`Supervisor::child`]): prefix applied to metrics
+    ///   registered with [`Metrics::register`]. It also populates the `name`
+    ///   field of runtime-internal task metrics (`runtime_tasks_spawned`,
+    ///   `runtime_tasks_running`).
+    /// - `attributes` (set by [`Supervisor::with_attribute`]): Prometheus label
+    ///   dimensions on metrics registered with [`Metrics::register`]. They are
+    ///   also emitted as OpenTelemetry attributes on the per-task tracing span
+    ///   when [`Tracing::with_span`] is enabled. Runtime task metrics ignore
+    ///   attributes to keep their cardinality bounded.
+    /// - `span` (set by [`Tracing::with_span`]): wraps the next spawned task in
+    ///   a `tracing` span populated from the current `label` and `attributes`.
+    ///   It never touches metrics.
+    ///
+    /// | Builder | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span |
+    /// | --- | :---: | :---: | :---: | :---: |
+    /// | `child` | prefix | - | `name` | `name` field when `with_span` is set |
+    /// | `with_attribute` | - | label dimension | - | OTel attribute when `with_span` is set |
+    /// | `with_span` | - | - | - | enables span creation |
+    pub trait Observer: Tracing + Metrics {}
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
     ///
