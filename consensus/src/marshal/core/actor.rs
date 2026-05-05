@@ -1272,7 +1272,7 @@ where
             let next_height = self
                 .pending_acks
                 .next_dispatch_height(self.last_processed_height);
-            let Some(block) = self.get_finalized_block(next_height).await else {
+            let Some(block) = self.get_ready_finalized_block(next_height).await else {
                 return;
             };
             assert_eq!(
@@ -1395,6 +1395,18 @@ where
     }
 
     // -------------------- Immutable Storage --------------------
+
+    /// Get a finalized block that is known to be within the finalized archive tip.
+    async fn get_ready_finalized_block(&self, height: Height) -> Option<V::Block> {
+        if !self
+            .finalized_blocks
+            .last_index()
+            .is_some_and(|last| last >= height)
+        {
+            return None;
+        }
+        self.get_finalized_block(height).await
+    }
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {

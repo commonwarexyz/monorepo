@@ -85,7 +85,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod coding;
 });
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
 /// An identifier for a block request.
