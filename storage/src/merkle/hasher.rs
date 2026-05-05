@@ -162,6 +162,11 @@ impl<H: CHasher> Standard<H> {
         }
     }
 
+    /// Return the bagging policy used when folding peaks into a root.
+    pub const fn root_bagging(&self) -> Bagging {
+        self.bagging
+    }
+
     /// Hash an arbitrary sequence of byte slices into a single digest.
     pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
         let mut h = H::new();
@@ -185,7 +190,7 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     }
 
     fn root_bagging(&self) -> Bagging {
-        self.bagging
+        Self::root_bagging(self)
     }
 }
 

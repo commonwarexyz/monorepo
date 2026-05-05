@@ -15,8 +15,7 @@ use crate::{
         full::Merkle,
         hasher::{Hasher as _, Standard as StandardHasher},
         mem::Mem,
-        Bagging::ForwardFold,
-        Family, Location, Position, Proof, Readable,
+        Bagging, Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
 };
@@ -109,6 +108,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
+            bagging: hasher.root_bagging(),
             items,
             parent: parent.as_ref().map(Arc::downgrade),
             ancestor_items,
@@ -153,6 +153,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
+            bagging: self.hasher.root_bagging(),
             items,
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
@@ -165,6 +166,8 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
 pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy = Sequential> {
     /// The inner batch of Merkle leaf digests.
     pub(crate) inner: Arc<batch::MerkleizedBatch<F, D, S>>,
+    /// The peak bagging policy inherited from the parent journal or batch.
+    bagging: Bagging,
     /// The items to append from this batch.
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
@@ -227,7 +230,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     {
         UnmerkleizedBatch {
             inner: self.inner.new_batch(),
-            hasher: StandardHasher::new(ForwardFold),
+            hasher: StandardHasher::new(self.bagging),
             items: Vec::new(),
             parent: Some(Arc::clone(self)),
         }
@@ -319,7 +322,7 @@ where
         let root = self.merkle.to_batch();
         UnmerkleizedBatch {
             inner: root.new_batch(),
-            hasher: StandardHasher::new(ForwardFold),
+            hasher: StandardHasher::new(self.hasher.root_bagging()),
             items: Vec::new(),
             parent: None,
         }
@@ -337,6 +340,7 @@ where
     pub(crate) fn to_merkleized_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, C::Item, S>> {
         Arc::new(MerkleizedBatch {
             inner: self.merkle.to_batch(),
+            bagging: self.hasher.root_bagging(),
             items: Arc::new(Vec::new()),
             parent: None,
             ancestor_items: Vec::new(),
@@ -852,6 +856,7 @@ mod tests {
         merkle::{
             full::{Config as MerkleConfig, Merkle},
             mmb, mmr,
+            Bagging::{BackwardFold, ForwardFold},
         },
         qmdb::{
             any::{
@@ -939,6 +944,31 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn test_batches_inherit_journal_bagging() {
+        deterministic::Runner::default().start(|context| async move {
+            let merkle_cfg = merkle_config("batch-bagging", &context);
+            let journal_cfg = journal_config("batch-bagging", &context);
+            let journal = TestJournal::<mmr::Family>::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                BackwardFold,
+            )
+            .await
+            .unwrap();
+
+            let batch = journal.new_batch();
+            assert_eq!(batch.hasher.root_bagging(), BackwardFold);
+
+            let merkleized = journal.merkle.with_mem(|mem| batch.merkleize(mem));
+            let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>> =
+                merkleized.new_batch();
+            assert_eq!(child.hasher.root_bagging(), BackwardFold);
+        });
     }
 
     /// Create a test operation with predictable values based on index.
