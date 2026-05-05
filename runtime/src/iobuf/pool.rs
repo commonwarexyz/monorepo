@@ -617,6 +617,18 @@ impl TlsSizeClassCache {
             return Some(entry);
         }
 
+        // Refill from the global freelist on a local miss.
+        self.pop_miss(class)
+    }
+
+    /// Handles a local-cache miss by taking from the class-global freelist.
+    ///
+    /// This is separate from [`Self::pop`] so the steady-state allocation hot path
+    /// can inline only the local cache hit. We annotate with `inline(never)` to keep
+    /// the refill and batching code out of `BufferPoolInner::try_alloc`, reducing
+    /// hot-path code size and register pressure.
+    #[inline(never)]
+    fn pop_miss(&mut self, class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
         // Tiny caches do not batch enough to justify the wider global
         // claim. Keep their miss path equivalent to a single take.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
@@ -671,6 +683,18 @@ impl TlsSizeClassCache {
             return;
         }
 
+        // Spill to the global freelist when the local cache is full.
+        self.push_full(entry);
+    }
+
+    /// Handles a full local cache by returning entries to the global freelist.
+    ///
+    /// This is separate from [`Self::push`] so the steady-state return hot path can
+    /// inline only the local cache push. We annotate with `inline(never)` to keep the
+    /// spill and batching code out of pooled buffer drop, which keeps that hot frame
+    /// small when the local cache has room.
+    #[inline(never)]
+    fn push_full(&mut self, entry: TlsSizeClassCacheEntry) {
         // Very small caches cannot spill enough entries to amortize a batch
         // insert, so overflow goes straight to the global freelist.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
