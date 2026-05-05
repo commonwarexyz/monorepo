@@ -857,6 +857,7 @@ where
 pub(crate) mod harnesses {
     use super::*;
     use crate::merkle::{mmb, mmr, Family};
+    use commonware_parallel::Sequential;
 
     type VariableDb<F> = immutable::variable::Db<
         F,
@@ -881,7 +882,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1146,6 +1147,7 @@ mod compact_variable_mmr {
     use super::*;
     use crate::merkle::mmr;
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
 
     type SourceDb = immutable::variable::Db<
         mmr::Family,
@@ -1176,7 +1178,7 @@ mod compact_variable_mmr {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1197,7 +1199,7 @@ mod compact_variable_mmr {
         immutable::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
         }
@@ -1619,6 +1621,7 @@ mod compact_variable_mmb {
     use super::*;
     use crate::merkle::mmb;
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
 
     type SourceDb = immutable::variable::Db<
         mmb::Family,
@@ -1649,7 +1652,7 @@ mod compact_variable_mmb {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1670,7 +1673,7 @@ mod compact_variable_mmb {
         immutable::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
         }

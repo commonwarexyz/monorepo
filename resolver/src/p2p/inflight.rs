@@ -88,8 +88,7 @@ where
     /// Drop entries for which the predicate returns false. Returns the count of dropped entries.
     pub(super) fn retain<F: FnMut(&Key) -> bool>(&mut self, mut predicate: F) -> usize {
         let removed: Vec<_> = self.entries.extract_if(|k, _| !predicate(k)).collect();
-        let count = removed.len();
-        count
+        removed.len()
     }
 
     /// Drop all entries. Returns the count of dropped entries.

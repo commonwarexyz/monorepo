@@ -1,12 +1,16 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{BufMut, Error, IoBufs};
 use bytes::{Bytes, BytesMut};
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    sync::Mutex,
+};
 use std::sync::Arc;
 
-/// Default read buffer size for the stream's local buffer (64 KB).
-const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+/// Default buffer size (64 KB). Controls both how much data the stream
+/// pulls per recv and the backpressure threshold for send.
+const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
 
 /// A mock channel struct that is used internally by Sink and Stream.
 pub struct Channel {
@@ -18,8 +22,13 @@ pub struct Channel {
     /// the sink uses to send the bytes to the stream directly.
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
 
-    /// Target size for the stream's local buffer, used to bound buffering.
-    read_buffer_size: usize,
+    /// Target buffer size, used to bound both the stream's local buffer
+    /// and the shared buffer (backpressure threshold).
+    buffer_size: usize,
+
+    /// If the sink is blocked waiting for the buffer to drain, this holds
+    /// the oneshot sender that the stream uses to wake the sink.
+    drain_waiter: Option<oneshot::Sender<()>>,
 
     /// Tracks whether the sink is still alive and able to send messages.
     sink_alive: bool,
@@ -29,83 +38,189 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Returns an async-safe Sink/Stream pair with default read buffer size.
+    /// Returns an async-safe Sink/Stream pair with default buffer size.
     pub fn init() -> (Sink, Stream) {
-        Self::init_with_read_buffer_size(DEFAULT_READ_BUFFER_SIZE)
+        Self::init_with_buffer_size(DEFAULT_BUFFER_SIZE)
     }
 
-    /// Returns an async-safe Sink/Stream pair with the specified buffer capacity.
-    pub fn init_with_read_buffer_size(read_buffer_size: usize) -> (Sink, Stream) {
+    /// Returns an async-safe Sink/Stream pair with the specified buffer size.
+    pub fn init_with_buffer_size(buffer_size: usize) -> (Sink, Stream) {
         let channel = Arc::new(Mutex::new(Self {
             buffer: BytesMut::new(),
             waiter: None,
-            read_buffer_size,
+            buffer_size,
+            drain_waiter: None,
             sink_alive: true,
             stream_alive: true,
         }));
         (
             Sink {
                 channel: channel.clone(),
+                state: SinkState::Open,
             },
             Stream {
                 channel,
                 buffer: BytesMut::new(),
+                poisoned: false,
             },
         )
+    }
+
+    /// Restores bytes that were detached from the front of the shared buffer.
+    fn restore_front(&mut self, data: Bytes) {
+        if data.is_empty() {
+            return;
+        }
+
+        let mut restored = BytesMut::with_capacity(data.len() + self.buffer.len());
+        restored.extend_from_slice(&data);
+        restored.extend_from_slice(&self.buffer);
+        self.buffer = restored;
+    }
+
+    /// Marks the sink as closed and wakes any waiter.
+    fn close_sink(&mut self) {
+        self.sink_alive = false;
+
+        // If there is a waiter, resolve it by dropping the oneshot sender.
+        self.waiter.take();
+    }
+}
+
+struct RecvWaiterGuard {
+    channel: Arc<Mutex<Channel>>,
+    active: bool,
+}
+
+impl RecvWaiterGuard {
+    const fn new(channel: Arc<Mutex<Channel>>) -> Self {
+        Self {
+            channel,
+            active: true,
+        }
+    }
+
+    const fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RecvWaiterGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        self.channel.lock().waiter.take();
     }
 }
 
 /// A mock sink that implements the Sink trait.
 pub struct Sink {
     channel: Arc<Mutex<Channel>>,
+    state: SinkState,
 }
 
-impl SinkTrait for Sink {
+/// Lifecycle state for the mock sink half.
+enum SinkState {
+    /// Sends may be attempted.
+    Open,
+    /// A send is currently in progress.
+    Sending,
+    /// The sink has been closed.
+    Closed,
+}
+
+impl Sink {
+    fn close(&mut self) {
+        if matches!(self.state, SinkState::Closed) {
+            return;
+        }
+        self.channel.lock().close_sink();
+        self.state = SinkState::Closed;
+    }
+}
+
+impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let (os_send, data) = {
+        match self.state {
+            SinkState::Open => {}
+            SinkState::Sending => {
+                self.close();
+                return Err(Error::Closed);
+            }
+            SinkState::Closed => return Err(Error::Closed),
+        }
+
+        let drain_recv = {
             let mut channel = self.channel.lock();
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
-                return Err(Error::Closed);
+                channel.close_sink();
+                self.state = SinkState::Closed;
+                return Err(Error::SendFailed);
             }
 
             channel.buffer.put(bufs.into());
 
             // If there is a waiter and the buffer is large enough,
-            // return the waiter (while clearing the waiter field).
-            // Otherwise, return early.
+            // resolve the waiter (while clearing the waiter field).
             if channel
                 .waiter
                 .as_ref()
                 .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
             {
-                // Send up to read_buffer_size bytes (but at least requested amount)
+                // Send up to buffer_size bytes (but at least requested amount)
                 let (requested, os_send) = channel.waiter.take().unwrap();
-                let send_amount = channel
-                    .buffer
-                    .len()
-                    .min(requested.max(channel.read_buffer_size));
+                let send_amount = channel.buffer.len().min(requested.max(channel.buffer_size));
                 let data = channel.buffer.split_to(send_amount).freeze();
-                (os_send, data)
+
+                // A canceled recv should behave like a buffered transport:
+                // preserve the bytes and allow a subsequent recv to consume them.
+                if let Err(data) = os_send.send(data) {
+                    channel.restore_front(data);
+                    if !channel.stream_alive {
+                        channel.close_sink();
+                        self.state = SinkState::Closed;
+                        return Err(Error::SendFailed);
+                    }
+                }
+            }
+
+            // If the buffer exceeds the write limit, block until the
+            // receiver drains enough data.
+            if channel.buffer.len() > channel.buffer_size {
+                assert!(channel.drain_waiter.is_none());
+                let (os_send, os_recv) = oneshot::channel();
+                channel.drain_waiter = Some(os_send);
+                os_recv
             } else {
                 return Ok(());
             }
         };
 
-        // Resolve the waiter.
-        os_send.send(data).map_err(|_| Error::SendFailed)?;
-        Ok(())
+        // Mark the sink as sending before awaiting so cancellation can be
+        // detected by the next send.
+        self.state = SinkState::Sending;
+
+        // Wait for the receiver to drain the buffer.
+        match drain_recv.await {
+            Ok(()) => {
+                self.state = SinkState::Open;
+                Ok(())
+            }
+            Err(_) => {
+                self.close();
+                Err(Error::SendFailed)
+            }
+        }
     }
 }
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        let mut channel = self.channel.lock();
-        channel.sink_alive = false;
-
-        // If there is a waiter, resolve it by dropping the oneshot sender.
-        channel.waiter.take();
+        self.close();
     }
 }
 
@@ -114,23 +229,33 @@ pub struct Stream {
     channel: Arc<Mutex<Channel>>,
     /// Local buffer for data that has been received but not yet consumed.
     buffer: BytesMut,
+    poisoned: bool,
 }
 
-impl StreamTrait for Stream {
+impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
         let os_recv = {
             let mut channel = self.channel.lock();
 
             // Pull data from channel buffer into local buffer.
-            if !channel.buffer.is_empty() {
-                let target = len.max(channel.read_buffer_size);
-                let pull_amount = channel
-                    .buffer
-                    .len()
-                    .min(target.saturating_sub(self.buffer.len()));
-                if pull_amount > 0 {
-                    let data = channel.buffer.split_to(pull_amount);
-                    self.buffer.extend_from_slice(&data);
+            let target = len.max(channel.buffer_size);
+            let pull_amount = channel
+                .buffer
+                .len()
+                .min(target.saturating_sub(self.buffer.len()));
+            if pull_amount > 0 {
+                let data = channel.buffer.split_to(pull_amount);
+                self.buffer.extend_from_slice(&data);
+
+                // Wake a blocked sender if the buffer drained below the limit.
+                if channel.buffer.len() <= channel.buffer_size {
+                    if let Some(sender) = channel.drain_waiter.take() {
+                        sender.send_lossy(());
+                    }
                 }
             }
 
@@ -141,7 +266,8 @@ impl StreamTrait for Stream {
 
             // If the sink is dead, we cannot receive any more messages.
             if !channel.sink_alive {
-                return Err(Error::Closed);
+                self.poisoned = true;
+                return Err(Error::RecvFailed);
             }
 
             // Set up waiter for remaining amount.
@@ -152,8 +278,23 @@ impl StreamTrait for Stream {
             os_recv
         };
 
+        let mut waiter_guard = RecvWaiterGuard::new(self.channel.clone());
+
+        // Pre-poison so that cancellation  leaves the stream permanently closed.
+        self.poisoned = true;
+
         // Wait for the waiter to be resolved.
-        let data = os_recv.await.map_err(|_| Error::Closed)?;
+        let data = match os_recv.await {
+            Ok(data) => {
+                waiter_guard.disarm();
+                self.poisoned = false;
+                data
+            }
+            Err(_) => {
+                waiter_guard.disarm();
+                return Err(Error::RecvFailed);
+            }
+        };
         self.buffer.extend_from_slice(&data);
 
         assert!(self.buffer.len() >= len);
@@ -170,13 +311,16 @@ impl Drop for Stream {
     fn drop(&mut self) {
         let mut channel = self.channel.lock();
         channel.stream_alive = false;
+
+        // Wake a blocked sender so it can observe the closed stream.
+        channel.drain_waiter.take();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Spawner, Supervisor as _};
+    use crate::{deterministic, Clock, Runner, Sink, Spawner, Stream, Supervisor as _};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 
@@ -237,6 +381,8 @@ mod tests {
             futures::join!(
                 async {
                     let result = stream.recv(5).await;
+                    assert!(matches!(result, Err(Error::RecvFailed)));
+                    let result = stream.recv(5).await;
                     assert!(matches!(result, Err(Error::Closed)));
                 },
                 async {
@@ -255,6 +401,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let result = stream.recv(5).await;
+            assert!(matches!(result, Err(Error::RecvFailed)));
             let result = stream.recv(5).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
@@ -284,6 +432,8 @@ mod tests {
 
             // Try to send a message. The stream is dropped, so this should fail.
             let result = sink.send(b"hello world".as_slice()).await;
+            assert!(matches!(result, Err(Error::SendFailed)));
+            let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
@@ -295,6 +445,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let result = sink.send(b"hello world".as_slice()).await;
+            assert!(matches!(result, Err(Error::SendFailed)));
             let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
@@ -358,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_peek_after_recv_wakeup() {
-        let (mut sink, mut stream) = Channel::init_with_read_buffer_size(64);
+        let (mut sink, mut stream) = Channel::init_with_buffer_size(64);
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -407,14 +559,18 @@ mod tests {
     }
 
     #[test]
-    fn test_read_buffer_size_limit() {
+    fn test_buffer_size_limit() {
         // Use a small buffer capacity for testing
-        let (mut sink, mut stream) = Channel::init_with_read_buffer_size(10);
+        let (mut sink, mut stream) = Channel::init_with_buffer_size(10);
 
         let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Send more than buffer capacity
-            sink.send(b"0123456789ABCDEF".as_slice()).await.unwrap();
+        executor.start(|context| async move {
+            // Send more than buffer capacity concurrently with recv
+            // so the sender can drain via backpressure.
+            let send_handle = context.child("sender").spawn(|_| async move {
+                sink.send(b"0123456789ABCDEF".as_slice()).await.unwrap();
+                sink
+            });
 
             // Recv a small amount - should only pull up to capacity (10 bytes)
             let received = stream.recv(2).await.unwrap();
@@ -433,13 +589,16 @@ mod tests {
             assert_eq!(received.coalesce(), b"AB");
 
             assert_eq!(stream.peek(100), b"CDEF");
+
+            // Ensure the sender completes
+            send_handle.await.unwrap();
         });
     }
 
     #[test]
     fn test_recv_before_send() {
         // Use a small buffer capacity for testing
-        let (mut sink, mut stream) = Channel::init_with_read_buffer_size(10);
+        let (mut sink, mut stream) = Channel::init_with_buffer_size(10);
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

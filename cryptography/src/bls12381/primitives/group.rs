@@ -34,12 +34,13 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
+use commonware_formatting::Hex;
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
     Space,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{hex, Participant};
+use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
@@ -1186,13 +1187,13 @@ impl Ord for G1 {
 
 impl Debug for G1 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "{}", Hex(&self.as_slice()))
     }
 }
 
 impl Display for G1 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "{}", Hex(&self.as_slice()))
     }
 }
 
@@ -1606,13 +1607,13 @@ impl Ord for G2 {
 
 impl Debug for G2 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "{}", Hex(&self.as_slice()))
     }
 }
 
 impl Display for G2 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "{}", Hex(&self.as_slice()))
     }
 }
 

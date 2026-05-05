@@ -1,7 +1,7 @@
 use super::Header;
 use crate::{BufferPool, Error};
 use commonware_codec::Encode;
-use commonware_utils::{from_hex, hex};
+use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
@@ -238,8 +238,15 @@ impl crate::Storage for Storage {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
             if let Some(name) = entry.file_name().to_str() {
-                let name = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
-                blobs.push(name);
+                // Reject anything that isn't canonical lowercase hex (no `0x`
+                // prefix, no whitespace) since `from_hex` is lenient and
+                // storage only ever writes the canonical form via `hex()`.
+                let decoded = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
+                if hex(&decoded) != name {
+                    return Err(Error::PartitionCorrupt(partition.into()));
+                }
+
+                blobs.push(decoded);
             }
         }
         Ok(blobs)
@@ -393,5 +400,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_non_canonical_hex_file_names() {
+        // `commonware_formatting::from_hex` is lenient (strips `0x`/`0X` prefixes
+        // and ASCII whitespace), but storage only ever writes filenames in the
+        // canonical lowercase hex form produced by `hex()`. Verify that scans
+        // reject any filename that decodes successfully but doesn't round-trip
+        // to its canonical form.
+        for bad_name in ["0x626c6f62", "0X626C6F62", " 626c6f62", "626C6F62"] {
+            let storage_directory = env::temp_dir().join(format!(
+                "test_scan_non_canonical_{}_{}",
+                bad_name.replace([' ', '0', 'x', 'X'], "_"),
+                rand::random::<u64>()
+            ));
+            let storage = Storage::new(
+                Config {
+                    storage_directory: storage_directory.clone(),
+                    maximum_buffer_size: 1024 * 1024,
+                },
+                test_pool(),
+            );
+
+            let partition_path = storage_directory.join("partition");
+            std::fs::create_dir_all(&partition_path).unwrap();
+            std::fs::write(partition_path.join(bad_name), []).unwrap();
+
+            let err = match storage.scan("partition").await {
+                Ok(_) => panic!("scan should have failed for filename {bad_name:?}"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.to_string(),
+                "partition corrupt: partition",
+                "filename {bad_name:?} should be rejected as corrupt",
+            );
+
+            let _ = std::fs::remove_dir_all(&storage_directory);
+        }
     }
 }

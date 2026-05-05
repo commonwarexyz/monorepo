@@ -3,8 +3,8 @@ use crate::{
     qmdb::{any::value::ValueEncoding, operation::Committable},
 };
 use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_formatting::hex;
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::hex;
 use std::fmt;
 
 pub(crate) mod fixed;

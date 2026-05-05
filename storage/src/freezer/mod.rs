@@ -276,11 +276,12 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
+    use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         deterministic, Blob, Observer as _, Runner, Storage, Supervisor as _,
     };
-    use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
     use std::num::NonZeroU16;
 

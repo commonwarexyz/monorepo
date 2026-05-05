@@ -17,10 +17,11 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 #[cfg(test)]
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
+    use commonware_macros::select;
     use commonware_utils::sync::Barrier;
-    use futures::join;
-    use std::{net::SocketAddr, sync::Arc};
-    use tokio::task::JoinSet;
+    use futures::{join, FutureExt};
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use tokio::{sync::oneshot, task::JoinSet};
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
@@ -36,6 +37,10 @@ mod tests {
         test_network_large_data(new_network()).await;
         test_network_connection_errors(new_network()).await;
         test_network_peek(new_network()).await;
+        test_network_canceled_recv_poisons_stream(new_network()).await;
+        test_network_canceled_send_poisons_sink(new_network()).await;
+        test_network_recv_error_poisons_stream(new_network()).await;
+        test_network_send_error_poisons_sink(new_network()).await;
     }
 
     // Basic network connectivity test
@@ -356,6 +361,257 @@ mod tests {
             // After consuming all data, peek should return empty
             let final_peek = stream.peek(100);
             assert!(final_peek.is_empty());
+            (sink, stream)
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        server_result.expect("Server task failed");
+        client_result.expect("Client task failed");
+    }
+
+    async fn test_network_canceled_recv_poisons_stream<N: crate::Network>(network: N) {
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+        let server = tokio::spawn(async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+
+            // Cancel a recv mid-flight
+            select! {
+                v = stream.recv(100) => {
+                    panic!("unexpected value: {v:?}");
+                },
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+            };
+
+            // Stream should be poisoned after cancellation
+            assert!(matches!(stream.recv(1).await, Err(crate::Error::Closed)));
+
+            // Sink should remain usable
+            sink.send(IoBuf::from(b"ok"))
+                .await
+                .expect("sink should remain usable after stream cancellation");
+
+            (sink, stream)
+        });
+
+        let client = tokio::spawn(async move {
+            let (sink, mut stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            let received = stream.recv(2).await.expect("Failed to receive response");
+            assert_eq!(received.coalesce(), b"ok");
+
+            (sink, stream)
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        server_result.expect("Server task failed");
+        client_result.expect("Client task failed");
+    }
+
+    async fn test_network_canceled_send_poisons_sink<N: crate::Network>(network: N) {
+        // Windows IOCP completes TCP writes without yielding, so send
+        // cancellation cannot be easily triggered on that platform.
+        if cfg!(target_os = "windows") {
+            return;
+        }
+
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+        let (canceled_sender, canceled_receiver) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+
+            // Poll multiple sends until backpressure makes one pending, then
+            // drop that pending future to simulate cancellation.
+            let mut blocked = false;
+            for _ in 0..1024 {
+                match sink.send(vec![0u8; 128 * 1024]).now_or_never() {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => panic!("send failed before blocking: {err:?}"),
+                    None => {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+            assert!(blocked, "send should have blocked on backpressure");
+
+            // Sink should be poisoned after cancellation.
+            assert!(matches!(
+                sink.send(b"after".as_slice()).await,
+                Err(crate::Error::Closed)
+            ));
+            canceled_sender
+                .send(())
+                .expect("client should wait for send cancellation");
+
+            // Stream should remain usable.
+            let received = stream.recv(2).await.expect("stream should remain usable");
+            assert_eq!(received.coalesce(), b"ok");
+
+            (sink, stream)
+        });
+
+        let client = tokio::spawn(async move {
+            let (mut sink, stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            canceled_receiver
+                .await
+                .expect("server should cancel the send first");
+
+            sink.send(IoBuf::from(b"ok")).await.expect("Failed to send");
+
+            (sink, stream)
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        server_result.expect("Server task failed");
+        client_result.expect("Client task failed");
+    }
+
+    async fn test_network_recv_error_poisons_stream<N: crate::Network>(network: N) {
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+        // Server triggers a recv error after a partial read, then verifies the
+        // stream is poisoned while the sink remains usable.
+        let server = tokio::spawn(async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+
+            let err = stream
+                .recv(100)
+                .await
+                .expect_err("recv should fail after a partial read");
+            assert!(matches!(err, crate::Error::RecvFailed));
+            assert!(matches!(stream.recv(1).await, Err(crate::Error::Closed)));
+
+            sink.send(IoBuf::from(b"ok"))
+                .await
+                .expect("sink should remain usable after stream error");
+
+            (sink, stream)
+        });
+
+        // Client sends a partial payload, half-closes its write direction, and
+        // still receives the server's response on the read half.
+        let client = tokio::spawn(async move {
+            let (mut sink, mut stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            sink.send([1; 50].as_slice())
+                .await
+                .expect("Failed to send partial payload");
+            drop(sink);
+
+            let received = stream.recv(2).await.expect("Failed to receive response");
+            assert_eq!(received.coalesce(), b"ok");
+
+            stream
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        server_result.expect("Server task failed");
+        client_result.expect("Client task failed");
+    }
+
+    async fn test_network_send_error_poisons_sink<N: crate::Network>(network: N) {
+        const DATA: &[u8] = b"okay";
+
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+        let (buffered_sender, buffered_receiver) = oneshot::channel();
+        let (closed_sender, closed_receiver) = oneshot::channel();
+
+        // Server sends a response, waits for the client to buffer it, then
+        // closes the connection so the client's next send eventually fails.
+        let server = tokio::spawn(async move {
+            let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
+
+            sink.send(IoBuf::from(DATA))
+                .await
+                .expect("stream peer should remain readable after sink error");
+
+            buffered_receiver
+                .await
+                .expect("client should signal once the response is buffered");
+
+            drop(sink);
+            drop(stream);
+
+            closed_sender
+                .send(())
+                .expect("client should still be waiting for the close");
+        });
+
+        // Client confirms the read half remains usable after the server closes,
+        // then verifies the sink is poisoned after the first send error.
+        let client = tokio::spawn(async move {
+            let (mut sink, mut stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            let prefix = stream.recv(2).await.expect("Failed to receive response");
+            assert_eq!(prefix.coalesce(), &DATA[..2]);
+            assert_eq!(stream.peek(2), &DATA[2..]);
+            buffered_sender
+                .send(())
+                .expect("server should still be waiting for the client");
+            closed_receiver
+                .await
+                .expect("server should signal after closing the connection");
+
+            let mut err = None;
+            for _ in 0..10 {
+                // A peer close is not guaranteed to make the next send fail
+                // immediately, so retry briefly until the error becomes visible.
+                match sink.send([9u8].as_slice()).await {
+                    Ok(()) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(send_err) => {
+                        err = Some(send_err);
+                        break;
+                    }
+                }
+            }
+            let err = err.expect("send should fail after the peer closes");
+            assert!(matches!(err, crate::Error::SendFailed));
+            assert!(matches!(
+                sink.send([9u8].as_slice()).await,
+                Err(crate::Error::Closed)
+            ));
+
+            let suffix = stream
+                .recv(2)
+                .await
+                .expect("Failed to receive buffered response");
+            assert_eq!(suffix.coalesce(), &DATA[2..]);
+
             (sink, stream)
         });
 

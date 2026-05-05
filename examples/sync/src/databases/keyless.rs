@@ -7,6 +7,7 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -44,7 +45,7 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         log: FConfig {

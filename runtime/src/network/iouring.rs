@@ -28,7 +28,7 @@ use crate::{
 };
 use std::{
     net::SocketAddr,
-    os::fd::OwnedFd,
+    os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -296,11 +296,24 @@ impl crate::Listener for Listener {
 
 /// Implementation of [crate::Sink] for an io-uring [Network].
 pub struct Sink {
+    /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
     handle: iouring::Handle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
+    /// Tracks this sink's lifecycle.
+    state: SinkState,
+}
+
+/// Lifecycle state for the write-half of a connection.
+enum SinkState {
+    /// Sends may be attempted.
+    Open,
+    /// A send is currently in progress.
+    Sending,
+    /// The write-half has been shut down.
+    Closed,
 }
 
 impl Sink {
@@ -310,20 +323,67 @@ impl Sink {
             fd,
             handle,
             timeout,
+            state: SinkState::Open,
         }
+    }
+
+    fn close(&mut self) {
+        if matches!(self.state, SinkState::Closed) {
+            return;
+        }
+
+        // Best-effort write-half shutdown so the peer can observe that no more
+        // bytes will be sent after this sink becomes unusable.
+        //
+        // SAFETY: `self.fd` owns a live socket descriptor for the lifetime of
+        // the sink. `shutdown` does not take ownership of the descriptor.
+        unsafe {
+            libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_WR);
+        }
+        self.state = SinkState::Closed;
+    }
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        match self.state {
+            SinkState::Open => {}
+            SinkState::Sending => {
+                self.close();
+                return Err(Error::Closed);
+            }
+            SinkState::Closed => return Err(Error::Closed),
+        }
+
         let bufs = bufs.into();
         if !bufs.has_remaining() {
             return Ok(());
         }
 
-        self.handle
+        // Mark the sink as sending before awaiting so cancellation can be
+        // detected by the next send.
+        self.state = SinkState::Sending;
+
+        let result = self
+            .handle
             .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
-            .await
+            .await;
+
+        // A failed send leaves the write-half unusable.
+        if result.is_err() {
+            self.close();
+            return result;
+        }
+
+        // Mark the sink reusable on success.
+        self.state = SinkState::Open;
+        Ok(())
     }
 }
 
@@ -332,11 +392,14 @@ impl crate::Sink for Sink {
 /// Uses an internal buffer to reduce syscall overhead. Multiple small reads
 /// can be satisfied from the buffer without additional network operations.
 pub struct Stream {
+    /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
     handle: iouring::Handle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
+    /// Tracks whether a previous recv failure has made this stream unusable.
+    poisoned: bool,
     /// Internal read buffer.
     buffer: IoBufMut,
     /// Current read position in the buffer.
@@ -360,6 +423,7 @@ impl Stream {
             fd,
             handle,
             timeout,
+            poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
             buffer_len: 0,
@@ -424,48 +488,65 @@ impl Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
-        // SAFETY: `len` bytes are written by the recv loop below.
-        let mut owned_buf = unsafe { self.pool.alloc_len(len) };
-        let mut bytes_received = 0;
-        let deadline = Instant::now() + self.timeout;
-
-        while bytes_received < len {
-            // First drain any buffered data
-            let buffered = self.buffer_len - self.buffer_pos;
-            if buffered > 0 {
-                let to_copy = std::cmp::min(buffered, len - bytes_received);
-                owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
-                    &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + to_copy],
-                );
-                self.buffer_pos += to_copy;
-                bytes_received += to_copy;
-                continue;
-            }
-
-            let remaining = len - bytes_received;
-
-            // Skip internal buffer if disabled, or if the read is large enough
-            // to fill the buffer and immediately drain it
-            let buffer_capacity = self.buffer.capacity();
-            if buffer_capacity == 0 || remaining >= buffer_capacity {
-                // Direct recv into the result buffer with exact=true.
-                match self
-                    .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
-                    .await
-                {
-                    Ok((buf, read)) => {
-                        owned_buf = buf;
-                        bytes_received += read;
-                    }
-                    Err((_, err)) => return Err(err),
-                }
-            } else {
-                // Fill internal buffer, then loop will copy
-                self.fill_buffer(deadline).await?;
-            }
+        if self.poisoned {
+            return Err(Error::Closed);
         }
 
-        Ok(IoBufs::from(owned_buf.freeze()))
+        // Pre-poison so that cancellation leaves the stream permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
+        let result = async {
+            // SAFETY: `len` bytes are written by the recv loop below.
+            let mut owned_buf = unsafe { self.pool.alloc_len(len) };
+            let mut bytes_received = 0;
+            let deadline = Instant::now() + self.timeout;
+
+            while bytes_received < len {
+                // First drain any buffered data
+                let buffered = self.buffer_len - self.buffer_pos;
+                if buffered > 0 {
+                    let to_copy = std::cmp::min(buffered, len - bytes_received);
+                    owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
+                        &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + to_copy],
+                    );
+                    self.buffer_pos += to_copy;
+                    bytes_received += to_copy;
+                    continue;
+                }
+
+                let remaining = len - bytes_received;
+
+                // Skip internal buffer if disabled, or if the read is large enough
+                // to fill the buffer and immediately drain it
+                let buffer_capacity = self.buffer.capacity();
+                if buffer_capacity == 0 || remaining >= buffer_capacity {
+                    match self
+                        .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
+                        .await
+                    {
+                        Ok((buf, read)) => {
+                            owned_buf = buf;
+                            bytes_received += read;
+                        }
+                        Err((_, err)) => return Err(err),
+                    }
+                } else {
+                    // Fill internal buffer, then loop will copy
+                    self.fill_buffer(deadline).await?;
+                }
+            }
+
+            Ok(IoBufs::from(owned_buf.freeze()))
+        }
+        .await;
+
+        // Unpoison on success.
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+
+        result
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
@@ -521,7 +602,11 @@ mod tests {
     async fn test_trait() {
         // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
-            test_network(Config::default()).expect("Failed to start io_uring")
+            test_network(Config {
+                read_write_timeout: Duration::from_secs(15),
+                ..Default::default()
+            })
+            .expect("Failed to start io_uring")
         })
         .await;
     }

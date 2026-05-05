@@ -238,9 +238,9 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> OrderedTrait for Index<
 mod tests {
     use super::*;
     use crate::translator::OneCap;
+    use commonware_formatting::hex;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::hex;
 
     #[test_traced]
     fn test_ordered_trait_empty_index() {

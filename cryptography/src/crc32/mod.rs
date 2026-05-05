@@ -29,8 +29,9 @@
 use crate::Hasher;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{hex, Array, Span};
+use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
@@ -167,13 +168,13 @@ impl Deref for Digest {
 
 impl Debug for Digest {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.0))
+        write!(f, "{}", Hex(&self.0))
     }
 }
 
 impl Display for Digest {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.0))
+        write!(f, "{}", Hex(&self.0))
     }
 }
 

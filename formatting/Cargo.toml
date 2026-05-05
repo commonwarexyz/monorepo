@@ -1,0 +1,34 @@
+[package]
+name = "commonware-formatting"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Format and parse encoded data."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/formatting"
+documentation = "https://docs.rs/commonware-formatting"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-macros = { workspace = true, default-features = false }
+const-hex = { workspace = true, default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+criterion.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[features]
+default = [ "std" ]
+std = [ "commonware-macros/std", "const-hex/std" ]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "formatting"
+harness = false
+path = "src/benches/bench.rs"

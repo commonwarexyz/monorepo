@@ -4,6 +4,7 @@
 //! section-based blob storage, pruning, syncing, and metrics.
 
 use crate::journal::Error;
+use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{
         paged::{Append, CacheRef},
@@ -12,7 +13,6 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufferPool, Error as RError, Metrics, Storage,
 };
-use commonware_utils::hex;
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;

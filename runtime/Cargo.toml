@@ -20,6 +20,7 @@ cfg-if.workspace = true
 commonware-codec.workspace = true
 commonware-conformance = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-formatting = { workspace = true, features = ["std"] }
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime-macros.workspace = true
@@ -29,6 +30,7 @@ futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
 libc.workspace = true
+loom = { workspace = true, optional = true }
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
@@ -72,6 +74,7 @@ arbitrary = [
 ]
 bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
+loom = [ "dep:loom" ]
 test-utils = []
 iouring = [ "iouring-network", "iouring-storage" ]
 iouring-network = [ "io-uring" ]

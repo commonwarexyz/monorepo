@@ -33,7 +33,7 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                     b.iter_batched(
                         || {
                             let h = StandardHasher::<Sha256>::new();
-                            let mut mem = Mem::<F, _>::new(&h);
+                            let mut mem = Mem::<F, _>::new();
                             block_on(async {
                                 let batch = {
                                     let mut batch = mem.new_batch();

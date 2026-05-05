@@ -844,11 +844,9 @@ impl<const N: usize> Write for BitMap<N> {
         self.len().write(buf);
 
         // Write all chunks
-        for chunk in &self.chunks {
-            for &byte in chunk {
-                byte.write(buf);
-            }
-        }
+        let (front, back) = self.chunks.as_slices();
+        buf.put_slice(front.as_flattened());
+        buf.put_slice(back.as_flattened());
     }
 }
 
@@ -1063,9 +1061,9 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hex;
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
+    use commonware_formatting::hex;
 
     #[test]
     fn test_constructors() {

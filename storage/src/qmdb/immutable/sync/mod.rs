@@ -6,6 +6,7 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
+        self,
         full::{self, Merkle},
         Family, Location,
     },
@@ -22,11 +23,10 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 
-type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
-
-impl<F, E, K, V, C, H, T> sync::Database for immutable::Immutable<F, E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -39,14 +39,17 @@ where
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
+    S: Strategy,
 {
     type Family = F;
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config>;
+    type Config = immutable::Config<T, C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
+
+    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
@@ -72,21 +75,20 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
-        let hasher = StandardHasher::new();
+        let hasher = merkle::hasher::Standard::with_bagging(merkle::Bagging::BackwardFold);
 
         // Initialize Merkle structure for sync
-        let merkle = Merkle::init_sync(
+        let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
-                range,
+                range: range.clone(),
                 pinned_nodes,
             },
-            &hasher,
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _, _>::from_components(
+        let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
             merkle,
             log,
             hasher,
@@ -120,9 +122,15 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(*last_commit_loc + 1)),
+            inactivity_floor_loc,
+        );
+        let root = journal.root(inactive_peaks)?;
 
         let db = Self {
             journal,
+            root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
@@ -137,23 +145,26 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg>
+impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
+    S: Strategy,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: Read<Cfg = Cfg>,
     Cfg: Clone + Send + Sync + 'static,
 {
     type Family = F;
     type Op = Operation<F, K, V>;
-    type Config = immutable::CompactConfig<Cfg>;
+    type Config = immutable::CompactConfig<Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
+
+    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
     async fn from_compact_state(
         context: Self::Context,
@@ -175,19 +186,25 @@ where
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
+        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.child("merkle"),
-            &StandardHasher::<H>::new(),
             config.merkle,
             leaf_count,
             pinned_nodes.clone(),
         )
         .await?;
+        let inactive_peaks =
+            F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+        let root = merkle
+            .root(&hasher, inactive_peaks)
+            .map_err(|_| Error::DataCorrupted("failed to compute compact state root"))?;
         Self::init_from_verified_state(
             merkle,
             commit_codec_config,
             last_commit_metadata,
             inactivity_floor_loc,
+            root,
             commit_op_bytes,
             last_commit_proof,
             pinned_nodes,

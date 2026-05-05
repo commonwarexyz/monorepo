@@ -9,11 +9,12 @@ use clap::{Args, Parser, Subcommand};
 use commonware_codec::Encode;
 use commonware_consensus::simplex::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
+use commonware_formatting::hex;
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Runner, Supervisor as _,
 };
-use commonware_utils::{hex, NZU64};
+use commonware_utils::NZU64;
 use std::{future::Future, num::NonZeroU64, path::PathBuf, pin::Pin};
 use tracing::Level;
 

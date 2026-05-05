@@ -56,8 +56,11 @@ struct MmrRootStability;
 impl Conformance for MmrRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
         let hasher = Standard::new();
-        let mmr = crate::mmr::mem::Mmr::new(&hasher);
-        build_test_mem(&hasher, mmr, seed).root().to_vec()
+        let mmr = crate::mmr::mem::Mmr::new();
+        build_test_mem(&hasher, mmr, seed)
+            .root(&hasher, 0)
+            .unwrap()
+            .to_vec()
     }
 }
 
@@ -70,8 +73,11 @@ struct MmbRootStability;
 impl Conformance for MmbRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
         let hasher = Standard::new();
-        let mmb = crate::mmb::mem::Mmb::new(&hasher);
-        build_test_mem(&hasher, mmb, seed).root().to_vec()
+        let mmb = crate::mmb::mem::Mmb::new();
+        build_test_mem(&hasher, mmb, seed)
+            .root(&hasher, 0)
+            .unwrap()
+            .to_vec()
     }
 }
 

@@ -782,6 +782,7 @@ where
 
 pub(crate) mod harnesses {
     use super::*;
+    use commonware_parallel::Sequential;
 
     type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256>;
     type VariableOp<F> = Operation<F, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
@@ -800,7 +801,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1028,6 +1029,7 @@ sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 mod compact_variable_mmr {
     use super::*;
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
 
     type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256>;
     type ClientDb = variable::CompactDb<
@@ -1050,7 +1052,7 @@ mod compact_variable_mmr {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1070,7 +1072,7 @@ mod compact_variable_mmr {
         keyless::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: ((0..=10000).into(), ()),
         }
@@ -1495,6 +1497,7 @@ mod compact_variable_mmb {
     use super::*;
     use crate::merkle::mmb;
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
 
     type SourceDb = variable::Db<mmb::Family, deterministic::Context, Vec<u8>, Sha256>;
     type ClientDb = variable::CompactDb<
@@ -1517,7 +1520,7 @@ mod compact_variable_mmb {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1537,7 +1540,7 @@ mod compact_variable_mmb {
         keyless::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: ((0..=10000).into(), ()),
         }

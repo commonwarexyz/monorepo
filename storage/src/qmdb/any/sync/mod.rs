@@ -42,6 +42,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_utils::{range::NonEmptyRange, Array};
 
 #[cfg(test)]
@@ -55,21 +56,25 @@ pub(crate) mod tests;
 /// [crate::qmdb::current] performs an additional lower-bound check because its grafted-state
 /// reconstruction depends on the persisted pruning point remaining at or below
 /// `target.range.start()`.
-pub async fn has_local_target_state<F, E, H>(
+pub async fn has_local_target_state<F, E, H, S>(
     context: E,
-    merkle_config: full::Config,
+    merkle_config: full::Config<S>,
     target: &qmdb::sync::Target<F, H::Digest>,
+    inactive_peaks: usize,
+    bagging: merkle::Bagging,
 ) -> bool
 where
     F: merkle::Family,
     E: Context,
     H: Hasher,
+    S: Strategy,
 {
-    let hasher = StandardHasher::<H>::new();
-    let peek = full::Merkle::<F, _, _>::peek_root(
+    let hasher = StandardHasher::<H>::with_bagging(bagging);
+    let peek = full::Merkle::<F, _, _, S>::peek_root(
         context.child("local_target_probe"),
         merkle_config,
         &hasher,
+        inactive_peaks,
     )
     .await;
     // Size + root identify a unique state, so if they match the target's we can reuse
@@ -82,15 +87,16 @@ where
 }
 
 /// Shared helper to build a [Db] from sync components.
-async fn build_db<F, E, U, I, H, C, T>(
+#[allow(clippy::too_many_arguments)]
+async fn build_db<F, E, U, I, H, C, T, S>(
     context: E,
-    merkle_config: full::Config,
+    merkle_config: full::Config<S>,
     log: C,
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
-) -> Result<Db<F, E, C, I, H, U>, qmdb::Error<F>>
+) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
     E: Context,
@@ -99,31 +105,31 @@ where
     H: Hasher,
     T: Translator,
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = crate::journal::Error>,
+    S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
 
-    let merkle = full::Merkle::<F, _, _>::init_sync(
+    let merkle = full::Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
             pinned_nodes,
         },
-        &hasher,
     )
     .await?;
 
     let index = I::new(context.child("index"), translator);
 
-    let log = authenticated::Journal::<F, _, _, _>::from_components(
+    let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
         hasher,
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None).await?;
+    let db = Db::init_from_log(index, log, None, true).await?;
 
     Ok(db)
 }
@@ -133,7 +139,7 @@ macro_rules! impl_sync_database {
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T> qmdb::sync::Database for $db<F, E, K, V, H, T>
+        impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
             F: merkle::Family,
             E: Context,
@@ -141,6 +147,7 @@ macro_rules! impl_sync_database {
             V: $value_bound + 'static,
             H: Hasher,
             T: Translator,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -150,6 +157,8 @@ macro_rules! impl_sync_database {
             type Hasher = H;
             type Config = $config;
             type Digest = H::Digest;
+
+            const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
 
             async fn from_sync_result(
                 context: Self::Context,
@@ -161,7 +170,7 @@ macro_rules! impl_sync_database {
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
-                build_db::<F, _, $update<K, V>, _, H, _, T>(
+                build_db::<F, _, $update<K, V>, _, H, _, T, S>(
                     context,
                     merkle_config,
                     log,
@@ -178,16 +187,22 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
-                qmdb::any::sync::has_local_target_state::<F, _, H>(
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    target.range.start(),
+                );
+                qmdb::any::sync::has_local_target_state::<F, _, H, S>(
                     context,
                     config.merkle_config.clone(),
                     target,
+                    inactive_peaks,
+                    merkle::Bagging::BackwardFold,
                 )
                 .await
             }
 
             fn root(&self) -> Self::Digest {
-                self.log.root()
+                crate::qmdb::any::db::Db::root(self)
             }
         }
     };
@@ -195,28 +210,28 @@ macro_rules! impl_sync_database {
 
 impl_sync_database!(
     UnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
-    fixed::Journal<E, Self::Op>, FixedConfig<T>,
+    fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_sync_database!(
     UnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;
     UnorderedVariableOp<F, K, V>: CodecShared
 );
 
 impl_sync_database!(
     OrderedFixedDb, OrderedFixedOp, OrderedFixedUpdate,
-    fixed::Journal<E, Self::Op>, FixedConfig<T>,
+    fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_sync_database!(
     OrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;
     OrderedVariableOp<F, K, V>: CodecShared
 );

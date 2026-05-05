@@ -87,11 +87,12 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         deterministic, Blob, Observer as _, Runner, Storage, Supervisor as _,
     };
-    use commonware_utils::{hex, sequence::U64};
+    use commonware_utils::sequence::U64;
     use rand::{Rng, RngCore};
 
     #[test_traced]

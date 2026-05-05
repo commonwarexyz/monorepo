@@ -17,6 +17,7 @@ workspace = true
 chrono.workspace = true
 clap.workspace = true
 commonware-cryptography.workspace = true
+commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true

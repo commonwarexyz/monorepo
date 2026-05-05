@@ -9,14 +9,18 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use core::iter;
 use std::sync::{Arc, Weak};
+
+/// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
+type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, V, S>>;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
-pub struct UnmerkleizedBatch<F, H, V>
+pub struct UnmerkleizedBatch<F, H, V, S: Strategy = Sequential>
 where
     F: Family,
     V: ValueEncoding,
@@ -24,13 +28,13 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
-    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, V>, S>,
 
     /// Pending appends.
     appends: Vec<V::Value>,
 
     /// Parent batch in the chain. `None` for batches created directly from the DB.
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, V>>>,
+    parent: Option<MerkleizedParent<F, H, V, S>>,
 
     /// Total operation count before this batch (committed DB + prior batches).
     /// This batch's i-th operation lands at location `base_size + i`.
@@ -43,12 +47,15 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding>
+pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy = Sequential>
 where
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>>>,
+    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>, S>>,
+
+    /// Cached operations root after applying this batch.
+    pub(super) root: D,
 
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
@@ -75,7 +82,7 @@ where
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
+impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -95,8 +102,8 @@ where
 /// Returns `None` if the location cannot be found in the live parent chain (e.g. the
 /// owning ancestor was committed and freed). Callers should fall through to the committed
 /// DB in that case.
-fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
-    batch: &MerkleizedBatch<F, D, V>,
+fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
+    batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
 ) -> Option<Operation<F, V>>
 where
@@ -120,7 +127,7 @@ where
     None
 }
 
-impl<F, H, V> UnmerkleizedBatch<F, H, V>
+impl<F, H, V, S: Strategy> UnmerkleizedBatch<F, H, V, S>
 where
     F: Family,
     V: ValueEncoding,
@@ -128,7 +135,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
-    pub(super) fn new<E, C>(keyless: &Keyless<F, E, V, C, H>, journal_size: u64) -> Self
+    pub(super) fn new<E, C>(keyless: &Keyless<F, E, V, C, H, S>, journal_size: u64) -> Self
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -263,10 +270,10 @@ where
     /// would let a later `prune(floor)` remove the last readable commit.
     pub fn merkleize<E, C>(
         self,
-        db: &Keyless<F, E, V, C, H>,
+        db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, V>>
+    ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -287,7 +294,15 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(total_size)),
+            inactivity_floor,
+        );
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
+        let root = db
+            .journal
+            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_batch_ends = Vec::new();
         let mut ancestor_new_inactivity_floor_locs = Vec::new();
@@ -302,6 +317,7 @@ where
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
+            root,
             parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
             total_size,
@@ -313,20 +329,20 @@ where
     }
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
+impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
 where
     Operation<F, V>: EncodeShared,
 {
     /// Return the speculative root.
-    pub fn root(&self) -> D {
-        self.journal_batch.root()
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// Read a value at `loc`.
     pub async fn get<E, H, C>(
         &self,
         loc: Location<F>,
-        db: &Keyless<F, E, V, C, H>,
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -354,7 +370,7 @@ where
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
-        db: &Keyless<F, E, V, C, H>,
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -402,7 +418,7 @@ where
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
-    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V>
+    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,
     {

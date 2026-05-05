@@ -6,12 +6,13 @@ use commonware_cryptography::{
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
+use commonware_formatting::from_hex;
 use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio, Buf, Quota, Runner, Spawner, Supervisor as _,
 };
-use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
+use commonware_utils::{ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use std::{
@@ -46,7 +47,7 @@ fn main() {
         .hosts
         .into_iter()
         .map(|host| {
-            let key = from_hex_formatted(&host.name).expect("Could not parse host key");
+            let key = from_hex(&host.name).expect("Could not parse host key");
             let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
             (key, host.ip)
         })
@@ -60,7 +61,7 @@ fn main() {
 
     // Parse config
     info!(peers = peers.len(), "loaded peers");
-    let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
+    let key = from_hex(&config.private_key).expect("Could not parse private key");
     let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
     let public_key = key.public_key();
 
@@ -114,7 +115,7 @@ fn main() {
             .expect("public keys are unique");
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
-            let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
+            let key = from_hex(bootstrapper).expect("Could not parse bootstrapper key");
             let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
             let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
             let bootstrapper_socket = format!("{}:{}", ip, config.port);

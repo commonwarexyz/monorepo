@@ -552,6 +552,11 @@ stability_scope!(BETA {
         /// # Warning
         ///
         /// If the sink returns an error, part of the message may still be delivered.
+        /// After any error, the sink is no longer reusable and subsequent sends will
+        /// return [`Error::Closed`].
+        ///
+        /// Dropping the future (e.g. via `select!`) also poisons the sink, since a
+        /// partial write may have occurred.
         fn send(
             &mut self,
             bufs: impl Into<IoBufs> + Send,
@@ -568,6 +573,11 @@ stability_scope!(BETA {
         /// # Warning
         ///
         /// If the stream returns an error, partially read data may be discarded.
+        /// After any error, the stream is no longer reusable and subsequent receives
+        /// will return [`Error::Closed`].
+        ///
+        /// Dropping the future (e.g. via `select!`) also poisons the stream, since
+        /// partially read data may be lost.
         fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 
         /// Peek at buffered data without consuming.

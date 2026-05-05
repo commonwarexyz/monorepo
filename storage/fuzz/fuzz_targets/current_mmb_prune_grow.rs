@@ -13,6 +13,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -151,7 +152,7 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap> {
             metadata_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
             items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
             write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {

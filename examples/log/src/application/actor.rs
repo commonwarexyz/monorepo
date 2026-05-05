@@ -5,8 +5,9 @@ use super::{
 };
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
+use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::{channel::mpsc, hex};
+use commonware_utils::channel::mpsc;
 use rand::Rng;
 use tracing::info;
 

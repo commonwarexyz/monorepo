@@ -9,6 +9,7 @@ members = [
     "consensus",
     "cryptography",
     "deployer",
+    "formatting",
     "macros",
     "macros/impl",
     "math",
@@ -97,6 +98,7 @@ commonware-conformance-macros = { version = "2026.4.0", path = "conformance/macr
 commonware-consensus = { version = "2026.4.0", path = "consensus" }
 commonware-cryptography = { version = "2026.4.0", path = "cryptography", default-features = false }
 commonware-deployer = { version = "2026.4.0", path = "deployer", default-features = false }
+commonware-formatting = { version = "2026.4.0", path = "formatting", default-features = false }
 commonware-invariants = { version = "2026.4.0", path = "invariants" }
 commonware-macros = { version = "2026.4.0", path = "macros", default-features = false }
 commonware-macros-impl = { version = "2026.4.0", path = "macros/impl" }
@@ -110,6 +112,7 @@ commonware-storage = { version = "2026.4.0", path = "storage", default-features 
 commonware-stream = { version = "2026.4.0", path = "stream" }
 commonware-utils = { version = "2026.4.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
+const-hex = { version = "1.18.1", default-features = false }
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
@@ -130,6 +133,7 @@ hashbrown = { version = "0.16.1", default-features = false, features = ["default
 io-uring = "0.7.4"
 libc = "0.2.172"
 libfuzzer-sys = "0.4.9"
+loom = "0.7.2"
 num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }

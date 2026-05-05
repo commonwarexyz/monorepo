@@ -535,7 +535,7 @@ mod tests {
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new();
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {

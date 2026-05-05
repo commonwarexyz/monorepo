@@ -1,7 +1,7 @@
 use super::{
     cache,
     mailbox::{Mailbox, Message},
-    Buffer, IntoBlock, Variant,
+    Buffer, Variant,
 };
 use crate::{
     marshal::{
@@ -931,10 +931,7 @@ where
                     }
                 };
                 let waiter_key = key;
-                let aborter = waiters.push(async move {
-                    rx.await
-                        .map_or_else(|_| Err(waiter_key), |block| Ok(block.into_block()))
-                });
+                let aborter = waiters.push(async move { rx.await.map_err(|_| waiter_key) });
                 entry.insert(BlockSubscription {
                     subscribers: vec![response],
                     _aborter: aborter,
@@ -1557,7 +1554,7 @@ where
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_digest(digest).await {
-            return Some(block.into_block());
+            return Some(block);
         }
         self.find_block_in_storage(digest).await
     }
@@ -1572,7 +1569,7 @@ where
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
-            return Some(block.into_block());
+            return Some(block);
         }
         self.find_block_in_storage(V::commitment_to_inner(commitment))
             .await

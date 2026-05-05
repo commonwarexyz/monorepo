@@ -22,12 +22,14 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<F, E, C, H> = authenticated::Journal<F, E, C, H>;
+pub(crate) type AuthenticatedLog<F, E, C, H, S = Sequential> =
+    authenticated::Journal<F, E, C, H, S>;
 
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
@@ -63,6 +65,7 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize = BITMAP_CHUNK_BYTES,
+    S: Strategy = Sequential,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -71,7 +74,13 @@ pub struct Db<
     ///
     /// - The log is never pruned beyond the inactivity floor.
     /// - There is always at least one commit operation in the log.
-    pub(crate) log: AuthenticatedLog<F, E, C, H>,
+    pub(crate) log: AuthenticatedLog<F, E, C, H, S>,
+
+    /// Cached operations root for this database.
+    pub(crate) root: H::Digest,
+
+    /// Whether the operations root uses inactive-prefix split semantics.
+    pub(crate) split_root: bool,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -109,7 +118,7 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -117,6 +126,7 @@ where
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -145,8 +155,28 @@ where
         }
     }
 
-    pub fn root(&self) -> H::Digest {
-        self.log.root()
+    /// Return the canonical QMDB operations root.
+    pub const fn root(&self) -> H::Digest {
+        self.root
+    }
+
+    /// Return the inactive_peaks count for the given leaf count and inactivity floor.
+    ///
+    /// Returns 0 when `split_root` is false (the boundary is not committed in that case).
+    pub(crate) fn inactive_peaks(
+        &self,
+        leaves: Location<F>,
+        inactivity_floor: Location<F>,
+    ) -> usize {
+        if !self.split_root {
+            return 0;
+        }
+        F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
+    }
+
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.log.strategy()
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -254,7 +284,7 @@ where
 }
 
 // Functionality requiring Mutable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -262,6 +292,7 @@ where
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
@@ -302,14 +333,46 @@ where
         Ok(())
     }
 
+    /// Returns a historical proof for `historical_size` operations, anchored at `start_loc`
+    /// and bounded by `max_ops`.
+    ///
+    /// # Contract
+    ///
+    /// In split-root mode, `historical_size` must be a commit-boundary size: the operation at
+    /// `historical_size - 1` must itself be a commit op declaring the governing inactivity floor.
+    /// In plain-root mode, historical proof roots do not depend on the floor and any retained
+    /// `historical_size` works.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] in split-root mode if
+    /// `historical_size - 1` is retained but is not a commit op, either because the caller
+    /// passed a non-commit-boundary size or because pruning removed the commit that would
+    /// have governed it.
     pub async fn historical_proof(
         &self,
         historical_size: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
+        if historical_size > self.log.size().await {
+            return Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(historical_size),
+            ));
+        }
+
+        let inactivity_floor = if self.split_root {
+            let reader = self.log.reader().await;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&reader, historical_size, |op| {
+                op.has_floor()
+            })
+            .await?
+        } else {
+            Location::new(0)
+        };
+        let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
-            .historical_proof(historical_size, start_loc, max_ops)
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await
             .map_err(Into::into)
     }
@@ -484,13 +547,16 @@ where
             ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
+        self.root = self
+            .log
+            .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
 
         Ok(())
     }
 }
 
 // Functionality requiring Mutable + Persistable journal.
-impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -498,6 +564,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
@@ -510,8 +577,9 @@ where
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
     pub(crate) async fn init_from_log(
         mut index: I,
-        log: AuthenticatedLog<F, E, C, H>,
+        log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
+        split_root: bool,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
@@ -519,6 +587,11 @@ where
             let last_commit_loc = bounds.end.checked_sub(1).expect("commit should exist");
             let last_commit = reader.read(last_commit_loc).await?;
             let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
+            if *inactivity_floor_loc > last_commit_loc {
+                return Err(crate::qmdb::Error::DataCorrupted(
+                    "inactivity floor exceeds last commit",
+                ));
+            }
 
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
             // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
@@ -585,8 +658,20 @@ where
             ));
         }
 
+        let inactive_peaks = if split_root {
+            F::inactive_peaks(
+                F::location_to_position(log.merkle.leaves()),
+                inactivity_floor_loc,
+            )
+        } else {
+            0
+        };
+        let root = log.root(inactive_peaks)?;
+
         Ok(Self {
             log,
+            root,
+            split_root,
             inactivity_floor_loc,
             snapshot: index,
             last_commit_loc,
@@ -613,7 +698,7 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize> Persistable for Db<F, E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -621,6 +706,7 @@ where
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    S: Strategy,
     Operation<F, U>: Codec,
 {
     type Error = crate::qmdb::Error<F>;

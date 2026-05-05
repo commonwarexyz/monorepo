@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage, Supervisor as _};
 use commonware_storage::{MerkleizedBitMap, UnmerkleizedBitMap};
 use commonware_utils::bitmap::BitMap;
@@ -62,7 +63,7 @@ fn fuzz(input: FuzzInput) {
         let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
             context.child("bitmap"),
             PARTITION,
-            None,
+            Sequential,
             &hasher,
         )
         .await
@@ -235,7 +236,7 @@ fn fuzz(input: FuzzInput) {
                     let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
                         context.child("bitmap").with_attribute("instance", restarts),
                         PARTITION,
-                        None,
+                        Sequential,
                         &hasher,
                     )
                     .await

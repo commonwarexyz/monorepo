@@ -12,6 +12,7 @@ cargo-fuzz = true
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-formatting.workspace = true
 commonware-utils = { path = ".." }
 futures.workspace = true
 libfuzzer-sys.workspace = true

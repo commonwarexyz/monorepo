@@ -1,9 +1,10 @@
 use crate::{
-    merkle::{Family, Location},
+    merkle::{Bagging, Family, Location},
     qmdb::sync::Journal,
     translator::Translator,
 };
 use commonware_cryptography::Digest;
+use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::future::Future;
 
@@ -12,7 +13,7 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator, J: Clone> Config for crate::qmdb::any::Config<T, J> {
+impl<T: Translator, J: Clone, S: Strategy> Config for crate::qmdb::any::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -20,7 +21,7 @@ impl<T: Translator, J: Clone> Config for crate::qmdb::any::Config<T, J> {
     }
 }
 
-impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
+impl<T: Translator, C: Clone, S: Strategy> Config for crate::qmdb::immutable::Config<T, C, S> {
     type JournalConfig = C;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -28,7 +29,7 @@ impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
     }
 }
 
-impl<J: Clone> Config for crate::qmdb::keyless::Config<J> {
+impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -46,6 +47,9 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
+
+    /// Bagging policy used by this database when computing roots/proofs.
+    const ROOT_BAGGING: Bagging;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(

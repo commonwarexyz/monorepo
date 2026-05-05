@@ -60,6 +60,10 @@ test-benches crate test_flags='' lint_flags='':
 test *args='':
     cargo nextest run $@
 
+# Run loom tests
+test-loom *args='':
+    cargo nextest run --release --features loom --lib {{ args }} ::loom_tests::
+
 # Test the Rust documentation
 test-docs *args='--all':
     cargo test --doc --locked $@

@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
 };
@@ -100,7 +101,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {

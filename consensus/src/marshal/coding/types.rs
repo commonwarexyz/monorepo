@@ -9,7 +9,7 @@ use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
@@ -142,7 +142,7 @@ where
 #[derive(Debug)]
 pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     /// The inner block type.
-    inner: B,
+    inner: Arc<B>,
     /// The erasure coding configuration.
     config: CodingConfig,
     /// The erasure coding commitment.
@@ -152,7 +152,7 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     /// These shards are optional to enable lazy construction. If the block is
     /// constructed with [`Self::new_trusted`], the shards are computed lazily
     /// via [`Self::shards`].
-    shards: Option<Vec<C::Shard>>,
+    shards: Option<Arc<[C::Shard]>>,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
 }
@@ -175,10 +175,10 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     pub fn new(inner: B, config: CodingConfig, strategy: &impl Strategy) -> Self {
         let (commitment, shards) = Self::encode(&inner, config, strategy);
         Self {
-            inner,
+            inner: Arc::new(inner),
             config,
             commitment,
-            shards: Some(shards),
+            shards: Some(shards.into()),
             _hasher: PhantomData,
         }
     }
@@ -186,7 +186,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
     pub fn new_trusted(inner: B, commitment: Commitment) -> Self {
         Self {
-            inner,
+            inner: Arc::new(inner),
             config: commitment.config(),
             commitment: commitment.root(),
             shards: None,
@@ -213,7 +213,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
                     "coded block constructed with trusted commitment does not match commitment"
                 );
 
-                self.shards = Some(shards);
+                self.shards = Some(shards.into());
                 self.shards.as_ref().unwrap()
             }
         }
@@ -232,17 +232,17 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     }
 
     /// Returns a reference to the inner [`Block`].
-    pub const fn inner(&self) -> &B {
+    pub fn inner(&self) -> &B {
         &self.inner
     }
 
     /// Takes the inner [`Block`].
     pub fn into_inner(self) -> B {
-        self.inner
+        Arc::unwrap_or_clone(self.inner)
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
+impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
     for StoredCodedBlock<B, C, H>
 {
     fn from(block: CodedBlock<B, C, H>) -> Self {
@@ -250,10 +250,10 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
     }
 }
 
-impl<B: Block + Clone, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
+impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
             config: self.config,
             commitment: self.commitment,
             shards: self.shards.clone(),
@@ -315,10 +315,10 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             })?;
 
         Ok(Self {
-            inner,
+            inner: Arc::new(inner),
             config,
             commitment,
-            shards: Some(shards),
+            shards: Some(shards.into()),
             _hasher: PhantomData,
         })
     }
@@ -380,7 +380,7 @@ pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     _scheme: PhantomData<(C, H)>,
 }
 
-impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
+impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
     /// Create a [`StoredCodedBlock`] from a verified [`CodedBlock`].
     ///
     /// The caller must ensure the [`CodedBlock`] has been properly verified
@@ -388,7 +388,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
     pub fn new(block: CodedBlock<B, C, H>) -> Self {
         Self {
             commitment: block.commitment(),
-            inner: block.inner,
+            inner: block.into_inner(),
             _scheme: PhantomData,
         }
     }
@@ -619,6 +619,24 @@ mod test {
         let decoded = CodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
 
         assert!(coded_block == decoded);
+    }
+
+    #[test]
+    fn test_coded_block_clone_shares_storage() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let cloned = coded_block.clone();
+
+        assert!(Arc::ptr_eq(&coded_block.inner, &cloned.inner));
+        assert!(Arc::ptr_eq(
+            coded_block.shards.as_ref().unwrap(),
+            cloned.shards.as_ref().unwrap()
+        ));
     }
 
     #[test]

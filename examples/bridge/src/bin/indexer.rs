@@ -22,12 +22,12 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
+use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Listener, Network, Runner, Spawner, Supervisor as _};
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
     channel::{mpsc, oneshot},
-    from_hex,
     ordered::Set,
     union, TryCollect,
 };

@@ -994,20 +994,26 @@ impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
 impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Journal<E, V> {
     type Config = Config<V::Cfg>;
 
-    async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
+    async fn init<
+        F: crate::merkle::Family,
+        H: commonware_cryptography::Hasher,
+        S: commonware_parallel::Strategy,
+    >(
         context: E,
-        merkle_cfg: crate::merkle::full::Config,
+        merkle_cfg: crate::merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&V) -> bool,
+        bagging: crate::merkle::Bagging,
     ) -> Result<
-        crate::journal::authenticated::Journal<F, E, Self, H>,
+        crate::journal::authenticated::Journal<F, E, Self, H, S>,
         crate::journal::authenticated::Error<F>,
     > {
-        crate::journal::authenticated::Journal::<F, E, Self, H>::new(
+        crate::journal::authenticated::Journal::<F, E, Self, H, S>::new(
             context,
             merkle_cfg,
             journal_cfg,
             rewind_predicate,
+            bagging,
         )
         .await
     }
