@@ -125,25 +125,31 @@ where
 pub mod tests {
     //! Shared test utilities for ordered Current QMDB variants.
 
-    use super::db;
+    use super::{db, ExclusionProof};
     use crate::{
         index::ordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
         merkle::{Graftable, Location, Proof},
+        mmb,
         qmdb::{
             any::{
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
+                value::FixedEncoding,
                 ValueEncoding,
             },
-            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
+            current::{
+                proof::{OperationProof, RangeProof},
+                tests::apply_random_ops,
+                BitmapPrunedBits,
+            },
             store::tests::{TestKey, TestValue},
             Error,
         },
         translator::OneCap,
         Persistable,
     };
-    use commonware_codec::Codec;
+    use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _};
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -908,29 +914,10 @@ pub mod tests {
             ));
         });
     }
-}
 
-#[cfg(test)]
-mod codec_tests {
-    use super::{db::KeyValueProof, ExclusionProof};
-    use crate::{
-        merkle::Proof,
-        mmb,
-        qmdb::{
-            any::{ordered::Update, value::FixedEncoding},
-            current::proof::{OperationProof, RangeProof},
-        },
-    };
-    use commonware_codec::{Decode as _, Encode as _, EncodeSize as _};
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
-
-    type F = mmb::Family;
-    const N: usize = 32;
-    const MAX_DIGESTS: usize = 64;
-
-    fn sample_op_proof() -> OperationProof<F, Digest, N> {
+    fn sample_op_proof() -> OperationProof<mmb::Family, Digest, 32> {
         let range_proof = RangeProof {
-            proof: Proof::<F, Digest> {
+            proof: Proof::<mmb::Family, Digest> {
                 leaves: mmb::Location::new(7),
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
@@ -940,7 +927,7 @@ mod codec_tests {
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
-        let chunk: [u8; N] = core::array::from_fn(|i| i as u8);
+        let chunk: [u8; 32] = core::array::from_fn(|i| i as u8);
         OperationProof {
             loc: mmb::Location::new(5),
             chunk,
@@ -948,24 +935,27 @@ mod codec_tests {
         }
     }
 
+    type CodecExclusionProof = ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
+    type CodecKeyValueProof = db::KeyValueProof<mmb::Family, Digest, Digest, 32>;
+    const MAX_DIGESTS: usize = 64;
+
     #[test]
     fn test_key_value_proof_codec_roundtrip() {
-        let proof = KeyValueProof::<F, Digest, Digest, N> {
+        let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
             next_key: Sha256::hash(b"next-key"),
         };
 
         let encoded = proof.encode();
         assert_eq!(encoded.len(), proof.encode_size());
-        let decoded =
-            KeyValueProof::<F, Digest, Digest, N>::decode_cfg(encoded, &(MAX_DIGESTS, ())).unwrap();
+        let decoded = CodecKeyValueProof::decode_cfg(encoded, &(MAX_DIGESTS, ())).unwrap();
         assert_eq!(decoded, proof);
     }
 
     #[test]
     fn test_exclusion_proof_codec_roundtrip() {
         let cases = [
-            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::KeyValue(
+            CodecExclusionProof::KeyValue(
                 sample_op_proof(),
                 Update {
                     key: Sha256::hash(b"key"),
@@ -973,25 +963,15 @@ mod codec_tests {
                     next_key: Sha256::hash(b"next-key"),
                 },
             ),
-            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::Commit(
-                sample_op_proof(),
-                Some(Sha256::hash(b"metadata")),
-            ),
-            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::Commit(
-                sample_op_proof(),
-                None,
-            ),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(b"metadata"))),
+            CodecExclusionProof::Commit(sample_op_proof(), None),
         ];
 
         for proof in cases {
             let encoded = proof.encode();
             assert_eq!(encoded.len(), proof.encode_size());
             let decoded =
-                ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::decode_cfg(
-                    encoded,
-                    &(MAX_DIGESTS, (), ()),
-                )
-                .unwrap();
+                CodecExclusionProof::decode_cfg(encoded, &(MAX_DIGESTS, (), ())).unwrap();
             assert_eq!(decoded, proof);
         }
     }
@@ -1000,10 +980,7 @@ mod codec_tests {
     fn test_exclusion_proof_rejects_unknown_tag() {
         let mut bytes = vec![42u8]; // unknown tag
         bytes.extend_from_slice(&[0u8; 32]); // garbage
-        let result = ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, N>::decode_cfg(
-            bytes.as_slice(),
-            &(MAX_DIGESTS, (), ()),
-        );
+        let result = CodecExclusionProof::decode_cfg(bytes.as_slice(), &(MAX_DIGESTS, (), ()));
         assert!(result.is_err());
     }
 }
