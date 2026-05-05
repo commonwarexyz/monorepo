@@ -219,6 +219,11 @@ impl Bitmap {
             };
 
             let container = self.containers.entry(key).or_default();
+            if container_start == 0 && container_end.is_none() {
+                inserted += container::bitmap::BITS as u64 - container.len() as u64;
+                *container = Container::Run(container::Run::full());
+                continue;
+            }
             match container_end {
                 Some(container_end) => {
                     inserted += container.insert_range(container_start..container_end) as u64;
