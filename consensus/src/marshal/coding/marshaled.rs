@@ -610,7 +610,6 @@ where
             let parent = select! {
                 _ = tx.closed() => {
                     debug!(reason = "consensus dropped receiver", "skipping proposal");
-                    parent_timer.observe(&runtime_context);
                     return;
                 },
                 result = parent_request => match result {
@@ -621,7 +620,6 @@ where
                             reason = "failed to fetch parent block",
                             "skipping proposal"
                         );
-                        parent_timer.observe(&runtime_context);
                         return;
                     }
                 },
@@ -678,7 +676,6 @@ where
                             reason = "block building failed",
                             "skipping proposal"
                         );
-                        build_timer.observe(&runtime_context);
                         return;
                     }
                 },

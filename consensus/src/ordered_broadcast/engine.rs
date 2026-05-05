@@ -470,17 +470,18 @@ impl<
                     payload,
                     result,
                 } = verify;
-                timer.observe(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, ?context, "verified returned error");
                         self.metrics.verify.inc(Status::Dropped);
                     }
                     Ok(false) => {
+                        timer.observe(self.context.as_ref());
                         debug!(?context, "verified was false");
                         self.metrics.verify.inc(Status::Failure);
                     }
                     Ok(true) => {
+                        timer.observe(self.context.as_ref());
                         debug!(?context, "verified");
                         self.metrics.verify.inc(Status::Success);
                         if let Err(err) = self

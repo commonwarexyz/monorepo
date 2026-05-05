@@ -334,13 +334,13 @@ impl<
                     result,
                     timer,
                 } = request;
-                timer.observe(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, %height, "automaton returned error");
                         self.metrics.digest.inc(Status::Dropped);
                     }
                     Ok(digest) => {
+                        timer.observe(self.context.as_ref());
                         if let Err(err) = self.handle_digest(height, digest, &mut sender).await {
                             debug!(?err, %height, "handle_digest failed");
                             continue;

@@ -1211,8 +1211,8 @@ mod tests {
                 assert!(
                     context
                         .encode()
-                        .contains("wrapper_under_test_build_duration_count 1"),
-                    "{kind:?}: failed application builds should still be timed"
+                        .contains("wrapper_under_test_build_duration_count 0"),
+                    "{kind:?}: failed application builds should not be timed"
                 );
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
