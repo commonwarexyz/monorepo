@@ -6,6 +6,8 @@ use commonware_stream::encrypted::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
+const CHANNEL_BUFFER_SIZE: usize = 1024 * 1024;
+
 #[derive(Debug)]
 pub struct FuzzInput {
     // Seeds for cryptographic identities
@@ -89,8 +91,10 @@ fn fuzz(input: FuzzInput) {
         let dialer_crypto = PrivateKey::from_seed(input.dialer_seed);
         let listener_crypto = PrivateKey::from_seed(input.listener_seed);
 
-        let (dialer_sink, listener_stream) = mocks::Channel::init();
-        let (listener_sink, dialer_stream) = mocks::Channel::init();
+        let (dialer_sink, listener_stream) =
+            mocks::Channel::init_with_buffer_size(CHANNEL_BUFFER_SIZE);
+        let (listener_sink, dialer_stream) =
+            mocks::Channel::init_with_buffer_size(CHANNEL_BUFFER_SIZE);
 
         let dialer_config = Config {
             signing_key: dialer_crypto.clone(),
