@@ -922,8 +922,8 @@ pub mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            pre_prefix_acc: Some(Sha256::hash(b"pre")),
             unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
+            unfolded_suffix_peaks: vec![Sha256::hash(b"suf")],
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };

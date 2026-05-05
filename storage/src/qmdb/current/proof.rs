@@ -909,8 +909,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 impl<F: Family, D: Digest> Write for RangeProof<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
-        self.pre_prefix_acc.write(buf);
         self.unfolded_prefix_peaks.write(buf);
+        self.unfolded_suffix_peaks.write(buf);
         self.partial_chunk_digest.write(buf);
         self.ops_root.write(buf);
     }
@@ -919,8 +919,8 @@ impl<F: Family, D: Digest> Write for RangeProof<F, D> {
 impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
     fn encode_size(&self) -> usize {
         self.proof.encode_size()
-            + self.pre_prefix_acc.encode_size()
             + self.unfolded_prefix_peaks.encode_size()
+            + self.unfolded_suffix_peaks.encode_size()
             + self.partial_chunk_digest.encode_size()
             + self.ops_root.encode_size()
     }
@@ -928,7 +928,8 @@ impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
 
 impl<F: Family, D: Digest> Read for RangeProof<F, D> {
     /// The maximum number of digests in the proof, also used as the upper bound on the
-    /// number of unfolded prefix peaks (which is itself bounded by the structural peak count).
+    /// number of unfolded prefix and suffix peaks (each itself bounded by the structural peak
+    /// count).
     type Cfg = usize;
 
     fn read_cfg(
@@ -936,14 +937,14 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let pre_prefix_acc = Option::<D>::read(buf)?;
         let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=*max_digests)?;
+        let unfolded_suffix_peaks = Vec::<D>::read_range(buf, ..=*max_digests)?;
         let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
             proof,
-            pre_prefix_acc,
             unfolded_prefix_peaks,
+            unfolded_suffix_peaks,
             partial_chunk_digest,
             ops_root,
         })
@@ -1110,24 +1111,24 @@ mod tests {
             // Minimal: no optional fields, no unfolded peaks.
             RangeProof {
                 proof: proof.clone(),
-                pre_prefix_acc: None,
                 unfolded_prefix_peaks: vec![],
+                unfolded_suffix_peaks: vec![],
                 partial_chunk_digest: None,
                 ops_root,
             },
-            // All optional fields populated, with unfolded peaks.
+            // All optional fields populated, with unfolded peaks on both sides.
             RangeProof {
                 proof,
-                pre_prefix_acc: Some(Sha256::hash(b"pre-prefix")),
                 unfolded_prefix_peaks: vec![Sha256::hash(b"u0"), Sha256::hash(b"u1")],
+                unfolded_suffix_peaks: vec![Sha256::hash(b"s0"), Sha256::hash(b"s1")],
                 partial_chunk_digest: Some(Sha256::hash(b"partial")),
                 ops_root,
             },
             // Default proof with only partial chunk digest.
             RangeProof {
                 proof: Proof::<F, sha256::Digest>::default(),
-                pre_prefix_acc: None,
                 unfolded_prefix_peaks: vec![],
+                unfolded_suffix_peaks: vec![],
                 partial_chunk_digest: Some(Sha256::hash(b"only-partial")),
                 ops_root,
             },
@@ -1154,8 +1155,8 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            pre_prefix_acc: Some(Sha256::hash(b"pre")),
             unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
+            unfolded_suffix_peaks: vec![Sha256::hash(b"suf")],
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
