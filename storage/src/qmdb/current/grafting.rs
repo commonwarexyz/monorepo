@@ -230,11 +230,6 @@ pub(super) fn grafted_root<
 
 /// Compute the grafted root by folding peak digests with multi-peak chunk grafting.
 ///
-/// For MMR this produces the same result as
-/// `hasher.root(leaves, 0, peaks).expect("zero inactive peaks is always valid")` because every
-/// chunk has a single peak at the grafting height. For MMB, chunks that span multiple
-/// sub-grafting-height peaks are folded together and combined with the bitmap chunk.
-///
 /// This custom folding process is necessary to ensure every bit of activity state from the bitmap
 /// is cryptographically incorporated into the root. Because MMB structures can have "incomplete"
 /// right edges, a single complete bitmap chunk block might logically cover several smaller,

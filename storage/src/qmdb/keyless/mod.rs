@@ -528,8 +528,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle,
-        qmdb::verify_proof,
+        qmdb::{self, verify_proof},
         Persistable,
     };
     use commonware_cryptography::Sha256;
@@ -742,8 +741,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         const ELEMENTS: u64 = 50;
 
         {
@@ -1303,8 +1301,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         // Build a db with some values.
         const ELEMENTS: u64 = 100;
@@ -1380,8 +1377,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         const ELEMENTS: u64 = 100;
         {
@@ -1655,8 +1651,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         const BATCHES: u64 = 20;
         const APPENDS_PER_BATCH: u64 = 5;
@@ -1766,8 +1761,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         const N: u64 = 500;
         let mut values = Vec::new();
         let mut locs = Vec::new();

@@ -179,7 +179,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
+        qmdb::{
+            self,
+            any::{FixedConfig, MerkleConfig, VariableConfig},
+        },
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
@@ -258,7 +261,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as UnorderedIndex,
         journal::contiguous::Mutable,
-        merkle::{self, mmr},
+        merkle::mmr,
         qmdb::any::{
             db::Db as AnyDb,
             operation::{update::Update as UpdateTrait, Operation as AnyOperation},
@@ -627,7 +630,7 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
 
         const ELEMENTS: u64 = 1000;
 
@@ -689,7 +692,7 @@ pub(crate) mod test {
             }
         }
 
-        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
@@ -749,7 +752,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -779,7 +782,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         assert!(verify_proof(
             &hasher,
             &historical_proof,
@@ -828,7 +831,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
         // Apply two single-write batches and capture the commit-boundary size after the
@@ -858,7 +861,7 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         // Changing the proof digests should cause verification to fail
         {

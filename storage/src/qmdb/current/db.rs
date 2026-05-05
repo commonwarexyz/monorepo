@@ -10,10 +10,11 @@ use crate::{
     },
     merkle::{
         self, hasher::Standard as StandardHasher, mem::Mem, storage::Storage as MerkleStorage,
-        Bagging, Location, Position,
+        Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
+        self,
         any::{
             self,
             operation::{update::Update, Operation},
@@ -153,7 +154,7 @@ where
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            StandardHasher::<H>::with_bagging(Bagging::BackwardFold),
+            qmdb::hasher::<H>(),
         )
     }
 
@@ -290,8 +291,7 @@ where
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
     /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
-    /// verifiers should use the same Merkle hasher configuration as QMDB sync:
-    /// [`Bagging::BackwardFold`].
+    /// verifiers should use the same Merkle hasher configuration as QMDB sync.
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,
@@ -562,7 +562,7 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any.rewind(size).await?;
 
-        let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let grafted_tree = build_grafted_tree::<F, H, S, N>(
             &hasher,
             self.any.bitmap.as_ref(),
@@ -1164,7 +1164,7 @@ mod tests {
                 next_idx += 1;
             }
 
-            let mut hasher = StandardHasher::<Sha256>::with_bagging(Bagging::BackwardFold);
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1196,7 +1196,7 @@ mod tests {
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
 
-            let mut hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1245,7 +1245,7 @@ mod tests {
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
 
-            let mut hasher = StandardHasher::<Sha256>::with_bagging(Bagging::BackwardFold);
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1272,7 +1272,7 @@ mod tests {
             .await
             .unwrap();
 
-            let mut hasher = StandardHasher::<Sha256>::with_bagging(Bagging::BackwardFold);
+            let mut hasher = qmdb::hasher::<Sha256>();
             let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();

@@ -6,11 +6,11 @@
 //! The canonical root of a `current` database combines the ops root, grafted tree root, and
 //! optional partial chunk into a single hash (see the [Root structure](super) section in the
 //! module documentation). The sync engine operates on the **ops root**, not the canonical root:
-//! it downloads operations and verifies each batch against the ops root using standard merkle
-//! range proofs (identical to `any` sync). Callers that verify current ops proofs directly should
-//! use the same Merkle hasher configuration as sync. [crate::qmdb::current::proof::OpsRootWitness]
-//! can be used by callers that need to authenticate the synced ops root against a trusted canonical
-//! root; the sync engine does not perform this check itself.
+//! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
+//! (identical to `any` sync). Callers that verify current ops proofs directly should
+//! use `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be
+//! used by callers that need to authenticate the synced ops root against a trusted canonical root;
+//! the sync engine does not perform this check itself.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed
 //! deterministically from the operations. The canonical root is then computed from the
@@ -34,8 +34,7 @@ use crate::{
     },
     merkle::{
         full::{self, Merkle},
-        hasher::Standard as StandardHasher,
-        Bagging, Graftable, Location,
+        Graftable, Location,
     },
     qmdb::{
         self,
@@ -119,7 +118,7 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.with_label("merkle"),
         full::SyncConfig {
@@ -178,7 +177,7 @@ where
     };
 
     // Build grafted tree.
-    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
@@ -324,7 +323,6 @@ macro_rules! impl_current_sync_database {
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,
-                    Bagging::BackwardFold,
                 )
                 .await
                 {

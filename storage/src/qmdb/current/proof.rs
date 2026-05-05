@@ -14,6 +14,7 @@ use crate::{
         Bagging, Family, Graftable, Location, Position, Proof,
     },
     qmdb::{
+        self,
         current::{db::combine_roots, grafting},
         Error,
     },
@@ -615,7 +616,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         range: Range<Location<F>>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        let std_hasher = merkle::hasher::Standard::<H>::with_bagging(Bagging::BackwardFold);
+        let std_hasher = qmdb::hasher::<H>();
         let range_for_layout = range.clone();
         let complete_chunks = status.complete_chunks() as u64;
         let pruned_chunks = status.pruned_chunks() as u64;
@@ -983,7 +984,6 @@ mod tests {
     use crate::{
         merkle::{conformance::build_test_mem, mem::Mem},
         mmb,
-        mmr::StandardHasher,
         qmdb::current::{db, grafting},
     };
     use commonware_codec::{DecodeExt as _, Encode as _};
@@ -1018,8 +1018,7 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> =
-                StandardHasher::with_bagging(Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
 
             let leaf_count = (16..=64u64)
@@ -1111,8 +1110,7 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> =
-                StandardHasher::with_bagging(Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
 
             let (leaf_count, loc) = (17..=64u64)
@@ -1234,8 +1232,7 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> =
-                StandardHasher::with_bagging(Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -1354,8 +1351,7 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> =
-                StandardHasher::with_bagging(Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -1448,8 +1444,7 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> =
-                StandardHasher::with_bagging(Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -1613,8 +1608,7 @@ mod tests {
             type F = mmb::Family;
             const N: usize = 1;
 
-            let hasher: StandardHasher<Sha256> =
-                StandardHasher::with_bagging(Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
             let leaf_count = chunk_bits;

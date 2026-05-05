@@ -23,9 +23,9 @@
 //!    its proof on every serve.
 
 use crate::{
-    merkle::{self, compact, Family, Location, Proof},
+    merkle::{compact, Family, Location, Proof},
     metadata::Metadata,
-    qmdb::{sync::compact::Target, Error},
+    qmdb::{self, sync::compact::Target, Error},
     Context,
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize};
@@ -236,7 +236,7 @@ where
 
     let inactive_peaks =
         F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
-    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let root = merkle
         .root(&hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
@@ -279,7 +279,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &commit_op_bytes);
         merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
@@ -360,7 +360,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let last_commit_loc = source.last_commit_loc();
     let inactivity_floor_loc = source.inactivity_floor_loc();
     let commit_op_bytes = source.encode_current_commit_op();

@@ -2,8 +2,7 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
 //!
-//! Callers verifying `any` sync proofs directly should use the same Merkle hasher configuration as
-//! the sync engine.
+//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -11,7 +10,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable, Reader as _},
     },
-    merkle::{self, full, hasher::Standard as StandardHasher, Location},
+    merkle::{self, full, Location},
     qmdb::{
         self,
         any::{
@@ -64,7 +63,6 @@ pub async fn has_local_target_state<F, E, H, S>(
     merkle_config: full::Config<S>,
     target: &qmdb::sync::Target<F, H::Digest>,
     inactive_peaks: usize,
-    bagging: merkle::Bagging,
 ) -> bool
 where
     F: merkle::Family,
@@ -72,7 +70,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::with_bagging(bagging);
+    let hasher = qmdb::hasher::<H>();
     let peek = full::Merkle::<F, _, _, S>::peek_root(
         context.with_label("local_target_probe"),
         merkle_config,
@@ -111,7 +109,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
-    let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
 
     let merkle = full::Merkle::<F, _, _, S>::init_sync(
         context.with_label("merkle"),
@@ -209,7 +207,6 @@ macro_rules! impl_sync_database {
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,
-                    merkle::Bagging::BackwardFold,
                 )
                 .await
             }

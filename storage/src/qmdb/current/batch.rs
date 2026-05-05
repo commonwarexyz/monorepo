@@ -6,11 +6,11 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
-        mem::Mem, storage::Storage as MerkleStorage, Bagging, Graftable, Location, Position,
-        Readable,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
+        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
+        self,
         any::{
             self,
             batch::{lookup_sorted, DiffEntry},
@@ -610,7 +610,7 @@ where
         (idx, chunk)
     });
 
-    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
         &hasher,
         &ops_tree_adapter,

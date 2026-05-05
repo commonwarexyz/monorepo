@@ -123,11 +123,11 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
-            self,
-            mmr::{self, Location, StandardHasher},
+            mmr::{self, Location},
             Location as GenericLocation,
         },
         qmdb::{
+            self,
             any::{
                 test::fixed_db_config,
                 unordered::{fixed::Operation, Update},
@@ -592,7 +592,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             assert!(verify_proof(
                 &hasher,
                 &historical_proof,
@@ -640,7 +640,7 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
 
             let mut db = create_test_db(context.with_label("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
@@ -708,7 +708,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 

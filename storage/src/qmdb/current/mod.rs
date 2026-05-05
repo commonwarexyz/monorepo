@@ -241,9 +241,9 @@
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use the same Merkle hasher configuration as sync. After
 //! sync, the bitmap and grafted tree are reconstructed deterministically from the operations, and
-//! the canonical root is computed. [proof::OpsRootWitness] can be used to validate that a particular
-//! ops root is committed by a trusted canonical root; the sync engine does not perform this check
-//! itself.
+//! the canonical root is computed.
+//! [proof::OpsRootWitness] can be used to validate that a particular ops root is committed by a
+//! trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -251,9 +251,9 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Bagging, Location},
-    mmr::StandardHasher,
+    merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
+        self,
         any::{
             self,
             operation::{Operation, Update},
@@ -359,7 +359,7 @@ where
     let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = StandardHasher::<H>::with_bagging(Bagging::BackwardFold);
+    let hasher = qmdb::hasher::<H>();
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
@@ -419,6 +419,7 @@ pub mod tests {
     use crate::{
         merkle::{self, mmb, mmr},
         qmdb::{
+            self,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -3639,9 +3640,8 @@ pub mod tests {
         });
     }
 
-    /// Regression: a `current::Db` over `mmb::Family` bags its ops root with backward-fold, so
-    /// [`crate::qmdb::verify_proof`] must use a hasher with that bagging to accept proofs returned
-    /// by `ops_historical_proof`.
+    /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration,
+    /// not the Merkle default.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
         use crate::{merkle::hasher::Standard, qmdb::verify_proof};
@@ -3669,8 +3669,8 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Verifies under the backward-fold bagging the prover actually used.
-            let hasher = Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            // Verifies under the QMDB ops-tree hasher configuration.
+            let hasher = qmdb::hasher::<Sha256>();
             assert!(verify_proof(
                 &hasher,
                 &proof,
@@ -3679,8 +3679,7 @@ pub mod tests {
                 &ops_root
             ));
 
-            // Sanity: the plain forward-fold hasher must not accept this proof, since the ops
-            // root is bagged with backward bagging.
+            // Sanity: the plain Merkle default must not accept this proof.
             let plain = Standard::<Sha256>::new();
             assert!(!verify_proof(
                 &plain,

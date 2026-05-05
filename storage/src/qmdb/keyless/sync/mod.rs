@@ -5,7 +5,6 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self,
         full::{self, Merkle},
         Family, Location,
     },
@@ -67,7 +66,7 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error<F>> {
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
 
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.with_label("merkle"),
@@ -163,7 +162,7 @@ where
             Operation::<F, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.with_label("merkle"),
             config.merkle,
