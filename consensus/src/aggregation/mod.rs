@@ -1055,7 +1055,7 @@ mod tests {
                 // Create reporter with verifier scheme
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-            reporter.start();
+                reporter.start();
                 reporters.insert(participant.clone(), reporter_mailbox.clone());
 
                 // Create blocker
