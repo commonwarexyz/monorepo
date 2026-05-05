@@ -54,6 +54,9 @@ where
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>, S>>,
 
+    /// Cached operations root after applying this batch.
+    pub(super) root: D,
+
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
 
@@ -291,7 +294,15 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(total_size)),
+            inactivity_floor,
+        );
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
+        let root = db
+            .journal
+            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_batch_ends = Vec::new();
         let mut ancestor_new_inactivity_floor_locs = Vec::new();
@@ -306,6 +317,7 @@ where
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
+            root,
             parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
             total_size,
@@ -322,8 +334,8 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Return the speculative root.
-    pub fn root(&self) -> D {
-        self.journal_batch.root()
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// Read a value at `loc`.

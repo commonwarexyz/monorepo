@@ -1,5 +1,5 @@
 use crate::{
-    merkle::{Family, Location},
+    merkle::{Bagging, Family, Location},
     qmdb::sync::Journal,
     translator::Translator,
 };
@@ -47,6 +47,9 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
+
+    /// Bagging policy used by this database when computing roots/proofs.
+    const ROOT_BAGGING: Bagging;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(

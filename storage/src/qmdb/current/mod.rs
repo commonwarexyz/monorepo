@@ -250,7 +250,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, full::Config as MerkleConfig, Bagging, Location},
     mmr::StandardHasher,
     qmdb::{
         any::{
@@ -355,7 +355,14 @@ where
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
-    let any = any::init_with_bitmap(context.with_label("any"), config.into(), Some(bitmap)).await?;
+    let any = any::init_with_bitmap(
+        context.with_label("any"),
+        config.into(),
+        Some(bitmap),
+        false,
+        Bagging::ForwardFold,
+    )
+    .await?;
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::new();
@@ -376,7 +383,7 @@ where
         hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
-    let ops_root = any.log.root();
+    let ops_root = any.root();
     let root = db::compute_db_root(
         &hasher,
         any.bitmap.as_ref(),
@@ -3634,6 +3641,56 @@ pub mod tests {
                 speculative_chunks, committed_chunks,
                 "speculative chunks must equal post-apply committed chunks across all chunks",
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: MMB current-db ops proofs verify against the full-forward ops root.
+    #[test_traced("INFO")]
+    fn test_current_mmb_ops_historical_proof_verifies_with_full_forward_bagging() {
+        use crate::{merkle::hasher::Standard, qmdb::verify_proof};
+        use commonware_utils::NZU64;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedFixedMmbDb = UnorderedFixedMmbDb::init(
+                ctx.clone(),
+                fixed_config::<OneCap>("mmb-ops-proof", &ctx),
+            )
+            .await
+            .unwrap();
+
+            let writes: Vec<(Digest, Option<Digest>)> =
+                (0u64..16).map(|i| (key(i), Some(val(i)))).collect();
+            commit_writes(&mut db, writes).await.unwrap();
+
+            let ops_root = db.ops_root();
+            let historical_size = db.bounds().await.end;
+            let (proof, ops) = db
+                .ops_historical_proof(historical_size, Location::new(0), NZU64!(32))
+                .await
+                .unwrap();
+
+            let hasher = Standard::<Sha256>::new();
+            let hasher_backward = Standard::<Sha256>::backward();
+
+            assert!(verify_proof(
+                &hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root
+            ));
+
+            assert!(!verify_proof(
+                &hasher_backward,
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root
+            ));
 
             db.destroy().await.unwrap();
         });

@@ -57,8 +57,8 @@ fn verify_element_proof<F: MerkleFamily>(
     loc: Location<F>,
     element: &[u8],
 ) -> Result<bool, Error<F>> {
-    let proof = merkle.proof(hasher, loc)?;
-    let root = *merkle.root();
+    let proof = merkle.proof(hasher, loc, 0)?;
+    let root = merkle.root(hasher, 0)?;
     Ok(proof.verify_element_inclusion(hasher, element, loc, &root))
 }
 
@@ -129,7 +129,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
 
     runner.start(|_context| async move {
         let hasher = Standard::<Sha256>::new();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
         let mut reference = ReferenceMerkle::<F>::new();
 
         for (op_idx, op) in operations.iter().enumerate() {
@@ -176,7 +176,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
                     }
 
                     let size_before = merkle.size();
-                    let root_before = *merkle.root();
+                    let root_before = merkle.root(&hasher, 0).unwrap();
                     let root_should_change = reference.leaf_data[idx].as_slice() != limited;
 
                     update_leaf(&mut merkle, &hasher, leaf_loc, limited).unwrap();
@@ -191,7 +191,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
 
                     if root_should_change {
                         assert_ne!(
-                            *merkle.root(),
+                            merkle.root(&hasher, 0).unwrap(),
                             root_before,
                             "{} op {op_idx}: root should change after updating a leaf to different data",
                             type_name::<F>()
@@ -269,7 +269,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
                         type_name::<F>()
                     );
 
-                    let _ = merkle.root();
+                    let _ = merkle.root(&hasher, 0);
                 }
 
                 MerkleOperation::PruneToPos { pos_idx } => {
@@ -309,7 +309,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
                         type_name::<F>()
                     );
 
-                    let _ = merkle.root();
+                    let _ = merkle.root(&hasher, 0);
                 }
             }
         }

@@ -1,0 +1,43 @@
+name: Loom
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-loom-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  Tests:
+    name: "Tests (flags: \"${{ matrix.flags }}\")"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        flags:
+          - "--features iouring"
+          - ""
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-cache-key: loom-${{ matrix.flags || 'default' }}
+    - name: Install just & nextest
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.129
+    - name: Run loom tests
+      run: just test-loom ${{ matrix.flags }} --verbose

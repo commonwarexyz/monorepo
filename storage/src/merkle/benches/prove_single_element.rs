@@ -17,7 +17,7 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str) {
     for n in N_LEAVES {
         let hasher = StandardHasher::<Sha256>::new();
-        let mut mem = Mem::<F, _>::new(&hasher);
+        let mut mem = Mem::<F, _>::new();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         block_on(async {
@@ -32,7 +32,7 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
             };
             mem.apply_batch(&batch).unwrap();
         });
-        let root = *mem.root();
+        let root = mem.root(&hasher, 0).unwrap();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
@@ -53,7 +53,7 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
                         block_on(async {
                             let hasher = StandardHasher::<Sha256>::new();
                             for (loc, element) in samples {
-                                let proof = mem.proof(&hasher, loc).unwrap();
+                                let proof = mem.proof(&hasher, loc, 0).unwrap();
                                 assert!(
                                     proof.verify_element_inclusion(&hasher, &element, loc, &root)
                                 );

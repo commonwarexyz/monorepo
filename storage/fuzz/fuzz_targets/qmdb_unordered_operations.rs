@@ -7,7 +7,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{self, mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
@@ -78,7 +78,7 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {
@@ -179,8 +179,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 &proof,
                                 adjusted_start,
                                 &log,
-                                &current_root
-                                ),
+                                &current_root),
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
                         );
                     }

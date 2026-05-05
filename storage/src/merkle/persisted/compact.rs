@@ -193,11 +193,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Initialize a new `Merkle` instance, rebuilding in-memory state from the last sync.
-    pub async fn init(
-        context: E,
-        hasher: &impl Hasher<F, Digest = D>,
-        cfg: Config<S>,
-    ) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.with_label("compact_metadata"),
             MConfig {
@@ -210,16 +206,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let active_slot = Self::read_gen_ptr(&metadata)?.unwrap_or(0);
         let leaves = Self::read_slot_size(&metadata, active_slot)?.unwrap_or(Location::new(0));
         let mem = if leaves == 0 {
-            Mem::new(hasher)
+            Mem::new()
         } else {
-            Mem::init(
-                MemConfig {
-                    nodes: vec![],
-                    pruning_boundary: leaves,
-                    pinned_nodes: Self::load_slot_pins(&metadata, active_slot, leaves)?,
-                },
-                hasher,
-            )?
+            Mem::init(MemConfig {
+                nodes: vec![],
+                pruning_boundary: leaves,
+                pinned_nodes: Self::load_slot_pins(&metadata, active_slot, leaves)?,
+            })?
         };
 
         Ok(Self {
@@ -247,7 +240,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// owns the typed final commit operation needed to authenticate the caller's requested target.
     pub(crate) async fn init_from_compact_state(
         context: E,
-        hasher: &impl Hasher<F, Digest = D>,
         cfg: Config<S>,
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
@@ -268,16 +260,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         metadata.clear();
 
         let mem = if leaves == 0 {
-            Mem::new(hasher)
+            Mem::new()
         } else {
-            Mem::init(
-                MemConfig {
-                    nodes: vec![],
-                    pruning_boundary: leaves,
-                    pinned_nodes,
-                },
-                hasher,
-            )?
+            Mem::init(MemConfig {
+                nodes: vec![],
+                pruning_boundary: leaves,
+                pinned_nodes,
+            })?
         };
 
         let merkle = Self {
@@ -291,8 +280,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Return the root digest of the current committed state.
-    pub fn root(&self) -> D {
-        *self.inner.read().root()
+    pub fn root(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        inactive_peaks: usize,
+    ) -> Result<D, Error<F>> {
+        self.inner.read().root(hasher, inactive_peaks)
     }
 
     /// Return the total number of nodes (MMR position count, not leaf count).
@@ -417,10 +410,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// Returns the slot index now active (caller uses this to repopulate its own per-slot
     /// caches from the matching slot).
-    pub(crate) async fn rewind(
-        &mut self,
-        hasher: &impl Hasher<F, Digest = D>,
-    ) -> Result<u8, Error<F>> {
+    pub(crate) async fn rewind(&mut self) -> Result<u8, Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
 
         let current_slot = *self.active_slot.read();
@@ -441,16 +431,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Rebuild Mem from the rewound slot's state. This discards any uncommitted appends.
         let new_mem = if new_leaves == 0 {
-            Mem::new(hasher)
+            Mem::new()
         } else {
-            Mem::init(
-                MemConfig {
-                    nodes: vec![],
-                    pruning_boundary: new_leaves,
-                    pinned_nodes,
-                },
-                hasher,
-            )?
+            Mem::init(MemConfig {
+                nodes: vec![],
+                pruning_boundary: new_leaves,
+                pinned_nodes,
+            })?
         };
 
         // Atomically clear this layer's state in the pre-rewind slot (size + pins) and flip the
@@ -508,7 +495,6 @@ mod tests {
     async fn open<F: Family>(context: deterministic::Context, partition: &str) -> TestMerkle<F> {
         TestMerkle::<F>::init(
             context,
-            &StandardHasher::<Sha256>::new(),
             Config {
                 partition: partition.into(),
                 strategy: Sequential,
@@ -541,7 +527,7 @@ mod tests {
             strategy: Sequential,
         };
 
-        let mut merkle = TestMerkle::<F>::init(context.with_label("first"), &hasher, cfg.clone())
+        let mut merkle = TestMerkle::<F>::init(context.with_label("first"), cfg.clone())
             .await
             .unwrap();
         let batch = {
@@ -549,15 +535,15 @@ mod tests {
             merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
         };
         merkle.apply_batch(&batch).unwrap();
-        let root_before = merkle.root();
+        let root_before = merkle.root(&hasher, 0).unwrap();
         let leaves_before = merkle.leaves();
         merkle.sync().await.unwrap();
         drop(merkle);
 
-        let mut reopened = TestMerkle::<F>::init(context.with_label("second"), &hasher, cfg)
+        let mut reopened = TestMerkle::<F>::init(context.with_label("second"), cfg)
             .await
             .unwrap();
-        assert_eq!(reopened.root(), root_before);
+        assert_eq!(reopened.root(&hasher, 0).unwrap(), root_before);
         assert_eq!(reopened.leaves(), leaves_before);
 
         let batch = {
@@ -590,14 +576,14 @@ mod tests {
         let mut merkle = open::<F>(context, partition).await;
 
         append_and_sync(&mut merkle, &[b"a", b"b"]).await;
-        let root_after_first = merkle.root();
+        let root_after_first = merkle.root(&hasher, 0).unwrap();
         let leaves_after_first = merkle.leaves();
 
         append_and_sync(&mut merkle, &[b"c"]).await;
-        assert_ne!(merkle.root(), root_after_first);
+        assert_ne!(merkle.root(&hasher, 0).unwrap(), root_after_first);
 
-        merkle.rewind(&hasher).await.unwrap();
-        assert_eq!(merkle.root(), root_after_first);
+        merkle.rewind().await.unwrap();
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root_after_first);
         assert_eq!(merkle.leaves(), leaves_after_first);
 
         merkle.destroy().await.unwrap();
@@ -620,18 +606,17 @@ mod tests {
     #[test]
     fn test_rewind_beyond_history_errors() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
             let mut merkle = open::<mmr::Family>(context, "rewind-beyond").await;
             // No prior sync: rewind should fail with RewindBeyondHistory.
             assert!(matches!(
-                merkle.rewind(&hasher).await,
+                merkle.rewind().await,
                 Err(Error::RewindBeyondHistory)
             ));
             // After one sync, the previous slot is still empty (nothing has been overwritten);
             // a rewind should still fail.
             append_and_sync(&mut merkle, &[b"a"]).await;
             assert!(matches!(
-                merkle.rewind(&hasher).await,
+                merkle.rewind().await,
                 Err(Error::RewindBeyondHistory)
             ));
             merkle.destroy().await.unwrap();
@@ -646,7 +631,7 @@ mod tests {
 
             append_and_sync(&mut merkle, &[b"a"]).await;
             append_and_sync(&mut merkle, &[b"b"]).await;
-            let root_after_two = merkle.root();
+            let root_after_two = merkle.root(&hasher, 0).unwrap();
             let leaves_after_two = merkle.leaves();
 
             // Apply a batch but do not sync. State is ahead of the last persisted slot.
@@ -655,12 +640,12 @@ mod tests {
                 merkle.with_mem(|mem| b.merkleize(mem, &hasher))
             };
             merkle.apply_batch(&batch).unwrap();
-            assert_ne!(merkle.root(), root_after_two);
+            assert_ne!(merkle.root(&hasher, 0).unwrap(), root_after_two);
 
             // Rewind reverts to the state as of the sync before the most recent sync, discarding
             // both the uncommitted append and the most recent sync.
-            merkle.rewind(&hasher).await.unwrap();
-            assert_ne!(merkle.root(), root_after_two);
+            merkle.rewind().await.unwrap();
+            assert_ne!(merkle.root(&hasher, 0).unwrap(), root_after_two);
             assert_ne!(merkle.leaves(), leaves_after_two);
 
             merkle.destroy().await.unwrap();
@@ -679,16 +664,16 @@ mod tests {
 
             let mut merkle = open::<mmr::Family>(context.with_label("first"), partition).await;
             append_and_sync(&mut merkle, &[b"a"]).await;
-            let root_after_first = merkle.root();
+            let root_after_first = merkle.root(&hasher, 0).unwrap();
             append_and_sync(&mut merkle, &[b"b"]).await;
-            merkle.rewind(&hasher).await.unwrap();
+            merkle.rewind().await.unwrap();
             drop(merkle);
 
             let reopened: TestMerkle<mmr::Family> =
-                Merkle::<mmr::Family, _, _>::init(context.with_label("second"), &hasher, cfg)
+                Merkle::<mmr::Family, _, _>::init(context.with_label("second"), cfg)
                     .await
                     .unwrap();
-            assert_eq!(reopened.root(), root_after_first);
+            assert_eq!(reopened.root(&hasher, 0).unwrap(), root_after_first);
             reopened.destroy().await.unwrap();
         });
     }
@@ -696,13 +681,12 @@ mod tests {
     #[test]
     fn test_double_rewind_errors() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
             let mut merkle = open::<mmr::Family>(context, "rewind-double").await;
             append_and_sync(&mut merkle, &[b"a"]).await;
             append_and_sync(&mut merkle, &[b"b"]).await;
-            merkle.rewind(&hasher).await.unwrap();
+            merkle.rewind().await.unwrap();
             assert!(matches!(
-                merkle.rewind(&hasher).await,
+                merkle.rewind().await,
                 Err(Error::RewindBeyondHistory)
             ));
             merkle.destroy().await.unwrap();
@@ -716,17 +700,17 @@ mod tests {
             let mut merkle = open::<mmr::Family>(context, "rewind-resumable").await;
 
             append_and_sync(&mut merkle, &[b"a"]).await;
-            let root_after_first = merkle.root();
+            let root_after_first = merkle.root(&hasher, 0).unwrap();
             append_and_sync(&mut merkle, &[b"b"]).await;
-            merkle.rewind(&hasher).await.unwrap();
-            assert_eq!(merkle.root(), root_after_first);
+            merkle.rewind().await.unwrap();
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root_after_first);
 
             // Now sync a different branch. Rewind should restore `root_after_first` again.
             append_and_sync(&mut merkle, &[b"c"]).await;
-            let root_abc = merkle.root();
+            let root_abc = merkle.root(&hasher, 0).unwrap();
             assert_ne!(root_abc, root_after_first);
-            merkle.rewind(&hasher).await.unwrap();
-            assert_eq!(merkle.root(), root_after_first);
+            merkle.rewind().await.unwrap();
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root_after_first);
 
             merkle.destroy().await.unwrap();
         });
@@ -735,7 +719,6 @@ mod tests {
     #[test]
     fn test_reopen_rejects_invalid_persisted_leaf_count() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
             let partition = "compact-invalid-leaf-count";
             let cfg = Config {
                 partition: partition.into(),
@@ -743,7 +726,7 @@ mod tests {
             };
 
             let mut merkle =
-                TestMerkle::<mmr::Family>::init(context.with_label("first"), &hasher, cfg.clone())
+                TestMerkle::<mmr::Family>::init(context.with_label("first"), cfg.clone())
                     .await
                     .unwrap();
             append_and_sync(&mut merkle, &[b"a"]).await;
@@ -767,8 +750,7 @@ mod tests {
             );
             metadata.sync().await.unwrap();
 
-            let reopened =
-                TestMerkle::<mmr::Family>::init(context.with_label("second"), &hasher, cfg).await;
+            let reopened = TestMerkle::<mmr::Family>::init(context.with_label("second"), cfg).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"))
