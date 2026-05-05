@@ -582,11 +582,6 @@ where
                 |op| op.has_floor(),
             )
             .await?;
-            if inactivity_floor_loc > last_commit_loc {
-                return Err(crate::qmdb::Error::DataCorrupted(
-                    "inactivity floor exceeds last commit",
-                ));
-            }
 
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
             // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay

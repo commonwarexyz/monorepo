@@ -1,10 +1,6 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use crate::merkle::{
-    Bagging,
-    Bagging::{BackwardFold, ForwardFold},
-    Error, Family, Location, Position,
-};
+use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
@@ -166,16 +162,6 @@ impl<H: CHasher> Standard<H> {
         }
     }
 
-    /// Creates a new [Standard] hasher with forward-fold bagging.
-    pub const fn forward() -> Self {
-        Self::new(ForwardFold)
-    }
-
-    /// Creates a new [Standard] hasher with backward-fold bagging.
-    pub const fn backward() -> Self {
-        Self::new(BackwardFold)
-    }
-
     /// Hash an arbitrary sequence of byte slices into a single digest.
     pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
         let mut h = H::new();
@@ -220,7 +206,7 @@ mod tests {
     use super::*;
     use crate::merkle::{
         mmr::{Location, Position, StandardHasher as Standard},
-        Bagging::ForwardFold,
+        Bagging::{BackwardFold, ForwardFold},
     };
     use alloc::vec::Vec;
     use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
@@ -242,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_invalid_inactive_prefix_returns_err() {
-        let mmr_hasher: Standard<Sha256> = Standard::backward();
+        let mmr_hasher: Standard<Sha256> = Standard::new(BackwardFold);
         let d1 = test_digest::<Sha256>(1);
         let d2 = test_digest::<Sha256>(2);
         let digests = [d1, d2];

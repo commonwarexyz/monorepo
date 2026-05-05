@@ -239,9 +239,9 @@
 //! verifies batches against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
-//! verifying ops proofs directly should use the same Merkle hasher configuration as sync. After
-//! sync, the bitmap and grafted tree are reconstructed deterministically from the operations, and
-//! the canonical root is computed.
+//! verifying ops proofs directly should use [`crate::qmdb::hasher`]. After sync, the bitmap and
+//! grafted tree are reconstructed deterministically from the operations, and the canonical root is
+//! computed.
 //! [proof::OpsRootWitness] can be used to validate that a particular ops root is committed by a
 //! trusted canonical root; the sync engine does not perform this check itself.
 
@@ -3640,8 +3640,7 @@ pub mod tests {
         });
     }
 
-    /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration,
-    /// not the Merkle default.
+    /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
         use crate::{merkle::hasher::Standard, qmdb::verify_proof};
@@ -3679,7 +3678,7 @@ pub mod tests {
                 &ops_root
             ));
 
-            // Sanity: the plain Merkle default must not accept this proof.
+            // Sanity: a different Merkle hasher configuration must not accept this proof.
             let plain = Standard::<Sha256>::new(ForwardFold);
             assert!(!verify_proof(
                 &plain,

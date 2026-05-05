@@ -399,7 +399,10 @@ pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Bagging::ForwardFold, LocationRangeExt as _},
+        merkle::{
+            Bagging::{BackwardFold, ForwardFold},
+            LocationRangeExt as _,
+        },
         mmb::{mem::Mmb, Location as MmbLocation},
         mmr::{mem::Mmr, StandardHasher as Standard},
     };
@@ -587,7 +590,7 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let hasher: Standard<Sha256> = Standard::backward();
+            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(0)..MmbLocation::new(1);
@@ -645,7 +648,7 @@ mod tests {
             let total_leaves = *mmb.leaves();
             assert!(active_start > 0 && active_start < total_leaves);
 
-            let hasher: Standard<Sha256> = Standard::backward();
+            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(active_start)..MmbLocation::new(total_leaves);
@@ -703,7 +706,7 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let hasher: Standard<Sha256> = Standard::backward();
+            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let inactive_peaks = 0usize;
             let root = mmb.root(&hasher, inactive_peaks).unwrap();
 

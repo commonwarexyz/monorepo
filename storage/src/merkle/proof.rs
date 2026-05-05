@@ -1243,7 +1243,7 @@ mod tests {
         mem::Mem,
         mmb, mmr,
         proof::{nodes_required_for_multi_proof, Blueprint, Proof},
-        Bagging::ForwardFold,
+        Bagging::{BackwardFold, ForwardFold},
         Family, Location, LocationRangeExt as _,
     };
     use alloc::vec;
@@ -1292,7 +1292,7 @@ mod tests {
     }
 
     fn split_root<F: Family>(mem: &Mem<F, D>, inactive_peaks: usize) -> D {
-        let backward_hasher: H = Standard::backward();
+        let backward_hasher: H = Standard::new(BackwardFold);
         mem.root(&backward_hasher, inactive_peaks).unwrap()
     }
 
@@ -1435,7 +1435,7 @@ mod tests {
     }
 
     fn backward_fold_proof_optimization_inner(inactive_peaks: usize) {
-        let hasher: H = Standard::backward();
+        let hasher: H = Standard::new(BackwardFold);
         let mem = build_inactive_prefix::<mmb::Family>(&hasher, 123, inactive_peaks);
         let leaves = mem.leaves();
         let root = split_root(&mem, inactive_peaks);
@@ -1489,7 +1489,7 @@ mod tests {
 
     #[test]
     fn full_backward_root_proves_like_split_zero() {
-        let hasher: H = Standard::backward();
+        let hasher: H = Standard::new(BackwardFold);
         let mem = build_raw::<mmb::Family>(&hasher, 123);
         let range = Location::new(2)..Location::new(3);
 
