@@ -84,11 +84,7 @@ fn expand<P: PublicKey>(
             .filter(|(i, _)| *i != sender_idx)
             .map(|(_, p)| p.clone())
             .collect(),
-        Recipients::Some(v) => v
-            .iter()
-            .filter(|p| Some(*p) != sender)
-            .cloned()
-            .collect(),
+        Recipients::Some(v) => v.iter().filter(|p| Some(*p) != sender).cloned().collect(),
         Recipients::One(p) => {
             if Some(p) == sender {
                 Vec::new()
