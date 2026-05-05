@@ -516,7 +516,7 @@ mod tests {
         AddressableTrackedPeers, Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Observer as _, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, Clock, Metrics as _, Runner, Supervisor as _};
     use commonware_utils::{
         hostname,
         ordered::{Map, Set},

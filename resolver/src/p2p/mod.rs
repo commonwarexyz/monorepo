@@ -97,8 +97,8 @@ mod tests {
         Blocker, Manager as _, Provider, TrackedPeers,
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Observer as _, Quota,
-        Runner, Supervisor as _,
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics as _, Quota, Runner,
+        Supervisor as _,
     };
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},

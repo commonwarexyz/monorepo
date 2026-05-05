@@ -136,7 +136,7 @@ mod tests {
     use commonware_runtime::{
         deterministic::{Context, Runner},
         telemetry::metrics::{histogram::Buckets, MetricsExt},
-        Observer, Runner as _,
+        Metrics, Runner as _,
     };
 
     type TestInflight = Inflight<Context, MockConsumer<MockKey, Bytes>, PublicKey, MockKey>;

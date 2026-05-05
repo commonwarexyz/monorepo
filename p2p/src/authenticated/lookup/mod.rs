@@ -220,8 +220,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock,
-        Metrics, Network as RNetwork, Observer as _, Quota, Resolver, Runner, Spawner,
-        Supervisor as _,
+        Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
         channel::mpsc,

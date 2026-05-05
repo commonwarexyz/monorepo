@@ -82,7 +82,7 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Observer as _, Quota,
+        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
         Runner, Supervisor as _,
     };
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};

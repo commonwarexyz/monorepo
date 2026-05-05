@@ -279,7 +279,7 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{deterministic, Observer as _, Runner, Spawner, Supervisor as _};
+    use crate::{deterministic, Metrics as _, Runner, Spawner, Supervisor as _};
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";

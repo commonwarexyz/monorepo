@@ -559,7 +559,7 @@ mod tests {
     use super::*;
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, Clock, Observer as _, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_utils::{
         bitmap::BitMap, ordered::Set as OrderedSet, NZUsize, SystemTimeExt, TryCollect,
     };

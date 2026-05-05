@@ -173,7 +173,7 @@ mod tests {
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         test_utils::has_metric_value,
-        Observer as _, Runner, Supervisor as _,
+        Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;

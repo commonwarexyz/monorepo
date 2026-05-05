@@ -278,7 +278,7 @@ mod tests {
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, Error as RuntimeError, Observer as _, Runner as _, Stream, Supervisor as _,
+        deterministic, Error as RuntimeError, Runner as _, Stream, Supervisor as _,
     };
     use commonware_utils::NZU32;
     use std::{

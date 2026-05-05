@@ -1236,12 +1236,14 @@ impl crate::Supervisor for Context {
     }
 }
 
-impl crate::Observer for Context {
+impl crate::Tracing for Context {
     fn with_span(mut self) -> Self {
         self.traced = true;
         self
     }
+}
 
+impl crate::Metrics for Context {
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
         name: N,
@@ -1576,7 +1578,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "external")]
     use crate::FutureExt;
-    use crate::{deterministic, reschedule, Blob, Observer as _, Resolver, Runner as _, Storage};
+    use crate::{deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;

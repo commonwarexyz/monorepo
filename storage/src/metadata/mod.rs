@@ -89,9 +89,7 @@ mod tests {
     use super::*;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{
-        deterministic, Blob, Observer as _, Runner, Storage, Supervisor as _,
-    };
+    use commonware_runtime::{deterministic, Blob, Metrics as _, Runner, Storage, Supervisor as _};
     use commonware_utils::sequence::U64;
     use rand::{Rng, RngCore};
 

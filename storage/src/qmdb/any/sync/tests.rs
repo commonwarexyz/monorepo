@@ -24,7 +24,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    deterministic, BufferPooler, Clock, Observer as _, Runner as _, Supervisor as _,
+    deterministic, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},

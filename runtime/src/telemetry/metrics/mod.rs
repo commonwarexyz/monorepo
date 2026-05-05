@@ -24,7 +24,7 @@ pub use prometheus_client::{
 };
 
 /// Underlying Prometheus metric types. Used when constructing a metric
-/// to pass to [`crate::Observer::register`].
+/// to pass to [`crate::Metrics::register`].
 pub mod raw {
     pub use prometheus_client::metrics::{
         counter::Counter,
@@ -812,7 +812,7 @@ impl Register for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Observer as _, Runner, Spawner, Supervisor as _};
+    use crate::{deterministic, Metrics as _, Runner, Spawner, Supervisor as _};
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};

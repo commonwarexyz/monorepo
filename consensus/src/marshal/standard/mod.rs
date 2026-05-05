@@ -82,8 +82,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Observer as _, Quota, Runner,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},

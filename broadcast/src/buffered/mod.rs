@@ -49,7 +49,7 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Error, IoBuf, Observer as _,
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Error, IoBuf, Metrics as _,
         Quota, Runner, Supervisor as _,
     };
     use commonware_utils::NZUsize;

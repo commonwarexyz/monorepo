@@ -179,7 +179,7 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Observer as _, Quota, Runner as _, Spawner,
+        Clock, Handle, Metrics as _, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},

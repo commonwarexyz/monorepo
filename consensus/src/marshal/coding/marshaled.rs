@@ -111,7 +111,6 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    utils::Shared,
     Clock, Metrics, Spawner, Storage,
 };
 use commonware_utils::{
@@ -119,6 +118,7 @@ use commonware_utils::{
         fallible::OneshotExt,
         oneshot::{self, error::RecvError},
     },
+    sync::AsyncMutex,
     NZU16,
 };
 use futures::future::{ready, try_join, Either, Ready};
@@ -176,7 +176,7 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    context: Shared<E>,
+    context: Arc<AsyncMutex<E>>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
@@ -282,7 +282,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            context: Shared::new(context),
+            context: Arc::new(AsyncMutex::new(context)),
             application,
             marshal,
             shards,
@@ -787,50 +787,55 @@ where
             verification_tasks.insert(round, payload, task_rx);
 
             let (mut tx, rx) = oneshot::channel();
-            let context = self.context.lock().await.child("verify_reproposal");
-            context.spawn(move |_| async move {
-                let block = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping re-proposal verification"
-                        );
-                        return;
-                    },
-                    block = block_rx => match block {
-                        Ok(block) => block,
-                        Err(_) => {
+            self.context
+                .lock()
+                .await
+                .child("verify_reproposal")
+                .spawn(move |_| {
+                    async move {
+                        let block = select! {
+                            _ = tx.closed() => {
+                                debug!(
+                                    reason = "consensus dropped receiver",
+                                    "skipping re-proposal verification"
+                                );
+                                return;
+                            },
+                            block = block_rx => match block {
+                                Ok(block) => block,
+                                Err(_) => {
+                                    debug!(
+                                        ?payload,
+                                        reason = "failed to fetch block for re-proposal verification",
+                                        "skipping re-proposal verification"
+                                    );
+                                    // Fetch failure is an availability issue, not an explicit
+                                    // invalidity proof. Do not synthesize `false` here.
+                                    return;
+                                }
+                            },
+                        };
+
+                        if !is_valid_reproposal_at_verify(&epocher, block.height(), round.epoch()) {
                             debug!(
-                                ?payload,
-                                reason = "failed to fetch block for re-proposal verification",
-                                "skipping re-proposal verification"
+                                height = %block.height(),
+                                "re-proposal is not at epoch boundary"
                             );
-                            // Fetch failure is an availability issue, not an explicit
-                            // invalidity proof. Do not synthesize `false` here.
+                            task_tx.send_lossy(false);
+                            tx.send_lossy(false);
                             return;
                         }
-                    },
-                };
 
-                if !is_valid_reproposal_at_verify(&epocher, block.height(), round.epoch()) {
-                    debug!(
-                        height = %block.height(),
-                        "re-proposal is not at epoch boundary"
-                    );
-                    task_tx.send_lossy(false);
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Valid re-proposal: notify the marshal and complete the
-                // verification task for `certify`.
-                if !marshal.verified(round, block).await {
-                    debug!(?round, "marshal unable to accept block");
-                    return;
-                }
-                task_tx.send_lossy(true);
-                tx.send_lossy(true);
-            });
+                        // Valid re-proposal: notify the marshal and complete the
+                        // verification task for `certify`.
+                        if !marshal.verified(round, block).await {
+                            debug!(?round, "marshal unable to accept block");
+                            return;
+                        }
+                        task_tx.send_lossy(true);
+                        tx.send_lossy(true);
+                    }
+                });
             return rx;
         }
 
@@ -860,12 +865,15 @@ where
                 // not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
                 let (tx, rx) = oneshot::channel();
-                let context = self.context.lock().await.child("shard_validity_wait");
-                context.spawn(|_| async move {
-                    if validity_rx.await.is_ok() {
-                        tx.send_lossy(true);
-                    }
-                });
+                self.context
+                    .lock()
+                    .await
+                    .child("shard_validity_wait")
+                    .spawn(|_| async move {
+                        if validity_rx.await.is_ok() {
+                            tx.send_lossy(true);
+                        }
+                    });
                 rx
             }
             None => {

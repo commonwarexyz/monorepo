@@ -72,7 +72,7 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Observer as _, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, ordered::Set, sync::Mutex, NZUsize};
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 

@@ -732,9 +732,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        deterministic, Blob, BufMut, Observer as _, Runner, Storage, Supervisor as _,
-    };
+    use commonware_runtime::{deterministic, Blob, BufMut, Runner, Storage, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;

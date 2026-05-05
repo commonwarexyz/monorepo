@@ -168,6 +168,9 @@ stability_scope!(BETA {
 
     /// Interface for creating supervised child contexts and carrying context identity.
     pub trait Supervisor: Send + Sync + 'static {
+        /// Return the current label prefix and attributes.
+        fn name(&self) -> Name;
+
         /// Create a named child context with a new supervision-tree node.
         ///
         /// Labels must be static role names. Dynamic values belong in
@@ -184,9 +187,6 @@ stability_scope!(BETA {
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self
         where
             Self: Sized;
-
-        /// Return the current label prefix and attributes.
-        fn name(&self) -> Name;
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
@@ -262,8 +262,12 @@ stability_scope!(BETA {
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
 
-        /// Internal hook used by [`SpawnBuilder::spawn`].
-        #[doc(hidden)]
+        /// Spawn a task using an explicit execution mode.
+        ///
+        /// Most callers should use [`Spawner::spawn`], [`Spawner::shared`], or
+        /// [`Spawner::dedicated`]. Runtime implementations provide this hook so
+        /// [`SpawnBuilder`] can consume one-time spawn configuration without storing
+        /// it on the context.
         fn spawn_with<F, Fut, T>(self, execution: Execution, f: F) -> Handle<T>
         where
             Self: Sized,
@@ -313,8 +317,7 @@ stability_scope!(BETA {
     }
 
     impl<S: Spawner> SpawnBuilder<S> {
-        #[doc(hidden)]
-        pub const fn new(inner: S, execution: Execution) -> Self {
+        pub(crate) const fn new(inner: S, execution: Execution) -> Self {
             Self { inner, execution }
         }
 
@@ -361,8 +364,8 @@ stability_scope!(BETA {
         }
     }
 
-    /// Interface to register and encode metrics and configure task spans.
-    pub trait Observer: Send + Sync + 'static {
+    /// Interface to configure task spans.
+    pub trait Tracing: Supervisor {
         /// Return a context that wraps the next spawned task in a `tracing` span.
         ///
         /// This consumes the handle. The span is derived from [`Supervisor::name`]
@@ -371,7 +374,10 @@ stability_scope!(BETA {
         fn with_span(self) -> Self
         where
             Self: Sized;
+    }
 
+    /// Interface to register and encode metrics.
+    pub trait Metrics: Supervisor {
         /// Register a metric with the runtime.
         ///
         /// Any registered metric will include (as a prefix) the label of the current context.
@@ -396,10 +402,6 @@ stability_scope!(BETA {
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }
-
-    /// Compatibility name for contexts that support both supervision and observation.
-    pub trait Metrics: Observer + Supervisor {}
-    impl<T: Observer + Supervisor> Metrics for T {}
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
     ///

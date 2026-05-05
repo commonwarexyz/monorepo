@@ -695,12 +695,14 @@ impl crate::Supervisor for Context {
     }
 }
 
-impl crate::Observer for Context {
+impl crate::Tracing for Context {
     fn with_span(mut self) -> Self {
         self.traced = true;
         self
     }
+}
 
+impl crate::Metrics for Context {
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
         name: N,

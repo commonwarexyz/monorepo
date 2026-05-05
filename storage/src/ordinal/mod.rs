@@ -138,7 +138,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, Blob, Buf, BufMut, Observer as _, Runner, Storage, Supervisor as _,
+        deterministic, Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;

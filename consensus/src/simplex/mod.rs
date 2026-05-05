@@ -433,7 +433,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Observer as _, Quota, Runner, Spawner, Supervisor as _,
+        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;

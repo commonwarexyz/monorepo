@@ -4,7 +4,7 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{Observer as _, Spawner, Supervisor as _};
+use crate::{Metrics as _, Spawner, Supervisor as _};
 use axum::{
     body::Body,
     http::{header, Response, StatusCode},

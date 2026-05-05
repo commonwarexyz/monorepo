@@ -24,9 +24,6 @@ pub(crate) use handle::{Aborter, MetricHandle, Panicker};
 mod cell;
 pub use cell::Cell as ContextCell;
 
-mod shared;
-pub use shared::Shared;
-
 #[cfg(feature = "test-utils")]
 pub mod test_utils {
     fn matches_metric_name(full: &str, name: &str) -> bool {

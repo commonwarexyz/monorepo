@@ -1,7 +1,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     telemetry::metrics::{Metric, Registered, Registration},
-    Name, Observer, Supervisor,
+    Metrics, Name, Supervisor,
 };
 use criterion::criterion_main;
 
@@ -31,11 +31,7 @@ impl Supervisor for DummyMetrics {
     }
 }
 
-impl Observer for DummyMetrics {
-    fn with_span(self) -> Self {
-        Self
-    }
-
+impl Metrics for DummyMetrics {
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
         _: N,

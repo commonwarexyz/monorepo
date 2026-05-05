@@ -68,12 +68,11 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    utils::Shared,
     Clock, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
+    sync::{AsyncMutex, Mutex},
 };
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
@@ -140,7 +139,7 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: Shared<E>,
+    context: Arc<AsyncMutex<E>>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
@@ -194,7 +193,7 @@ where
         let build_duration = Timed::new(build_histogram);
 
         Self {
-            context: Shared::new(context),
+            context: Arc::new(AsyncMutex::new(context)),
             application,
             marshal,
             epocher,
