@@ -465,7 +465,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 finalizers.push(
                     context
                         .child("finalizer")
-                        .with_attribute("validator", validator)
+                        .with_attribute("public_key", validator)
                         .spawn(move |_| async move {
                             while latest.get() < required_containers {
                                 latest = monitor.recv().await.expect("event missing");
@@ -698,7 +698,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 finalizers.push(
                     context
                         .child("finalizer")
-                        .with_attribute("validator", validator)
+                        .with_attribute("public_key", validator)
                         .spawn(move |_| async move {
                             while latest.get() < required_containers {
                                 latest = monitor.recv().await.expect("event missing");

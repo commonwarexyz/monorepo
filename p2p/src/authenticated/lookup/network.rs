@@ -118,7 +118,10 @@ impl<
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        let clock = self.context.child("channel").with_attribute("idx", channel);
+        let clock = self
+            .context
+            .child("channel")
+            .with_attribute("index", channel);
         self.channels.register(channel, rate, backlog, clock)
     }
 

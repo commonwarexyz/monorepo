@@ -24,7 +24,7 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
         let mut partitions = Vec::with_capacity(partition_count);
         for i in 0..partition_count {
             partitions.push(UnorderedIndex::new(
-                ctx.child("partition").with_attribute("idx", i),
+                ctx.child("partition").with_attribute("index", i),
                 translator.clone(),
             ));
         }

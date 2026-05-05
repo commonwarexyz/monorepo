@@ -209,7 +209,7 @@ mod tests {
         for (idx, participant) in fixture.participants.iter().enumerate() {
             let context = context
                 .child("participant")
-                .with_attribute("participant", participant);
+                .with_attribute("public_key", participant);
 
             // Create Provider and register scheme for epoch
             let provider = mocks::Provider::new();
@@ -459,7 +459,7 @@ mod tests {
                     for (idx, participant) in fixture.participants.iter().enumerate() {
                         let validator_context = context
                             .child("participant")
-                            .with_attribute("participant", participant);
+                            .with_attribute("public_key", participant);
 
                         // Create Provider and register scheme for epoch
                         let provider = mocks::Provider::new();
@@ -612,7 +612,7 @@ mod tests {
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context = context
                         .child("participant")
-                        .with_attribute("participant", participant);
+                        .with_attribute("public_key", participant);
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -699,7 +699,7 @@ mod tests {
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context = context
                         .child("participant")
-                        .with_attribute("participant", participant);
+                        .with_attribute("public_key", participant);
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -1040,7 +1040,7 @@ mod tests {
 
             // Start only 2 out of 5 validators (below quorum of 3)
             for (idx, participant) in fixture.participants.iter().take(2).enumerate() {
-                let context = context.child("participant").with_attribute("participant", participant);
+                let context = context.child("participant").with_attribute("public_key", participant);
 
                 // Create Provider and register scheme for epoch
                 let provider = mocks::Provider::new();

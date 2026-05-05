@@ -754,7 +754,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1007,7 +1007,7 @@ mod tests {
             for (idx, validator) in participants.iter().enumerate() {
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
@@ -1164,7 +1164,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let signing = if is_observer {
@@ -1331,7 +1331,7 @@ mod tests {
                     // Create scheme context
                     let context = context
                         .child("validator")
-                        .with_attribute("validator", validator);
+                        .with_attribute("public_key", validator);
 
                     // Configure engine
                     let reporter_config = mocks::reporter::Config {
@@ -1514,7 +1514,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1612,7 +1612,7 @@ mod tests {
 
             // Configure engine for first peer
             let me = participants[0].clone();
-            let context = context.child("validator").with_attribute("validator", &me);
+            let context = context.child("validator").with_attribute("public_key", &me);
 
             // Link first peer to all (except second)
             link_validators(
@@ -1770,7 +1770,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1993,7 +1993,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2173,7 +2173,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2373,7 +2373,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2569,7 +2569,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2809,7 +2809,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3000,7 +3000,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
@@ -3175,7 +3175,7 @@ mod tests {
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
@@ -3354,7 +3354,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3515,7 +3515,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3624,7 +3624,7 @@ mod tests {
             info!(idx, ?validator, "restarting validator");
             let context = context
                 .child("validator_restarted")
-                .with_attribute("validator", validator);
+                .with_attribute("public_key", validator);
 
             // Start engine
             let reporter_config = mocks::reporter::Config {
@@ -3837,7 +3837,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3996,7 +3996,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -4168,7 +4168,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -4319,7 +4319,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -4697,7 +4697,7 @@ mod tests {
             for (idx, validator) in participants.iter().enumerate() {
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
@@ -5056,7 +5056,7 @@ mod tests {
                         mocks::nullify_only::NullifyOnly::new(
                             context
                                 .child("byzantine")
-                                .with_attribute("validator", validator),
+                                .with_attribute("public_key", validator),
                             cfg,
                         );
                     engine.start(pending);
@@ -5073,7 +5073,7 @@ mod tests {
                     let reporter = mocks::reporter::Reporter::new(
                         context
                             .child("reporter")
-                            .with_attribute("validator", validator),
+                            .with_attribute("public_key", validator),
                         reporter_config,
                     );
                     honest_reporters.push(reporter.clone());
@@ -5090,7 +5090,7 @@ mod tests {
                     let (actor, application) = mocks::application::Application::new(
                         context
                             .child("application")
-                            .with_attribute("validator", validator),
+                            .with_attribute("public_key", validator),
                         application_cfg,
                     );
                     actor.start();
@@ -5121,7 +5121,7 @@ mod tests {
                     let engine = Engine::new(
                         context
                             .child("engine")
-                            .with_attribute("validator", validator),
+                            .with_attribute("public_key", validator),
                         cfg,
                     );
                     engine.start(pending, recovered, resolver);
@@ -5278,7 +5278,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
@@ -5426,7 +5426,7 @@ mod tests {
                 // Create scheme context
                 let context = context
                     .child("validator")
-                    .with_attribute("validator", validator);
+                    .with_attribute("public_key", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -5529,7 +5529,7 @@ mod tests {
                 info!(idx, ?validator, "restarting validator");
                 let context = context
                     .child("validator_restarted")
-                    .with_attribute("validator", validator)
+                    .with_attribute("public_key", validator)
                     .with_attribute("restart", i);
 
                 // Start engine
@@ -6016,7 +6016,7 @@ mod tests {
                             (certificate_sender_secondary, certificate_receiver_secondary),
                         ),
                     ] {
-                        let label = format!("twin_{idx}_{twin_label}");
+                        let partition = format!("twin_{idx}_{twin_label}");
                         let context = context
                             .child("twin")
                             .with_attribute("index", idx)
@@ -6057,7 +6057,7 @@ mod tests {
                             relay: application.clone(),
                             reporter: reporter.clone(),
                             strategy: Sequential,
-                            partition: label,
+                            partition,
                             mailbox_size: 1024,
                             epoch: Epoch::new(333),
                             leader_timeout: Duration::from_secs(1),
@@ -6088,7 +6088,7 @@ mod tests {
                         continue;
                     }
 
-                    let label = format!("honest_{idx}");
+                    let partition = format!("honest_{idx}");
                     let context = context.child("honest").with_attribute("index", idx);
 
                     let reporter_config = mocks::reporter::Config {
@@ -6124,7 +6124,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: label,
+                        partition,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),

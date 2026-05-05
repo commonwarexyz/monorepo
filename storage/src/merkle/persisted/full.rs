@@ -1654,9 +1654,8 @@ mod tests {
 
         // Prune the structure in increments of 50, simulating a partial write after each prune.
         for i in 0usize..200 {
-            let label = format!("iter_{i}");
             let mut mmr = Merkle::<F, _, Digest>::init(
-                context.child("iter").with_attribute("label", &label),
+                context.child("iter").with_attribute("index", i),
                 &hasher,
                 test_config(&context),
             )
