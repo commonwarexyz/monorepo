@@ -17,7 +17,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -81,12 +81,6 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// The public key type used to identify peers.
     type PublicKey: PublicKey;
 
-    /// The cached block type held internally by the buffer.
-    ///
-    /// This allows buffers to use efficient internal representations (e.g., `Arc<Block>`)
-    /// while providing conversion to the underlying block type via [`IntoBlock`].
-    type CachedBlock: IntoBlock<V::Block>;
-
     /// Attempt to find a block by its digest.
     ///
     /// Returns `Some(block)` if the block is immediately available in the buffer,
@@ -96,7 +90,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn find_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> impl Future<Output = Option<Self::CachedBlock>> + Send;
+    ) -> impl Future<Output = Option<V::Block>> + Send;
 
     /// Attempt to find a block by its commitment.
     ///
@@ -109,7 +103,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn find_by_commitment(
         &self,
         commitment: V::Commitment,
-    ) -> impl Future<Output = Option<Self::CachedBlock>> + Send;
+    ) -> impl Future<Output = Option<V::Block>> + Send;
 
     /// Subscribe to a block's availability by its digest.
     ///
@@ -120,7 +114,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn subscribe_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> impl Future<Output = oneshot::Receiver<Self::CachedBlock>> + Send;
+    ) -> impl Future<Output = oneshot::Receiver<V::Block>> + Send;
 
     /// Subscribe to a block's availability by its commitment.
     ///
@@ -134,7 +128,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn subscribe_by_commitment(
         &self,
         commitment: V::Commitment,
-    ) -> impl Future<Output = oneshot::Receiver<Self::CachedBlock>> + Send;
+    ) -> impl Future<Output = oneshot::Receiver<V::Block>> + Send;
 
     /// Notify the buffer that a block has been finalized.
     ///
@@ -148,31 +142,4 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         block: V::Block,
         recipients: Recipients<Self::PublicKey>,
     ) -> impl Future<Output = ()> + Send;
-}
-
-/// A trait for cached block types that can be converted to the underlying block.
-///
-/// This trait allows buffer implementations to use efficient internal representations
-/// (e.g., `Arc<Block>`) while providing a uniform way to extract the block.
-pub trait IntoBlock<B>: Clone + Send {
-    /// Convert this cached block into the underlying block type.
-    fn into_block(self) -> B;
-}
-
-/// Blanket implementation for any cloneable block type.
-///
-/// This covers the standard variant where `CachedBlock = B`.
-impl<B: Clone + Send> IntoBlock<B> for B {
-    fn into_block(self) -> B {
-        self
-    }
-}
-
-/// Implementation for `Arc<B>` to support the coding variant.
-///
-/// Uses `Arc::unwrap_or_clone` to avoid cloning when the refcount is 1.
-impl<B: Clone + Send + Sync> IntoBlock<B> for Arc<B> {
-    fn into_block(self) -> B {
-        Self::unwrap_or_clone(self)
-    }
 }

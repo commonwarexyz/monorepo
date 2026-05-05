@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::{hasher::Standard as StandardHasher, Family},
+    merkle::{self, Family},
     qmdb::{
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
@@ -16,42 +16,52 @@ use crate::{
     },
 };
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for fixed-size values.
 pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
 
 /// A keyless authenticated database for fixed-size data.
-pub type Db<F, E, V, H> =
-    super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H>;
+pub type Db<F, E, V, H, S = Sequential> =
+    super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for fixed-size data.
-pub type CompactDb<F, E, V, H> = super::CompactDb<F, E, FixedEncoding<V>, H>;
+pub type CompactDb<F, E, V, H, S = Sequential> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, V, H> = authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H>;
+type Journal<F, E, V, H, S> =
+    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// Configuration for a fixed-size [keyless](super) authenticated db.
-pub type Config = super::Config<JournalConfig>;
+pub type Config<S = Sequential> = super::Config<JournalConfig, S>;
 
 /// Configuration for a fixed-size [keyless](super) compact db.
-pub type CompactConfig = super::CompactConfig<()>;
+pub type CompactConfig<S = Sequential> = super::CompactConfig<(), S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher> Db<F, E, V, H> {
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
+    Db<F, E, V, H, S>
+{
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H> =
-            Journal::new(context, cfg.merkle, cfg.log, Operation::<F, V>::is_commit).await?;
+    pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
+        let journal: Journal<F, E, V, H, S> = Journal::new(
+            context,
+            cfg.merkle,
+            cfg.log,
+            Operation::<F, V>::is_commit,
+            merkle::Bagging::BackwardFold,
+        )
+        .await?;
         Self::init_from_journal(journal).await
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher> CompactDb<F, E, V, H> {
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
+    CompactDb<F, E, V, H, S>
+{
     /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig) -> Result<Self, Error<F>> {
-        let merkle =
-            crate::merkle::compact::Merkle::init(context, &StandardHasher::<H>::new(), cfg.merkle)
-                .await?;
+    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
+        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
         Self::init_from_merkle(merkle, ()).await
     }
 }
@@ -65,6 +75,7 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
@@ -82,7 +93,7 @@ mod test {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {
@@ -98,11 +109,11 @@ mod test {
     type TestCompactDb<F> =
         CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
-    async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
+    async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
     }
 
-    async fn open_db_with_suffix<F: crate::merkle::Family>(
+    async fn open_db_with_suffix<F: Family>(
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
@@ -116,14 +127,14 @@ mod test {
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-keyless-fixed".into(),
-                thread_pool: None,
+                strategy: Sequential,
             },
             commit_codec_config: (),
         };
         TestCompactDb::init(context, cfg).await.unwrap()
     }
 
-    fn reopen<F: crate::merkle::Family>() -> tests::Reopen<TestDb<F>> {
+    fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 

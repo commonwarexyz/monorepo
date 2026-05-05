@@ -9,9 +9,11 @@ mod roaring_intersection;
 mod roaring_iteration;
 mod roaring_union;
 mod roaring_write;
+mod write;
 
 criterion_main!(
     count_ones::benches,
+    write::benches,
     roaring_insert::benches,
     roaring_insert_range::benches,
     roaring_contains::benches,

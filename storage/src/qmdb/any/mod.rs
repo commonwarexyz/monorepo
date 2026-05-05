@@ -69,7 +69,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{full::Config as MerkleConfig, Family, Location},
+    merkle::{full::Config as MerkleConfig, Bagging, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
@@ -80,6 +80,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -94,13 +95,13 @@ pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
 
-const BITMAP_CHUNK_BYTES: usize = 64;
+pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J> {
+pub struct Config<T: Translator, J, S: Strategy = Sequential> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -110,16 +111,18 @@ pub struct Config<T: Translator, J> {
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T> = Config<T, FConfig>;
+pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
+pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J>(
+///
+/// The operations root uses split-root mode with backward-fold active bagging.
+pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config>,
-) -> Result<db::Db<F, E, J, I, H, U>, crate::qmdb::Error<F>>
+    cfg: Config<T, J::Config, S>,
+) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
@@ -128,18 +131,33 @@ where
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(
+        context,
+        cfg,
+        None,
+        true,
+        Bagging::BackwardFold,
+    )
+    .await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
-pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, const N: usize>(
+///
+/// `split_root` selects whether the operations root commits to the inactive-prefix split, and
+/// `ops_root_bagging` selects its bagging policy. Public `Any` initialization uses split roots
+/// with backward-fold active bagging; `current::Db` passes a plain `ForwardFold` operations root
+/// because activity is committed through the grafted root instead.
+pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config>,
+    cfg: Config<T, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
-) -> Result<db::Db<F, E, J, I, H, U, N>, crate::qmdb::Error<F>>
+    split_root: bool,
+    ops_root_bagging: Bagging,
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
@@ -148,13 +166,15 @@ where
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
+    S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    let mut log = J::init::<F, H>(
+    let mut log = J::init::<F, H, S>(
         context.with_label("log"),
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
+        ops_root_bagging,
     )
     .await?;
 
@@ -166,7 +186,7 @@ where
     }
 
     let index = I::new(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap).await
+    db::Db::init_from_log(index, log, bitmap, split_root).await
 }
 
 #[cfg(test)]
@@ -212,7 +232,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -236,7 +256,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: VConfig {
@@ -254,7 +274,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as UnorderedIndex,
         journal::contiguous::Mutable,
-        merkle::mmr,
+        merkle::{self, mmr},
         qmdb::any::{
             db::Db as AnyDb,
             operation::{update::Update as UpdateTrait, Operation as AnyOperation},
@@ -685,7 +705,7 @@ pub(crate) mod test {
             }
         }
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
@@ -775,13 +795,13 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
         assert!(verify_proof(
             &hasher,
             &historical_proof,
             start_loc,
             &historical_ops,
-            &root_hash
+            &root_hash,
         ));
 
         // Add more operations to the database
@@ -809,7 +829,7 @@ pub(crate) mod test {
             &historical_proof2,
             start_loc,
             &historical_ops2,
-            &root_hash
+            &root_hash,
         ));
 
         db.destroy().await.unwrap();
@@ -827,27 +847,34 @@ pub(crate) mod test {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
 
-        // Add some operations
-        {
-            let mut batch = db.new_batch();
-            for i in 0u64..10 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value(i * 1000);
-                batch = batch.write(k, Some(v));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+        // Apply two single-write batches and capture the commit-boundary size after the
+        // first batch. `historical_proof` requires the historical size to land on a commit
+        // boundary when the db commits to an inactive peak boundary.
+        let mut historical_op_count = Location::new(0);
+        for i in 0u64..2 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            let merkleized = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            if i == 0 {
+                historical_op_count = db.bounds().await.end;
+            }
         }
 
-        let historical_op_count = Location::new(5);
+        let expected_ops_len = (*historical_op_count - 1) as usize;
         let (proof, ops) = db
             .historical_proof(historical_op_count, Location::new(1), NZU64!(10))
             .await
             .unwrap();
         assert_eq!(proof.leaves, historical_op_count);
-        assert_eq!(ops.len(), 4);
+        assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
 
         // Changing the proof digests should cause verification to fail
         {
@@ -859,7 +886,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -873,7 +900,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -889,7 +916,7 @@ pub(crate) mod test {
                     &proof,
                     Location::new(1),
                     &tampered_ops,
-                    &root_hash
+                    &root_hash,
                 ));
             }
         }
@@ -904,7 +931,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &tampered_ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -916,7 +943,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(2),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -928,7 +955,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &ops,
-                &invalid_root
+                &invalid_root,
             ));
         }
 
@@ -942,7 +969,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -960,40 +987,59 @@ pub(crate) mod test {
     {
         use commonware_utils::NZU64;
 
-        // Add 50 operations
-        {
-            let mut batch = db.new_batch();
-            for i in 0u64..50 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value(i * 1000);
-                batch = batch.write(k, Some(v));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+        // Apply a sequence of single-write batches and record the commit-boundary size
+        // reached after each. `historical_proof` requires the historical size to be a
+        // commit boundary when the db commits to an inactive peak boundary, so we anchor each test on
+        // one of the boundaries we recorded here rather than hardcoding sizes that depend
+        // on internal floor-raising behavior.
+        let initial_size = db.bounds().await.end;
+        let mut boundaries = vec![initial_size];
+        for i in 0u64..5 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            let merkleized = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            boundaries.push(db.bounds().await.end);
         }
 
-        // Test singleton database (historical size = 2 means 1 op after initial commit)
+        // Singleton historical state: only the initial CommitFloor is visible.
+        let singleton_size = boundaries[0];
         let (single_proof, single_ops) = db
-            .historical_proof(Location::new(2), Location::new(1), NZU64!(1))
+            .historical_proof(singleton_size, Location::new(0), NZU64!(1))
             .await
             .unwrap();
-        assert_eq!(single_proof.leaves, Location::new(2));
+        assert_eq!(single_proof.leaves, singleton_size);
         assert_eq!(single_ops.len(), 1);
 
-        // Test requesting more operations than available in historical position
+        // max_ops exceeds the ops remaining at this historical size, so the returned count
+        // is capped at `historical_size - start_loc`. Anchor at the earliest post-batch
+        // boundary that has at least 3 ops past `boundaries[1]`.
+        let limited_size = boundaries[2];
+        let limited_start = boundaries[1];
+        let expected_limited = (*limited_size - *limited_start) as usize;
+        assert!(expected_limited > 0);
         let (_limited_proof, limited_ops) = db
-            .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
+            .historical_proof(limited_size, limited_start, NZU64!(20))
             .await
             .unwrap();
-        assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+        assert_eq!(limited_ops.len(), expected_limited);
 
-        // Test proof at minimum historical position
+        // Standard historical proof anchored at an early commit boundary, requesting a
+        // bounded number of ops within the historical range.
+        let min_size = boundaries[2];
+        let max_ops = NZU64!(3);
+        let expected_min = core::cmp::min(max_ops.get(), *min_size - 1) as usize;
         let (min_proof, min_ops) = db
-            .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+            .historical_proof(min_size, Location::new(1), max_ops)
             .await
             .unwrap();
-        assert_eq!(min_proof.leaves, Location::new(4));
-        assert_eq!(min_ops.len(), 3);
+        assert_eq!(min_proof.leaves, min_size);
+        assert_eq!(min_ops.len(), expected_min);
 
         db.destroy().await.unwrap();
     }
@@ -1168,47 +1214,47 @@ pub(crate) mod test {
     // Defines MMR-only variants (for tests that require mmr::Family, e.g. proof verification).
     macro_rules! with_mmr_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
+            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
         };
     }
 
-    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $config) for each.
+    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $family, $config) for each.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
-            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of_mmb", MmbOrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, variable_db_config);
+            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, mmb::Family, variable_db_config);
+            $cb!($($args)*, "of_mmb", MmbOrderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, mmb::Family, variable_db_config);
         };
     }
 
-    // Runner macros - each receives common args followed by (label, type, config) from with_all_variants.
+    // Runner macros - each receives common args followed by (label, type, family, config) from with_all_variants.
     // Uses Box::pin to move futures to the heap and avoid stack overflow.
     macro_rules! test_with_reopen {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
@@ -1234,7 +1280,7 @@ pub(crate) mod test {
     }
 
     macro_rules! test_with_make_value {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);

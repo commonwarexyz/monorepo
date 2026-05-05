@@ -1615,6 +1615,7 @@ dependencies = [
  "governor",
  "io-uring",
  "libc",
+ "loom",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -1677,7 +1678,6 @@ dependencies = [
  "futures",
  "futures-util",
  "rand 0.8.5",
- "rayon",
  "rstest",
  "thiserror 2.0.17",
  "tracing",
@@ -1692,6 +1692,7 @@ dependencies = [
  "arbitrary",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
@@ -1744,6 +1745,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-stream",
@@ -2671,6 +2673,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52f04ae4152da20c76fe800fa48659201d5cf627c5149ca0b707b69d7eef6cf9"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3401,6 +3418,19 @@ name = "log"
 version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+
+[[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "lru"
@@ -4612,6 +4642,12 @@ checksum = "891d81b926048e76efe18581bf793546b4c0eaf8448d72be8de2bbee5fd166e1"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
 name = "scopeguard"

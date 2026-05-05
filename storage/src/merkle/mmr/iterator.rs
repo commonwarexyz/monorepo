@@ -140,7 +140,7 @@ mod tests {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new();
         let digest = [1u8; 32];
         let (batch, loc_to_pos) = {
             let mut batch = mmr.new_batch();
@@ -177,7 +177,7 @@ mod tests {
     fn test_to_nearest_size() {
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new();
         let digest = [1u8; 32];
 
         for _ in 0..1000 {

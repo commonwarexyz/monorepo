@@ -11,6 +11,7 @@
 
 use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::Sha256;
+use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
@@ -41,6 +42,7 @@ type AnyUFix = commonware_storage::qmdb::any::unordered::fixed::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type AnyUVar = commonware_storage::qmdb::any::unordered::variable::Db<
     commonware_storage::merkle::mmr::Family,
@@ -49,6 +51,7 @@ type AnyUVar = commonware_storage::qmdb::any::unordered::variable::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type AnyUFixMmb = commonware_storage::qmdb::any::unordered::fixed::Db<
     commonware_storage::merkle::mmb::Family,
@@ -57,6 +60,7 @@ type AnyUFixMmb = commonware_storage::qmdb::any::unordered::fixed::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type AnyUVarMmb = commonware_storage::qmdb::any::unordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
@@ -65,6 +69,7 @@ type AnyUVarMmb = commonware_storage::qmdb::any::unordered::variable::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type CurUFix32 = commonware_storage::qmdb::current::unordered::fixed::Db<
     commonware_storage::merkle::mmr::Family,
@@ -74,6 +79,7 @@ type CurUFix32 = commonware_storage::qmdb::current::unordered::fixed::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurUVar32 = commonware_storage::qmdb::current::unordered::variable::Db<
     commonware_storage::merkle::mmr::Family,
@@ -83,6 +89,7 @@ type CurUVar32 = commonware_storage::qmdb::current::unordered::variable::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurUFix32Mmb = commonware_storage::qmdb::current::unordered::fixed::Db<
     commonware_storage::merkle::mmb::Family,
@@ -92,6 +99,7 @@ type CurUFix32Mmb = commonware_storage::qmdb::current::unordered::fixed::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurUVar32Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
@@ -101,6 +109,7 @@ type CurUVar32Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 
 const LARGE_CHUNK_SIZE: usize = 256;
@@ -113,6 +122,7 @@ type CurUFix256 = commonware_storage::qmdb::current::unordered::fixed::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 type CurUVar256 = commonware_storage::qmdb::current::unordered::variable::Db<
     commonware_storage::merkle::mmr::Family,
@@ -122,6 +132,7 @@ type CurUVar256 = commonware_storage::qmdb::current::unordered::variable::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 type CurUFix256Mmb = commonware_storage::qmdb::current::unordered::fixed::Db<
     commonware_storage::merkle::mmb::Family,
@@ -131,6 +142,7 @@ type CurUFix256Mmb = commonware_storage::qmdb::current::unordered::fixed::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 type CurUVar256Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
@@ -140,6 +152,7 @@ type CurUVar256Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 
 // Ordered variants.
@@ -150,6 +163,7 @@ type AnyOFix = commonware_storage::qmdb::any::ordered::fixed::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type AnyOVar = commonware_storage::qmdb::any::ordered::variable::Db<
     commonware_storage::merkle::mmr::Family,
@@ -158,6 +172,7 @@ type AnyOVar = commonware_storage::qmdb::any::ordered::variable::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type AnyOFixMmb = commonware_storage::qmdb::any::ordered::fixed::Db<
     commonware_storage::merkle::mmb::Family,
@@ -166,6 +181,7 @@ type AnyOFixMmb = commonware_storage::qmdb::any::ordered::fixed::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type AnyOVarMmb = commonware_storage::qmdb::any::ordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
@@ -174,6 +190,7 @@ type AnyOVarMmb = commonware_storage::qmdb::any::ordered::variable::Db<
     Digest,
     Sha256,
     EightCap,
+    Rayon,
 >;
 type CurOFix32 = commonware_storage::qmdb::current::ordered::fixed::Db<
     commonware_storage::merkle::mmr::Family,
@@ -183,6 +200,7 @@ type CurOFix32 = commonware_storage::qmdb::current::ordered::fixed::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurOVar32 = commonware_storage::qmdb::current::ordered::variable::Db<
     commonware_storage::merkle::mmr::Family,
@@ -192,6 +210,7 @@ type CurOVar32 = commonware_storage::qmdb::current::ordered::variable::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurOFix32Mmb = commonware_storage::qmdb::current::ordered::fixed::Db<
     commonware_storage::merkle::mmb::Family,
@@ -201,6 +220,7 @@ type CurOFix32Mmb = commonware_storage::qmdb::current::ordered::fixed::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurOVar32Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
@@ -210,6 +230,7 @@ type CurOVar32Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Rayon,
 >;
 type CurOFix256 = commonware_storage::qmdb::current::ordered::fixed::Db<
     commonware_storage::merkle::mmr::Family,
@@ -219,6 +240,7 @@ type CurOFix256 = commonware_storage::qmdb::current::ordered::fixed::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 type CurOVar256 = commonware_storage::qmdb::current::ordered::variable::Db<
     commonware_storage::merkle::mmr::Family,
@@ -228,6 +250,7 @@ type CurOVar256 = commonware_storage::qmdb::current::ordered::variable::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 type CurOFix256Mmb = commonware_storage::qmdb::current::ordered::fixed::Db<
     commonware_storage::merkle::mmb::Family,
@@ -237,6 +260,7 @@ type CurOFix256Mmb = commonware_storage::qmdb::current::ordered::fixed::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
@@ -246,6 +270,7 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
     Sha256,
     EightCap,
     LARGE_CHUNK_SIZE,
+    Rayon,
 >;
 
 // -- Config --
@@ -261,13 +286,13 @@ const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
+        strategy: ctx.create_strategy(THREADS).unwrap(),
         page_cache: pc,
     }
 }
@@ -297,7 +322,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 fn any_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
-) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
+) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
@@ -309,7 +334,7 @@ fn any_fix_cfg(
 fn any_var_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
-) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
+) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
@@ -321,7 +346,7 @@ fn any_var_cfg(
 fn cur_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
+) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
@@ -334,7 +359,7 @@ fn cur_fix_cfg(
 fn cur_var_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
-) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
+) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),

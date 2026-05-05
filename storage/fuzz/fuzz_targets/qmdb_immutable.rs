@@ -3,10 +3,11 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{self, mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
@@ -105,7 +106,7 @@ fn db_config(
             metadata_partition: format!("metadata-{suffix}"),
             items_per_blob: NZU64!(ITEMS_PER_BLOB),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         log: VConfig {
@@ -150,7 +151,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 .await
                 .unwrap();
 
-            let hasher = Standard::<Sha256>::new();
+            let hasher =
+                merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
             let mut last_commit_loc: Option<Location<F>> = None;

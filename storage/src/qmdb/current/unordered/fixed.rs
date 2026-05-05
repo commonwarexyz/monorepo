@@ -20,10 +20,11 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
-pub type Db<F, E, K, V, H, T, const N: usize> = super::db::Db<
+pub type Db<F, E, K, V, H, T, const N: usize, S = Sequential> = super::db::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -32,6 +33,7 @@ pub type Db<F, E, K, V, H, T, const N: usize> = super::db::Db<
     Index<T, Location<F>>,
     H,
     N,
+    S,
 >;
 
 impl<
@@ -42,11 +44,12 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<F, E, K, V, H, T, N>
+        S: Strategy,
+    > Db<F, E, K, V, H, T, N, S>
 {
-    /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
-    /// Merkleization to initialize the bitmap tree if a thread pool is provided.
-    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error<F>> {
+    /// Initializes a [Db] authenticated database from the given `config`.
+    /// The configured [`Strategy`] is used to parallelize merkleization.
+    pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
         crate::qmdb::current::init(context, config).await
     }
 }
@@ -66,7 +69,7 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize> =
+    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S = Sequential> =
         crate::qmdb::current::unordered::db::Db<
             F,
             E,
@@ -76,6 +79,7 @@ pub mod partitioned {
             Index<T, Location<F>, P>,
             H,
             N,
+            S,
         >;
 
     impl<
@@ -87,11 +91,12 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<F, E, K, V, H, T, P, N>
+            S: Strategy,
+        > Db<F, E, K, V, H, T, P, N, S>
     {
-        /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
-        /// Merkleization to initialize the bitmap Merkle tree if a thread pool is provided.
-        pub async fn init(context: E, config: Config<T>) -> Result<Self, Error<F>> {
+        /// Initializes a [Db] authenticated database from the given `config`.
+        /// The configured [`Strategy`] is used to parallelize merkleization.
+        pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
     }

@@ -20,6 +20,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Array;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -29,8 +30,8 @@ pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<F, E, C, K, V, I, H, const N: usize> =
-    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N>;
+pub type Db<F, E, C, K, V, I, H, const N: usize, S = Sequential> =
+    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.
 impl<
@@ -42,7 +43,8 @@ impl<
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<F, E, C, K, V, I, H, N>
+        S: Strategy,
+    > Db<F, E, C, K, V, I, H, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -75,7 +77,8 @@ impl<
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<F, E, C, K, V, I, H, N>
+        S: Strategy,
+    > Db<F, E, C, K, V, I, H, N, S>
 where
     Operation<F, K, V>: Codec,
 {
