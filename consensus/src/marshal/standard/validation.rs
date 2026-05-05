@@ -4,7 +4,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::{DigestRequest, Mailbox},
+        core::{CommitmentRequest, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -239,12 +239,12 @@ where
         let receiver = match parent_round {
             Some(round) => {
                 marshal
-                    .subscribe_by_digest(parent_digest, DigestRequest::FetchByRound { round })
+                    .subscribe_by_commitment(parent_digest, CommitmentRequest::FetchByRound { round })
                     .await
             }
             None => {
                 marshal
-                    .subscribe_by_digest(parent_digest, DigestRequest::Wait)
+                    .subscribe_by_commitment(parent_digest, CommitmentRequest::Wait)
                     .await
             }
         };

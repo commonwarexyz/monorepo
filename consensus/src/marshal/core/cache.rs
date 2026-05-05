@@ -60,6 +60,9 @@ where
         <V::Block as Digestible>::Digest,
         Finalization<S, V::Commitment>,
     >,
+    /// Verified blocks stored by height.
+    verified_blocks_by_height:
+        prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
 }
 
 impl<R, V, S> Cache<R, V, S>
@@ -68,8 +71,8 @@ where
     V: Variant,
     S: Scheme,
 {
-    /// Prune the archives to the given view.
-    async fn prune(&mut self, min_view: View) {
+    /// Prune view-indexed archives to the given view.
+    async fn prune_by_view(&mut self, min_view: View) {
         match futures::try_join!(
             self.verified_blocks.prune(min_view.get()),
             self.notarized_blocks.prune(min_view.get()),
@@ -79,6 +82,14 @@ where
             Ok(_) => debug!(min_view = %min_view, "pruned archives"),
             Err(e) => panic!("failed to prune archives: {e}"),
         }
+    }
+
+    /// Prune height-indexed archives to the given height.
+    async fn prune_by_height(&mut self, min_height: Height) {
+        self.verified_blocks_by_height
+            .prune(min_height.get())
+            .await
+            .expect("failed to prune height-indexed verified blocks");
     }
 }
 
@@ -101,9 +112,6 @@ where
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
-
-    /// Blocks fetched by digest during ancestry verification, indexed by height.
-    digest_blocks: prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
 
     /// A map from epoch to its cache
     caches: BTreeMap<Epoch, Cache<R, V, S>>,
@@ -131,9 +139,6 @@ where
         )
         .await
         .expect("failed to initialize metadata");
-        let digest_blocks =
-            Self::init_height_archive(&context, &cfg, "digest_blocks", block_codec_config.clone())
-                .await;
 
         // We don't eagerly initialize any epoch caches here, they will be
         // initialized on demand, otherwise there could be coordination issues
@@ -143,7 +148,6 @@ where
             cfg,
             block_codec_config,
             metadata,
-            digest_blocks,
             caches: BTreeMap::new(),
         }
     }
@@ -208,7 +212,13 @@ where
             .context
             .with_label("cache")
             .with_attribute("epoch", epoch);
-        let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
+        let (
+            verified_blocks,
+            notarized_blocks,
+            notarizations,
+            finalizations,
+            verified_blocks_by_height,
+        ) = futures::join!(
             Self::init_archive(
                 &context,
                 &self.cfg,
@@ -237,6 +247,13 @@ where
                 "finalizations",
                 S::certificate_codec_config_unbounded(),
             ),
+            Self::init_archive(
+                &context,
+                &self.cfg,
+                epoch,
+                "verified_by_height",
+                self.block_codec_config.clone()
+            ),
         );
         let existing = self.caches.insert(
             epoch,
@@ -245,6 +262,7 @@ where
                 notarized_blocks,
                 notarizations,
                 finalizations,
+                verified_blocks_by_height,
             },
         );
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
@@ -278,33 +296,6 @@ where
         archive
     }
 
-    /// Helper to initialize a height-indexed archive.
-    async fn init_height_archive<T: CodecShared>(
-        ctx: &R,
-        cfg: &Config,
-        name: &str,
-        codec_config: T::Cfg,
-    ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
-        let start = ctx.current();
-        let archive_cfg = prunable::Config {
-            translator: TwoCap,
-            key_partition: format!("{}-height-{name}-key", cfg.partition_prefix),
-            key_page_cache: cfg.key_page_cache.clone(),
-            value_partition: format!("{}-height-{name}-value", cfg.partition_prefix),
-            items_per_section: cfg.prunable_items_per_section,
-            compression: None,
-            codec_config,
-            replay_buffer: cfg.replay_buffer,
-            key_write_buffer: cfg.key_write_buffer,
-            value_write_buffer: cfg.value_write_buffer,
-        };
-        let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
-            .await
-            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
-        info!(elapsed = ?ctx.current().duration_since(start).unwrap_or(Duration::ZERO), "restored {name} archive");
-        archive
-    }
-
     /// Add a verified block to the prunable archive.
     pub(crate) async fn put_verified(
         &mut self,
@@ -322,29 +313,38 @@ where
         Self::handle_result(result, round, "verified");
     }
 
-    /// Add a digest-fetched block to the height-indexed archive.
-    pub(crate) async fn put_digest_block(
+    /// Add a verified block to the height-indexed archive.
+    pub(crate) async fn put_verified_block_by_height(
         &mut self,
+        epoch: Epoch,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
         block: V::StoredBlock,
     ) {
-        match self.digest_blocks.has(Identifier::Key(&digest)).await {
+        let Some(cache) = self.get_or_init_epoch(epoch).await else {
+            return;
+        };
+
+        match cache
+            .verified_blocks_by_height
+            .has(Identifier::Key(&digest))
+            .await
+        {
             Ok(true) => return,
             Ok(false) => {}
-            Err(e) => panic!("failed to check digest block: {e}"),
+            Err(e) => panic!("failed to check height-indexed verified block: {e}"),
         }
 
-        match self
-            .digest_blocks
+        match cache
+            .verified_blocks_by_height
             .put_multi_sync(height.get(), digest, block)
             .await
         {
-            Ok(()) => debug!(%height, "cached digest block"),
+            Ok(()) => debug!(%height, "cached height-indexed verified block"),
             Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(%height, "digest block already pruned");
+                debug!(%height, "height-indexed verified block already pruned");
             }
-            Err(e) => panic!("failed to insert digest block: {e}"),
+            Err(e) => panic!("failed to insert height-indexed verified block: {e}"),
         }
     }
 
@@ -461,17 +461,17 @@ where
         &self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::StoredBlock> {
-        if let Some(block) = self
-            .digest_blocks
-            .get(Identifier::Key(&digest))
-            .await
-            .expect("failed to get digest block")
-        {
-            return Some(block);
-        }
-
         // Check in reverse order
         for cache in self.caches.values().rev() {
+            if let Some(block) = cache
+                .verified_blocks_by_height
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get height-indexed verified block")
+            {
+                return Some(block);
+            }
+
             // Check verified blocks
             if let Some(block) = cache
                 .verified_blocks
@@ -495,8 +495,8 @@ where
         None
     }
 
-    /// Prune the caches below the given round.
-    pub(crate) async fn prune(&mut self, round: Round) {
+    /// Prune the view-indexed caches below the given round.
+    pub(crate) async fn prune_by_view(&mut self, round: Round) {
         // Remove and close prunable archives from older epochs
         let new_floor = round.epoch();
         let old_epochs: Vec<Epoch> = self
@@ -511,12 +511,13 @@ where
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
-                ..
+                verified_blocks_by_height: vbh,
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
             nv.destroy().await.expect("failed to destroy nv");
             fv.destroy().await.expect("failed to destroy fv");
+            vbh.destroy().await.expect("failed to destroy vbh");
         }
 
         // Update metadata if necessary
@@ -529,15 +530,14 @@ where
         // Prune archives for the given epoch
         let min_view = round.view();
         if let Some(prunable) = self.caches.get_mut(&round.epoch()) {
-            prunable.prune(min_view).await;
+            prunable.prune_by_view(min_view).await;
         }
     }
 
-    /// Prune digest-fetched blocks below the given height.
-    pub(crate) async fn prune_digest_blocks(&mut self, height: Height) {
-        self.digest_blocks
-            .prune(height.get())
-            .await
-            .expect("failed to prune digest blocks");
+    /// Prune height-indexed verified blocks below the given height.
+    pub(crate) async fn prune_by_height(&mut self, height: Height) {
+        for cache in self.caches.values_mut() {
+            cache.prune_by_height(height).await;
+        }
     }
 }

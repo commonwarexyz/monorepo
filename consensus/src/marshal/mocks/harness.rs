@@ -11,7 +11,7 @@ use crate::{
             Coding,
         },
         config::Config,
-        core::{Actor, DigestRequest, Mailbox},
+        core::{Actor, CommitmentRequest, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -186,8 +186,6 @@ impl<H: TestHarness> Clone for ValidatorHandle<H> {
 /// A test harness that abstracts over marshal variant differences.
 pub trait TestHarness: 'static + Sized {
     /// The application block type.
-    /// Note: We require `Digestible<Digest = D>` so generic test functions can use
-    /// `subscribe_by_digest` which expects the block's digest type.
     type ApplicationBlock: crate::Block + Digestible<Digest = D> + Clone + Send + 'static;
 
     /// The marshal variant type.
@@ -3567,7 +3565,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
 
         let subscription_rx = handle
             .mailbox
-            .subscribe_by_digest(digest, DigestRequest::Wait)
+            .subscribe_by_commitment(commitment, CommitmentRequest::Wait)
             .await;
 
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
@@ -3648,15 +3646,15 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(digest1, DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
             .await;
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(digest2, DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait)
             .await;
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_digest(digest1, DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
             .await;
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
@@ -3736,16 +3734,15 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             2,
             participants.len() as u16,
         );
-        let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(digest1, DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
             .await;
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(digest2, DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait)
             .await;
 
         drop(sub1_rx);
@@ -3844,23 +3841,23 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(H::digest(&block1), DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
             .await;
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(H::digest(&block2), DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait)
             .await;
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_digest(H::digest(&block3), DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block3), CommitmentRequest::Wait)
             .await;
         let sub4_rx = handle
             .mailbox
-            .subscribe_by_digest(H::digest(&block4), DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block4), CommitmentRequest::Wait)
             .await;
         let sub5_rx = handle
             .mailbox
-            .subscribe_by_digest(H::digest(&block5), DigestRequest::Wait)
+            .subscribe_by_commitment(H::commitment(&block5), CommitmentRequest::Wait)
             .await;
 
         // Block1: Broadcasted by the actor

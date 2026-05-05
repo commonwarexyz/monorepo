@@ -1,6 +1,6 @@
 use super::{
     cache,
-    mailbox::{CommitmentRequest, DigestRequest, Mailbox, Message},
+    mailbox::{CommitmentRequest, Mailbox, Message},
     Buffer, Variant,
 };
 use crate::{
@@ -629,11 +629,11 @@ where
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
-                            Self::enqueue_block_fetch(
-                                &mut resolver,
-                                commitment,
-                                BlockFetchContext::Finalized { round },
-                            )
+                            resolver
+                                .fetch(ResolverKey::block_request(
+                                    commitment,
+                                    BlockFetchContext::Finalized { round },
+                                ))
                                 .await;
                         }
                     }
@@ -679,14 +679,10 @@ where
                         resolver.fetch_targeted(request, targets).await;
                     }
                     Message::SubscribeByDigest {
-                        request,
+                        round,
                         digest,
                         response,
                     } => {
-                        let round = match request {
-                            DigestRequest::Wait => None,
-                            DigestRequest::FetchByRound { round } => Some(round),
-                        };
                         self.handle_subscribe(
                             round,
                             None,
@@ -731,6 +727,7 @@ where
 
                         // Update the processed height
                         self.update_processed_height(height, &mut resolver).await;
+                        self.cache.prune_by_height(height).await;
                         if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
                             return;
@@ -875,17 +872,6 @@ where
         }
     }
 
-    /// Enqueue a resolver fetch for a block commitment.
-    async fn enqueue_block_fetch(
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
-        commitment: V::Commitment,
-        context: BlockFetchContext,
-    ) {
-        resolver
-            .fetch(ResolverKey::block_request(commitment, context))
-            .await;
-    }
-
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
@@ -935,6 +921,8 @@ where
                 .await;
         } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
             if height <= self.last_processed_height {
+                // We already checked local storage. Missing ancestors at or below
+                // the processed floor are no longer safe to keep requesting.
                 debug!(
                     %height,
                     floor = %self.last_processed_height,
@@ -944,11 +932,11 @@ where
                 return;
             }
             debug!(%height, ?commitment, ?digest, "requested ancestry block missing");
-            Self::enqueue_block_fetch(
-                resolver,
-                commitment,
-                BlockFetchContext::Ancestry { height },
-            )
+            resolver
+                .fetch(ResolverKey::block_request(
+                    commitment,
+                    BlockFetchContext::Ancestry { height },
+                ))
                 .await;
         }
 
@@ -1029,9 +1017,16 @@ where
                                 .await
                         } else {
                             if height > self.last_processed_height {
-                                self.cache
-                                    .put_digest_block(height, digest, block.clone().into())
-                                    .await;
+                                if let Some(bounds) = self.epocher.containing(height) {
+                                    self.cache
+                                        .put_verified_block_by_height(
+                                            bounds.epoch(),
+                                            height,
+                                            digest,
+                                            block.clone().into(),
+                                        )
+                                        .await;
+                                }
                                 self.notify_subscribers(&block);
                             }
                             false
@@ -1401,6 +1396,7 @@ where
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver).await;
+        self.cache.prune_by_height(height).await;
 
         // Cancel any useless requests
         resolver
@@ -1415,8 +1411,8 @@ where
                 lpr.view().saturating_sub(self.view_retention_timeout),
             );
 
-            // Prune archives
-            self.cache.prune(prune_round).await;
+            // Prune view-indexed archives
+            self.cache.prune_by_view(prune_round).await;
 
             // Update the last processed round
             let round = finalization.round();
@@ -1709,14 +1705,14 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    Self::enqueue_block_fetch(
-                        resolver,
-                        commitment,
-                        BlockFetchContext::Repair {
-                            height: last_finalized,
-                        },
-                    )
-                    .await;
+                    resolver
+                        .fetch(ResolverKey::block_request(
+                            commitment,
+                            BlockFetchContext::Repair {
+                                height: last_finalized,
+                            },
+                        ))
+                        .await;
                 }
             }
         }
@@ -1769,13 +1765,13 @@ where
                         .height()
                         .previous()
                         .expect("gap repair cursor must be above genesis");
-                    Self::enqueue_block_fetch(
-                        resolver,
-                        parent_commitment,
-                        BlockFetchContext::Repair {
-                            height: parent_height,
-                        },
-                    )
+                    resolver
+                        .fetch(ResolverKey::block_request(
+                            parent_commitment,
+                            BlockFetchContext::Repair {
+                                height: parent_height,
+                            },
+                        ))
                         .await;
                     break 'cache_repair;
                 }
@@ -1812,7 +1808,6 @@ where
         let _ = self
             .processed_height
             .try_set(self.last_processed_height.get());
-        self.cache.prune_digest_blocks(height).await;
 
         // Cancel any existing requests below the new floor.
         resolver

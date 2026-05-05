@@ -77,7 +77,7 @@ use crate::{
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
-        core::{DigestRequest, Mailbox},
+        core::{CommitmentRequest, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -462,9 +462,9 @@ where
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
                 let block_request = marshal
-                    .subscribe_by_digest(
+                    .subscribe_by_commitment(
                         digest,
-                        DigestRequest::FetchByRound {
+                        CommitmentRequest::FetchByRound {
                             round: context.round,
                         },
                     )
@@ -589,7 +589,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_digest(digest, DigestRequest::FetchByRound { round })
+            .subscribe_by_commitment(digest, CommitmentRequest::FetchByRound { round })
             .await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();

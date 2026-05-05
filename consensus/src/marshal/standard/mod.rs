@@ -1023,6 +1023,52 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_cache_load_persisted_epochs_finds_verified_blocks_by_height() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let prefix = "test-verified-by-height-cache";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+
+            {
+                let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.with_label("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                mgr.put_verified_block_by_height(
+                    Epoch::zero(),
+                    block.height(),
+                    digest,
+                    block.clone(),
+                )
+                .await;
+            }
+
+            let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                context.with_label("read"),
+                make_cfg(),
+                (),
+            )
+            .await;
+            assert_eq!(mgr.find_block(digest).await, None);
+
+            mgr.load_persisted_epochs().await;
+            assert_eq!(mgr.find_block(digest).await, Some(block));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_get_block_by_commitment_from_sources_and_missing() {
         harness::get_block_by_commitment_from_sources_and_missing::<InlineHarness>();
         harness::get_block_by_commitment_from_sources_and_missing::<DeferredHarness>();
@@ -1281,6 +1327,10 @@ mod tests {
                 assert!(
                     victim_mailbox.get_block(&block1_digest).await.is_some(),
                     "digest-fetched ancestor should be retained locally"
+                );
+                assert!(
+                    victim_mailbox.get_block(Height::new(1)).await.is_none(),
+                    "digest-fetched ancestor should not be served as finalized by height"
                 );
             });
         }
