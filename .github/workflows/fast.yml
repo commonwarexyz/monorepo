@@ -49,6 +49,8 @@ jobs:
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0
+    - name: Check source ASCII
+      run: just check-ascii
     - name: Fmt
       run: just check-fmt
     - name: Lint
@@ -57,16 +59,6 @@ jobs:
       run: just check-docs ${{ matrix.flags }}
     - name: Test docs
       run: just test-docs ${{ matrix.flags }}
-
-  Source-ASCII:
-    name: Check Source ASCII
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-    - name: Check source ASCII
-      run: python3 .github/scripts/check_ascii.py
 
   Tests:
     name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/2)"
