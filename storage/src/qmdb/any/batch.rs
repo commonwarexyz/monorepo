@@ -21,6 +21,7 @@ use crate::{
     },
     Context,
 };
+use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -28,7 +29,7 @@ use commonware_utils::bitmap;
 use core::{iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::BTreeMap,
     sync::{Arc, Weak},
 };
 use tracing::debug;
@@ -1198,15 +1199,16 @@ where
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
         // but are invisible to the base-DB-only `prev_translated_key` lookup above.
         //
-        // Walk ancestors closest-first; a BTreeSet tracks keys already seen so each key is
-        // processed only once (closest-ancestor's entry wins). BTreeSet is faster than HashMap
-        // for 32-byte Digest keys because Digest cmp (~5ns, SIMD) is cheaper than SipHash
-        // (~200ns) per op at the sizes involved.
+        // Walk ancestors closest-first; a set tracks keys already seen so each key is processed
+        // only once (closest-ancestor's entry wins). We use AHashSet (keyed per-process via
+        // runtime-rng) instead of std's default SipHash: ahash is DoS-resistant for adversarial
+        // inputs but several times faster on 32-byte Digest keys, where SipHash dominates over
+        // the actual probe.
         //
-        // Depth-1 chains skip the BTreeSet entirely — a single ancestor can't shadow itself,
+        // Depth-1 chains skip the set entirely — a single ancestor can't shadow itself,
         // and each diff's keys are unique by construction.
         let track_shadow = m.ancestors.len() > 1;
-        let mut seen: BTreeSet<&K> = BTreeSet::new();
+        let mut seen: AHashSet<&K> = AHashSet::new();
         let mut ancestor_deleted: Vec<K> = Vec::new();
         for batch in m.ancestors.iter() {
             for (key, entry) in batch.diff.iter() {
@@ -1335,7 +1337,7 @@ where
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
             // Safe to use a HashSet here since we don't rely on iteration order.
-            let mut rewritten_predecessors = HashSet::new();
+            let mut rewritten_predecessors = AHashSet::new();
             for key in created
                 .iter()
                 .map(|(k, _, _)| k)
@@ -1596,7 +1598,7 @@ where
         // Build committed_locs: for each key in a committed ancestor batch, record the nearest
         // (to child) committed ancestor's final state. Some(loc) = Active at loc, None =
         // Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
-        let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
+        let mut committed_locs: AHashMap<&U::Key, Option<Location<F>>> = AHashMap::new();
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.ancestor_diff_ends[i] <= db_size {
                 for (key, entry) in ancestor_diff.iter() {
@@ -1611,9 +1613,9 @@ where
             let mut bitmap = self.bitmap.write();
             bitmap.extend_to(*batch.new_last_commit_loc + 1);
 
-            // Apply child's diff (child wins via seen set). Safe to use a HashSet here since we
-            // don't rely on iteration order.
-            let mut seen = HashSet::<&U::Key>::new();
+            // Apply child's diff (child wins via seen set). Safe to use an AHashSet here since
+            // we don't rely on iteration order.
+            let mut seen = AHashSet::<&U::Key>::new();
             for (key, entry) in batch.diff.iter() {
                 seen.insert(key);
                 let base_old_loc = committed_locs
