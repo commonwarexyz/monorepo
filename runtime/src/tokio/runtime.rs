@@ -18,8 +18,8 @@ use crate::{
         Registry,
     },
     utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, BufferPoolThreadCache, Clock, Error, Execution, Handle,
+    Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 #[cfg(feature = "iouring-network")]
 use crate::{
@@ -41,12 +41,23 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Weak,
+    },
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
 use tracing::{info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+// How often the background Rayon buffer-pool cache flush loop asks workers to
+// flush their thread-local caches.
+pub(crate) const RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(2)
+};
 
 #[cfg(feature = "iouring-network")]
 cfg_if::cfg_if! {
@@ -500,6 +511,25 @@ impl crate::Runner for Runner {
     }
 }
 
+/// Marks one worker's Rayon broadcast maintenance task as complete on drop.
+///
+/// The maintenance loop allows only one broadcast to be in flight at a time by
+/// holding a `pending` latch until every worker has run the broadcast closure.
+/// Keep the accounting in a guard so an unwind from maintenance code cannot
+/// leave that latch set forever and silently disable future flush passes.
+struct RayonBroadcastGuard<'a> {
+    remaining: &'a AtomicUsize,
+    pending: &'a AtomicBool,
+}
+
+impl Drop for RayonBroadcastGuard<'_> {
+    fn drop(&mut self) {
+        if self.remaining.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.pending.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
@@ -554,6 +584,53 @@ impl Context {
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> &Metrics {
         &self.executor.metrics
+    }
+
+    /// Spawn a task that periodically asks Rayon workers to flush idle
+    /// thread-local buffer pool caches.
+    ///
+    /// Rayon worker threads are long-lived, so without periodic flushes they
+    /// could retain cached buffers indefinitely. Each pass injects a broadcast
+    /// task that runs once per worker after it drains local work. Caches used
+    /// since the previous pass are retained for locality, caches untouched for
+    /// a full interval are released back to the global freelists.
+    fn spawn_rayon_buffer_pool_thread_cache_flush(&self, pool: &ThreadPool) {
+        let pool = Arc::downgrade(pool);
+        let pending = Arc::new(AtomicBool::new(false));
+        self.with_label("rayon_buffer_pool_thread_cache_flush")
+            .spawn(move |context| async move {
+                loop {
+                    context.sleep(RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL).await;
+
+                    // Stop maintenance once the caller has dropped the pool.
+                    let Some(pool) = Weak::upgrade(&pool) else {
+                        break;
+                    };
+
+                    // At most one broadcast may be pending, otherwise slow or busy
+                    // workers could accumulate maintenance jobs indefinitely.
+                    if pending
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        continue;
+                    }
+
+                    // Rayon only runs this on workers after they have drained
+                    // their local work, so the flush happens during an idle
+                    // maintenance pass rather than interrupting active tasks.
+                    let remaining = AtomicUsize::new(pool.current_num_threads());
+                    let pending = pending.clone();
+                    pool.spawn_broadcast(move |_| {
+                        let _guard = RayonBroadcastGuard {
+                            remaining: &remaining,
+                            pending: pending.as_ref(),
+                        };
+
+                        BufferPoolThreadCache::flush_idle();
+                    });
+                }
+            });
     }
 }
 
@@ -666,7 +743,7 @@ impl crate::ThreadPooler for Context {
         &self,
         concurrency: NonZeroUsize,
     ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        ThreadPoolBuilder::new()
+        let pool = ThreadPoolBuilder::new()
             .num_threads(concurrency.get())
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
@@ -677,7 +754,17 @@ impl crate::ThreadPooler for Context {
                 Ok(())
             })
             .build()
-            .map(Arc::new)
+            .map(Arc::new)?;
+
+        // If any buffer pool has thread-local caching enabled, we must periodically
+        // ask Rayon workers to flush their thread-local caches.
+        if self.network_buffer_pool.config().thread_cache_enabled()
+            || self.storage_buffer_pool.config().thread_cache_enabled()
+        {
+            self.spawn_rayon_buffer_pool_thread_cache_flush(&pool);
+        }
+
+        Ok(pool)
     }
 }
 
