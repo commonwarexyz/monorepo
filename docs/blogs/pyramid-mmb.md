@@ -35,7 +35,7 @@ If we’re looking to minimize either worst-case or average-case proof size over
 
 If it seems the case is closed when it comes to how to bag peaks, recall that in our particular application, we’re far more interested in proof sizes over the *younger* elements since that’s where our active state resides. Focusing only on these elements paints a more complex picture (Fig. 4). Average-case proof size of the two bagging strategies when looking only at the last ~1M elements begins to favor the forward bagging strategy at a large enough database size.
 
-![Figure 4: Average-case proof size over the youngest ~1M elements.](/imgs/pyramid-mmb-fig-4.png)
+![Figure 4: Average-case proof size over the youngest ~1M elements.](/imgs/mmr_recent_average_comparison.png)
 
 If you’re now thinking “forward bagging FTW!”, you’re only half right. While forward bagging elegantly collapses the entire ancient history into a single digest, it introduces a new inefficiency: elements in the largest active peaks are forced to provide every smaller active peak to their right individually. On the flip side, backwards bagging perfectly optimizes the active peaks, but "pollutes" the proof with ancient history. Backwards bagging the MMR from Fig. 1, for example, results in the digest of peak P1 appearing in every proof, even those for active elements in the disjoint trees to its right. Seems a bit unnecessary?
 

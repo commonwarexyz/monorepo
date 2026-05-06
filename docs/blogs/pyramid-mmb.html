@@ -18,7 +18,7 @@ proofs smaller, more predictable, and efficient for light clients.">
     <meta property="og:url" content="https://commonware.xyz/blogs/pyramid-mmb" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/imgs/pyramid-mmb-fig-8.png" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/mmr_mmb_variants_worst_case_comparison.png" />
     <meta property="og:title" content="Honey, I Shrunk the Proofs!" />
     <meta property="og:description" content="Commonware’s authenticated
 databases now use pyramid-bagged Merkle Mountain Belts to make Merkle
@@ -38,7 +38,7 @@ Proofs!" />
 authenticated databases now use pyramid-bagged Merkle Mountain Belts to
 make Merkle proofs smaller, more predictable, and efficient for light
 clients." />
-    <meta property="twitter:image" content="https://commonware.xyz/imgs/pyramid-mmb-fig-8.png" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/mmr_mmb_variants_worst_case_comparison.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/roberto_bayardo" />
     
@@ -143,7 +143,7 @@ Bayardo</a></div>
         those from a BMT, unlike those from Merkle structures with high
         node fan-out like Ethereum’s (hexary) state trie.</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-1.png"
+        <img src="/imgs/mmr-leaf-age.png"
         alt="Figure 1: An MMR over a log of update operations, each with age determined by distance from tip. Average depth of elements in the active region (indicated by dark color) is lower than that of the inactive region." />
         <figcaption aria-hidden="true">Figure 1: An MMR over a log of
         update operations, each with age determined by distance from
@@ -205,7 +205,7 @@ Bayardo</a></div>
         possible! Another simple strategy is <em>min-depth,</em> which
         bags peaks according to a binary Merkle tree over them.</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-2.jpeg"
+        <img src="/imgs/bagging_mmb.jpeg"
         alt="Figure 2: Forward-bagging peaks to derive the MMR root commitment." />
         <figcaption aria-hidden="true">Figure 2: Forward-bagging peaks
         to derive the MMR root commitment.</figcaption>
@@ -217,7 +217,7 @@ Bayardo</a></div>
         doubles the worst-case proof size, and increases the average
         case considerably (Fig. 3).</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-3.png"
+        <img src="/imgs/mmr_combined_linear.png"
         alt="Figure 3: Worst-case and average-case proof sizes for forwards vs backwards bagged MMRs." />
         <figcaption aria-hidden="true">Figure 3: Worst-case and
         average-case proof sizes for forwards vs backwards bagged
@@ -232,7 +232,7 @@ Bayardo</a></div>
         looking only at the last ~1M elements begins to favor the
         forward bagging strategy at a large enough database size.</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-4.png"
+        <img src="/imgs/mmr_recent_average_comparison.png"
         alt="Figure 4: Average-case proof size over the youngest ~1M elements." />
         <figcaption aria-hidden="true">Figure 4: Average-case proof size
         over the youngest ~1M elements.</figcaption>
@@ -265,14 +265,14 @@ Bayardo</a></div>
         provided by backwards bagging. Average proof size indeed
         plummets when pyramid bagging is used (Fig. 6).</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-5.png"
+        <img src="/imgs/pyramid-bagging.png"
         alt="Figure 5: Pyramid bagging 8 peaks, with the first four covering elements only in the inactive region." />
         <figcaption aria-hidden="true">Figure 5: Pyramid bagging 8
         peaks, with the first four covering elements only in the
         inactive region.</figcaption>
         </figure>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-6.png"
+        <img src="/imgs/mmr_recent_pyramid_mmr_comparison.png"
         alt="Figure 6: Pyramid bagged MMR average-case proof size over an active region of 1M leaves." />
         <figcaption aria-hidden="true">Figure 6: Pyramid bagged MMR
         average-case proof size over an active region of 1M
@@ -299,7 +299,7 @@ Bayardo</a></div>
         nodes with each new update. With an MMB, we always add <em>at
         most one</em> ancestor per update.</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-7.png"
+        <img src="/imgs/mmr-vs-mmb.png"
         alt="Figure 7: An MMR (left) and an MMB (right) over the same 8 elements." />
         <figcaption aria-hidden="true">Figure 7: An MMR (left) and an
         MMB (right) over the same 8 elements.</figcaption>
@@ -348,7 +348,7 @@ Bayardo</a></div>
         size of a P-MMB is 50% smaller than the F-MMB over the active
         range, and average-case proof size is 33% smaller.</p>
         <figure>
-        <img src="/imgs/pyramid-mmb-fig-8.png"
+        <img src="/imgs/mmr_mmb_variants_worst_case_comparison.png"
         alt="Figure 8: Forward and pyramid-bagged MMB proof sizes grow only with the size of the active region (independent of N). Pyramid bagging results in an optimal Merkle structure over the active region (isomorphic to a BMT) with respect to average and worst-case proof size." />
         <figcaption aria-hidden="true">Figure 8: Forward and
         pyramid-bagged MMB proof sizes grow only with the size of the
