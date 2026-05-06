@@ -619,7 +619,7 @@ impl TlsSizeClassCache {
     /// caches take only the buffer being returned to the caller. Larger caches
     /// batch-take from the global freelist, return the first claimed buffer,
     /// and retain the rest locally for future allocations.
-    #[inline]
+    #[inline(always)]
     fn pop(&mut self, class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
         // Serve local hits without touching shared state.
         if let Some(entry) = self.entries.pop() {
@@ -684,7 +684,7 @@ impl TlsSizeClassCache {
     /// directly to the global freelist. Once the local cache is large enough
     /// to batch effectively, half the entries are drained to amortize global
     /// queue traffic across future returns.
-    #[inline]
+    #[inline(always)]
     fn push(&mut self, entry: TlsSizeClassCacheEntry) {
         // Preserve same-thread locality while the cache still has room.
         if self.entries.len() < self.capacity {
@@ -849,7 +849,7 @@ impl BufferPoolThreadCache {
 
     /// Returns a buffer to the current thread's local cache for the given
     /// size class, spilling to the global freelist if the cache is full.
-    #[inline]
+    #[inline(always)]
     pub(super) fn push(class: Arc<SizeClass>, slot: u32, buffer: AlignedBuffer) {
         if class.thread_cache_capacity == 0 {
             class.global.put(slot, buffer);
@@ -880,7 +880,7 @@ impl BufferPoolThreadCache {
     /// The local cache is checked first. On a local miss, the global freelist
     /// is queried once. The first claimed buffer is returned to the caller, and
     /// any additional claimed buffers are appended directly to the local cache.
-    #[inline]
+    #[inline(always)]
     fn pop(class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
         if class.thread_cache_capacity == 0 {
             return class
