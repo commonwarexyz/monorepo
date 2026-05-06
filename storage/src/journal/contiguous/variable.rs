@@ -153,8 +153,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         items_per_section: u64,
         offsets: &impl super::Reader<Item = u64>,
     ) -> Option<V> {
-        let mut scratch = Vec::new();
-        self.try_read_sync_into(position, items_per_section, offsets, &mut scratch)
+        let mut buf = Vec::new();
+        self.try_read_sync_into(position, items_per_section, offsets, &mut buf)
     }
 
     /// Read an item synchronously using caller-provided scratch space.
@@ -163,14 +163,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         position: u64,
         items_per_section: u64,
         offsets: &impl super::Reader<Item = u64>,
-        scratch: &mut Vec<u8>,
+        buf: &mut Vec<u8>,
     ) -> Option<V> {
         if position >= self.size || position < self.pruning_boundary {
             return None;
         }
         let offset = offsets.try_read_sync(position)?;
         let section = position_to_section(position, items_per_section);
-        self.data.try_get_sync_into(section, offset, scratch)
+        self.data.try_get_sync_into(section, offset, buf)
     }
 }
 
@@ -263,26 +263,25 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
             positions.windows(2).all(|w| w[0] < w[1]),
             "positions must be sorted and unique"
         );
-        for &position in positions {
-            if position >= self.guard.size {
-                return Err(Error::ItemOutOfRange(position));
-            }
-            if position < self.guard.pruning_boundary {
-                return Err(Error::ItemPruned(position));
-            }
+        if positions[0] < self.guard.pruning_boundary {
+            return Err(Error::ItemPruned(positions[0]));
+        }
+        let last_position = *positions.last().expect("positions is not empty");
+        if last_position >= self.guard.size {
+            return Err(Error::ItemOutOfRange(last_position));
         }
 
         // Read the items from cache if possible.
         let mut result: Vec<Option<V>> = Vec::with_capacity(positions.len());
         let mut miss_indices = Vec::with_capacity(positions.len());
         let mut miss_positions = Vec::with_capacity(positions.len());
-        let mut scratch = Vec::new();
+        let mut buf = Vec::new();
         for (i, &position) in positions.iter().enumerate() {
             if let Some(item) = self.guard.try_read_sync_into(
                 position,
                 self.items_per_section,
                 &self.offsets,
-                &mut scratch,
+                &mut buf,
             ) {
                 result.push(Some(item));
             } else {

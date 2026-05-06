@@ -600,10 +600,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Offsets should be sorted in ascending order.
     pub async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
-        self.get_many_sequential(section, offsets).await
-    }
-
-    async fn get_many_sequential(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
         if offsets.is_empty() {
             return Ok(Vec::new());
         }
@@ -640,7 +636,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         offsets: &[u64],
     ) -> Result<Vec<V>, Error> {
         if offsets.len() <= 1 {
-            return self.get_many_sequential(section, offsets).await;
+            return self.get_many(section, offsets).await;
         }
         let blob = self
             .manager
@@ -650,7 +646,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         if end <= start {
-            return self.get_many_sequential(section, offsets).await;
+            return self.get_many(section, offsets).await;
         }
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
         let bytes = blob.read_at(start, range_len).await?.coalesce();
