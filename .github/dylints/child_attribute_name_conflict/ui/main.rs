@@ -24,8 +24,9 @@ fn main() {
         .child("validator")
         .with_attribute("validator", 2);
     let _ = context.with_attribute("worker", 3).child("worker");
+    let _ = context.child("a").child("b").with_attribute("b", 4);
     let _ = context
         .child("service")
-        .with_attribute("service", 4)
+        .with_attribute("service", 5)
         .spawn();
 }

@@ -50,19 +50,21 @@ impl<'tcx> LateLintPass<'tcx> for ChildAttributeNameConflict {
 }
 
 fn check_child_attribute_name_conflict(cx: &LateContext<'_>, expr: &Expr<'_>) {
-    let Some((child, attributes)) = child_and_attributes(expr) else {
+    let Some((children, attributes)) = child_and_attributes(expr) else {
         return;
     };
 
     for attribute in attributes {
-        if child.value == attribute.value {
-            cx.span_lint(CHILD_ATTRIBUTE_NAME_CONFLICT, attribute.span, |diag| {
-                diag.primary_message("child name conflicts with context attribute name");
-                diag.span_help(
-                    child.span,
-                    "choose a child name for the component and an attribute name for the varying field",
-                );
-            });
+        for child in &children {
+            if child.value == attribute.value {
+                cx.span_lint(CHILD_ATTRIBUTE_NAME_CONFLICT, attribute.span, |diag| {
+                    diag.primary_message("child name conflicts with context attribute name");
+                    diag.span_help(
+                        child.span,
+                        "choose a child name for the component and an attribute name for the varying field",
+                    );
+                });
+            }
         }
     }
 }
@@ -73,10 +75,10 @@ struct StringArg {
     span: Span,
 }
 
-fn child_and_attributes(expr: &Expr<'_>) -> Option<(StringArg, Vec<StringArg>)> {
+fn child_and_attributes(expr: &Expr<'_>) -> Option<(Vec<StringArg>, Vec<StringArg>)> {
     let child = Symbol::intern("child");
     let with_attribute = Symbol::intern("with_attribute");
-    let mut child_arg = None;
+    let mut children = Vec::new();
     let mut attributes = Vec::new();
     let mut current = expr;
 
@@ -89,7 +91,9 @@ fn child_and_attributes(expr: &Expr<'_>) -> Option<(StringArg, Vec<StringArg>)> 
 
     while let ExprKind::MethodCall(segment, receiver, args, ..) = current.kind {
         if segment.ident.name == child {
-            child_arg = args.first().and_then(string_arg);
+            if let Some(child) = args.first().and_then(string_arg) {
+                children.push(child);
+            }
         } else if segment.ident.name == with_attribute {
             if let Some(attribute) = args.first().and_then(string_arg) {
                 attributes.push(attribute);
@@ -99,7 +103,7 @@ fn child_and_attributes(expr: &Expr<'_>) -> Option<(StringArg, Vec<StringArg>)> 
         current = receiver;
     }
 
-    child_arg.map(|child| (child, attributes))
+    (!children.is_empty()).then_some((children, attributes))
 }
 
 fn string_arg(expr: &Expr<'_>) -> Option<StringArg> {

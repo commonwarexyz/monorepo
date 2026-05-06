@@ -36,16 +36,28 @@ LL |     let _ = context.with_attribute("worker", 3).child("worker");
    |                                                       ^^^^^^^^
 
 error: child name conflicts with context attribute name
-  --> $DIR/main.rs:29:25
+  --> $DIR/main.rs:27:58
    |
-LL |         .with_attribute("service", 4)
+LL |     let _ = context.child("a").child("b").with_attribute("b", 4);
+   |                                                          ^^^
+   |
+help: choose a child name for the component and an attribute name for the varying field
+  --> $DIR/main.rs:27:38
+   |
+LL |     let _ = context.child("a").child("b").with_attribute("b", 4);
+   |                                      ^^^
+
+error: child name conflicts with context attribute name
+  --> $DIR/main.rs:30:25
+   |
+LL |         .with_attribute("service", 5)
    |                         ^^^^^^^^^
    |
 help: choose a child name for the component and an attribute name for the varying field
-  --> $DIR/main.rs:28:16
+  --> $DIR/main.rs:29:16
    |
 LL |         .child("service")
    |                ^^^^^^^^^
 
-error: aborting due to 4 previous errors
+error: aborting due to 5 previous errors
 
