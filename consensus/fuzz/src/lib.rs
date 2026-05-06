@@ -1450,11 +1450,11 @@ impl FuzzMode for Byzzfuzz {
 /// Same fault model as `Byzzfuzz`, but applies faults only during a bounded
 /// fault phase. After the phase elapses (or all non-byzantine reporters
 /// reach `required_containers`, whichever comes first), the shared fault
-/// gate is healed: forwarders pass partition decisions through and the
+/// gate reaches GST: forwarders pass partition decisions through and the
 /// injector drops queued intercepts. Each non-byzantine reporter (every
 /// index except `BYZANTINE_IDX = 0`) must then finalize at least one new
-/// view within a fixed heal window; failure to advance panics with a
-/// liveness violation. Safety invariants run after the heal check on
+/// view within a fixed post-GST window; failure to advance panics with a
+/// liveness violation. Safety invariants run after the post-GST check on
 /// every successful path.
 pub struct ByzzfuzzLiveness;
 impl FuzzMode for ByzzfuzzLiveness {

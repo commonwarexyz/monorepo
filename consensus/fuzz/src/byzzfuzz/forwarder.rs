@@ -208,9 +208,9 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
         let Some(msg) = decoded else {
             // Undecodable: still apply the network partition (partitions
             // are total per their view) using sender_view.get(); skip
-            // proc faults because there is no kind to match. After heal,
+            // proc faults because there is no kind to match. After GST,
             // pass through unchanged.
-            if gate.healed() {
+            if gate.gst_reached() {
                 return Some(recipients.clone());
             }
             let view = sender_view.get();
@@ -234,10 +234,10 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
         };
         pool.observe_vote::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
-        // After the fault phase ends, decode + observe + sender_view
+        // After GST, decode + observe + sender_view
         // updates still happen (rnd(m) attribution stays accurate), but
         // no faults are applied -- the message passes through.
-        if gate.healed() {
+        if gate.gst_reached() {
             return Some(recipients.clone());
         }
         let kind = scope::vote_kind::<S, S::PublicKey>(&msg);
@@ -303,9 +303,9 @@ where
         let Some(msg) = decoded else {
             // Undecodable: still apply the network partition (total per
             // its view) using sender_view.get(); skip proc faults
-            // because there is no kind to match. After heal, pass through
+            // because there is no kind to match. After GST, pass through
             // unchanged.
-            if gate.healed() {
+            if gate.gst_reached() {
                 return Some(recipients.clone());
             }
             let view = sender_view.get();
@@ -329,7 +329,7 @@ where
         };
         pool.observe_certificate::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
-        if gate.healed() {
+        if gate.gst_reached() {
             return Some(recipients.clone());
         }
         let kind = scope::certificate_kind::<S, S::PublicKey>(&msg);
@@ -402,7 +402,7 @@ where
         {
             sender_view.update(v);
         }
-        if gate.healed() {
+        if gate.gst_reached() {
             return Some(recipients.clone());
         }
         let view = sender_view.get();

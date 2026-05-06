@@ -5,10 +5,10 @@
 //!   finalization (with a fixed virtual-time fallback), check invariants.
 //!   Timeouts are not failures.
 //! - [`run_liveness`]: liveness mode. Apply faults during a bounded
-//!   *fault phase*, then heal (flip a shared `FaultGate`), then require
+//!   *fault phase*, then reach GST on a shared `FaultGate`, then require
 //!   each non-byzantine reporter to advance at least one finalized view
-//!   inside a fixed *heal window*. Failure to advance panics; faults
-//!   stopping mid-stream is what makes the post-heal liveness check
+//!   inside a fixed *post-GST window*. Failure to advance panics; faults
+//!   stopping mid-stream is what makes the post-GST liveness check
 //!   meaningful.
 
 use super::BYZANTINE_IDX;
@@ -47,11 +47,11 @@ use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 /// Liveness-mode fault phase length. The fuzzer applies network/process
 /// faults during this virtual-time window; after it elapses (or all
 /// non-byzantine reporters reach `required_containers`, whichever comes
-/// first) the [`FaultGate`] is healed. Kept close to [`MAX_SLEEP_DURATION`]
+/// first) the [`FaultGate`] reaches GST. Kept close to [`MAX_SLEEP_DURATION`]
 /// so each libFuzzer iteration stays cheap; tune up from corpus signal.
 const BYZZFUZZ_FAULT_PHASE: Duration = MAX_SLEEP_DURATION;
 
-/// Liveness-mode heal window. After healing, each non-byzantine reporter
+/// Liveness-mode post-GST window. After GST, each non-byzantine reporter
 /// must finalize at least one new view within this virtual-time window;
 /// otherwise `run_liveness` panics with a liveness violation.
 ///
@@ -61,7 +61,7 @@ const BYZZFUZZ_FAULT_PHASE: Duration = MAX_SLEEP_DURATION;
 /// shorter risks panicking before the retry path can rebroadcast
 /// nullify / recovery traffic that was dropped during the fault phase --
 /// which would be a false liveness violation.
-const BYZZFUZZ_HEAL_WINDOW: Duration = Duration::from_secs(15);
+const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(15);
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
@@ -70,8 +70,8 @@ type ByzzReporter<P> =
 /// forwarder/receiver/injector wiring shared by [`run`] (safety) and
 /// [`run_liveness`] (liveness). The returned reporters are already running;
 /// `gate` controls whether forwarders + injector apply faults (safety mode
-/// constructs a never-healed gate; liveness mode flips it after the fault
-/// phase).
+/// constructs a gate that never reaches GST; liveness mode reaches GST after
+/// the fault phase).
 async fn setup_engines<P: Simplex>(
     context: &mut deterministic::Context,
     input: &mut crate::FuzzInput,
@@ -263,9 +263,9 @@ where
     reporters
 }
 
-/// Run the ByzzFuzz fault model on `input` in safety mode. 4 honest engines
-/// plus a per-message strict-replace interception layer. Faults apply for
-/// the whole run; finalization timeout is not a failure.
+/// Run the ByzzFuzz fuzzing method on `input` to check whether safety holds.
+/// 4 honest engines plus a per-message strict-replace interception layer.
+/// Faults apply for the whole run; finalization timeout is not a failure.
 ///
 /// See [`crate::byzzfuzz`] module docs for the architectural overview.
 pub fn run<P: Simplex>(mut input: crate::FuzzInput)
@@ -286,7 +286,7 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        // Safety mode: gate is constructed but never healed. Forwarders /
+        // Safety mode: gate is constructed but never reaches GST. Forwarders /
         // injector remain in fault-applying mode for the entire run.
         let gate = FaultGate::new();
         let mut reporters = setup_engines::<P>(&mut context, &mut input, gate, "byzzfuzz").await;
@@ -334,16 +334,38 @@ where
     });
 }
 
-/// Run the ByzzFuzz fault model on `input` in liveness mode. Faults apply
-/// during a bounded fault phase, then the shared fault gate flips and each
-/// non-byzantine reporter must advance at least one finalized view inside
-/// the heal window. Failure to advance is a liveness violation (panics).
-/// The byzantine identity at index 0 is excluded -- only correct-process
-/// liveness is checked.
+/// Run the ByzzFuzz fuzzing method on `input` to check whether liveness holds.
+/// Faults apply during Phase 1, then the shared fault gate reaches GST and
+/// Phase 2 requires each non-byzantine reporter to advance at least one
+/// finalized view inside the post-GST window. Failure to advance is a
+/// liveness violation (panics).
+/// The byzantine identity (always at index 0) is excluded; only correct
+/// process liveness is checked.
 ///
-/// Faults must stop at the boundary so the post-heal protocol can run unperturbed; a
-/// fuzzer that kept dropping/mutating at a stuck round forever would
-/// generate false liveness failures.
+/// Faults must stop at the Phase 1/Phase 2 boundary so the post-GST protocol
+/// can run unperturbed. Otherwise, a stuck-round drop or mutation could become
+/// a false liveness failure.
+/// ```text
+/// time
+///   |------ Phase 1: fault phase -------|---- Phase 2: post-GST window -----|
+///   | network/process faults are active | faults are disabled               |
+///   |                                   |                                   |
+///   | phase timer or early completion   | each correct reporter must        |
+///   |                                   | finalize above its baseline       |
+///   |                                   |                                   |
+///   +-----------------------------------+-----------------------------------+
+///                                       |
+///                                       +-- record finalization baselines,
+///                                           then reach GST
+/// ```
+///
+/// The finalization baseline is each correct reporter's latest finalized
+/// view immediately before GST. The post-GST check requires every
+/// correct reporter to finalize a strictly newer view.
+///
+/// If all non-byzantine reporters reach `required_containers` during the
+/// fault phase, the run skips the post-GST check and proceeds directly to
+/// safety invariants.
 pub fn run_liveness<P: Simplex>(mut input: crate::FuzzInput)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -371,12 +393,12 @@ where
         // identity at `BYZANTINE_IDX` is excluded.
         let non_byzantine: Vec<usize> = (0..n).filter(|i| *i != BYZANTINE_IDX).collect();
 
-        // Phase 1: race the fault-phase timer against an early-success
-        // condition (all non-byzantine reporters reach `required_containers`).
+        // Phase 1: keep faults active until either all correct reporters
+        // reach `required_containers` or the fault-phase timer expires.
         // Each finisher returns true iff its reporter actually reached
         // `required_containers`; a closed monitor is a stall (false), not a
         // success -- otherwise an unexpectedly dropped subscription would
-        // skip the heal phase entirely.
+        // skip Phase 2 entirely.
         let mut phase1_finishers = Vec::new();
         for &i in &non_byzantine {
             let (mut latest, mut monitor): (View, ViewReceiver<View>) =
@@ -395,22 +417,18 @@ where
             ));
         }
 
-        let early_complete = select! {
+        let phase1_early_complete = select! {
             results = join_all(phase1_finishers) => {
                 results.iter().all(|r| matches!(r, Ok(true)))
             },
             _ = context.sleep(BYZZFUZZ_FAULT_PHASE) => false,
         };
 
-        if !early_complete {
-            // Snapshot baselines BEFORE flipping the gate so the recorded
-            // views are unambiguously pre-heal. Kept in a separate
-            // `baselines` vec (parallel to `watcher_inputs`) so the
-            // diagnostic in the panic path can pair each node's baseline
-            // with a freshly-re-subscribed current view -- on timeout the
-            // watcher Handles are dropped but the underlying tasks may
-            // still be alive until the runner unwinds, so re-subscribing
-            // is simpler than plumbing state back out of them.
+        if !phase1_early_complete {
+            // Phase 2: record each correct reporter's finalization baseline,
+            // reach GST, then require a strictly newer finalization.
+            // Keep `baselines` separate so timeout diagnostics can
+            // re-subscribe and report each node's current view.
             let mut baselines: Vec<(usize, u64)> = Vec::with_capacity(non_byzantine.len());
             let mut watcher_inputs = Vec::with_capacity(non_byzantine.len());
             for &i in &non_byzantine {
@@ -421,20 +439,18 @@ where
                 watcher_inputs.push((i, baseline, latest, monitor));
             }
 
-            // Heal: from this point forwarders pass partition decisions
-            // through and the injector drops queued intercepts. Faults can
-            // no longer perturb the protocol, so any subsequent failure to
-            // advance is attributable to the protocol itself.
-            log::push("byzzfuzz_liveness: heal".to_string());
-            gate.heal();
+            // GST: disable faults. From this point on, forwarders
+            // pass messages through and the injector drops queued intercepts.
+            log::push("byzzfuzz_liveness: gst_reached".to_string());
+            gate.reach_gst();
 
-            // Per-non-byzantine watcher: returns true iff the reporter
-            // advances strictly past `baseline` within the heal window.
+            // Phase 2 watchers: true means the reporter advanced strictly
+            // past its finalization baseline before the post-GST window closed.
             let mut watchers = Vec::new();
             for (i, baseline, mut latest, mut monitor) in watcher_inputs {
                 watchers.push(
                     context
-                        .with_label(&format!("byzzfuzz_heal_watcher_{i}"))
+                        .with_label(&format!("byzzfuzz_post_gst_watcher_{i}"))
                         .spawn(move |_| async move {
                             while latest.get() <= baseline {
                                 let Some(next) = monitor.recv().await else {
@@ -447,14 +463,14 @@ where
                 );
             }
 
-            let progressed = select! {
+            let phase2_complete = select! {
                 results = join_all(watchers) => {
                     results.iter().all(|r| matches!(r, Ok(true)))
                 },
-                _ = context.sleep(BYZZFUZZ_HEAL_WINDOW) => false,
+                _ = context.sleep(BYZZFUZZ_POST_GST_WINDOW) => false,
             };
 
-            if !progressed {
+            if !phase2_complete {
                 let mut diag = String::new();
                 for &(i, baseline) in &baselines {
                     let (latest, _monitor): (View, ViewReceiver<View>) =
@@ -467,8 +483,8 @@ where
                     );
                 }
                 panic!(
-                    "byzzfuzz liveness: heal window {:?} elapsed before all non-byzantine reporters advanced past pre-heal baseline;{diag}",
-                    BYZZFUZZ_HEAL_WINDOW,
+                    "byzzfuzz liveness: post-GST window {:?} elapsed before all non-byzantine reporters advanced past pre-GST baseline;{diag}",
+                    BYZZFUZZ_POST_GST_WINDOW,
                 );
             }
         }

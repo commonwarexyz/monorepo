@@ -127,13 +127,12 @@ where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
         R: Rng,
     {
-        // After the fault phase ends, drain any in-flight intercepts
-        // without emitting -- liveness mode needs the post-heal protocol
-        // to run unperturbed even if intercepts captured before heal are
-        // still queued.
-        if gate.healed() {
+        // After GST, drain any in-flight intercepts without emitting:
+        // liveness mode needs the post-GST protocol to run unperturbed
+        // even if pre-GST intercepts are still queued.
+        if gate.gst_reached() {
             log::push(format!(
-                "byzzfuzz: drop intercept channel={:?} view={} reason=post_heal",
+                "byzzfuzz: drop intercept channel={:?} view={} reason=post_gst",
                 item.channel, item.view,
             ));
             return;

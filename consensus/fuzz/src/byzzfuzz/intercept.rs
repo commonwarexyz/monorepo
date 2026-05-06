@@ -67,9 +67,9 @@ pub struct Intercept<P: PublicKey> {
 }
 
 /// Shared per-run flag that switches off ByzzFuzz fault application
-/// once the fault phase ends. Liveness mode flips it after the fault
-/// window so post-heal progress can be measured; safety mode constructs
-/// one and never heals (so the gate never triggers).
+/// once GST is reached. Liveness mode reaches GST after the fault
+/// window so post-GST progress can be measured; safety mode constructs
+/// one and never reaches GST (so the gate never triggers).
 ///
 /// Cheap to clone (Arc).
 #[derive(Clone, Default)]
@@ -80,12 +80,12 @@ impl FaultGate {
         Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
 
-    pub fn heal(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    pub fn reach_gst(&self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 
-    pub fn healed(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn gst_reached(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
     }
 }
 

@@ -15,9 +15,9 @@
 //! Public surface used from `lib.rs`:
 //! - [`run`] is the `Mode::Byzzfuzz` (safety) entry point;
 //! - [`run_liveness`] is the `Mode::ByzzfuzzLiveness` entry point: applies
-//!   faults during a bounded fault phase, heals the shared fault gate,
+//!   faults during a bounded fault phase, reaches GST on the shared fault gate,
 //!   then requires every non-byzantine reporter to make at least one new
-//!   finalization within a fixed heal window;
+//!   finalization within a fixed post-GST window;
 //! - [`log`] stores the bounded decision trace drained on panic.
 
 mod fault;
