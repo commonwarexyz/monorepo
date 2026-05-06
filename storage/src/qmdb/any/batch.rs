@@ -1208,7 +1208,12 @@ where
         // Depth-1 chains skip the set entirely — a single ancestor can't shadow itself,
         // and each diff's keys are unique by construction.
         let track_shadow = m.ancestors.len() > 1;
-        let mut seen: AHashSet<&K> = AHashSet::new();
+        let seen_cap = if track_shadow {
+            m.ancestors.iter().map(|a| a.diff.len()).sum()
+        } else {
+            0
+        };
+        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         let mut ancestor_deleted: Vec<K> = Vec::new();
         for batch in m.ancestors.iter() {
             for (key, entry) in batch.diff.iter() {
@@ -1337,7 +1342,7 @@ where
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
             // Safe to use a HashSet here since we don't rely on iteration order.
-            let mut rewritten_predecessors = AHashSet::new();
+            let mut rewritten_predecessors = AHashSet::with_capacity(created.len() + deleted.len());
             for key in created
                 .iter()
                 .map(|(k, _, _)| k)
@@ -1595,10 +1600,27 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
+        // Pre-size the two hash collections used below in one pass over ancestors. Each
+        // ancestor's diff lands in exactly one of:
+        //   - `committed_locs`, if the ancestor's ops are already in the DB (`end <= db_size`)
+        //   - the `seen` set, if the ancestor's ops still need to be applied
+        let mut committed_diff_total = 0usize;
+        let mut uncommitted_diff_total = 0usize;
+        for (ancestor_diff, &ancestor_end) in
+            batch.ancestor_diffs.iter().zip(&batch.ancestor_diff_ends)
+        {
+            if ancestor_end <= db_size {
+                committed_diff_total += ancestor_diff.len();
+            } else {
+                uncommitted_diff_total += ancestor_diff.len();
+            }
+        }
+
         // Build committed_locs: for each key in a committed ancestor batch, record the nearest
         // (to child) committed ancestor's final state. Some(loc) = Active at loc, None =
         // Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
-        let mut committed_locs: AHashMap<&U::Key, Option<Location<F>>> = AHashMap::new();
+        let mut committed_locs: AHashMap<&U::Key, Option<Location<F>>> =
+            AHashMap::with_capacity(committed_diff_total);
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.ancestor_diff_ends[i] <= db_size {
                 for (key, entry) in ancestor_diff.iter() {
@@ -1615,7 +1637,8 @@ where
 
             // Apply child's diff (child wins via seen set). Safe to use an AHashSet here since
             // we don't rely on iteration order.
-            let mut seen = AHashSet::<&U::Key>::new();
+            let mut seen =
+                AHashSet::<&U::Key>::with_capacity(batch.diff.len() + uncommitted_diff_total);
             for (key, entry) in batch.diff.iter() {
                 seen.insert(key);
                 let base_old_loc = committed_locs
