@@ -110,3 +110,10 @@ path = "fuzz_targets/channel.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuse"
+path = "fuzz_targets/fuse.rs"
+test = false
+doc = false
+bench = false

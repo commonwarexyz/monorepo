@@ -12,6 +12,9 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
 
     pub mod thread_local;
     pub use thread_local::Cached;
+
+    pub mod fuse;
+    pub use fuse::{BinaryFuseFilter, Error as FuseError, Fingerprint};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]

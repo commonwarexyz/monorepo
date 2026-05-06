@@ -86,3 +86,8 @@ path = "src/bitmap/benches/bench.rs"
 name = "rational"
 harness = false
 path = "src/rational/benches/bench.rs"
+
+[[bench]]
+name = "fuse"
+harness = false
+path = "src/fuse/benches/bench.rs"
