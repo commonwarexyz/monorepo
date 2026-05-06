@@ -31,7 +31,7 @@ Consider the example in Fig. 2, which shows what’s called a “forward” (old
 
 If we’re looking to minimize either worst-case or average-case proof size over all elements of an MMR, the backwards-bagging strategy is provably optimal (by the strictly decreasing peak height property)! In comparison, forward bagging doubles the worst-case proof size, and increases the average case considerably (Fig. 3).
 
-![Figure 3: Worst-case and average-case proof sizes for forwards vs backwards bagged MMRs.](/imgs/pyramid-mmb-fig-3.png)
+![Figure 3: Worst-case and average-case proof sizes for forwards vs backwards bagged MMRs.](/imgs/mmr_combined_linear.png)
 
 If it seems the case is closed when it comes to how to bag peaks, recall that in our particular application, we’re far more interested in proof sizes over the *younger* elements since that’s where our active state resides. Focusing only on these elements paints a more complex picture (Fig. 4). Average-case proof size of the two bagging strategies when looking only at the last ~1M elements begins to favor the forward bagging strategy at a large enough database size.
 
