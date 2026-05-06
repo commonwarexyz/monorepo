@@ -44,7 +44,10 @@ members = [
     "storage/fuzz",
     "utils/fuzz"
 ]
-exclude = [".github/dylints/borrowed_child_context"]
+exclude = [
+    ".github/dylints/borrowed_child_context",
+    ".github/dylints/child_attribute_name_conflict",
+]
 resolver = "2"
 
 [workspace.metadata.dylint]
