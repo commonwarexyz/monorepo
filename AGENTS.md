@@ -47,7 +47,9 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 - **storage**: Persist and retrieve data from an abstract store.
 - **stream**: Exchange messages over arbitrary transport.
 
-_More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
+Supporting crates include **formatting**, **invariants**, **macros**, **math**, **parallel**, and **utils**.
+
+_All workspace crates can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
 
 ### Examples
 
@@ -66,7 +68,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic.rs`) commonly in the repository to drive tests.
 3. **Performance Sensitive**: All primitives are optimized for high throughput/low latency.
 4. **Adversarial Safety**: All primitives are designed to operate robustly in adversarial environments.
-5. **Abstract Runtime**: All code outside the `runtime` primitive must be runtime-agnostic (never import `tokio` directly outside of `runtime/`). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
+5. **Abstract Runtime**: Protocol primitives should stay runtime-agnostic. Do not introduce direct `tokio` usage unless the crate already owns a runtime integration or command-line runtime path (for example `runtime`, `deployer`, runtime utilities, benches, or tests). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
 6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
 7. **Own Core Mechanisms**: If a primitive relies heavily on some core mechanism/algorithm, we should implement it rather than relying on external crates.
 
@@ -471,7 +473,7 @@ assert_eq!(state1, state2); // Must be deterministic with same seed
 - **Byzantine Simulation**: Replace honest nodes with Byzantine actors to test fault tolerance
 - **State Recovery**: Test crash recovery by saving and restoring context state
 - **Network Partitions**: Simulate split-brain scenarios with selective link removal
-- **Metric Verification**: Use supervisors or monitors to verify distributed properties
+- **Metric Verification**: Use supervisors, monitors, or metric output to verify distributed properties. For task shutdown checks, assert the selected task prefix is non-zero before shutdown, then assert the same prefix is zero after shutdown.
 
 ## Storage Testing via Runtime
 
@@ -726,11 +728,12 @@ Run `just test-conformance` to generate the initial hash values. The test framew
 
 ### Runtime Isolation Rule
 
-**CRITICAL**: All code outside the `runtime` primitive must be runtime-agnostic:
-- Never import or use `tokio` directly outside of `runtime/`
-- Always use `futures` for async operations
-- Use capabilities exported by `runtime` traits for I/O operations
-- This ensures all primitives remain portable across different runtime implementations
+**CRITICAL**: Protocol primitives should remain runtime-agnostic:
+- Do not introduce direct `tokio` usage in protocol crates unless the module is explicitly runtime-specific, a benchmark, or a test.
+- Existing runtime-owning crates and paths such as `runtime`, `deployer`'s AWS feature, `commonware-macros`, and `commonware-utils::sync` may use `tokio` where that is already part of their contract.
+- Prefer `futures` for async operations in runtime-agnostic code.
+- Use capabilities exported by `runtime` traits for I/O operations.
+- This keeps primitives portable across different runtime implementations.
 
 ### Error Handling
 
@@ -756,7 +759,7 @@ pub enum Error {
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
 - Place explanatory comments above the logical code block they describe; do not split a single consecutive sequence with inline comments between adjacent lines.
-- Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
+- Only use characters that can be easily typed. For example, don't use em dashes or arrows.
 - Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 - Do not write comments that sound unnatural, out of place, or overly verbose outside the context of the changes being made. For example, if you edit a function to call foo() instead of bar(), don't add a comment "// Used to call bar() here".
 
