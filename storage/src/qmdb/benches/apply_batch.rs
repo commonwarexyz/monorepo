@@ -89,6 +89,57 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
     elapsed
 }
 
+// 1 committed + 1 uncommitted ancestor: apply A, then apply C (whose chain is [B, A]).
+async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) -> Duration {
+    let mut db = open_db(ctx).await;
+    seed_db(&mut db, NUM_KEYS).await;
+
+    let mut rng = StdRng::seed_from_u64(7);
+    let a = write_updates(db.new_batch(), updates, &mut rng);
+    let a = a.merkleize(&db, None).await.unwrap();
+
+    let b = write_updates(a.new_batch(), updates, &mut rng);
+    let b = b.merkleize(&db, None).await.unwrap();
+
+    let c = write_updates(b.new_batch(), updates, &mut rng);
+    let c = c.merkleize(&db, None).await.unwrap();
+
+    db.apply_batch(a).await.unwrap();
+
+    let start = Instant::now();
+    db.apply_batch(c).await.unwrap();
+    let elapsed = start.elapsed();
+
+    db.destroy().await.unwrap();
+    elapsed
+}
+
+// 2 uncommitted ancestors: apply C directly without applying A or B.
+async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration {
+    let mut db = open_db(ctx).await;
+    seed_db(&mut db, NUM_KEYS).await;
+
+    let mut rng = StdRng::seed_from_u64(7);
+    let a = write_updates(db.new_batch(), updates, &mut rng);
+    let a = a.merkleize(&db, None).await.unwrap();
+
+    let b = write_updates(a.new_batch(), updates, &mut rng);
+    let b = b.merkleize(&db, None).await.unwrap();
+
+    let c = write_updates(b.new_batch(), updates, &mut rng);
+    let c = c.merkleize(&db, None).await.unwrap();
+
+    drop(a);
+    drop(b);
+
+    let start = Instant::now();
+    db.apply_batch(c).await.unwrap();
+    let elapsed = start.elapsed();
+
+    db.destroy().await.unwrap();
+    elapsed
+}
+
 fn bench_apply_batch(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
 
@@ -138,6 +189,40 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         total += bench_apply_with_committed_ancestor(&ctx, updates).await;
+                    }
+                    total
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!(
+                "{}/case=committed_uncommitted_chain variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += bench_apply_committed_uncommitted_chain(&ctx, updates).await;
+                    }
+                    total
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!(
+                "{}/case=multi_uncommitted variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += bench_apply_multi_uncommitted(&ctx, updates).await;
                     }
                     total
                 });
