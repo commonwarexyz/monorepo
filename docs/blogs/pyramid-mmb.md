@@ -1,6 +1,6 @@
 ---
 title: "Honey, I Shrunk the Proofs!"
-description: "TBD"
+description: "By combining an active-region-aware bagging policy, pyramid bagging, with the Merkle Mountain Belt (MMB), our new scheme makes active-value proofs small and predictable: within two digests of a balanced binary Merkle tree over those values without sacrificing append-only updates."
 date: "May 6th, 2026"
 published-time: "2026-05-06T00:00:00Z"
 modified-time: "2026-05-06T00:00:00Z"
@@ -11,7 +11,9 @@ image: "https://commonware.xyz/imgs/mmr_mmb_variants_worst_case_comparison.png"
 katex: true
 ---
 
-Grab your magnifying glass, because today we’re going to tell you about new innovations in Commonware’s authenticated databases that bring proof sizes down to near the smallest possible for Merkle-based structures. Small proofs enable efficient light clients, a cornerstone of decentralization in blockchains that unfortunately remain under-utilized. What exactly is a proof, though? A proof is a small amount of information (a collection of *digests*) that augments a piece of data and can be used to establish the authenticity of that data, even if obtained from a completely untrusted source such as a nearby cache. As proofs become smaller and cheaper to verify, decentralized applications can approach and even exceed the performance of those that rely on trusted, centralized providers (anyone can serve you a proof, even folks right down the street!).
+Grab your magnifying glass: QMDB's Merkle proofs are getting smaller.
+
+QMDB's original MMR-based proof scheme made updates efficient and grinding-resistant, but proof sizes were tied to historical updates $U$ rather than active values $V$. By combining an active-region-aware bagging policy, *pyramid bagging*, with the Merkle Mountain Belt (MMB), our new scheme makes active-value proofs small and predictable: within two digests of a balanced binary Merkle tree over those values (the best you can do) without sacrificing the append-only structure that drew us to Merkle Mountain Ranges in the first place.
 
 When restricted to k-ary hashing, the Merkle structure that minimizes leaf depth (and hence proof size) in both the worst and (uniform) average case is a balanced binary Merkle tree (BMT). More exotic cryptography such as *vector commitments* and *SNARK*s can deliver even smaller proofs than Merkle structures [[3]](https://arxiv.org/html/2504.14069v1), but with a number of non-trivial trade-offs and complexities we won’t dive into here.
 

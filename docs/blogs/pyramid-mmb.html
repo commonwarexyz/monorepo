@@ -9,9 +9,11 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Honey, I Shrunk the Proofs!</title>
-    <meta name="description" content="Commonware’s authenticated
-databases now use pyramid-bagged Merkle Mountain Belts to make Merkle
-proofs smaller, more predictable, and efficient for light clients.">
+    <meta name="description" content="By combining an
+active-region-aware bagging policy, pyramid bagging, with the Merkle
+Mountain Belt (MMB), our new scheme makes active-value proofs small and
+predictable: within two digests of a balanced binary Merkle tree over
+those values without sacrificing append-only updates.">
     <meta name="author" content="Roberto Bayardo">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -20,9 +22,11 @@ proofs smaller, more predictable, and efficient for light clients.">
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/mmr_mmb_variants_worst_case_comparison.png" />
     <meta property="og:title" content="Honey, I Shrunk the Proofs!" />
-    <meta property="og:description" content="Commonware’s authenticated
-databases now use pyramid-bagged Merkle Mountain Belts to make Merkle
-proofs smaller, more predictable, and efficient for light clients." />
+    <meta property="og:description" content="By combining an
+active-region-aware bagging policy, pyramid bagging, with the Merkle
+Mountain Belt (MMB), our new scheme makes active-value proofs small and
+predictable: within two digests of a balanced binary Merkle tree over
+those values without sacrificing append-only updates." />
     <meta property="article:author" content="Roberto Bayardo" />
     <meta property="article:published_time" content="2026-05-06T00:00:00Z" />
     <meta property="article:modified_time" content="2026-05-06T00:00:00Z" />
@@ -34,10 +38,11 @@ proofs smaller, more predictable, and efficient for light clients." />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/pyramid-mmb" />
     <meta property="twitter:title" content="Honey, I Shrunk the
 Proofs!" />
-    <meta property="twitter:description" content="Commonware’s
-authenticated databases now use pyramid-bagged Merkle Mountain Belts to
-make Merkle proofs smaller, more predictable, and efficient for light
-clients." />
+    <meta property="twitter:description" content="By combining an
+active-region-aware bagging policy, pyramid bagging, with the Merkle
+Mountain Belt (MMB), our new scheme makes active-value proofs small and
+predictable: within two digests of a balanced binary Merkle tree over
+those values without sacrificing append-only updates." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/mmr_mmb_variants_worst_case_comparison.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/roberto_bayardo" />
@@ -97,20 +102,19 @@ clients." />
 Bayardo</a></div>
                         <div class="date">May 6th, 2026</div>
         </div>
-        <p>Grab your magnifying glass, because today we’re going to tell
-        you about new innovations in Commonware’s authenticated
-        databases that bring proof sizes down to near the smallest
-        possible for Merkle-based structures. Small proofs enable
-        efficient light clients, a cornerstone of decentralization in
-        blockchains that unfortunately remain under-utilized. What
-        exactly is a proof, though? A proof is a small amount of
-        information (a collection of <em>digests</em>) that augments a
-        piece of data and can be used to establish the authenticity of
-        that data, even if obtained from a completely untrusted source
-        such as a nearby cache. As proofs become smaller and cheaper to
-        verify, decentralized applications can approach and even exceed
-        the performance of those that rely on trusted, centralized
-        providers.</p>
+        <p>Grab your magnifying glass: QMDB’s Merkle proofs are getting
+        smaller.</p>
+        <p>QMDB’s original MMR-based proof scheme made updates efficient
+        and grinding-resistant, but proof sizes were tied to historical
+        updates <span class="math inline">\(U\)</span> rather than
+        active values <span class="math inline">\(V\)</span>. By
+        combining an active-region-aware bagging policy, <em>pyramid
+        bagging</em>, with the Merkle Mountain Belt (MMB), our new
+        scheme makes active-value proofs small and predictable: within
+        two digests of a balanced binary Merkle tree over those values
+        (the best you can do) without sacrificing the append-only
+        structure that drew us to Merkle Mountain Ranges in the first
+        place.</p>
         <p>When restricted to k-ary hashing, the Merkle structure that
         minimizes leaf depth (and hence proof size) in both the worst
         and (uniform) average case is a balanced binary Merkle tree
