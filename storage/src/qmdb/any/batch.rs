@@ -26,7 +26,6 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::{iter, ops::Range};
-use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, Weak},
@@ -468,21 +467,37 @@ where
             .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
             .collect();
 
-        // Batch-read disk misses concurrently.
-        let disk_results = try_join_all(
-            locations
-                .iter()
-                .zip(results.iter())
-                .filter(|(_, cached)| cached.is_none())
-                .map(|(loc, _)| reader.read(**loc)),
-        )
-        .await?;
+        // Batch-read disk misses. Reader::read_many requires sorted, unique positions, while this
+        // helper preserves the caller's order and permits duplicates.
+        let misses: Vec<(usize, u64)> = locations
+            .iter()
+            .zip(results.iter())
+            .enumerate()
+            .filter_map(|(idx, (loc, cached))| cached.is_none().then_some((idx, **loc)))
+            .collect();
+        if misses.is_empty() {
+            return Ok(results.into_iter().map(Option::unwrap).collect());
+        }
+
+        let mut miss_positions: Vec<u64> = misses.iter().map(|(_, loc)| *loc).collect();
+        miss_positions.sort_unstable();
+        miss_positions.dedup();
+
+        let disk_results = reader.read_many(&miss_positions).await?;
 
         // Merge disk results back in order.
-        let mut disk_iter = disk_results.into_iter();
+        let mut results = results;
+        for (idx, loc) in misses {
+            // `miss_positions` is sorted and deduped, and `loc` came from it before deduping, so
+            // binary search must find the matching read_many result.
+            let result_idx = miss_positions
+                .binary_search(&loc)
+                .expect("disk result missing for requested location");
+            results[idx] = Some(disk_results[result_idx].clone());
+        }
         Ok(results
             .into_iter()
-            .map(|r| r.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch")))
+            .map(|r| r.expect("operation should be resolved"))
             .collect())
     }
 
@@ -2107,11 +2122,12 @@ mod tests {
                 value_current,
             ))];
 
-            // read_ops should resolve all three sources correctly.
+            // read_ops should resolve all three sources correctly while preserving order and
+            // duplicates across the disk-backed subset.
             let reader = db.log.reader().await;
             let ops = merkleizer
                 .read_ops(
-                    &[committed_loc, parent_loc, current_loc],
+                    &[current_loc, committed_loc, parent_loc, committed_loc],
                     &batch_ops,
                     &reader,
                 )
@@ -2122,9 +2138,10 @@ mod tests {
             assert_eq!(
                 ops,
                 vec![
+                    Operation::Update(update::Unordered(key_current, value_current)),
                     Operation::Update(update::Unordered(key_db, value_db)),
                     Operation::Update(update::Unordered(key_parent, value_parent)),
-                    Operation::Update(update::Unordered(key_current, value_current)),
+                    Operation::Update(update::Unordered(key_db, value_db)),
                 ]
             );
 
