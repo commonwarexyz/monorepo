@@ -27,7 +27,7 @@ The average case behavior tells a better story, but still not a great one. Analy
 
 Consider the example in Fig. 2, which shows what’s called a “forward” (oldest to youngest) bagging strategy. We can analogously define the *backward* bagging strategy which folds the peaks from youngest to oldest. Many more schemes are possible! Another simple strategy is *min-depth,* which bags peaks according to a binary Merkle tree over them.
 
-![Figure 2: Forward-bagging peaks to derive the MMR root commitment.](/imgs/pyramid-mmb-fig-2.jpeg)
+![Figure 2: Forward-bagging peaks to derive the MMR root commitment.](/imgs/bagging_mmb.jpeg)
 
 If we’re looking to minimize either worst-case or average-case proof size over all elements of an MMR, the backwards-bagging strategy is provably optimal (by the strictly decreasing peak height property)! In comparison, forward bagging doubles the worst-case proof size, and increases the average case considerably (Fig. 3).
 
