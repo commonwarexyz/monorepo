@@ -51,7 +51,7 @@ jobs:
         tool: just@1.43.0
     - name: Install Dylint toolchain support
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
-      run: rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustc-dev
+      run: rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustc-dev llvm-tools-preview
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
       run: |
