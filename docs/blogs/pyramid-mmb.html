@@ -119,10 +119,10 @@ Bayardo</a></div>
         and (uniform) average case is a balanced binary Merkle tree
         (BMT). More exotic cryptography such as <em>vector
         commitments</em> and <em>SNARK</em>s can deliver even smaller
-        proofs than Merkle structures <a
-        href="https://arxiv.org/html/2504.14069v1">[3]</a>, but with a
-        number of non-trivial trade-offs and complexities we won’t dive
-        into here.</p>
+        proofs than Merkle structures (<a
+        href="https://arxiv.org/html/2504.14069v1">example</a>), but
+        with a number of non-trivial trade-offs and complexities we
+        won’t dive into here.</p>
         <p>As we’ve described in earlier articles <a
         href="/blogs/adb-any">[1]</a>, <a
         href="/blogs/adb-current">[2]</a>, Commonware’s QMDB <a
@@ -141,7 +141,7 @@ Bayardo</a></div>
         number of active values, since most updates are for existing
         keys, and many keys eventually get deleted. The MMR may
         introduce additional inefficiencies over a BMT depending on how
-        peaks are <em>bagged,</em> which we detail shortly. Still, it’s
+        peaks are <em>bagged</em>, which we detail shortly. Still, it’s
         conceivable that a typical MMR proof may not be much larger than
         those from a BMT, unlike those from Merkle structures with high
         node fan-out like Ethereum’s (hexary) state trie.</p>
@@ -195,7 +195,7 @@ Bayardo</a></div>
         deal with more than one mountain. When there’s more than one
         mountain in the structure, computing the <em>root</em> (aka
         commitment) of the structure requires combining (or
-        <em>bagging)</em> the peaks into a single digest. Just as we
+        <em>bagging</em>) the peaks into a single digest. Just as we
         pairwise-hash leaves to derive ancestor digests in the MMR, we
         pairwise-hash peaks in order to derive the structure’s root. And
         the exact strategy we use to perform these <span
@@ -215,15 +215,15 @@ Bayardo</a></div>
         </figure>
         <p>If we’re looking to minimize either worst-case or
         average-case proof size over all elements of an MMR, the
-        backwards-bagging strategy is provably optimal (by the strictly
+        backward-bagging strategy is provably optimal (by the strictly
         decreasing peak height property)! In comparison, forward bagging
         doubles the worst-case proof size, and increases the average
         case considerably (Fig. 3).</p>
         <figure>
         <img src="/imgs/mmr_combined_linear.png"
-        alt="Figure 3: Worst-case and average-case proof sizes for forwards vs backwards bagged MMRs." />
+        alt="Figure 3: Worst-case and average-case proof sizes for forward-bagged vs backward-bagged MMRs." />
         <figcaption aria-hidden="true">Figure 3: Worst-case and
-        average-case proof sizes for forwards vs backwards bagged
+        average-case proof sizes for forward-bagged vs backward-bagged
         MMRs.</figcaption>
         </figure>
         <p>If it seems the case is closed when it comes to how to bag
@@ -245,9 +245,9 @@ Bayardo</a></div>
         ancient history into a single digest, it introduces a new
         inefficiency: elements in the largest active peaks are forced to
         provide every smaller active peak to their right individually.
-        On the flip side, backwards bagging perfectly optimizes the
+        On the flip side, backward bagging perfectly optimizes the
         active peaks, but “pollutes” the proof with ancient history.
-        Backwards bagging the MMR from Fig. 1, for example, results in
+        Backward bagging the MMR from Fig. 1, for example, results in
         the digest of peak P1 appearing in every proof, even those for
         active elements in the disjoint trees to its right. Seems a bit
         unnecessary?</p>
@@ -259,14 +259,14 @@ Bayardo</a></div>
         from the commit operation at the tip of the log. Instead of a
         naive forward or backward-only strategy, what if we were to
         forward-bag all peaks “covering” nodes entirely within the
-        inactive range, and backwards bag the remaining? We call this
+        inactive range, and backward-bag the remaining? We call this
         policy <em>pyramid bagging</em> because it can be visualized as
         a tree with only two branches that looks a bit like a (possibly
-        lop-sided) 2D pyramid (Fig. 5). Proofs for elements in the
-        active range contain <em>at most one</em> peak from the inactive
-        range, and still benefit from the average-case improvements
-        provided by backwards bagging. Average proof size indeed
-        plummets when pyramid bagging is used (Fig. 6).</p>
+        lopsided) 2D pyramid (Fig. 5). Proofs for elements in the active
+        range contain <em>at most one</em> peak from the inactive range,
+        and still benefit from the average-case improvements provided by
+        backward bagging. Average proof size indeed plummets when
+        pyramid bagging is used (Fig. 6).</p>
         <figure>
         <img src="/imgs/pyramid-bagging.png"
         alt="Figure 5: Pyramid bagging 8 peaks, with the first four covering elements only in the inactive region." />
@@ -276,8 +276,8 @@ Bayardo</a></div>
         </figure>
         <figure>
         <img src="/imgs/mmr_recent_pyramid_mmr_comparison.png"
-        alt="Figure 6: Pyramid bagged MMR average-case proof size over an active region of 1M leaves." />
-        <figcaption aria-hidden="true">Figure 6: Pyramid bagged MMR
+        alt="Figure 6: Pyramid-bagged MMR average-case proof size over an active region of 1M leaves." />
+        <figcaption aria-hidden="true">Figure 6: Pyramid-bagged MMR
         average-case proof size over an active region of 1M
         leaves.</figcaption>
         </figure>
@@ -290,7 +290,7 @@ Bayardo</a></div>
         average-case proof size of <span
         class="math inline">\(\log_2(N)\)</span> despite all our
         efforts. It’s also frustrating, and potentially problematic for
-        low bandwidth clients, that the proof sizes vary so considerably
+        low-bandwidth clients, that the proof sizes vary so considerably
         even for small changes in the database size.</p>
         <p>We address these final concerns through a recent innovation
         known as the Merkle Mountain Belt <a
@@ -309,7 +309,7 @@ Bayardo</a></div>
         </figure>
         <p>The MMB has mountains of decreasing height, but that decrease
         is not strict: it may have up to two consecutive mountains at
-        the same height (Fig. 7). In the worst case then, the MMB may
+        the same height (Fig. 7). In the worst case, then, the MMB may
         have twice the number of peaks that must be bagged to derive the
         root compared to an MMR. This might seem a step in the wrong
         direction, and in fact proofs of <em>old</em> elements within an
@@ -330,20 +330,20 @@ Bayardo</a></div>
         our domain, where roots are computed only after large batches of
         updates (such as after processing an entire block of
         transactions).</p>
-        <p>Unfortunately, a backwards bagging policy when applied to an
+        <p>Unfortunately, a backward bagging policy when applied to an
         MMB-style update rule is not compatible with the <span
         class="math inline">\(O(\log(\text{age}))\)</span> property. But
         it does result in something quite interesting: the resulting
         Merkle structure is isomorphic to a balanced binary Merkle tree
-        over all elements! In other words, the proof size of each
-        element has the same size (within 1 digest), completely
-        eliminating variance in proof size.</p>
+        over all elements! In other words, each element’s proof has the
+        same size (within 1 digest), completely eliminating variance in
+        proof size.</p>
         <p>Combined with pyramid bagging, the MMB update rule gives us
         the best of all worlds: proof size is bounded by <span
-        class="math inline">\(\log_2\)</span> of the active range, its
-        average case over the active range is minimized (Fig. 8), and
-        variance is eliminated. Applied to QMDB then, a proof over an
-        active element contains at most <span
+        class="math inline">\(\log_2\)</span> of the active range,
+        average-case proof size over the active range is minimized (Fig.
+        8), and variance is eliminated. Applied to QMDB then, a proof
+        over an active element contains at most <span
         class="math inline">\(\log_2(2V) = \log_2(V) + 1\)</span>
         digests. Put another way, the maximum penalty in proof size of a
         P-MMB over the optimal structure (a BMT over the active values
