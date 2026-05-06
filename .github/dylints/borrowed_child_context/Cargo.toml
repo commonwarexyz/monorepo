@@ -1,7 +1,7 @@
 [package]
 name = "borrowed_child_context"
-version = "0.1.0"
-description = "Reject borrowed temporary child contexts"
+version = "0.0.1"
+description = "Reject borrowed temporary child contexts."
 edition = "2021"
 publish = false
 

@@ -4,10 +4,6 @@ impl Context {
     fn child(&self, _: &'static str) -> Self {
         Self
     }
-
-    fn with_label(self, _: &'static str) -> Self {
-        self
-    }
 }
 
 struct Holder {
@@ -28,8 +24,7 @@ fn main() {
     takes_context(&context.child("direct"));
     takes_context(
         &context
-            .child("multiline")
-            .with_label("worker"),
+            .child("multiline"),
     );
 
     let holder = Holder { context: Context };

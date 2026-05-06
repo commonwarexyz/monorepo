@@ -75,7 +75,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "borrowed_child_context"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "dylint_linting",
  "dylint_testing",

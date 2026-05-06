@@ -16,8 +16,8 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Why is this bad?
     ///
-    /// The borrowed temporary is fragile, hard to audit, and can hide whether
-    /// the callee needs a child context or could take the parent context.
+    /// Calling `child` on a context returns a new context. It should be consumed
+    /// or a reference to the parent context should be passed instead.
     ///
     /// ### Example
     ///
@@ -51,7 +51,7 @@ impl<'tcx> LateLintPass<'tcx> for BorrowedChildContext {
                 diag.primary_message("borrowed temporary child context");
                 diag.span_help(
                     expr.span,
-                    "bind the child context before borrowing, or pass the parent context",
+                    "pass a reference to an existing context, or bind the child context before borrowing it",
                 );
             });
         }
