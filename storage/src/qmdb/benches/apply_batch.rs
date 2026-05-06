@@ -163,7 +163,7 @@ fn bench_apply_batch(c: &mut Criterion) {
 
         c.bench_function(
             &format!(
-                "{}/case=uncommitted_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                "{}/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
                 module_path!(),
             ),
             |b| {
@@ -180,7 +180,7 @@ fn bench_apply_batch(c: &mut Criterion) {
 
         c.bench_function(
             &format!(
-                "{}/case=committed_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                "{}/case=comm_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
                 module_path!(),
             ),
             |b| {
@@ -197,7 +197,7 @@ fn bench_apply_batch(c: &mut Criterion) {
 
         c.bench_function(
             &format!(
-                "{}/case=committed_uncommitted_chain variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                "{}/case=comm_uncomm_chain variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
                 module_path!(),
             ),
             |b| {
@@ -214,7 +214,7 @@ fn bench_apply_batch(c: &mut Criterion) {
 
         c.bench_function(
             &format!(
-                "{}/case=multi_uncommitted variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                "{}/case=multi_uncomm variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
                 module_path!(),
             ),
             |b| {
