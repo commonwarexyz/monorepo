@@ -157,7 +157,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.try_read_sync_into(position, items_per_section, offsets, &mut buf)
     }
 
-    /// Read an item synchronously using caller-provided scratch space.
+    /// Read an item synchronously using caller-provided buffer.
     fn try_read_sync_into(
         &self,
         position: u64,
