@@ -223,7 +223,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.try_get_sync_into(section, position, &mut buf)
     }
 
-    /// Get an item synchronously using caller-provided scratch space.
+    /// Get an item synchronously using caller-provided buffer.
     ///
     /// `buf` must be at least [Self::CHUNK_SIZE] bytes.
     ///
