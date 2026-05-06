@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Honey, I Shrunk the Proofs!</title>
+    <meta name="description" content="Commonware’s authenticated
+databases now use pyramid-bagged Merkle Mountain Belts to make Merkle
+proofs smaller, more predictable, and efficient for light clients.">
+    <meta name="author" content="Roberto Bayardo">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/pyramid-mmb" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/pyramid-mmb-fig-8.png" />
+    <meta property="og:title" content="Honey, I Shrunk the Proofs!" />
+    <meta property="og:description" content="Commonware’s authenticated
+databases now use pyramid-bagged Merkle Mountain Belts to make Merkle
+proofs smaller, more predictable, and efficient for light clients." />
+    <meta property="article:author" content="Roberto Bayardo" />
+    <meta property="article:published_time" content="2026-05-06T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-05-06T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/pyramid-mmb" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/pyramid-mmb" />
+    <meta property="twitter:title" content="Honey, I Shrunk the
+Proofs!" />
+    <meta property="twitter:description" content="Commonware’s
+authenticated databases now use pyramid-bagged Merkle Mountain Belts to
+make Merkle proofs smaller, more predictable, and efficient for light
+clients." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/pyramid-mmb-fig-8.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/roberto_bayardo" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Honey, I Shrunk the Proofs!</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/roberto_bayardo">Roberto
+Bayardo</a></div>
+                        <div class="date">May 6th, 2026</div>
+        </div>
+        <p>Grab your magnifying glass, because today we’re going to tell
+        you about new innovations in Commonware’s authenticated
+        databases that bring proof sizes down to near the smallest
+        possible for Merkle-based structures. Small proofs enable
+        efficient light clients, a cornerstone of decentralization in
+        blockchains that unfortunately remain under-utilized. What
+        exactly is a proof, though? A proof is a small amount of
+        information (a collection of <em>digests</em>) that augments a
+        piece of data and can be used to establish the authenticity of
+        that data, even if obtained from a completely untrusted source
+        such as a nearby cache. As proofs become smaller and cheaper to
+        verify, decentralized applications can approach and even exceed
+        the performance of those that rely on trusted, centralized
+        providers.</p>
+        <p>When restricted to k-ary hashing, the Merkle structure that
+        minimizes leaf depth (and hence proof size) in both the worst
+        and (uniform) average case is a balanced binary Merkle tree
+        (BMT). More exotic cryptography such as <em>vector
+        commitments</em> and <em>SNARK</em>s can deliver even smaller
+        proofs than Merkle structures <a
+        href="https://arxiv.org/html/2504.14069v1">[3]</a>, but with a
+        number of non-trivial trade-offs and complexities we won’t dive
+        into here.</p>
+        <p>As we’ve described in earlier articles <a
+        href="/blogs/adb-any">[1]</a>, <a
+        href="/blogs/adb-current">[2]</a>, Commonware’s QMDB <a
+        href="https://arxiv.org/abs/2501.05262">[3]</a> <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/qmdb/mod.rs">implementation</a>
+        relies on a Merkle Mountain Range <a href="/blogs/mmr">[4]</a>
+        (MMR) applied to a log of database updates. We adopted an MMR
+        because of its incredible efficiency in handling updates and
+        resistance to grinding <a href="/blogs/its-a-grind">[5]</a>, but
+        at what cost does this come with respect to proof efficiency?
+        Instead of having depth logarithmic in the number of values
+        <span class="math inline">\(V\)</span> (stored in its leaves)
+        like a BMT, the MMR has depth logarithmic in the number of
+        updates <span class="math inline">\(U\)</span>. The number of
+        updates is strictly greater (sometimes much greater) than the
+        number of active values, since most updates are for existing
+        keys, and many keys eventually get deleted. The MMR may
+        introduce additional inefficiencies over a BMT depending on how
+        peaks are <em>bagged,</em> which we detail shortly. Still, it’s
+        conceivable that a typical MMR proof may not be much larger than
+        those from a BMT, unlike those from Merkle structures with high
+        node fan-out like Ethereum’s (hexary) state trie.</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-1.png"
+        alt="Figure 1: An MMR over a log of update operations, each with age determined by distance from tip. Average depth of elements in the active region (indicated by dark color) is lower than that of the inactive region." />
+        <figcaption aria-hidden="true">Figure 1: An MMR over a log of
+        update operations, each with age determined by distance from
+        tip. Average depth of elements in the active region (indicated
+        by dark color) is lower than that of the inactive
+        region.</figcaption>
+        </figure>
+        <p>Precisely quantifying MMR proof inefficiency over a BMT
+        requires establishing a bit more context. First, while the
+        worst-case proof size from an MMR over updates is clearly larger
+        than the worst-case proof size of a BMT over database values,
+        it’s important to also consider the average-case proof size, as
+        well as proof size variance (all three are important). Second,
+        QMDB involves continuously moving <em>active</em> values to the
+        tip of the log, and for the most part we’re interested primarily
+        (if not exclusively) in proving over active values. Define the
+        <em>age</em> of an element in the log as its distance from the
+        tip (the most recent update therefore has an age of 0). If there
+        are <span class="math inline">\(V\)</span> active values in the
+        database, the incremental compaction policy in our
+        implementation guarantees no active value has a corresponding
+        update with age greater than <span
+        class="math inline">\(2V\)</span>. This means proofs in our
+        system are almost always over leaves that are far to the right
+        in the MMR, regardless of how long the update log has grown.
+        Third, proof size corresponds to the depth of the proven element
+        in the Merkle structure. Since MMRs consist of perfect trees of
+        strictly decreasing height, the depth of an element is, <em>on
+        average,</em> smaller the further to the right it resides in the
+        structure (Fig. 1).</p>
+        <p>Unfortunately, even taking in all the above, the worst-case
+        proof behavior of an MMR over updates remains quite a bit worse
+        than a tree over only active values, and it occurs when the
+        number of elements (leaves) is an exact power of 2. All
+        mountains collapse into a single tree of depth <span
+        class="math inline">\(\log_2(U)\)</span>, where <span
+        class="math inline">\(U\)</span> is the number of updates
+        (recall that <span class="math inline">\(U \gg V\)</span>). The
+        inclusion proof for <em>any</em> value, whether or not it is
+        active, therefore requires at least <span
+        class="math inline">\(\log_2(U)\)</span> digests.</p>
+        <p>The average case behavior tells a better story, but still not
+        a great one. Analyzing average case behavior requires we look
+        beyond the degenerate case of <span
+        class="math inline">\(2^k\)</span> elements and consider how we
+        deal with more than one mountain. When there’s more than one
+        mountain in the structure, computing the <em>root</em> (aka
+        commitment) of the structure requires combining (or
+        <em>bagging)</em> the peaks into a single digest. Just as we
+        pairwise-hash leaves to derive ancestor digests in the MMR, we
+        pairwise-hash peaks in order to derive the structure’s root. And
+        the exact strategy we use to perform these <span
+        class="math inline">\(|\text{peaks}| - 1\)</span> pairwise
+        hashes can have a profound impact on proof size.</p>
+        <p>Consider the example in Fig. 2, which shows what’s called a
+        “forward” (oldest to youngest) bagging strategy. We can
+        analogously define the <em>backward</em> bagging strategy which
+        folds the peaks from youngest to oldest. Many more schemes are
+        possible! Another simple strategy is <em>min-depth,</em> which
+        bags peaks according to a binary Merkle tree over them.</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-2.jpeg"
+        alt="Figure 2: Forward-bagging peaks to derive the MMR root commitment." />
+        <figcaption aria-hidden="true">Figure 2: Forward-bagging peaks
+        to derive the MMR root commitment.</figcaption>
+        </figure>
+        <p>If we’re looking to minimize either worst-case or
+        average-case proof size over all elements of an MMR, the
+        backwards-bagging strategy is provably optimal (by the strictly
+        decreasing peak height property)! In comparison, forward bagging
+        doubles the worst-case proof size, and increases the average
+        case considerably (Fig. 3).</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-3.png"
+        alt="Figure 3: Worst-case and average-case proof sizes for forwards vs backwards bagged MMRs." />
+        <figcaption aria-hidden="true">Figure 3: Worst-case and
+        average-case proof sizes for forwards vs backwards bagged
+        MMRs.</figcaption>
+        </figure>
+        <p>If it seems the case is closed when it comes to how to bag
+        peaks, recall that in our particular application, we’re far more
+        interested in proof sizes over the <em>younger</em> elements
+        since that’s where our active state resides. Focusing only on
+        these elements paints a more complex picture (Fig. 4).
+        Average-case proof size of the two bagging strategies when
+        looking only at the last ~1M elements begins to favor the
+        forward bagging strategy at a large enough database size.</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-4.png"
+        alt="Figure 4: Average-case proof size over the youngest ~1M elements." />
+        <figcaption aria-hidden="true">Figure 4: Average-case proof size
+        over the youngest ~1M elements.</figcaption>
+        </figure>
+        <p>If you’re now thinking “forward bagging FTW!”, you’re only
+        half right. While forward bagging elegantly collapses the entire
+        ancient history into a single digest, it introduces a new
+        inefficiency: elements in the largest active peaks are forced to
+        provide every smaller active peak to their right individually.
+        On the flip side, backwards bagging perfectly optimizes the
+        active peaks, but “pollutes” the proof with ancient history.
+        Backwards bagging the MMR from Fig. 1, for example, results in
+        the digest of peak P1 appearing in every proof, even those for
+        active elements in the disjoint trees to its right. Seems a bit
+        unnecessary?</p>
+        <p>This insight suggests a new, <em>active</em> strategy that is
+        aware of the inactivity boundary. While our simple graphs assume
+        the inactivity boundary is always at age 1M, in practice it will
+        vary over time. But at any given point where we need to generate
+        a root or proof, the QMDB <em>inactivity floor</em> is derivable
+        from the commit operation at the tip of the log. Instead of a
+        naive forward or backward-only strategy, what if we were to
+        forward-bag all peaks “covering” nodes entirely within the
+        inactive range, and backwards bag the remaining? We call this
+        policy <em>pyramid bagging</em> because it can be visualized as
+        a tree with only two branches that looks a bit like a (possibly
+        lop-sided) 2D pyramid (Fig. 5). Proofs for elements in the
+        active range contain <em>at most one</em> peak from the inactive
+        range, and still benefit from the average-case improvements
+        provided by backwards bagging. Average proof size indeed
+        plummets when pyramid bagging is used (Fig. 6).</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-5.png"
+        alt="Figure 5: Pyramid bagging 8 peaks, with the first four covering elements only in the inactive region." />
+        <figcaption aria-hidden="true">Figure 5: Pyramid bagging 8
+        peaks, with the first four covering elements only in the
+        inactive region.</figcaption>
+        </figure>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-6.png"
+        alt="Figure 6: Pyramid bagged MMR average-case proof size over an active region of 1M leaves." />
+        <figcaption aria-hidden="true">Figure 6: Pyramid bagged MMR
+        average-case proof size over an active region of 1M
+        leaves.</figcaption>
+        </figure>
+        <p>While pyramid bagging delivers a huge win in proof size on
+        average, it still suffers from the exact same worst-case
+        behavior as the other bagging schemes, even over recent
+        elements. This can be seen from the spikes in Fig. 6 (appearing
+        at <span class="math inline">\(N\)</span> a power of 2), where
+        all three schemes produce the exact same worst <em>and</em>
+        average-case proof size of <span
+        class="math inline">\(\log_2(N)\)</span> despite all our
+        efforts. It’s also frustrating, and potentially problematic for
+        low bandwidth clients, that the proof sizes vary so considerably
+        even for small changes in the database size.</p>
+        <p>We address these final concerns through a recent innovation
+        known as the Merkle Mountain Belt <a
+        href="https://arxiv.org/abs/2511.13582">[6]</a>. A Merkle
+        Mountain Belt (MMB) can be thought of as an MMR with a different
+        update rule that adds ancestor nodes at a slightly slower pace,
+        along with a special bagging policy. In an MMR, we may have to
+        add up to <span class="math inline">\(\log(U)\)</span> ancestor
+        nodes with each new update. With an MMB, we always add <em>at
+        most one</em> ancestor per update.</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-7.png"
+        alt="Figure 7: An MMR (left) and an MMB (right) over the same 8 elements." />
+        <figcaption aria-hidden="true">Figure 7: An MMR (left) and an
+        MMB (right) over the same 8 elements.</figcaption>
+        </figure>
+        <p>The MMB has mountains of decreasing height, but that decrease
+        is not strict: it may have up to two consecutive mountains at
+        the same height (Fig. 7). In the worst case then, the MMB may
+        have twice the number of peaks that must be bagged to derive the
+        root compared to an MMR. This might seem a step in the wrong
+        direction, and in fact proofs of <em>old</em> elements within an
+        MMB are larger than those from an MMR over the exact same data
+        (though only by a small constant: both retain an <span
+        class="math inline">\(O(\log(U))\)</span> bound overall). But
+        the MMB has an additional remarkable property: the depth of an
+        element in the structure is bounded by a logarithmic function of
+        its <em>age</em>. It therefore doesn’t just provide small proofs
+        of recent elements on average, it guarantees it.</p>
+        <p>This remarkable MMB property bounding proof size by age,
+        however, is not independent of the bagging policy. One that
+        <em>is</em> compatible is forward bagging (F-MMB). A more
+        complex compatible policy proposed in the MMB paper provides
+        other interesting properties such as <span
+        class="math inline">\(O(1)\)</span> root update time with each
+        tree update. But this latter property is of little interest in
+        our domain, where roots are computed only after large batches of
+        updates (such as after processing an entire block of
+        transactions).</p>
+        <p>Unfortunately, a backwards bagging policy when applied to an
+        MMB-style update rule is not compatible with the <span
+        class="math inline">\(O(\log(\text{age}))\)</span> property. But
+        it does result in something quite interesting: the resulting
+        Merkle structure is isomorphic to a balanced binary Merkle tree
+        over all elements! In other words, the proof size of each
+        element has the same size (within 1 digest), completely
+        eliminating variance in proof size.</p>
+        <p>Combined with pyramid bagging, the MMB update rule gives us
+        the best of all worlds: proof size is bounded by <span
+        class="math inline">\(\log_2\)</span> of the active range, its
+        average case over the active range is minimized (Fig. 8), and
+        variance is eliminated. Applied to QMDB then, a proof over an
+        active element contains at most <span
+        class="math inline">\(\log_2(2V) = \log_2(V) + 1\)</span>
+        digests. Put another way, the maximum penalty in proof size of a
+        P-MMB over the optimal structure (a BMT over the active values
+        alone) is a mere 2 digests. Analytically, the worst-case proof
+        size of a P-MMB is 50% smaller than the F-MMB over the active
+        range, and average-case proof size is 33% smaller.</p>
+        <figure>
+        <img src="/imgs/pyramid-mmb-fig-8.png"
+        alt="Figure 8: Forward and pyramid-bagged MMB proof sizes grow only with the size of the active region (independent of N). Pyramid bagging results in an optimal Merkle structure over the active region (isomorphic to a BMT) with respect to average and worst-case proof size." />
+        <figcaption aria-hidden="true">Figure 8: Forward and
+        pyramid-bagged MMB proof sizes grow only with the size of the
+        active region (independent of N). Pyramid bagging results in an
+        optimal Merkle structure over the active region (isomorphic to a
+        BMT) with respect to average and worst-case proof
+        size.</figcaption>
+        </figure>
+        <p>The <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/qmdb/mod.rs">latest
+        QMDB implementations</a> in Commonware perform pyramid bagging
+        and can be instantiated with either an <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/merkle/mmr/mod.rs">MMR</a>
+        or <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/merkle/mmb/mod.rs">MMB</a>.
+        If you’ve been curious about MMR-authenticated stores but were
+        scared off by <span class="math inline">\(\log(U)\)</span> proof
+        scaling, less than ideal average-case proof size, or high proof
+        size variance, take our P-MMB authenticated stores out for
+        spin.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
