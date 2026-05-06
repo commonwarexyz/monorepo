@@ -991,6 +991,7 @@ impl BufferPoolInner {
     ///
     /// If `zero_on_new` is true, newly-created buffers are allocated with
     /// `alloc_zeroed`. Reused buffers are never re-zeroed here.
+    #[inline(always)]
     fn try_alloc(&self, class_index: usize, zero_on_new: bool) -> Option<Allocation> {
         let class = &self.classes[class_index];
 
@@ -1006,6 +1007,16 @@ impl BufferPoolInner {
         }
 
         // Slow path: create a new tracked buffer (metrics only here).
+        self.try_alloc_new(class, zero_on_new)
+    }
+
+    /// Creates a new tracked buffer after the reuse path fails.
+    ///
+    /// This is separate from [`Self::try_alloc`] so the steady-state allocation
+    /// path can inline the TLS hit without also carrying reservation, metrics,
+    /// and heap-allocation code.
+    #[inline(never)]
+    fn try_alloc_new(&self, class: &Arc<SizeClass>, zero_on_new: bool) -> Option<Allocation> {
         let label = SizeClassLabel {
             size_class: class.size as u64,
         };
@@ -1146,6 +1157,7 @@ impl BufferPool {
     ///
     /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
     /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
+    #[inline(always)]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         if capacity < self.inner.config.pool_min_size {
             let size = capacity.max(1);
