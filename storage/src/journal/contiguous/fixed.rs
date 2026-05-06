@@ -162,7 +162,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.try_read_sync_into(pos, items_per_blob, &mut buf)
     }
 
-    /// Read an item synchronously using caller-provided scratch space.
+    /// Read an item synchronously using caller-provided buffer.
     fn try_read_sync_into(&self, pos: u64, items_per_blob: u64, buf: &mut [u8]) -> Option<A> {
         if pos >= self.size || pos < self.pruning_boundary {
             return None;
