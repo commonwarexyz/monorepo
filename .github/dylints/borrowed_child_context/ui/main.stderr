@@ -1,0 +1,55 @@
+error: borrowed temporary child context
+  --> $DIR/main.rs:28:20
+   |
+LL |     takes_context(&context.child("direct"));
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: bind the child context before borrowing, or pass the parent context
+  --> $DIR/main.rs:28:19
+   |
+LL |     takes_context(&context.child("direct"));
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[deny(borrowed_child_context)]` on by default
+
+error: borrowed temporary child context
+  --> $DIR/main.rs:30:10
+   |
+LL |           &context
+   |  __________^
+LL | |             .child("multiline")
+   | |_______________________________^
+   |
+help: bind the child context before borrowing, or pass the parent context
+  --> $DIR/main.rs:30:9
+   |
+LL | /         &context
+LL | |             .child("multiline")
+LL | |             .with_label("worker"),
+   | |_________________________________^
+
+error: borrowed temporary child context
+  --> $DIR/main.rs:36:20
+   |
+LL |     takes_context(&holder.context.child("field"));
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: bind the child context before borrowing, or pass the parent context
+  --> $DIR/main.rs:36:19
+   |
+LL |     takes_context(&holder.context.child("field"));
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: borrowed temporary child context
+  --> $DIR/main.rs:39:28
+   |
+LL |     takes_context_mut(&mut context.child("mutable"));
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: bind the child context before borrowing, or pass the parent context
+  --> $DIR/main.rs:39:23
+   |
+LL |     takes_context_mut(&mut context.child("mutable"));
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 4 previous errors
+
