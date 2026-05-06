@@ -1383,10 +1383,11 @@ pub use test_plan::Plan as FuzzPlan;
 mod tests {
     use super::{test_plan::Plan, *};
     use commonware_invariants::minifuzz;
+    use commonware_macros::test_group;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::N3f1;
-    use std::sync::LazyLock;
+    use std::{sync::LazyLock, time::Duration};
 
     /// Cached setup used by every test in this module. Sized for the largest
     /// `num_players` exercised by `Plan::new` calls below (7) so that one
@@ -1715,14 +1716,18 @@ mod tests {
         assert_eq!(output, decoded);
     }
 
+    #[test_group("slow")]
     #[test]
     fn fuzz_plan() {
-        minifuzz::test(|u| {
-            let plan: Plan = u.arbitrary()?;
-            let seed: u64 = u.arbitrary()?;
-            plan.run(&TEST_SETUP, seed, &Sequential)
-                .expect("plan should not panic");
-            Ok(())
-        });
+        minifuzz::Builder::default()
+            .with_min_iterations(0)
+            .with_search_time(Duration::from_secs(600))
+            .test(|u| {
+                let plan: Plan = u.arbitrary()?;
+                let seed: u64 = u.arbitrary()?;
+                plan.run(&TEST_SETUP, seed, &Sequential)
+                    .expect("plan should not panic");
+                Ok(())
+            });
     }
 }
