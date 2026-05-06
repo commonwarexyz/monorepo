@@ -1,6 +1,6 @@
 ---
 title: "Honey, I Shrunk the Proofs!"
-description: "Commonware’s authenticated databases now use pyramid-bagged Merkle Mountain Belts to make Merkle proofs smaller, more predictable, and efficient for light clients."
+description: "TBD"
 date: "May 6th, 2026"
 published-time: "2026-05-06T00:00:00Z"
 modified-time: "2026-05-06T00:00:00Z"
