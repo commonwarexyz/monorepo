@@ -129,18 +129,18 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
     },
-    /// Sets the sync starting point (advances if higher than current).
+    /// Sets the sync starting point using an already-processed anchor block.
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// Marshal stores the anchor, treats its height as processed, and delivers
+    /// blocks starting at `anchor.height() + 1`. Data below the anchor height is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
     ///
     /// The default floor is 0.
     SetFloor {
-        /// The candidate floor height.
-        height: Height,
+        /// The candidate floor anchor.
+        anchor: V::Block,
     },
     /// Prunes finalized blocks and certificates below the given height.
     ///
@@ -343,17 +343,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .is_some()
     }
 
-    /// Sets the sync starting point (advances if higher than current).
+    /// Sets the sync starting point using an already-processed anchor block.
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// Marshal stores the anchor, treats its height as processed, and delivers
+    /// blocks starting at `anchor.height() + 1`. Data below the anchor height is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
-    pub async fn set_floor(&self, height: Height) {
-        self.sender.send_lossy(Message::SetFloor { height }).await;
+    pub async fn set_floor(&self, anchor: V::Block) {
+        self.sender.send_lossy(Message::SetFloor { anchor }).await;
     }
 
     /// Prunes finalized blocks and certificates below the given height.

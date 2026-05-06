@@ -1,14 +1,18 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::{
-            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
+        application::{
+            genesis,
+            validation::{
+                has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
+                Stage,
+            },
         },
         core::Mailbox,
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epocher, Round},
+    types::{Epoch, Epocher, Round},
     Application, Block, Epochable, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -124,6 +128,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     block: B,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
+    cached_genesis: &genesis::Cache<B>,
     tx: &mut oneshot::Sender<bool>,
     stage: Stage,
 ) -> Option<bool>
@@ -141,12 +146,14 @@ where
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
+        context.epoch(),
         // We are guaranteed that the parent round for any `context` is
         // in the same epoch (recall, the boundary block of the previous epoch
         // is the genesis block of the current epoch).
         Some(Round::new(context.epoch(), parent_view)),
         application,
         marshal,
+        cached_genesis,
     )
     .await;
     // If consensus drops the receiver, we can stop work early.
@@ -222,9 +229,11 @@ where
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
+    epoch: Epoch,
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
+    cached_genesis: &genesis::Cache<B>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -232,7 +241,7 @@ where
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let genesis = application.genesis().await;
+    let genesis = cached_genesis.get::<E, A>(application, epoch).await;
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {

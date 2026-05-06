@@ -704,8 +704,10 @@ where
                         )
                         .await;
                     }
-                    Message::SetFloor { height } => {
-                        if self.last_processed_height >= height {
+                    Message::SetFloor { anchor } => {
+                        let height = anchor.height();
+                        let advanced = self.last_processed_height < height;
+                        if height < self.last_processed_height {
                             warn!(
                                 %height,
                                 existing = %self.last_processed_height,
@@ -714,7 +716,21 @@ where
                             continue;
                         }
 
-                        // Update the processed height
+                        if let Err(err) = self.finalized_blocks.put(anchor.clone().into()).await {
+                            error!(?err, %height, "failed to store floor anchor");
+                            return;
+                        }
+                        if let Err(err) = self.finalized_blocks.sync().await {
+                            error!(?err, %height, "failed to sync floor anchor");
+                            return;
+                        }
+                        self.notify_subscribers(&anchor);
+
+                        if !advanced {
+                            continue;
+                        }
+
+                        // Update the processed height.
                         self.update_processed_height(height, &mut resolver).await;
                         if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
@@ -735,6 +751,7 @@ where
                         // Intentionally keep existing block subscriptions alive. Canceling
                         // waiters can have catastrophic consequences (nodes can get stuck in
                         // different views) as actors do not retry subscriptions on failed channels.
+                        self.try_dispatch_blocks(&mut application).await;
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor

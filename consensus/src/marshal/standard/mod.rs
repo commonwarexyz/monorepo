@@ -184,6 +184,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_set_floor_same_height_preserves_pending_acks() {
+        harness::set_floor_same_height_preserves_pending_acks::<InlineHarness>();
+        harness::set_floor_same_height_preserves_pending_acks::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<InlineHarness>();
         harness::ack_pipeline_backlog_persists_on_restart::<DeferredHarness>();
@@ -2388,7 +2394,8 @@ mod tests {
             .await;
 
             // Raise the floor above the hint we are about to send.
-            mailbox.set_floor(Height::new(10)).await;
+            let anchor = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(10), 10);
+            mailbox.set_floor(anchor).await;
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox

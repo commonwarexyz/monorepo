@@ -47,14 +47,26 @@
 //! needed for a short period of time, such as unverified blocks or notarizations. External storage
 //! (archive backends) is used to persist finalized blocks and certificates indefinitely.
 //!
-//! Marshal will store all blocks after a configurable starting height (or, floor) onward.
-//! This allows for state sync from a specific height rather than from genesis. When
-//! updating the starting height, marshal will attempt to prune blocks in external storage
-//! that are no longer needed, if the backing [`store::Blocks`] supports pruning.
+//! ## State Sync
 //!
-//! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
-//! feature is only recommended for applications that support state sync (i.e., those that don't require full
-//! block history to participate in consensus)._
+//! Marshal can start from an already-processed anchor block rather than from height zero. Calling
+//! [`core::Mailbox::set_floor`] with an anchor at height `H` stores the anchor, marks `H` as
+//! processed, and resumes ordered delivery at `H + 1`. When `H` advances the floor, marshal drops
+//! pending application acknowledgements, persists the new floor, and attempts to prune finalized
+//! block data below `H` when the backing [`store::Blocks`] supports pruning. Calling `set_floor`
+//! again with the current floor is a no-op.
+//!
+//! A state-sync snapshot must include enough application state to safely continue from the
+//! anchor. In particular, marshaled applications must be able to return the genesis block for
+//! the active epoch via [`crate::Application::genesis`]. Marshal uses that application-provided
+//! block when consensus asks for the epoch genesis digest or when the epoch genesis is the parent
+//! of the next proposal or verification. Applications that need more history than the anchor and
+//! epoch genesis (for example, to reconstruct application-level logs) must include that history in
+//! their own snapshot state.
+//!
+//! _Setting a floor prevents this node from backfilling blocks below that floor for peers. This
+//! feature is only appropriate for applications that support state sync and do not require full
+//! block history to participate in consensus._
 //!
 //! ## Limitations and Future Work
 //!

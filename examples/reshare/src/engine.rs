@@ -289,7 +289,7 @@ where
 
         let application = Deferred::new(
             context.with_label("application"),
-            Application::new(dkg_mailbox.clone()),
+            Application::new(dkg_mailbox.clone(), marshal_mailbox.clone()),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );

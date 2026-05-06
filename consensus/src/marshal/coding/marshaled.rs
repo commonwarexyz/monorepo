@@ -51,8 +51,7 @@
 //!
 //! # Implementation Notes
 //!
-//! - Genesis blocks are handled specially: epoch 0 returns the application's genesis block,
-//!   while subsequent epochs use the last block of the previous epoch as genesis
+//! - Genesis blocks are supplied by the application for each epoch.
 //! - Blocks are automatically verified to be within the current epoch
 //!
 //! # Notarization and Data Availability
@@ -82,6 +81,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
+            genesis,
             validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
             verification_tasks::VerificationTasks,
         },
@@ -122,7 +122,7 @@ use commonware_utils::{
 };
 use futures::future::{ready, try_join, Either, Ready};
 use rand::Rng;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
@@ -131,6 +131,9 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
     minimum_shards: NZU16!(1),
     extra_shards: NZU16!(1),
 };
+
+/// Cached genesis entry for the coding marshal wrapper.
+type CachedGenesis<B, C, H> = genesis::Cache<(Commitment, CodedBlock<B, C, H>)>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -184,7 +187,7 @@ where
     epocher: ES,
     strategy: S,
     verification_tasks: VerificationTasks<Commitment>,
-    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
+    cached_genesis: CachedGenesis<B, C, H>,
 
     build_duration: Timed<E>,
     verify_duration: Timed<E>,
@@ -262,7 +265,7 @@ where
             strategy,
             epocher,
             verification_tasks: VerificationTasks::new(),
-            cached_genesis: Arc::new(OnceLock::new()),
+            cached_genesis: genesis::Cache::new(),
 
             build_duration,
             verify_duration,
@@ -312,13 +315,14 @@ where
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
+                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
-                    cached_genesis,
+                    &cached_genesis,
                 )
                 .await;
 
@@ -449,33 +453,17 @@ where
     type Digest = Commitment;
     type Context = Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>;
 
-    /// Returns the genesis digest for a given epoch.
-    ///
-    /// For epoch 0, this returns the application's genesis block digest. For subsequent
-    /// epochs, it returns the digest of the last block from the previous epoch, which
-    /// serves as the genesis block for the new epoch.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a non-zero epoch is requested but the previous epoch's final block is not
-    /// available in storage. This indicates a critical error in the consensus engine startup
-    /// sequence, as engines must always have the genesis block before starting.
+    /// Returns the genesis commitment for a given epoch.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let Some(previous_epoch) = epoch.previous() else {
-            let genesis_block = self.application.genesis().await;
-            return genesis_coding_commitment::<H, _>(&genesis_block);
-        };
-
-        let last_height = self
-            .epocher
-            .last(previous_epoch)
-            .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
-            // A new consensus engine will never be started without having the genesis block
-            // of the new epoch (the last block of the previous epoch) already stored.
-            unreachable!("missing starting epoch block at height {last_height}");
-        };
-        block.commitment()
+        let (commitment, _) = self
+            .cached_genesis
+            .get_or_insert_with::<E, A, B, _>(
+                &mut self.application,
+                epoch,
+                derive_coded_genesis::<B, C, H>,
+            )
+            .await;
+        commitment
     }
 
     /// Proposes a new block or re-proposes the epoch boundary block.
@@ -562,13 +550,14 @@ where
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
+                    consensus_context.epoch(),
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
                     // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
-                    cached_genesis,
+                    &cached_genesis,
                 )
                 .await;
 
@@ -1038,10 +1027,11 @@ where
 #[allow(clippy::type_complexity)]
 async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
+    epoch: Epoch,
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
-    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
+    cached_genesis: &CachedGenesis<B, C, H>,
 ) -> Either<Ready<Result<CodedBlock<B, C, H>, RecvError>>, oneshot::Receiver<CodedBlock<B, C, H>>>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -1051,18 +1041,11 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    if cached_genesis.get().is_none() {
-        let genesis = application.genesis().await;
-        let genesis_coding_commitment = genesis_coding_commitment::<H, _>(&genesis);
-        let coded_genesis = CodedBlock::<B, C, H>::new_trusted(genesis, genesis_coding_commitment);
-        let _ = cached_genesis.set((genesis_coding_commitment, coded_genesis));
-    }
-
     let (genesis_commitment, coded_genesis) = cached_genesis
-        .get()
-        .expect("genesis cache should be initialized");
-    if parent_commitment == *genesis_commitment {
-        Either::Left(ready(Ok(coded_genesis.clone())))
+        .get_or_insert_with::<E, A, B, _>(application, epoch, derive_coded_genesis::<B, C, H>)
+        .await;
+    if parent_commitment == genesis_commitment {
+        Either::Left(ready(Ok(coded_genesis)))
     } else {
         Either::Right(
             marshal
@@ -1070,6 +1053,17 @@ where
                 .await,
         )
     }
+}
+
+fn derive_coded_genesis<B, C, H>(genesis: B) -> (Commitment, CodedBlock<B, C, H>)
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+{
+    let commitment = genesis_coding_commitment::<H, _>(&genesis);
+    let coded_genesis = CodedBlock::<B, C, H>::new_trusted(genesis, commitment);
+    (commitment, coded_genesis)
 }
 
 /// Constructs the [`Commitment`] for the genesis block.

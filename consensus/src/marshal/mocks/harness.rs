@@ -197,7 +197,10 @@ pub trait TestHarness: 'static + Sized {
     >;
 
     /// The block type used in test operations.
-    type TestBlock: Heightable + Clone + Send;
+    type TestBlock: Heightable
+        + Clone
+        + Send
+        + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
     type ValidatorExtra: Clone + Send;
@@ -2963,6 +2966,93 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
     });
 }
 
+/// Test that refreshing the floor at the current height does not redispatch in-flight blocks.
+pub fn set_floor_same_height_preserves_pending_acks<H: TestHarness>() {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(0xF1002)
+            .with_timeout(Some(Duration::from_secs(120))),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+
+        let validator = participants[0].clone();
+        let application = Application::<H::ApplicationBlock>::manual_ack();
+        let setup = H::setup_validator_with(
+            context.with_label("validator_0"),
+            &mut oracle,
+            validator,
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(3),
+            application,
+        )
+        .await;
+        let application = setup.application;
+        let mut handles = vec![ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        }];
+        let mut handle = handles[0].clone();
+
+        let n = NUM_VALIDATORS as u16;
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        let anchor = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(n),
+            Height::zero(),
+            0,
+            n,
+        );
+
+        let mut parent = H::digest(&anchor);
+        let mut parent_commitment = H::commitment(&anchor);
+        for i in 1..=3 {
+            let block = H::make_test_block(parent, parent_commitment, Height::new(i), i, n);
+            let commitment = H::commitment(&block);
+            parent = H::digest(&block);
+            parent_commitment = commitment;
+            let round = Round::new(
+                epocher.containing(H::height(&block)).unwrap().epoch(),
+                View::new(i),
+            );
+            H::verify(&mut handle, round, &block, &mut handles).await;
+            let proposal = Proposal {
+                round,
+                parent: View::new(i.saturating_sub(1)),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            H::report_finalization(&mut handle.mailbox, finalization).await;
+        }
+
+        while application.pending_ack_heights().len() < 3 {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            application.pending_ack_heights(),
+            vec![Height::new(1), Height::new(2), Height::new(3)]
+        );
+
+        handle.mailbox.set_floor(anchor.into()).await;
+        assert!(handle
+            .mailbox
+            .get_block(Identifier::Height(Height::zero()))
+            .await
+            .is_some());
+        assert_eq!(
+            application.pending_ack_heights(),
+            vec![Height::new(1), Height::new(2), Height::new(3)]
+        );
+    });
+}
+
 /// Test that batched pending-ack progress survives restart.
 pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
     let runner = deterministic::Runner::new(
@@ -3192,7 +3282,8 @@ pub fn sync_height_floor<H: TestHarness>() {
             .await
             .unwrap();
 
-        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR)).await;
+        let anchor = blocks[(NEW_SYNC_FLOOR - 1) as usize].clone();
+        mailbox.set_floor(anchor.into()).await;
         H::report_finalization(&mut mailbox, latest_finalization).await;
 
         let mut finished = false;
@@ -3217,7 +3308,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             let block = mailbox
                 .get_block(Identifier::Height(Height::new(height)))
                 .await;
-            if height <= NEW_SYNC_FLOOR {
+            if height < NEW_SYNC_FLOOR {
                 assert!(block.is_none());
             } else {
                 assert_eq!(block.unwrap().height().get(), height);
@@ -3487,7 +3578,14 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
-        victim_mailbox.set_floor(floor).await;
+        let floor_anchor = H::make_test_block(
+            Sha256::hash(b"floor-parent"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            floor,
+            floor.get(),
+            NUM_VALIDATORS as u16,
+        );
+        victim_mailbox.set_floor(floor_anchor.into()).await;
         // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
         // has been processed before we re-enable the delayed delivery path.
         let _ = victim_mailbox.get_finalization(floor).await;
