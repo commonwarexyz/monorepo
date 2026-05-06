@@ -896,6 +896,7 @@ impl BufferPoolThreadCache {
         // Allocation can happen from caller-owned TLS destructors during thread
         // teardown. If the local cache is unavailable, fall back to the global
         // freelist instead of panicking.
+        #[allow(clippy::option_if_let_else)]
         match Self::cache(class.class_id, class.thread_cache_capacity) {
             Some(mut cache) => {
                 // SAFETY: `cache` points to this thread's initialized TLS cache.
