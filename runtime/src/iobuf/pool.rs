@@ -57,9 +57,10 @@ use crate::{
 use commonware_utils::{NZUsize, NZU32};
 use crossbeam_utils::CachePadded;
 use std::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     mem::align_of,
     num::{NonZeroU32, NonZeroUsize},
+    ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -293,8 +294,7 @@ impl BufferPoolConfig {
     ///
     /// # Panics
     ///
-    /// Panics if size-class bounds violate the invariants checked by
-    /// [`Self::validate`].
+    /// Panics if size-class bounds violate the invariants checked by `validate`.
     ///
     /// Panics if the derived per-class capacity does not fit in `u32`.
     pub fn with_budget_bytes(mut self, budget_bytes: NonZeroUsize) -> Self {
@@ -572,24 +572,33 @@ impl SizeClass {
     }
 }
 
-/// Free tracked buffer cached in the current thread's TLS registry.
+/// Free tracked buffer owned by a thread-local size-class cache.
 ///
-/// This is allocator cache state, not a checked-out buffer. The cached
-/// `Arc<SizeClass>` is moved back into a checked-out pooled buffer on a local
-/// hit, or used to flush the buffer into the shared global freelist when the
-/// thread cache spills or is dropped on thread exit.
+/// This is allocator cache state, not a checked-out buffer. While an entry is
+/// held here, the buffer is owned by the current thread and is not visible to
+/// the class-global freelist.
+///
+/// The `slot` identifies the buffer within its [`SizeClass`]. The cached
+/// [`Arc<SizeClass>`] is moved back into a checked-out pooled buffer on a local
+/// hit, and is also what lets spill and thread-exit drop paths return the
+/// buffer to the correct class-global freelist even if the originating
+/// [`BufferPool`] handle has already been dropped.
 struct TlsSizeClassCacheEntry {
     buffer: AlignedBuffer,
     class: Arc<SizeClass>,
     slot: u32,
 }
 
-/// Per-class thread-local cache for tracked buffers.
+/// Per-thread cache for one size class's tracked buffers.
 ///
-/// The hot steady-state path allocates from and returns to this cache. When
-/// the cache is full, small bins route overflow directly to the class-global
-/// freelist while larger bins spill a batch back to it. When the thread exits
-/// its remaining entries are flushed to that same global freelist.
+/// Each instance is stored in [`TlsSizeClassCaches`] under one global
+/// [`SizeClass::class_id`], so all entries in the cache belong to the same size
+/// class. The cache owns full [`AlignedBuffer`] values while they are local,
+/// returning them to the global freelist happens only on miss refill, overflow,
+/// explicit flush, or thread exit.
+///
+/// The hot steady-state allocation path pops an entry from `entries`, and the
+/// hot return path pushes one back while there is room.
 struct TlsSizeClassCache {
     entries: Vec<TlsSizeClassCacheEntry>,
     capacity: usize,
@@ -729,42 +738,110 @@ impl Drop for TlsSizeClassCache {
     }
 }
 
-/// Utilities for managing the calling thread's local [`BufferPool`] caches.
+/// Registry of one thread's per-size-class caches.
 ///
-/// Internally, each thread owns a sparse `Vec<Option<TlsSizeClassCache>>`
-/// keyed by `SizeClass::class_id`, with one per-size-class cache allocated
-/// lazily on first use. Thread exit naturally flushes cached buffers back to
-/// the shared global freelist because `TlsSizeClassCache` drains itself in
-/// `Drop`.
+/// A [`BufferPool`] keeps its size classes in a vector, so allocation resolves
+/// a request to an index within that pool. Thread-local caches need a different
+/// key because a thread can use more than one pool. They use the process-global
+/// [`SizeClass::class_id`] assigned by [`NEXT_SIZE_CLASS_ID`], so index `0` in
+/// one pool cannot collide with index `0` in another pool.
 ///
-/// This type exists to keep the unsafe TLS access localized. Steady-state cache
-/// operations go through this facade rather than free functions over the
-/// `thread_local!` static.
+/// The registry is a sparse vector indexed by `class_id`. Each initialized
+/// entry is a [`TlsSizeClassCache`] for that global size class. Missing entries
+/// mean this thread has not used that size class yet. Holes can remain for the
+/// lifetime of the thread because class ids are monotonic and never reused.
+///
+/// We intentionally use `Vec<Option<...>>` because class ids are dense enough
+/// for direct indexing to be cheaper than hashing, but a thread may initialize
+/// only a subset of live size classes. This keeps the TLS-hit path to a bounds
+/// check and an initialized-entry check, with no synchronization.
+struct TlsSizeClassCaches {
+    bins: Vec<Option<TlsSizeClassCache>>,
+}
+
+impl TlsSizeClassCaches {
+    /// Creates an empty registry.
+    const fn new() -> Self {
+        Self { bins: Vec::new() }
+    }
+
+    /// Returns the cache for `class_id`, creating it lazily on first use.
+    #[inline(always)]
+    fn get_or_init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
+        if class_id < self.bins.len() && self.bins[class_id].is_some() {
+            return self.bins[class_id]
+                .as_mut()
+                .expect("class cache was checked as initialized");
+        }
+
+        self.init(class_id, capacity)
+    }
+
+    /// Initializes and returns the cache for `class_id`.
+    ///
+    /// This is separate from [`Self::get_or_init`] so the steady-state TLS hit
+    /// can inline only the existing-cache lookup. We annotate with
+    /// `inline(never)` to keep the resize and allocation path out of pooled
+    /// allocation and drop.
+    #[inline(never)]
+    fn init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
+        if class_id >= self.bins.len() {
+            self.bins.resize_with(class_id + 1, || None);
+        }
+        self.bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(capacity))
+    }
+}
+
+impl Drop for TlsSizeClassCaches {
+    fn drop(&mut self) {
+        let this = self as *mut Self;
+        BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| {
+            if fast.get() == this {
+                fast.set(ptr::null_mut());
+            }
+        });
+    }
+}
+
+/// Access to the calling thread's local [`BufferPool`] caches.
+///
+/// This type hides the TLS layout used by pooled allocation and return. The
+/// main TLS key owns the registry. It has a destructor, so thread exit drops
+/// the registry and each `TlsSizeClassCache` flushes its remaining entries to
+/// the class-global freelist.
+///
+/// Rust's access path for TLS values with destructors includes checks for
+/// access during or after destruction. Those checks are correct, but they are
+/// expensive on the hot pooled allocation/drop path. After first checked
+/// access, we cache a raw pointer to the same registry in a destructor-free TLS
+/// key and use that pointer for steady-state access.
+///
+/// If the checked key is unavailable during thread-local destruction, cache
+/// access returns `None` and callers use the class-global freelist instead.
 pub struct BufferPoolThreadCache;
 
 impl BufferPoolThreadCache {
-    // Each thread owns a sparse registry of per-size-class caches, indexed by the
-    // global `SizeClass::class_id`.
-    //
-    // We intentionally use `Vec<Option<...>>` here:
-    // - `class_id` values are dense enough for vector indexing to be cheap
-    // - each thread typically touches only a subset of all size classes
-    // - `None` represents "this thread has never initialized a cache for this id"
-    //
-    // This keeps the hot TLS-hit path to "index and branch" without a hash map or
-    // any synchronization. The cost is that vectors can accumulate holes over time
-    // because ids are not recycled.
     thread_local! {
-        static TLS_SIZE_CLASS_CACHES: UnsafeCell<Vec<Option<TlsSizeClassCache>>> =
-            const { UnsafeCell::new(Vec::new()) };
+        // Owns this thread's cache registry and drops it during thread exit.
+        static TLS_SIZE_CLASS_CACHES: UnsafeCell<TlsSizeClassCaches> =
+            const { UnsafeCell::new(TlsSizeClassCaches::new()) };
+
+        // Performance-only pointer to the same registry. This key has no
+        // destructor, so the hot allocation/drop path avoids Rust's
+        // destructor-aware access path for `TLS_SIZE_CLASS_CACHES`.
+        static TLS_SIZE_CLASS_CACHES_FAST: Cell<*mut TlsSizeClassCaches> =
+            const { Cell::new(ptr::null_mut()) };
     }
 
     /// Flushes all local caches for the current thread into the global freelists.
     pub fn flush() {
-        Self::TLS_SIZE_CLASS_CACHES.with(|bins| {
+        // If the owning TLS registry is unavailable during thread exit, this
+        // is a no-op. The registry's own drop path will flush any remaining
+        // entries.
+        let _ = Self::TLS_SIZE_CLASS_CACHES.try_with(|caches| {
             // SAFETY: this TLS value is only ever accessed by the current thread.
-            let bins = unsafe { &mut *bins.get() };
-            for cache in bins.iter_mut() {
+            let caches = unsafe { &mut *caches.get() };
+            for cache in caches.bins.iter_mut() {
                 let _ = cache.take();
             }
         });
@@ -779,31 +856,21 @@ impl BufferPoolThreadCache {
             return;
         }
 
-        let class_id = class.class_id;
-        let thread_cache_capacity = class.thread_cache_capacity;
-        let mut entry = Some((class, buffer));
-
         // Returning a pooled buffer can happen from arbitrary Drop code,
-        // including during thread-local destruction. Use `try_with` so a
-        // buffer dropped after this TLS key is destroyed can fall back to the
-        // global freelist instead of panicking.
-        if Self::TLS_SIZE_CLASS_CACHES
-            .try_with(|bins| {
-                Self::with_cache(bins, class_id, thread_cache_capacity, |cache| {
-                    let (class, buffer) =
-                        entry.take().expect("entry must be returned exactly once");
-
-                    cache.push(TlsSizeClassCacheEntry {
+        // including during thread-local destruction. If the local cache is
+        // unavailable, fall back to the global freelist instead of panicking.
+        match Self::cache(class.class_id, class.thread_cache_capacity) {
+            Some(mut cache) => {
+                // SAFETY: `cache` points to this thread's initialized TLS cache.
+                unsafe {
+                    cache.as_mut().push(TlsSizeClassCacheEntry {
                         buffer,
                         class,
                         slot,
                     });
-                });
-            })
-            .is_err()
-        {
-            let (class, buffer) = entry.expect("entry must remain available if TLS access fails");
-            class.global.put(slot, buffer);
+                }
+            }
+            None => class.global.put(slot, buffer),
         }
     }
 
@@ -827,42 +894,65 @@ impl BufferPoolThreadCache {
         }
 
         // Allocation can happen from caller-owned TLS destructors during thread
-        // teardown. Once this key is being destroyed, `with` would panic. Fall
-        // back to the global freelist instead.
-        Self::TLS_SIZE_CLASS_CACHES
-            .try_with(|bins| {
-                Self::with_cache(bins, class.class_id, class.thread_cache_capacity, |cache| {
-                    cache.pop(class)
-                })
-            })
-            .unwrap_or_else(|_| {
-                class
-                    .global
-                    .take()
-                    .map(|(slot, buffer)| TlsSizeClassCacheEntry {
-                        buffer,
-                        class: class.clone(),
-                        slot,
-                    })
-            })
+        // teardown. If the local cache is unavailable, fall back to the global
+        // freelist instead of panicking.
+        match Self::cache(class.class_id, class.thread_cache_capacity) {
+            Some(mut cache) => {
+                // SAFETY: `cache` points to this thread's initialized TLS cache.
+                unsafe { cache.as_mut().pop(class) }
+            }
+            None => class
+                .global
+                .take()
+                .map(|(slot, buffer)| TlsSizeClassCacheEntry {
+                    buffer,
+                    class: class.clone(),
+                    slot,
+                }),
+        }
     }
 
-    /// Accesses the current thread's local cache for `class_id`, creating it
-    /// lazily on first use, and invokes `f` on it.
+    /// Returns the current thread's local cache for `class_id`.
+    ///
+    /// The raw fast path serves steady-state accesses and initializes missing
+    /// size-class caches when the registry pointer is already available. The
+    /// checked TLS path is only needed when this thread has not stored the raw
+    /// registry pointer yet.
     #[inline(always)]
-    fn with_cache<R>(
-        bins: &UnsafeCell<Vec<Option<TlsSizeClassCache>>>,
-        class_id: usize,
-        capacity: usize,
-        f: impl FnOnce(&mut TlsSizeClassCache) -> R,
-    ) -> R {
-        // SAFETY: this TLS value is only ever accessed by the current thread.
-        let bins = unsafe { &mut *bins.get() };
-        if class_id >= bins.len() {
-            bins.resize_with(class_id + 1, || None);
+    fn cache(class_id: usize, capacity: usize) -> Option<ptr::NonNull<TlsSizeClassCache>> {
+        let caches = Self::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| fast.get());
+        if !caches.is_null() {
+            // SAFETY: the fast pointer is set only from this thread's
+            // `TLS_SIZE_CLASS_CACHES` value and cleared before that value
+            // drops.
+            return Some(ptr::NonNull::from(unsafe {
+                (&mut *caches).get_or_init(class_id, capacity)
+            }));
         }
-        let cache = bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(capacity));
-        f(cache)
+
+        Self::cache_slow(class_id, capacity)
+    }
+
+    /// Initializes the TLS fast path, then returns the local cache.
+    ///
+    /// This runs once per thread, when [`Self::cache`] finds no cached registry
+    /// pointer. It goes through the checked owner TLS key, stores the registry
+    /// pointer in [`Self::TLS_SIZE_CLASS_CACHES_FAST`], and then initializes the
+    /// requested size-class cache if needed. We annotate with `inline(never)` to
+    /// keep that one-time setup out of pooled allocation and drop.
+    #[inline(never)]
+    fn cache_slow(class_id: usize, capacity: usize) -> Option<ptr::NonNull<TlsSizeClassCache>> {
+        // The owning TLS key has a destructor, so it can be unavailable during
+        // thread-local teardown.
+        Self::TLS_SIZE_CLASS_CACHES
+            .try_with(|caches| {
+                let caches = caches.get();
+                Self::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| fast.set(caches));
+
+                // SAFETY: this TLS value is only ever accessed by the current thread.
+                ptr::NonNull::from(unsafe { (&mut *caches).get_or_init(class_id, capacity) })
+            })
+            .ok()
     }
 }
 
@@ -965,13 +1055,21 @@ impl std::fmt::Debug for BufferPool {
     }
 }
 
-// Global allocator for `SizeClass::class_id`.
-//
-// Ids are monotonic and never reused. This is deliberate: a reused id would
-// require generation tracking or equivalent validation on every TLS cache
-// access to distinguish a live size class from stale per-thread cache state.
-// Keeping ids monotonic makes the TLS fast path cheaper and simpler at the
-// cost of leaving holes in `TLS_CLASS_CACHES` over process lifetime.
+/// Global allocator for [`SizeClass::class_id`].
+///
+/// `class_id` is the key used by [`TlsSizeClassCaches`]. It must be global, not
+/// pool-local, because the same thread-local registry serves every
+/// [`BufferPool`] touched by the thread. Without a global id, two different
+/// pools could share a class index and accidentally share one local cache.
+///
+/// Ids are monotonic and never reused. Reuse would make stale per-thread cache
+/// state ambiguous after a pool is dropped and a later pool creates a new size
+/// class with the same id. Avoiding reuse means the hot path can index directly
+/// without generation checks, at the cost of possible holes in each thread's
+/// sparse registry.
+///
+/// Relaxed ordering is sufficient: the atomic operation is only used to assign
+/// unique ids, not to publish any associated size-class state.
 static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl BufferPool {
@@ -1269,10 +1367,12 @@ mod tests {
     /// Helper to get the number of free buffers parked in the current thread's
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
-        BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES.with(|bins| {
+        BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES.with(|caches| {
             // SAFETY: this TLS value is only ever accessed by the current thread.
-            let bins = unsafe { &*bins.get() };
-            bins.get(class.class_id)
+            let caches = unsafe { &*caches.get() };
+            caches
+                .bins
+                .get(class.class_id)
                 .and_then(Option::as_ref)
                 .map_or(0, |cache| cache.entries.len())
         })
