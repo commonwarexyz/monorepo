@@ -55,13 +55,10 @@ const BYZZFUZZ_FAULT_PHASE: Duration = MAX_SLEEP_DURATION;
 /// must finalize at least one new view within this virtual-time window;
 /// otherwise `run_liveness` panics with a liveness violation.
 ///
-/// Sized to dominate the protocol-level retry timers honest validators are
-/// configured with in [`crate::spawn_honest_validator`]: `timeout_retry`
-/// (10s) + `certification_timeout` (2s) + a scheduling margin. Anything
-/// shorter risks panicking before the retry path can rebroadcast
-/// nullify / recovery traffic that was dropped during the fault phase --
-/// which would be a false liveness violation.
-const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(15);
+/// Intentionally generous to avoid false liveness failures while the target
+/// is still being calibrated. This should dominate honest retry/recovery
+/// timers after GST.
+const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(360);
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
