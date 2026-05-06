@@ -867,6 +867,18 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
+/// Marks a dedicated subtree as closed before the parent task's result is made
+/// observable through its handle.
+struct DedicatedGuard {
+    tree: Arc<Tree>,
+}
+
+impl Drop for DedicatedGuard {
+    fn drop(&mut self) {
+        self.tree.abort();
+    }
+}
+
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
@@ -881,6 +893,7 @@ pub struct Context {
     tree: Arc<Tree>,
     execution: Execution,
     traced: bool,
+    dedicated: Option<Arc<Tree>>,
 }
 
 impl Clone for Context {
@@ -898,6 +911,7 @@ impl Clone for Context {
             tree: child,
             execution: Execution::default(),
             traced: false,
+            dedicated: self.dedicated.clone(),
         }
     }
 }
@@ -977,6 +991,7 @@ impl Context {
                 tree: Tree::root(),
                 execution: Execution::default(),
                 traced: false,
+                dedicated: None,
             },
             executor,
             panicked,
@@ -1047,6 +1062,7 @@ impl Context {
                 tree: Tree::root(),
                 execution: Execution::default(),
                 traced: false,
+                dedicated: None,
             },
             executor,
             panicked,
@@ -1114,6 +1130,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn colocated(mut self) -> Self {
+        self.execution = Execution::Colocated;
+        self
+    }
+
     fn shared(mut self, blocking: bool) -> Self {
         self.execution = Execution::Shared(blocking);
         self
@@ -1130,14 +1151,38 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
+        let past = self.execution;
         let traced = self.traced;
+        let inherited_dedicated = self.dedicated.clone();
         self.execution = Execution::default();
         self.traced = false;
+        if matches!(past, Execution::Colocated) {
+            let dedicated = inherited_dedicated
+                .as_ref()
+                .expect("`colocated()` requires a running dedicated ancestor");
+            assert!(
+                !dedicated.is_aborted(),
+                "`colocated()` requires a running dedicated ancestor"
+            );
+        }
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
+        let child_dedicated = match past {
+            // Dedicated creates a new execution domain for the spawned child.
+            // In the deterministic runtime, the child context node itself is
+            // sufficient to model that domain because the supervision tree
+            // already tracks whether the dedicated root task is still alive.
+            Execution::Dedicated => Some(child.clone()),
+            // Colocated reuses the nearest dedicated ancestor, which must
+            // already have been validated before creating the child node.
+            Execution::Colocated => inherited_dedicated,
+            // Shared clears the dedicated branch assignment.
+            Execution::Shared(_) => None,
+        };
         self.tree = child;
+        self.dedicated = child_dedicated.clone();
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
@@ -1149,6 +1194,15 @@ impl crate::Spawner for Context {
             Either::Left(f(self).instrument(span))
         } else {
             Either::Right(f(self))
+        };
+        let future = if matches!(past, Execution::Dedicated) {
+            let dedicated = child_dedicated.expect("dedicated tree missing");
+            Either::Left(async move {
+                let _guard = DedicatedGuard { tree: dedicated };
+                future.await
+            })
+        } else {
+            Either::Right(future)
         };
         let (f, handle) = Handle::init(
             future,

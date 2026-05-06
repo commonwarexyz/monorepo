@@ -31,6 +31,9 @@ pub(crate) mod supervision;
 pub enum Execution {
     /// Task runs on a dedicated thread.
     Dedicated,
+    /// Task runs on the same dedicated execution domain as its closest
+    /// dedicated ancestor.
+    Colocated,
     /// Task runs on the shared executor. `true` marks short blocking work that should
     /// use the runtime's blocking-friendly pool.
     Shared(bool),

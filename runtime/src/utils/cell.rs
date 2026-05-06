@@ -113,6 +113,10 @@ where
         Self::Present(self.into_present().dedicated())
     }
 
+    fn colocated(self) -> Self {
+        Self::Present(self.into_present().colocated())
+    }
+
     fn shared(self, blocking: bool) -> Self {
         Self::Present(self.into_present().shared(blocking))
     }

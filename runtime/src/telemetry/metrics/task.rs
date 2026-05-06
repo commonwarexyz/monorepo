@@ -9,7 +9,8 @@ pub struct Label {
     name: String,
     /// The type of task (root, async, or blocking).
     kind: Kind,
-    /// Whether the task runs on a dedicated thread or the shared runtime.
+    /// Whether the task runs on a shared executor, a dedicated thread, or is
+    /// colocated with a dedicated ancestor.
     execution: Execution,
 }
 
@@ -30,6 +31,7 @@ impl Label {
             kind: Kind::Task,
             execution: match execution {
                 crate::Execution::Dedicated => Execution::Dedicated,
+                crate::Execution::Colocated => Execution::Colocated,
                 crate::Execution::Shared(blocking) => {
                     if blocking {
                         Execution::SharedBlocking
@@ -65,4 +67,6 @@ pub enum Execution {
     SharedBlocking,
     /// Task runs on a dedicated thread.
     Dedicated,
+    /// Task is co-located on the same thread as its dedicated ancestor.
+    Colocated,
 }
