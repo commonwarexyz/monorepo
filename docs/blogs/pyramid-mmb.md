@@ -1,6 +1,6 @@
 ---
 title: "Honey, I Shrunk the Proofs!"
-description: "By combining an active-region-aware bagging policy, pyramid bagging, with the Merkle Mountain Belt (MMB), our new scheme makes active-value proofs small and predictable: within two digests of a balanced binary Merkle tree over those values without sacrificing append-only updates."
+description: "By combining an active-region-aware bagging policy, pyramid bagging, with the Merkle Mountain Belt (MMB), our new scheme makes active-value proofs small and predictable: within two digests of a balanced binary Merkle tree over those values (without sacrificing append-only updates)."
 date: "May 6th, 2026"
 published-time: "2026-05-06T00:00:00Z"
 modified-time: "2026-05-06T00:00:00Z"
@@ -13,7 +13,7 @@ katex: true
 
 Grab your magnifying glass: QMDB's Merkle proofs are getting smaller.
 
-QMDB's original MMR-based proof scheme made updates efficient and grinding-resistant, but proof sizes were tied to historical updates $U$ rather than active values $V$. By combining an active-region-aware bagging policy, *pyramid bagging*, with the Merkle Mountain Belt (MMB), our new scheme makes active-value proofs small and predictable: within two digests of a balanced binary Merkle tree over those values (the best you can do) without sacrificing the append-only structure that drew us to Merkle Mountain Ranges in the first place.
+QMDB's original MMR-based proof scheme made updates efficient and grinding-resistant, but proof sizes were tied to historical updates $U$ rather than active values $V$. By combining an active-region-aware bagging policy, *pyramid bagging*, with the Merkle Mountain Belt (MMB), our new scheme makes active-value proofs small and predictable: within two digests of a balanced binary Merkle tree over those values (without sacrificing the append-only structure that drew us to Merkle Mountain Ranges in the first place).
 
 When restricted to k-ary hashing, the Merkle structure that minimizes leaf depth (and hence proof size) in both the worst and (uniform) average case is a balanced binary Merkle tree (BMT). More exotic cryptography such as *vector commitments* and *SNARK*s can deliver even smaller proofs than Merkle structures [[3]](https://arxiv.org/html/2504.14069v1), but with a number of non-trivial trade-offs and complexities we won’t dive into here.
 
