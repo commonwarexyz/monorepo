@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Runner as _,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, Reader as _};
+use commonware_storage::journal::contiguous::fixed::Journal;
 use commonware_utils::{sequence::FixedBytes, NZUsize};
 use criterion::{criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
@@ -18,8 +18,7 @@ const PARTITION: &str = "test-partition";
 
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
-    let reader = journal.reader().await;
-    let stream = reader
+    let stream = journal
         .replay(NZUsize!(buffer), 0)
         .await
         .expect("failed to replay journal");

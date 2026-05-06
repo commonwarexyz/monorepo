@@ -69,7 +69,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         config: ConfigOf<Self>,
     ) -> impl Future<Output = Self::Db> + Send;
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
-    fn db_sync(db: &Self::Db) -> impl Future<Output = ()> + Send;
+    fn db_sync(db: &mut Self::Db) -> impl Future<Output = ()> + Send;
 
     fn apply_ops(
         db: Self::Db,
@@ -252,7 +252,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+        let mut synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::db_root(&synced_db), target_root);
         let expected_root = H::db_root(&synced_db);
@@ -260,7 +260,7 @@ where
         let expected_op_count = bounds.end;
         let expected_oldest_retained_loc = bounds.start;
 
-        H::db_sync(&synced_db).await;
+        H::db_sync(&mut synced_db).await;
         drop(synced_db);
         let reopened_db = H::init_db_with_config(context.with_label("reopened"), db_config).await;
 
@@ -988,7 +988,7 @@ pub(crate) mod harnesses {
             db.destroy().await.unwrap();
         }
 
-        async fn db_sync(db: &Self::Db) {
+        async fn db_sync(db: &mut Self::Db) {
             db.sync().await.unwrap();
         }
 

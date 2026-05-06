@@ -35,7 +35,6 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
-    sync::AsyncMutex,
 };
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -74,7 +73,7 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
-    pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
+    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
     /// and grafted leaf computation.
@@ -596,8 +595,8 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
-        let mut metadata = self.metadata.lock().await;
+    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
+        let metadata = &mut self.metadata;
         metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
@@ -638,12 +637,12 @@ where
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.any.commit().await
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
@@ -653,7 +652,7 @@ where
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.into_inner().destroy().await?;
+        self.metadata.destroy().await?;
         self.any.destroy().await
     }
 }
@@ -702,11 +701,11 @@ where
 {
     type Error = Error<F>;
 
-    async fn commit(&self) -> Result<(), Error<F>> {
+    async fn commit(&mut self) -> Result<(), Error<F>> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error<F>> {
+    async fn sync(&mut self) -> Result<(), Error<F>> {
         Self::sync(self).await
     }
 

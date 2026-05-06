@@ -106,7 +106,7 @@ where
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        let journal = Self::init(context, config).await?;
+        let mut journal = Self::init(context, config).await?;
         let size = Contiguous::size(&journal).await;
 
         // Fresh journal already aligned with the sync start - nothing to do.

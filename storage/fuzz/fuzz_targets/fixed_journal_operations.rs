@@ -131,15 +131,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Read { pos } => {
-                    let reader = journal.reader().await;
-                    let bounds = reader.bounds();
+                    let bounds = journal.bounds();
                     if bounds.contains(pos) {
-                        reader.read(*pos).await.unwrap();
+                        journal.read(*pos).await.unwrap();
                     }
                 }
 
                 JournalOperation::ReadMany { positions } => {
-                    let reader = journal.reader().await;
+                    let reader = journal.reader();
                     let bounds = reader.bounds();
                     // Map fuzz positions into valid, sorted, deduplicated positions
                     let mut mapped: Vec<u64> = positions
@@ -166,7 +165,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size().await;
+                    let size = journal.size();
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -179,26 +178,25 @@ fn fuzz(input: FuzzInput) {
                         journal.rewind(*size).await.unwrap();
                         journal.sync().await.unwrap();
                         journal_size = *size;
-                        oldest_retained_pos = journal.reader().await.bounds().start;
+                        oldest_retained_pos = journal.bounds().start;
                     }
                 }
 
                 JournalOperation::Bounds => {
-                    let _bounds = journal.reader().await.bounds();
+                    let _bounds = journal.bounds();
                 }
 
                 JournalOperation::Prune { min_pos } => {
                     if *min_pos <= journal_size {
                         journal.prune(*min_pos).await.unwrap();
-                        oldest_retained_pos = journal.reader().await.bounds().start;
+                        oldest_retained_pos = journal.bounds().start;
                     }
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    let reader = journal.reader().await;
-                    let bounds = reader.bounds();
+                    let bounds = journal.bounds();
                     let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                    let replay = reader.replay(NZUsize!(*buffer), start_pos).await;
+                    let replay = journal.replay(NZUsize!(*buffer), start_pos).await;
 
                     match replay {
                         Ok(stream) => {
@@ -229,8 +227,8 @@ fn fuzz(input: FuzzInput) {
                     .unwrap();
                     restarts += 1;
                     // Reset tracking variables to match recovered state
-                    journal_size = journal.size().await;
-                    oldest_retained_pos = journal.reader().await.bounds().start;
+                    journal_size = journal.size();
+                    oldest_retained_pos = journal.bounds().start;
                 }
 
                 JournalOperation::Destroy => {
@@ -293,12 +291,12 @@ fn fuzz(input: FuzzInput) {
                         let new_size = journal.rewind_to(|item| *item == target).await.unwrap();
                         journal.sync().await.unwrap();
                         journal_size = new_size;
-                        oldest_retained_pos = journal.reader().await.bounds().start;
+                        oldest_retained_pos = journal.reader().bounds().start;
                     }
                 }
 
                 JournalOperation::TryReadSync { pos } => {
-                    let reader = journal.reader().await;
+                    let reader = journal.reader();
                     let bounds = reader.bounds();
                     if bounds.contains(pos) {
                         // Cross-check: sync result must match async result
@@ -310,7 +308,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::PruningBoundary => {
-                    let boundary = journal.pruning_boundary().await;
+                    let boundary = journal.pruning_boundary();
                     assert_eq!(boundary, oldest_retained_pos);
                 }
 
@@ -328,8 +326,8 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .unwrap();
                     restarts += 1;
-                    journal_size = journal.size().await;
-                    oldest_retained_pos = journal.reader().await.bounds().start;
+                    journal_size = journal.size();
+                    oldest_retained_pos = journal.reader().bounds().start;
                 }
             }
         }

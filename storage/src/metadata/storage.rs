@@ -6,7 +6,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufMut, Error as RError,
 };
-use commonware_utils::{sync::AsyncMutex, Span};
+use commonware_utils::Span;
 use futures::future::try_join_all;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
@@ -74,7 +74,7 @@ pub struct Metadata<E: Context, K: Span, V: Codec> {
 
     map: BTreeMap<K, V>,
     partition: String,
-    state: AsyncMutex<State<E::Blob, K>>,
+    state: State<E::Blob, K>,
 
     sync_overwrites: Counter,
     sync_rewrites: Counter,
@@ -121,12 +121,12 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
             map,
             partition: cfg.partition,
-            state: AsyncMutex::new(State {
+            state: State {
                 cursor,
                 next_version,
                 key_order_changed: next_version, // rewrite on startup because we don't have a diff record
                 blobs: [left_wrapper, right_wrapper],
-            }),
+            },
 
             sync_rewrites,
             sync_overwrites,
@@ -227,9 +227,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        let state = self.state.get_mut();
-        state.blobs[state.cursor].modified.insert(key.clone());
-        state.blobs[1 - state.cursor].modified.insert(key.clone());
+        let cursor = self.state.cursor;
+        self.state.blobs[cursor].modified.insert(key.clone());
+        self.state.blobs[1 - cursor].modified.insert(key.clone());
 
         Some(value)
     }
@@ -241,8 +241,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         self.map.clear();
 
         // Mark key order as changed
-        let state = self.state.get_mut();
-        state.key_order_changed = state.next_version;
+        self.state.key_order_changed = self.state.next_version;
         self.keys.set(0);
     }
 
@@ -258,12 +257,12 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        let state = self.state.get_mut();
         if previous.is_some() {
-            state.blobs[state.cursor].modified.insert(key.clone());
-            state.blobs[1 - state.cursor].modified.insert(key);
+            let cursor = self.state.cursor;
+            self.state.blobs[cursor].modified.insert(key.clone());
+            self.state.blobs[1 - cursor].modified.insert(key);
         } else {
-            state.key_order_changed = state.next_version;
+            self.state.key_order_changed = self.state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
         previous
@@ -307,8 +306,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Mark key as modified.
         if past.is_some() {
-            let state = self.state.get_mut();
-            state.key_order_changed = state.next_version;
+            self.state.key_order_changed = self.state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
 
@@ -329,40 +327,35 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
         // If the number of keys has changed, mark the key order as changed
         if new_len != old_len {
-            let state = self.state.get_mut();
-            state.key_order_changed = state.next_version;
+            self.state.key_order_changed = self.state.next_version;
             let _ = self.keys.try_set(self.map.len());
         }
     }
 
     /// Atomically commit the current state of [Metadata].
-    pub async fn sync(&self) -> Result<(), Error> {
-        // Acquire lock on sync state which will prevent concurrent sync calls while not blocking
-        // reads from the metadata map.
-        let mut state = self.state.lock().await;
-
+    pub async fn sync(&mut self) -> Result<(), Error> {
         // Extract values we need
-        let cursor = state.cursor;
-        let next_version = state.next_version;
-        let key_order_changed = state.key_order_changed;
+        let cursor = self.state.cursor;
+        let next_version = self.state.next_version;
+        let key_order_changed = self.state.key_order_changed;
 
         // Compute next version.
         //
         // While it is possible that extremely high-frequency updates to metadata could cause an
         // eventual overflow of version, syncing once per millisecond would overflow in 584,942,417
         // years.
-        let past_version = state.blobs[cursor].version;
+        let past_version = self.state.blobs[cursor].version;
         let next_next_version = next_version.checked_add(1).expect("version overflow");
 
         // Get target blob (the one we will modify)
         let target_cursor = 1 - cursor;
 
         // Update the state.
-        state.cursor = target_cursor;
-        state.next_version = next_next_version;
+        self.state.cursor = target_cursor;
+        self.state.next_version = next_next_version;
 
         // Get a mutable reference to the target blob.
-        let target = &mut state.blobs[target_cursor];
+        let target = &mut self.state.blobs[target_cursor];
 
         // Determine if we can overwrite existing data in place, and prepare the list of data to
         // write in that event.
@@ -452,8 +445,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
-        let state = self.state.into_inner();
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
+        for (i, wrapper) in self.state.blobs.into_iter().enumerate() {
             drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))

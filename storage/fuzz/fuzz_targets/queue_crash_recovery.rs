@@ -264,7 +264,7 @@ async fn run_operations(
 
             QueueOperation::DequeueAndAck => {
                 if let Ok(Some((pos, _item))) = queue.dequeue().await {
-                    if queue.ack(pos).await.is_ok() {
+                    if queue.ack(pos).is_ok() {
                         state.update_ack_floor(queue.ack_floor());
                     }
                 }
@@ -276,12 +276,12 @@ async fn run_operations(
             }
 
             QueueOperation::AckOffset { offset } => {
-                let size = queue.size().await;
+                let size = queue.size();
                 let ack_floor = queue.ack_floor();
                 if size > ack_floor {
                     let range = size - ack_floor;
                     let pos = ack_floor + (*offset as u64 % range);
-                    match queue.ack(pos).await {
+                    match queue.ack(pos) {
                         Ok(()) => {
                             state.update_ack_floor(queue.ack_floor());
                         }
@@ -294,9 +294,9 @@ async fn run_operations(
             }
 
             QueueOperation::AckUpToOffset { offset } => {
-                let size = queue.size().await;
+                let size = queue.size();
                 let up_to = (*offset as u64) % (size + 1);
-                match queue.ack_up_to(up_to).await {
+                match queue.ack_up_to(up_to) {
                     Ok(()) => {
                         state.update_ack_floor(queue.ack_floor());
                     }
@@ -338,7 +338,7 @@ async fn run_operations(
 /// that the queue can be re-initialized and used again for basic operations.
 async fn verify_recovery_after_mutable_error(queue: &mut Queue<deterministic::Context, Vec<u8>>) {
     // Basic read-path sanity should not fail.
-    let size_before = queue.size().await;
+    let size_before = queue.size();
     queue
         .dequeue()
         .await
@@ -371,7 +371,7 @@ async fn verify_recovery(
         return;
     }
 
-    let size = queue.size().await;
+    let size = queue.size();
     let ack_floor = queue.ack_floor();
 
     // Size should be within expected bounds

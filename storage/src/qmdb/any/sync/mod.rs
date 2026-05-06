@@ -194,7 +194,7 @@ macro_rules! impl_sync_database {
                 else {
                     return false;
                 };
-                if Location::new(journal.reader().await.bounds().start) > target.range.start() {
+                if Location::new(journal.reader().bounds().start) > target.range.start() {
                     return false;
                 }
 

@@ -244,13 +244,13 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        FixedJournal::size(self).await
+        FixedJournal::size(self)
     }
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+        async { Reader::bounds(self) }
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
@@ -263,7 +263,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         &self,
         pos: u64,
     ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+        async move { Reader::read(self, pos).await }
     }
 
     async fn sync(&mut self) -> Result<(), commonware_storage::journal::Error> {
@@ -283,7 +283,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = self.reader().await.replay(buffer, start_pos).await?;
+        let _ = Reader::replay(self, buffer, start_pos).await?;
         Ok(())
     }
 
@@ -326,13 +326,13 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        VariableJournal::size(self).await
+        VariableJournal::size(self)
     }
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+        async { self.reader().bounds() }
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
@@ -345,7 +345,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         &self,
         pos: u64,
     ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+        async move { self.reader().read(pos).await }
     }
 
     async fn sync(&mut self) -> Result<(), commonware_storage::journal::Error> {
@@ -365,7 +365,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = self.reader().await.replay(buffer, start_pos).await?;
+        let _ = self.reader().replay(buffer, start_pos).await?;
         Ok(())
     }
 
