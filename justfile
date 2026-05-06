@@ -78,7 +78,7 @@ check-publish-order:
 
 # Check for borrowed temporary child contexts
 check-no-borrowed-child:
-    python3 .github/scripts/check_no_borrowed_child.py
+    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
 
 # Run all fuzz tests in a given directory
 fuzz fuzz_dir max_time='60' max_mem='4000':

@@ -1,0 +1,51 @@
+error: child name conflicts with context attribute name
+  --> $DIR/main.rs:22:50
+   |
+LL |     let _ = context.child("peer").with_attribute("peer", 1);
+   |                                                  ^^^^^^
+   |
+help: choose a child name for the component and an attribute name for the varying field
+  --> $DIR/main.rs:22:27
+   |
+LL |     let _ = context.child("peer").with_attribute("peer", 1);
+   |                           ^^^^^^
+   = note: `#[deny(child_attribute_name_conflict)]` on by default
+
+error: child name conflicts with context attribute name
+  --> $DIR/main.rs:25:25
+   |
+LL |         .with_attribute("validator", 2);
+   |                         ^^^^^^^^^^^
+   |
+help: choose a child name for the component and an attribute name for the varying field
+  --> $DIR/main.rs:24:16
+   |
+LL |         .child("validator")
+   |                ^^^^^^^^^^^
+
+error: child name conflicts with context attribute name
+  --> $DIR/main.rs:26:36
+   |
+LL |     let _ = context.with_attribute("worker", 3).child("worker");
+   |                                    ^^^^^^^^
+   |
+help: choose a child name for the component and an attribute name for the varying field
+  --> $DIR/main.rs:26:55
+   |
+LL |     let _ = context.with_attribute("worker", 3).child("worker");
+   |                                                       ^^^^^^^^
+
+error: child name conflicts with context attribute name
+  --> $DIR/main.rs:29:25
+   |
+LL |         .with_attribute("service", 4)
+   |                         ^^^^^^^^^
+   |
+help: choose a child name for the component and an attribute name for the varying field
+  --> $DIR/main.rs:28:16
+   |
+LL |         .child("service")
+   |                ^^^^^^^^^
+
+error: aborting due to 4 previous errors
+

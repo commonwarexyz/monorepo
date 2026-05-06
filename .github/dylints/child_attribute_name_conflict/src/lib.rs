@@ -1,0 +1,121 @@
+#![feature(rustc_private)]
+#![warn(unused_extern_crates)]
+
+extern crate rustc_ast;
+extern crate rustc_hir;
+extern crate rustc_span;
+
+use rustc_ast::ast::LitKind;
+use rustc_hir::{Expr, ExprKind};
+use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_span::{Span, Symbol};
+
+dylint_linting::declare_late_lint! {
+    /// ### What it does
+    ///
+    /// Detects a context method chain where `child` and `with_attribute` use the
+    /// same string literal, such as
+    /// `context.child("peer").with_attribute("peer", id)`.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// Child names identify the component that owns work, while attributes
+    /// identify dimensions of that component. Reusing the same field name for
+    /// both makes metrics and traces harder to interpret.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// let ctx = context.child("peer").with_attribute("peer", peer_id);
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust
+    /// let ctx = context.child("peer").with_attribute("public_key", peer_id);
+    /// ```
+    pub CHILD_ATTRIBUTE_NAME_CONFLICT,
+    Deny,
+    "child name conflicts with context attribute name"
+}
+
+impl<'tcx> LateLintPass<'tcx> for ChildAttributeNameConflict {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        if expr.span.from_expansion() {
+            return;
+        }
+
+        check_child_attribute_name_conflict(cx, expr);
+    }
+}
+
+fn check_child_attribute_name_conflict(cx: &LateContext<'_>, expr: &Expr<'_>) {
+    let Some((child, attributes)) = child_and_attributes(expr) else {
+        return;
+    };
+
+    for attribute in attributes {
+        if child.value == attribute.value {
+            cx.span_lint(CHILD_ATTRIBUTE_NAME_CONFLICT, attribute.span, |diag| {
+                diag.primary_message("child name conflicts with context attribute name");
+                diag.span_help(
+                    child.span,
+                    "choose a child name for the component and an attribute name for the varying field",
+                );
+            });
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StringArg {
+    value: Symbol,
+    span: Span,
+}
+
+fn child_and_attributes(expr: &Expr<'_>) -> Option<(StringArg, Vec<StringArg>)> {
+    let child = Symbol::intern("child");
+    let with_attribute = Symbol::intern("with_attribute");
+    let mut child_arg = None;
+    let mut attributes = Vec::new();
+    let mut current = expr;
+
+    let ExprKind::MethodCall(segment, ..) = current.kind else {
+        return None;
+    };
+    if segment.ident.name != child && segment.ident.name != with_attribute {
+        return None;
+    }
+
+    while let ExprKind::MethodCall(segment, receiver, args, ..) = current.kind {
+        if segment.ident.name == child {
+            child_arg = args.first().and_then(string_arg);
+        } else if segment.ident.name == with_attribute {
+            if let Some(attribute) = args.first().and_then(string_arg) {
+                attributes.push(attribute);
+            }
+        }
+
+        current = receiver;
+    }
+
+    child_arg.map(|child| (child, attributes))
+}
+
+fn string_arg(expr: &Expr<'_>) -> Option<StringArg> {
+    if let ExprKind::Lit(lit) = expr.kind {
+        if let LitKind::Str(value, _) = lit.node {
+            return Some(StringArg {
+                value,
+                span: expr.span,
+            });
+        }
+    }
+
+    None
+}
+
+#[test]
+fn ui() {
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
+}
