@@ -7,7 +7,7 @@ modified-time: "2026-05-06T00:00:00Z"
 author: "Roberto Bayardo"
 author_twitter: "https://x.com/roberto_bayardo"
 url: "https://commonware.xyz/blogs/pyramid-mmb"
-image: "https://commonware.xyz/imgs/pyramid-mmb-fig-8.png"
+image: "https://commonware.xyz/imgs/mmr_mmb_variants_worst_case_comparison.png"
 katex: true
 ---
 
@@ -43,7 +43,7 @@ This insight suggests a new, *active* strategy that is aware of the inactivity b
 
 ![Figure 5: Pyramid bagging 8 peaks, with the first four covering elements only in the inactive region.](/imgs/pyramid-bagging.png)
 
-![Figure 6: Pyramid bagged MMR average-case proof size over an active region of 1M leaves.](/imgs/pyramid-mmb-fig-6.png)
+![Figure 6: Pyramid bagged MMR average-case proof size over an active region of 1M leaves.](/imgs/mmr_recent_pyramid_mmr_comparison.png)
 
 While pyramid bagging delivers a huge win in proof size on average, it still suffers from the exact same worst-case behavior as the other bagging schemes, even over recent elements. This can be seen from the spikes in Fig. 6 (appearing at $N$ a power of 2), where all three schemes produce the exact same worst *and* average-case proof size of $\log_2(N)$ despite all our efforts. It’s also frustrating, and potentially problematic for low bandwidth clients, that the proof sizes vary so considerably even for small changes in the database size.
 
@@ -59,6 +59,6 @@ Unfortunately, a backwards bagging policy when applied to an MMB-style update ru
 
 Combined with pyramid bagging, the MMB update rule gives us the best of all worlds: proof size is bounded by $\log_2$ of the active range, its average case over the active range is minimized (Fig. 8), and variance is eliminated. Applied to QMDB then, a proof over an active element contains at most $\log_2(2V) = \log_2(V) + 1$ digests. Put another way, the maximum penalty in proof size of a P-MMB over the optimal structure (a BMT over the active values alone) is a mere 2 digests. Analytically, the worst-case proof size of a P-MMB is 50% smaller than the F-MMB over the active range, and average-case proof size is 33% smaller.
 
-![Figure 8: Forward and pyramid-bagged MMB proof sizes grow only with the size of the active region (independent of N). Pyramid bagging results in an optimal Merkle structure over the active region (isomorphic to a BMT) with respect to average and worst-case proof size.](/imgs/pyramid-mmb-fig-8.png)
+![Figure 8: Forward and pyramid-bagged MMB proof sizes grow only with the size of the active region (independent of N). Pyramid bagging results in an optimal Merkle structure over the active region (isomorphic to a BMT) with respect to average and worst-case proof size.](/imgs/mmr_mmb_variants_worst_case_comparison.png)
 
 The [latest QMDB implementations](https://github.com/commonwarexyz/monorepo/blob/main/storage/src/qmdb/mod.rs) in Commonware perform pyramid bagging and can be instantiated with either an [MMR](https://github.com/commonwarexyz/monorepo/blob/main/storage/src/merkle/mmr/mod.rs) or [MMB](https://github.com/commonwarexyz/monorepo/blob/main/storage/src/merkle/mmb/mod.rs). If you’ve been curious about MMR-authenticated stores but were scared off by $\log(U)$ proof scaling, less than ideal average-case proof size, or high proof size variance, take our P-MMB authenticated stores out for spin.
