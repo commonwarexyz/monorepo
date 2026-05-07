@@ -2660,7 +2660,7 @@ mod tests {
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
-            let (engine, mut mailbox1) = Engine::new(
+            let (engine, mut mailbox1): (_, Mailbox<Key, PublicKey>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 0),
                 Config {
                     peer_provider: oracle.manager(),
@@ -2680,7 +2680,7 @@ mod tests {
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
-            let (engine, _mailbox2) = Engine::new(
+            let (engine, _mailbox2): (_, Mailbox<Key, PublicKey>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 1),
                 Config {
                     peer_provider: oracle.manager(),

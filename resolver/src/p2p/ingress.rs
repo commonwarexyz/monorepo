@@ -6,14 +6,14 @@ use commonware_utils::{
     Span,
 };
 
-type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
+type Predicate<R> = Box<dyn Fn(&R) -> bool + Send>;
 
 /// A request to fetch data for a key, optionally with target peers.
-pub struct FetchRequest<K, P> {
+pub struct FetchRequest<K, P, R> {
     /// The key to fetch.
     pub key: K,
     /// The key used to decide whether the fetch should be retained.
-    pub retain_key: K,
+    pub retain_key: R,
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
@@ -22,9 +22,9 @@ pub struct FetchRequest<K, P> {
 }
 
 /// Messages that can be sent to the peer actor.
-pub enum Message<K, P> {
+pub enum Message<K, P, R> {
     /// Initiate fetch requests.
-    Fetch(Vec<FetchRequest<K, P>>),
+    Fetch(Vec<FetchRequest<K, P, R>>),
 
     /// Cancel a fetch request by key.
     Cancel { key: K },
@@ -33,25 +33,31 @@ pub enum Message<K, P> {
     Clear,
 
     /// Cancel all fetch requests without a retain key that satisfies the predicate.
-    Retain { predicate: Predicate<K> },
+    Retain { predicate: Predicate<R> },
 }
 
 /// A way to send messages to the peer actor.
 #[derive(Clone)]
-pub struct Mailbox<K, P> {
+pub struct Mailbox<K, P, R = K> {
     /// The channel that delivers messages to the peer actor.
-    sender: mpsc::Sender<Message<K, P>>,
+    sender: mpsc::Sender<Message<K, P, R>>,
 }
 
-impl<K, P> Mailbox<K, P> {
+impl<K, P, R> Mailbox<K, P, R> {
     /// Create a new mailbox.
-    pub(super) const fn new(sender: mpsc::Sender<Message<K, P>>) -> Self {
+    pub(super) const fn new(sender: mpsc::Sender<Message<K, P, R>>) -> Self {
         Self { sender }
     }
 }
 
-impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
+impl<K, P, R> Resolver for Mailbox<K, P, R>
+where
+    K: Span,
+    P: PublicKey,
+    R: Clone + From<K> + Send + 'static,
+{
     type Key = K;
+    type RetainKey = R;
     type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
@@ -63,7 +69,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
-                retain_key: key.clone(),
+                retain_key: R::from(key.clone()),
                 key,
                 targets: None,
             }]))
@@ -73,7 +79,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a fetch request to the peer actor with a separate retain key.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_with_retain_key(&mut self, key: Self::Key, retain_key: Self::Key) {
+    async fn fetch_with_retain_key(&mut self, key: Self::Key, retain_key: Self::RetainKey) {
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
                 key,
@@ -94,7 +100,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
             .send_lossy(Message::Fetch(
                 keys.into_iter()
                     .map(|key| FetchRequest {
-                        retain_key: key.clone(),
+                        retain_key: R::from(key.clone()),
                         key,
                         targets: None,
                     })
@@ -109,7 +115,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
-                retain_key: key.clone(),
+                retain_key: R::from(key.clone()),
                 key,
                 targets: Some(targets),
             }]))
@@ -128,7 +134,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
                 requests
                     .into_iter()
                     .map(|(key, targets)| FetchRequest {
-                        retain_key: key.clone(),
+                        retain_key: R::from(key.clone()),
                         key,
                         targets: Some(targets),
                     })
@@ -147,7 +153,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
+    async fn retain(&mut self, predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static) {
         self.sender
             .send_lossy(Message::Retain {
                 predicate: Box::new(predicate),

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, BlockFetchContext, Request, ResolverKey},
+        resolver::handler::{self, BlockFetchContext, Request, ResolverKey, ResolverRetainKey},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -194,6 +194,7 @@ enum BlockSubscriptionKey<C, D> {
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
 type ResolverRequestFor<V> = ResolverKey<<V as Variant>::Commitment>;
+type ResolverRetainKeyFor<V> = ResolverRetainKey<<V as Variant>::Commitment>;
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
@@ -372,6 +373,7 @@ where
     where
         R: Resolver<
             Key = ResolverRequestFor<V>,
+            RetainKey = ResolverRetainKeyFor<V>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -388,6 +390,7 @@ where
     ) where
         R: Resolver<
             Key = ResolverRequestFor<V>,
+            RetainKey = ResolverRetainKeyFor<V>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -888,7 +891,7 @@ where
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
         subscription: BlockSubscriptionRequest<V>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -938,7 +941,7 @@ where
                     resolver
                         .fetch_with_retain_key(
                             request,
-                            ResolverKey::block_request(
+                            ResolverRetainKey::block_request(
                                 commitment,
                                 BlockFetchContext::Finalized { round },
                             ),
@@ -1008,7 +1011,7 @@ where
         key: ResolverRequestFor<V>,
         value: Bytes,
         response: oneshot::Sender<bool>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
@@ -1073,7 +1076,9 @@ where
                 };
                 debug!(?digest, %height, "received block");
                 resolver
-                    .retain(ResolverKey::retain_current_block_fetch(commitment, context))
+                    .retain(ResolverRetainKey::retain_current_block_fetch(
+                        commitment, context,
+                    ))
                     .await;
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
                 wrote
@@ -1422,7 +1427,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver).await;
@@ -1430,7 +1435,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .retain(ResolverKey::without_block_commitment(commitment))
+            .retain(ResolverRetainKey::without_block_commitment(commitment))
             .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1450,7 +1455,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(ResolverKey::request(Request::Notarized { round }).predicate())
+                .retain(ResolverRetainKey::request(Request::Notarized { round }).predicate())
                 .await;
         }
     }
@@ -1701,7 +1706,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1831,7 +1836,7 @@ where
     async fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;
@@ -1841,7 +1846,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(ResolverKey::request(Request::Finalized { height }).predicate())
+            .retain(ResolverRetainKey::request(Request::Finalized { height }).predicate())
             .await;
     }
 

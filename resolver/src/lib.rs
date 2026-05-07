@@ -43,6 +43,9 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to uniquely identify data.
         type Key: Span;
 
+        /// Type used to retain or prune fetch requests.
+        type RetainKey: Clone + Send + 'static;
+
         /// Type used to identify peers for targeted fetches.
         type PublicKey: PublicKey;
 
@@ -60,7 +63,7 @@ commonware_macros::stability_scope!(BETA {
         fn fetch_with_retain_key(
             &mut self,
             key: Self::Key,
-            retain_key: Self::Key,
+            retain_key: Self::RetainKey,
         ) -> impl Future<Output = ()> + Send;
 
         /// Initiate a fetch request for a batch of keys.
@@ -115,7 +118,7 @@ commonware_macros::stability_scope!(BETA {
         /// how cancellation affects in-progress response validation.
         fn retain(
             &mut self,
-            predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
+            predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static,
         ) -> impl Future<Output = ()> + Send;
     }
 });

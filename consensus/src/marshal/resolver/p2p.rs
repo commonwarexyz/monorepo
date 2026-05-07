@@ -9,6 +9,9 @@ use commonware_utils::channel::mpsc;
 use rand::Rng;
 use std::time::Duration;
 
+/// Mailbox type returned by the marshal resolver.
+pub type Mailbox<D, P> = p2p::Mailbox<handler::ResolverKey<D>, P, handler::ResolverRetainKey<D>>;
+
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
 pub struct Config<P, C, B>
 where
@@ -51,10 +54,7 @@ pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (
-    mpsc::Receiver<handler::Message<D>>,
-    p2p::Mailbox<handler::ResolverKey<D>, P>,
-)
+) -> (mpsc::Receiver<handler::Message<D>>, Mailbox<D, P>)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,

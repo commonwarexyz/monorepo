@@ -1892,10 +1892,11 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = handler::ResolverKey<D>;
+        type RetainKey = handler::ResolverRetainKey<D>;
         type PublicKey = PublicKey;
 
         async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_with_retain_key(&mut self, _key: Self::Key, _retain_key: Self::Key) {}
+        async fn fetch_with_retain_key(&mut self, _key: Self::Key, _retain_key: Self::RetainKey) {}
         async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
         async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
             self.targeted.lock().push((key, targets));
@@ -1908,7 +1909,8 @@ mod tests {
         }
         async fn cancel(&mut self, _key: Self::Key) {}
         async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+        async fn retain(&mut self, _predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static) {
+        }
     }
 
     /// Poll `cond` on a 10ms tick until it returns true, panicking on timeout.

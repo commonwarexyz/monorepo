@@ -27,6 +27,7 @@ use futures::future::{self, Either};
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hash,
     marker::PhantomData,
 };
 use tracing::{debug, error, trace, warn};
@@ -50,6 +51,7 @@ pub struct Engine<
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
+    RetainKey = Key,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -67,7 +69,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key, P>>,
+    mailbox: mpsc::Receiver<Message<Key, P, RetainKey>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -76,7 +78,7 @@ pub struct Engine<
     inflight: Inflight<E, Con, P, Key>,
 
     /// Retain keys that keep each fetch key alive.
-    retainers: HashMap<Key, HashSet<Key>>,
+    retainers: HashMap<Key, HashSet<RetainKey>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -104,12 +106,18 @@ impl<
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+        RetainKey,
+    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR, RetainKey>
+where
+    RetainKey: Clone + Eq + Hash + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
+    pub fn new(
+        context: E,
+        cfg: Config<P, D, B, Key, Con, Pro>,
+    ) -> (Self, Mailbox<Key, P, RetainKey>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);

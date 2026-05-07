@@ -150,12 +150,24 @@ impl<D: Digest> Request<D> {
     }
 }
 
-/// A resolver key for either peer-visible requests or local annotated fetches.
+/// A resolver key for either peer-visible requests or local annotated block fetches.
 ///
-/// The annotation is local retention metadata. It affects resolver identity and
-/// pruning, but it is never encoded on the wire.
+/// The annotation is local delivery metadata. It affects resolver identity and
+/// delivery handling, but it is never encoded on the wire.
 #[derive(Clone, Copy)]
 pub enum ResolverKey<D: Digest> {
+    /// A peer-visible request.
+    Request(Request<D>),
+    /// A locally annotated block fetch.
+    Block {
+        commitment: D,
+        context: BlockFetchContext,
+    },
+}
+
+/// A local key for deciding whether a resolver fetch should be retained.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ResolverRetainKey<D: Digest> {
     /// A peer-visible request.
     Request(Request<D>),
     /// A locally annotated block fetch.
@@ -192,6 +204,29 @@ impl<D: Digest> ResolverKey<D> {
     /// Return the block commitment, if this is a block request.
     pub const fn block_commitment(&self) -> Option<D> {
         self.request_key().block_commitment()
+    }
+}
+
+impl<D: Digest> ResolverRetainKey<D> {
+    /// Create a retain key for a peer-visible request.
+    pub const fn request(request: Request<D>) -> Self {
+        Self::Request(request)
+    }
+
+    /// Create a retain key for a locally annotated block request.
+    pub const fn block_request(commitment: D, context: BlockFetchContext) -> Self {
+        Self::Block {
+            commitment,
+            context,
+        }
+    }
+
+    /// Return the block commitment, if this is a block request.
+    pub const fn block_commitment(&self) -> Option<D> {
+        match self {
+            Self::Request(request) => request.block_commitment(),
+            Self::Block { commitment, .. } => Some(*commitment),
+        }
     }
 
     /// A predicate that drops all block requests for `commitment`.
@@ -256,6 +291,21 @@ impl<D: Digest> ResolverKey<D> {
                 },
             ) => *theirs > *mine,
             (Self::Request(Request::Notarized { .. }), _) => true,
+        }
+    }
+}
+
+impl<D: Digest> From<ResolverKey<D>> for ResolverRetainKey<D> {
+    fn from(key: ResolverKey<D>) -> Self {
+        match key {
+            ResolverKey::Request(request) => Self::Request(request),
+            ResolverKey::Block {
+                commitment,
+                context,
+            } => Self::Block {
+                commitment,
+                context,
+            },
         }
     }
 }
@@ -640,14 +690,14 @@ mod tests {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
 
-        let predicate = ResolverKey::request(r1).predicate();
-        assert!(predicate(&ResolverKey::request(r2))); // r2.height > r1.height
-        assert!(predicate(&ResolverKey::request(r3))); // Different variant (notarized)
+        let predicate = ResolverRetainKey::request(r1).predicate();
+        assert!(predicate(&ResolverRetainKey::request(r2))); // r2.height > r1.height
+        assert!(predicate(&ResolverRetainKey::request(r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(&ResolverKey::request(r1_same))); // Same height, should not pass
+        assert!(!predicate(&ResolverRetainKey::request(r1_same))); // Same height, should not pass
     }
 
     #[test]
@@ -676,22 +726,22 @@ mod tests {
     #[test]
     fn test_subject_predicate_prunes_annotated_blocks() {
         let digest = Sha256::hash(b"prune");
-        let height_floor = ResolverKey::request(Request::<D>::Finalized {
+        let height_floor = ResolverRetainKey::request(Request::<D>::Finalized {
             height: Height::new(10),
         });
-        let keep_repair = ResolverKey::block_request(
+        let keep_repair = ResolverRetainKey::block_request(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(11),
             },
         );
-        let drop_repair = ResolverKey::block_request(
+        let drop_repair = ResolverRetainKey::block_request(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(10),
             },
         );
-        let drop_ancestry = ResolverKey::block_request(
+        let drop_ancestry = ResolverRetainKey::block_request(
             digest,
             BlockFetchContext::Ancestry {
                 height: Height::new(9),
@@ -703,16 +753,16 @@ mod tests {
         assert!(!predicate(&drop_repair));
         assert!(!predicate(&drop_ancestry));
 
-        let round_floor = ResolverKey::request(Request::<D>::Notarized {
+        let round_floor = ResolverRetainKey::request(Request::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(10)),
         });
-        let keep_finalized = ResolverKey::block_request(
+        let keep_finalized = ResolverRetainKey::block_request(
             digest,
             BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(11)),
             },
         );
-        let drop_finalized = ResolverKey::block_request(
+        let drop_finalized = ResolverRetainKey::block_request(
             digest,
             BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(10)),

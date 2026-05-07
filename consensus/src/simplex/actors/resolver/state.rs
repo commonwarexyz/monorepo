@@ -63,7 +63,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         certificate: Certificate<S, D>,
         request: Option<View>,
-        resolver: &mut impl Resolver<Key = U64>,
+        resolver: &mut impl Resolver<Key = U64, RetainKey = U64>,
     ) {
         match certificate {
             Certificate::Nullification(nullification) => {
@@ -102,7 +102,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         success: bool,
-        resolver: &mut impl Resolver<Key = U64>,
+        resolver: &mut impl Resolver<Key = U64, RetainKey = U64>,
     ) {
         if success {
             // Certification passed - set floor to notarization if we have it.
@@ -181,7 +181,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Inform the [Resolver] of any missing nullifications.
-    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
+    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64, RetainKey = U64>) {
         // We must either receive a nullification at the current view or a notarization/finalization at the current
         // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
         let start = self.fetch_floor.max(self.floor_view().next());
@@ -201,7 +201,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Prune stored certificates and requests that are not higher than the floor.
-    async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
+    async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64, RetainKey = U64>) {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
@@ -253,6 +253,7 @@ mod tests {
 
     impl Resolver for MockResolver {
         type Key = U64;
+        type RetainKey = U64;
         type PublicKey = PublicKey;
 
         async fn fetch(&mut self, key: U64) {
@@ -289,7 +290,7 @@ mod tests {
             self.outstanding.lock().clear();
         }
 
-        async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
+        async fn retain(&mut self, predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static) {
             self.outstanding.lock().retain(|key| predicate(key));
         }
     }
