@@ -22,7 +22,7 @@ use crate::{
         current::{
             batch::BitmapBatch,
             grafting,
-            proof::{OperationProof, OpsRootWitness, RangeProof},
+            proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
         operation::Operation as _,
         Error,
@@ -265,11 +265,13 @@ where
             hasher,
             self.any.bitmap.as_ref(),
             &storage,
-            self.any.inactivity_floor_loc,
             &self.any.log,
-            start_loc,
-            max_ops,
-            ops_root,
+            RangeProofSpec {
+                start_loc,
+                max_ops,
+                inactivity_floor: self.any.inactivity_floor_loc,
+                ops_root,
+            },
         )
         .await
     }
