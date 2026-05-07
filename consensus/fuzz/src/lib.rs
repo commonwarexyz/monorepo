@@ -1,4 +1,5 @@
 pub mod bounds;
+pub mod byzzfuzz;
 #[cfg(feature = "mocks")]
 pub mod certificate_mock;
 pub mod disrupter;
@@ -41,7 +42,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, sync::Once, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
 #[cfg(feature = "mocks")]
 pub use simplex::SimplexCertificateMock;
@@ -72,7 +73,7 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 /// runtime. Increase only if a complementary timeout is added to the wait loop.
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
-const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
+pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
@@ -222,7 +223,7 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
+pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
 
 type NetworkChannels<P> = (
     (
@@ -240,7 +241,7 @@ type NetworkChannels<P> = (
 );
 
 /// Common setup for fuzz tests: network, participants, links.
-async fn setup_network<P: simplex::Simplex>(
+pub(crate) async fn setup_network<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
 ) -> (
@@ -361,7 +362,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
 
 /// Spawn an honest validator with application, reporter, and engine.
 #[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator<
+pub(crate) fn spawn_honest_validator<
     P,
     EC,
     PendingSender,
@@ -638,7 +639,7 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
         });
 }
 
-fn network_faults(
+pub(crate) fn network_faults(
     strategy: StrategyChoice,
     required_containers: u64,
     rng: &mut impl rand::Rng,
@@ -1326,9 +1327,7 @@ where
     }
 }
 
-/// Selector for which multi-node fuzz harness `fuzz` will dispatch to. Each
-/// variant maps to a `*Mode` zero-sized type below; see those for what each
-/// mode does. Single-node modes live in [`simplex_node::NodeMode`].
+/// Selector for which a fuzz harness will dispatch to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
@@ -1336,19 +1335,17 @@ pub enum Mode {
     TwinsCampaign,
     FaultyMessaging,
     FaultyNet,
+    Byzzfuzz,
+    ByzzfuzzLiveness,
 }
 
-/// Zero-sized type implemented by every multi-node fuzz mode;
-/// `fuzz::<P, M>(...)` picks the run path via `M::MODE`. Separate from
-/// [`simplex_node::NodeFuzzMode`] so the type system prevents passing
-/// single-node modes to `fuzz` (and vice versa).
 pub trait FuzzMode {
     const MODE: Mode;
 }
 
 /// **Standard mode** - the baseline harness.
 ///
-/// `f` byzantine validators run as `Disrupter`s (mutating outgoing messages
+/// Configured byzantine validators run as `Disrupter` (mutating outgoing messages
 /// per `input.strategy`); the remaining validators run honestly. Network
 /// topology follows `input.partition` (`Connected`, a `Static` set partition,
 /// or an `Adaptive` round-indexed schedule).
@@ -1382,9 +1379,6 @@ impl FuzzMode for Twinable {
 /// see different network partitions per round. Liveness counts finalizations
 /// only past the adversarial prefix; safety invariants run only over honest
 /// reporters.
-///
-/// Use this to fuzz the pure twins setting (scenario-driven adversarial
-/// network only, no byzantine content mutations).
 pub struct TwinsCampaign;
 impl FuzzMode for TwinsCampaign {
     const MODE: Mode = Mode::TwinsCampaign;
@@ -1406,9 +1400,6 @@ impl FuzzMode for TwinsCampaign {
 ///   rate is written synchronously before validators are spawned so the
 ///   scheduled rate takes effect from the protocol's first message; the
 ///   async scheduler task picks up from view 2 onward.
-///
-/// Use this to fuzz consensus under hostile message ordering and lossy
-/// honest-message delivery, independent of network partitioning.
 pub struct FaultyMessaging;
 impl FuzzMode for FaultyMessaging {
     const MODE: Mode = Mode::FaultyMessaging;
@@ -1420,16 +1411,92 @@ impl FuzzMode for FaultyMessaging {
 /// activates a sampled `SetPartition` for each scheduled view, reverting to
 /// fully connected outside scheduled views. Each strategy guarantees at least
 /// one entry, so every run exercises an actual partition window.
-///
-/// Use this to fuzz consensus under transient network partitions
-/// (ByzzFuzz-style `d` budget over set partitions of `{0..n}`).
 pub struct FaultyNet;
 impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
+/// **Byzzfuzz mode** - safety fuzzing under sampled network and process faults.
+///
+/// Runs four honest engines and applies sampled faults for the entire run:
+/// - **Network faults**: a schedule of `(view, partition)` entries. At a
+///   scheduled view, traffic across partition blocks is dropped on every
+///   channel (vote, certificate, resolver, even undecodable bytes); outside
+///   scheduled views the topology is fully connected.
+/// - **Process faults**: a fixed byzantine identity, whose outgoing
+///   protocol messages are intercepted per a schedule of
+///   `(view, receivers, omit, scope)` entries. `scope` optionally
+///   narrows a fault to a specific channel + message kind (e.g. only
+///   Notarize votes); `Any` matches every byzantine outgoing message at
+///   the view. Vote process faults semantically mutate the intercepted
+///   vote and re-sign it under the byzantine identity. Certificate and
+///   resolver process faults are **omit-only**: the forwarder drops the
+///   original to the targeted recipients and the injector emits nothing.
+///
+/// Round attribution uses each message sender's current protocol round
+/// (the maximum view that sender has sent or received): network faults
+/// apply per-message-sender, process faults apply per-byzantine-sender.
+/// Retransmissions of an old view at a later round therefore inherit the
+/// later round's fault window.
+///
+/// Finalization timeout is not a failure; only invariant violations panic.
+pub struct Byzzfuzz;
+impl FuzzMode for Byzzfuzz {
+    const MODE: Mode = Mode::Byzzfuzz;
+}
+
+/// **ByzzfuzzLiveness mode** - liveness variant of the ByzzFuzz harness.
+///
+/// Same fault model as `Byzzfuzz`, but applies faults only during a bounded
+/// fault phase. After the phase elapses (or all non-byzantine reporters
+/// reach `required_containers`, whichever comes first), the shared fault
+/// gate reaches GST: forwarders pass partition decisions through and the
+/// injector drops queued intercepts. Each non-byzantine reporter (every
+/// index except `BYZANTINE_IDX = 0`) must then finalize at least one new
+/// view within a fixed post-GST window; failure to advance panics with a
+/// liveness violation. Safety invariants run after the post-GST check on
+/// every successful path.
+pub struct ByzzfuzzLiveness;
+impl FuzzMode for ByzzfuzzLiveness {
+    const MODE: Mode = Mode::ByzzfuzzLiveness;
+}
+
+/// Install (once per process) a panic-hook chain that drains and prints the
+/// ByzzFuzz decision log when the `BYZZFUZZ_LOG` environment variable is
+/// set (any value). Off by default to keep the libfuzzer crash output
+/// terse. The log is dumped *before* the previous hook runs: libfuzzer-sys
+/// installs a panic hook that prints + `abort()`s the process, so anything
+/// queued after it would never reach the terminal. With this ordering the
+/// output reads: log -> default panic message -> libfuzzer stack trace /
+/// `Failing input` / `Debug`.
+fn install_byzzfuzz_panic_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        // Sample the env var once at install time -- the hook itself runs
+        // in panic context and shouldn't touch global env state.
+        let dump = std::env::var_os("BYZZFUZZ_LOG").is_some();
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if dump {
+                let log = byzzfuzz::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- ByzzFuzz decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of ByzzFuzz decision log ----");
+                }
+            }
+            prev(info);
+        }));
+    });
+}
+
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
+    if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+        install_byzzfuzz_panic_hook();
+    }
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -1447,11 +1514,27 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)
         })),
+        Mode::Byzzfuzz => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
+        }
+        Mode::ByzzfuzzLiveness => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            byzzfuzz::run_liveness::<P>(input)
+        })),
     };
     match run_result {
-        Ok(()) => {}
+        Ok(()) => {
+            // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
+            // or otherwise) starts clean. This is cheap when the log is empty.
+            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+                let _ = byzzfuzz::log::take();
+            }
+        }
         Err(payload) => {
             println!("Panicked with raw_bytes: {:?}", raw_bytes);
+            // The ByzzFuzz decision log is dumped by the panic hook
+            // installed in `install_byzzfuzz_panic_hook` (fires during the
+            // panic itself, before unwinding reaches here). No work needed
+            // in this arm.
             panic::resume_unwind(payload);
         }
     }
