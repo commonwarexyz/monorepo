@@ -6,14 +6,15 @@
 
 use crate::{
     marshal::ancestry::{AncestorStream, BlockProvider},
-    types::Height, CertifiableBlock, Epochable,
+    types::Height,
+    CertifiableBlock, Epochable,
 };
-use futures::StreamExt;
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
+use futures::StreamExt;
 use std::{marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `VerifyingApplication` for testing.

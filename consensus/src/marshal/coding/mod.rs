@@ -495,7 +495,11 @@ mod tests {
             }
 
             assert!(
-                victim_setup.mailbox.get_block(&block1.digest()).await.is_some(),
+                victim_setup
+                    .mailbox
+                    .get_block(&block1.digest())
+                    .await
+                    .is_some(),
                 "digest-fetched ancestor should be retained locally"
             );
         });

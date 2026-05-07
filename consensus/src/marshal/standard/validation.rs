@@ -239,7 +239,10 @@ where
         let receiver = match parent_round {
             Some(round) => {
                 marshal
-                    .subscribe_by_commitment(parent_digest, CommitmentRequest::FetchByRound { round })
+                    .subscribe_by_commitment(
+                        parent_digest,
+                        CommitmentRequest::FetchByRound { round },
+                    )
                     .await
             }
             None => {

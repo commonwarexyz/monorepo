@@ -1070,12 +1070,9 @@ mod tests {
                 .await;
             }
 
-            let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.child("read"),
-                make_cfg(),
-                (),
-            )
-            .await;
+            let mut mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
+                    .await;
             assert_eq!(mgr.find_block(digest).await, None);
 
             mgr.load_persisted_epochs().await;

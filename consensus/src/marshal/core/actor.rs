@@ -1014,8 +1014,14 @@ where
                 let wrote = match context {
                     BlockFetchContext::Ancestry { .. } => {
                         if finalization.is_some() {
-                            self.store_finalization(height, digest, block, finalization, application)
-                                .await
+                            self.store_finalization(
+                                height,
+                                digest,
+                                block,
+                                finalization,
+                                application,
+                            )
+                            .await
                         } else {
                             if height > self.last_processed_height {
                                 if let Some(bounds) = self.epocher.containing(height) {

@@ -402,7 +402,10 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
     type AncestryBlock = V::Block;
 
-    async fn subscribe(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::AncestryBlock> {
+    async fn subscribe(
+        self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<Self::AncestryBlock> {
         let subscription = self.subscribe_by_digest(digest, None).await;
         subscription.await.ok()
     }

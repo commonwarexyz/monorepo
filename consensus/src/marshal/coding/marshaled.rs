@@ -1119,7 +1119,11 @@ where
             Some(round) => core::CommitmentRequest::FetchByRound { round },
             None => core::CommitmentRequest::Wait,
         };
-        Either::Right(marshal.subscribe_by_commitment(parent_commitment, request).await)
+        Either::Right(
+            marshal
+                .subscribe_by_commitment(parent_commitment, request)
+                .await,
+        )
     }
 }
 

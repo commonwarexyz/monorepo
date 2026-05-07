@@ -120,9 +120,15 @@ impl BlockFetchContext {
 #[derive(Clone, Copy)]
 pub enum Request<D: Digest> {
     /// Fetch a block by consensus commitment.
-    Block { commitment: D },
-    Finalized { height: Height },
-    Notarized { round: Round },
+    Block {
+        commitment: D,
+    },
+    Finalized {
+        height: Height,
+    },
+    Notarized {
+        round: Round,
+    },
 }
 
 impl<D: Digest> Request<D> {
@@ -227,9 +233,7 @@ impl<D: Digest> ResolverKey<D> {
             (
                 Self::Request(Request::Finalized { height: mine }),
                 Self::Request(Request::Finalized { height: theirs }),
-            ) => {
-                *theirs > *mine
-            }
+            ) => *theirs > *mine,
             (
                 Self::Request(Request::Finalized { height: mine }),
                 Self::Block {
@@ -239,10 +243,7 @@ impl<D: Digest> ResolverKey<D> {
                     ..
                 },
             ) => *theirs > *mine,
-            (
-                Self::Request(Request::Finalized { .. }),
-                _,
-            ) => true,
+            (Self::Request(Request::Finalized { .. }), _) => true,
             (
                 Self::Request(Request::Notarized { round: mine }),
                 Self::Request(Request::Notarized { round: theirs }),
