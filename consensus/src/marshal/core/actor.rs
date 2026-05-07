@@ -1003,15 +1003,16 @@ where
                 let height = block.height();
                 let digest = block.digest();
 
+                if let Some(expected_height) = context.expected_height() {
+                    if height != expected_height {
+                        response.send_lossy(false);
+                        return false;
+                    }
+                }
+
                 let finalization = self.cache.get_finalization_for(digest).await;
                 let wrote = match context {
-                    BlockFetchContext::Ancestry {
-                        height: expected_height,
-                    } => {
-                        if height != expected_height {
-                            response.send_lossy(false);
-                            return false;
-                        }
+                    BlockFetchContext::Ancestry { .. } => {
                         if finalization.is_some() {
                             self.store_finalization(height, digest, block, finalization, application)
                                 .await
@@ -1032,27 +1033,14 @@ where
                             false
                         }
                     }
-                    BlockFetchContext::Repair {
-                        height: expected_height,
-                    } => {
-                        if height != expected_height {
-                            response.send_lossy(false);
-                            return false;
-                        }
-                        self.store_finalization(height, digest, block, finalization, application)
-                            .await
-                    }
-                    BlockFetchContext::Finalized { .. } => {
+                    BlockFetchContext::Repair { .. } | BlockFetchContext::Finalized { .. } => {
                         self.store_finalization(height, digest, block, finalization, application)
                             .await
                     }
                 };
                 debug!(?digest, %height, "received block");
-                let current = ResolverKey::block_request(commitment, context);
                 resolver
-                    .retain(move |request| {
-                        *request == current || request.block_commitment() != Some(commitment)
-                    })
+                    .retain(ResolverKey::retain_current_block_fetch(commitment, context))
                     .await;
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
                 wrote

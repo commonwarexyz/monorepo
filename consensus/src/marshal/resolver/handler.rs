@@ -106,6 +106,16 @@ pub enum BlockFetchContext {
     Repair { height: Height },
 }
 
+impl BlockFetchContext {
+    /// Return the expected block height for fetch contexts that are height-bound.
+    pub(crate) const fn expected_height(&self) -> Option<Height> {
+        match self {
+            Self::Ancestry { height } | Self::Repair { height } => Some(*height),
+            Self::Finalized { .. } => None,
+        }
+    }
+}
+
 /// A request for backfilling data.
 #[derive(Clone, Copy)]
 pub enum Request<D: Digest> {
@@ -181,6 +191,16 @@ impl<D: Digest> ResolverKey<D> {
     /// A predicate that drops all block requests for `commitment`.
     pub fn without_block_commitment(commitment: D) -> impl Fn(&Self) -> bool + Send + 'static {
         move |request| request.block_commitment() != Some(commitment)
+    }
+
+    /// A predicate that retains this exact annotated block fetch, and drops
+    /// any other block fetch for the same commitment.
+    pub(crate) fn retain_current_block_fetch(
+        commitment: D,
+        context: BlockFetchContext,
+    ) -> impl Fn(&Self) -> bool + Send + 'static {
+        let current = Self::block_request(commitment, context);
+        move |request| *request == current || request.block_commitment() != Some(commitment)
     }
 
     /// The predicate to use when pruning subjects related to this subject.
