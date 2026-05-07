@@ -82,7 +82,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -301,7 +301,7 @@ mod tests {
         let items_per_section = NonZeroU64::new(10).unwrap();
 
         let mut finalizations_by_height = immutable::Archive::init(
-            context.with_label("seed_finalizations_by_height"),
+            context.child("seed_finalizations_by_height"),
             immutable::Config {
                 metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
                 freezer_table_partition: format!(
@@ -332,7 +332,7 @@ mod tests {
         .expect("failed to initialize finalizations archive for seeded restart state");
 
         let mut finalized_blocks = immutable::Archive::init(
-            context.with_label("seed_finalized_blocks"),
+            context.child("seed_finalized_blocks"),
             immutable::Config {
                 metadata_partition: format!("{partition_prefix}-finalized_blocks-metadata"),
                 freezer_table_partition: format!(
@@ -401,7 +401,7 @@ mod tests {
         let write_buffer = NonZeroUsize::new(1024).unwrap();
 
         let mut metadata: Metadata<deterministic::Context, u8, (Epoch, Epoch)> = Metadata::init(
-            context.with_label("seed_cache_metadata"),
+            context.child("seed_cache_metadata"),
             metadata::Config {
                 partition: format!("{cache_prefix}-metadata"),
                 codec_config: ((), ()),
@@ -418,7 +418,7 @@ mod tests {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
-                context.with_label("seed_notarized"),
+                context.child("seed_notarized"),
                 prunable::Config {
                     translator: TwoCap,
                     key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
@@ -452,9 +452,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -476,7 +479,7 @@ mod tests {
 
             // Give the peer all blocks so it can serve them during repair.
             let mut peer_mailbox = StandardHarness::setup_validator(
-                context.with_label("peer_validator"),
+                context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
@@ -500,7 +503,7 @@ mod tests {
             // (no block data) for height 2.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 &[block_one],
                 &[(Height::new(2), finalization_two)],
@@ -509,7 +512,7 @@ mod tests {
 
             // Start the recovering validator and verify initial state.
             let recovering = StandardHarness::setup_validator_with(
-                context.with_label("recovering_validator"),
+                context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -539,9 +542,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -573,7 +579,7 @@ mod tests {
 
             // Give the peer all blocks so it can serve them during repair.
             let mut peer_mailbox = StandardHarness::setup_validator(
-                context.with_label("peer_validator"),
+                context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
@@ -604,7 +610,7 @@ mod tests {
             // block 2 (an internal gap in the finalized chain).
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 &[block_one, block_three.clone()],
                 &[
@@ -615,7 +621,7 @@ mod tests {
             .await;
 
             let recovering = StandardHarness::setup_validator_with(
-                context.with_label("recovering_validator"),
+                context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -646,9 +652,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -673,7 +682,7 @@ mod tests {
             // finalization row.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 &[block_one.clone(), block_two.clone()],
                 &[(Height::new(1), finalization_one)],
@@ -681,7 +690,7 @@ mod tests {
             .await;
 
             let recovering = StandardHarness::setup_validator_with(
-                context.with_label("recovering_validator"),
+                context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -724,9 +733,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -764,7 +776,7 @@ mod tests {
 
             // Give the peer all blocks and finalizations.
             let mut peer_mailbox = StandardHarness::setup_validator(
-                context.with_label("peer_validator"),
+                context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
@@ -789,7 +801,7 @@ mod tests {
             // finalizations exist, leaving blocks 2-5 missing.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 &[block_one],
                 &finalizations
@@ -801,7 +813,7 @@ mod tests {
             .await;
 
             let recovering = StandardHarness::setup_validator_with(
-                context.with_label("recovering_validator"),
+                context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -831,9 +843,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -863,7 +878,7 @@ mod tests {
             // Seed fully consistent state: both blocks and both finalizations.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 &[block_one.clone(), block_two.clone()],
                 &[
@@ -874,7 +889,7 @@ mod tests {
             .await;
 
             let recovering = StandardHarness::setup_validator_with(
-                context.with_label("recovering_validator"),
+                context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -905,9 +920,12 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             // No network links: forces repair to rely on local cache only.
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
 
             let recovering_validator = participants[0].clone();
 
@@ -930,7 +948,7 @@ mod tests {
             // recovering validator can find it locally during trailing repair,
             // without needing a peer to serve it.
             seed_cache_block(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 Epoch::zero(),
                 View::new(2),
@@ -942,7 +960,7 @@ mod tests {
             // finalization for height 2 but no block_two in the archive.
             // block_two only exists in the cache's notarized storage.
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.child("storage"),
                 &partition_prefix,
                 &[block_one],
                 &[(Height::new(2), finalization_two)],
@@ -950,7 +968,7 @@ mod tests {
             .await;
 
             let recovering = StandardHarness::setup_validator_with(
-                context.with_label("recovering_validator"),
+                context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -991,7 +1009,7 @@ mod tests {
             // Write a block into the cache.
             {
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                    context.with_label("write"),
+                    context.child("write"),
                     make_cfg(),
                     (),
                 )
@@ -1001,12 +1019,9 @@ mod tests {
 
             // Re-init the cache (simulating restart). find_block should fail
             // before loading persisted epochs.
-            let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.with_label("read"),
-                make_cfg(),
-                (),
-            )
-            .await;
+            let mut mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
+                    .await;
             assert_eq!(
                 mgr.find_block(digest).await,
                 None,
@@ -1041,7 +1056,7 @@ mod tests {
 
             {
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                    context.with_label("write"),
+                    context.child("write"),
                     make_cfg(),
                     (),
                 )
@@ -1056,7 +1071,7 @@ mod tests {
             }
 
             let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.with_label("read"),
+                context.child("read"),
                 make_cfg(),
                 (),
             )
@@ -1203,7 +1218,7 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let mut oracle = setup_network_with_participants(
-                    context.clone(),
+                    context.child("network"),
                     NZUsize!(3),
                     participants.clone(),
                 )
@@ -1212,14 +1227,14 @@ mod tests {
                 let victim = participants[0].clone();
                 let peer = participants[1].clone();
                 let victim_setup = StandardHarness::setup_validator(
-                    context.with_label("victim"),
+                    context.child("victim"),
                     &mut oracle,
                     victim.clone(),
                     ConstantProvider::new(schemes[0].clone()),
                 )
                 .await;
                 let mut peer_mailbox = StandardHarness::setup_validator(
-                    context.with_label("peer"),
+                    context.child("peer"),
                     &mut oracle,
                     peer,
                     ConstantProvider::new(schemes[1].clone()),
@@ -1279,7 +1294,7 @@ mod tests {
                 match kind {
                     WrapperKind::Inline => {
                         let mut wrapper = Inline::new(
-                            context.clone(),
+                            context.child("inline"),
                             app,
                             marshal,
                             FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1299,7 +1314,7 @@ mod tests {
                     }
                     WrapperKind::Deferred => {
                         let mut wrapper = Deferred::new(
-                            context.clone(),
+                            context.child("deferred"),
                             app,
                             marshal,
                             FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1351,7 +1366,7 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let mut oracle = setup_network_with_participants(
-                    context.clone(),
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                 )
@@ -1359,7 +1374,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.with_label("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1369,7 +1384,12 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
+                let mut wrapper = Wrapper::new(
+                    kind,
+                    context.child("wrapper_under_test"),
+                    mock_app,
+                    marshal.clone(),
+                );
 
                 // Non-boundary propose should drop the response because mock app cannot build.
                 let non_boundary_context = Ctx {
@@ -1381,6 +1401,12 @@ mod tests {
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
+                );
+                assert!(
+                    context
+                        .encode()
+                        .contains("wrapper_under_test_build_duration_count 0"),
+                    "{kind:?}: failed application builds should not be timed"
                 );
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
@@ -1436,7 +1462,7 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let mut oracle = setup_network_with_participants(
-                    context.clone(),
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                 )
@@ -1444,7 +1470,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.with_label("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1454,7 +1480,8 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
                 let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
@@ -1578,7 +1605,7 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let mut oracle = setup_network_with_participants(
-                    context.clone(),
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                 )
@@ -1586,7 +1613,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.with_label("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1596,7 +1623,8 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
                 // Test case 1: non-contiguous height.
                 // Malformed block: parent is genesis but height skips from 0 to 2.
@@ -1718,8 +1746,7 @@ mod tests {
                     ..
                 } =
                     bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-                let mut oracle = setup_network_with_participants(
-                    context.clone(),
+                let mut oracle = setup_network_with_participants(context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                 )
@@ -1727,7 +1754,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
-                    context.with_label("validator_0"),
+                    context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1738,7 +1765,7 @@ mod tests {
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> =
                     MockVerifyingApp::with_verify_result(genesis.clone(), false);
-                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
+                let mut wrapper = Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
                 // 1) Set up a valid parent so structural checks can pass.
                 let parent_round = Round::new(Epoch::zero(), View::new(1));
@@ -1977,7 +2004,7 @@ mod tests {
             strategy: Sequential,
         };
         let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
+            context.child("finalizations_by_height"),
             immutable::Config {
                 metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
                 freezer_table_partition: format!(
@@ -2007,7 +2034,7 @@ mod tests {
         .await
         .expect("failed to initialize finalizations by height archive");
         let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
+            context.child("finalized_blocks"),
             immutable::Config {
                 metadata_partition: format!("{partition_prefix}-finalized_blocks-metadata"),
                 freezer_table_partition: format!(
@@ -2035,7 +2062,7 @@ mod tests {
         .await
         .expect("failed to initialize finalized blocks archive");
         let (actor, mailbox, _) = Actor::init(
-            context.clone(),
+            context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
             config,
@@ -2057,7 +2084,7 @@ mod tests {
         runner.start(|context| async move {
             let me = default_leader();
             let (network, oracle) = Network::new_with_peers(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2092,7 +2119,7 @@ mod tests {
                 strategy: Sequential,
             };
             let finalizations_by_height = prunable::Archive::init(
-                context.with_label("finalizations_by_height"),
+                context.child("finalizations_by_height"),
                 prunable::Config {
                     translator: EightCap,
                     key_partition: format!("{partition_prefix}-fbh-key"),
@@ -2109,7 +2136,7 @@ mod tests {
             .await
             .expect("failed to initialize finalizations archive");
             let finalized_blocks = prunable::Archive::init(
-                context.with_label("finalized_blocks"),
+                context.child("finalized_blocks"),
                 prunable::Config {
                     translator: EightCap,
                     key_partition: format!("{partition_prefix}-fb-key"),
@@ -2135,13 +2162,13 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (broadcast_engine, buffer) =
-                buffered::Engine::new(context.clone(), broadcast_config);
+                buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
             let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
 
             let (actor, _mailbox, _) = Actor::init(
-                context.clone(),
+                context.child("actor"),
                 finalizations_by_height,
                 finalized_blocks,
                 config,
@@ -2210,7 +2237,7 @@ mod tests {
 
             let (application, started, release) = GatedBlockReporter::new();
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -2245,7 +2272,9 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
 
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2276,16 +2305,27 @@ mod tests {
 
     /// Parse the `processed_height` gauge value from a prometheus-encoded
     /// metrics dump produced by `Metrics::encode`. Looks for any line of the
-    /// form `<prefix>processed_height <value>`.
+    /// form `<prefix>processed_height <value>` or
+    /// `<prefix>processed_height{labels} <value>`.
     fn parse_processed_height(metrics: &str) -> Option<u64> {
         for line in metrics.lines() {
             let line = line.trim();
             if line.starts_with('#') {
                 continue;
             }
-            let needle = "processed_height ";
-            if let Some(idx) = line.find(needle) {
-                let value = line[idx + needle.len()..].split_whitespace().next()?;
+
+            let Some(idx) = line.find("processed_height") else {
+                continue;
+            };
+            let mut rest = &line[idx + "processed_height".len()..];
+            if let Some(labeled) = rest.strip_prefix('{') {
+                let Some(labels_end) = labeled.find('}') else {
+                    continue;
+                };
+                rest = &labeled[labels_end + 1..];
+            }
+            if rest.chars().next().is_some_and(char::is_whitespace) {
+                let value = rest.split_whitespace().next()?;
                 return value.parse().ok();
             }
         }
@@ -2313,14 +2353,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let validator = participants[0].clone();
             let application = Application::<B>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 validator,
                 ConstantProvider::new(schemes[0].clone()),
@@ -2423,7 +2466,7 @@ mod tests {
             let unknown = Sha256::hash(b"unknown-block");
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2468,7 +2511,7 @@ mod tests {
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("proposed-cache-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2527,7 +2570,7 @@ mod tests {
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2573,7 +2616,7 @@ mod tests {
             let me = participants[0].clone();
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2619,7 +2662,7 @@ mod tests {
             );
 
             let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2661,7 +2704,7 @@ mod tests {
             let me = participants[0].clone();
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2713,7 +2756,7 @@ mod tests {
             );
 
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),

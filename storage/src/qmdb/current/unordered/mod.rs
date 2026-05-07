@@ -40,7 +40,7 @@ pub mod tests {
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics as _, Runner as _,
+        Runner as _, Supervisor as _,
     };
     use commonware_utils::{
         bitmap::{Prunable as BitMap, Readable as _},
@@ -70,12 +70,12 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build-small".to_string();
-            let db: C = open_db(context.with_label("first"), partition.clone()).await;
+            let db: C = open_db(context.child("first"), partition.clone()).await;
             assert_eq!(db.inactivity_floor_loc().await, Location::<F>::new(0));
             assert_eq!(db.oldest_retained().await, 0);
             let root0 = db.root();
             drop(db);
-            let mut db: C = open_db(context.with_label("second"), partition.clone()).await;
+            let mut db: C = open_db(context.child("second"), partition.clone()).await;
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
 
@@ -96,7 +96,7 @@ pub mod tests {
             let root1 = db.root();
             assert_ne!(root1, root0);
             drop(db);
-            let mut db: C = open_db(context.with_label("third"), partition.clone()).await;
+            let mut db: C = open_db(context.child("third"), partition.clone()).await;
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root1);
 
@@ -127,7 +127,7 @@ pub mod tests {
 
             // Confirm re-open preserves state.
             drop(db);
-            let mut db: C = open_db(context.with_label("fourth"), partition.clone()).await;
+            let mut db: C = open_db(context.child("fourth"), partition.clone()).await;
             // Last commit had no metadata (passed None to merkleize).
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root3);
@@ -172,7 +172,7 @@ pub mod tests {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let partition = "build-small".to_string();
-            let mut db = open_db(context.with_label("db"), partition.clone()).await;
+            let mut db = open_db(context.child("db"), partition.clone()).await;
 
             // Add one key.
             let k = Sha256::fill(0x01);
@@ -341,15 +341,15 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let mut hasher = Sha256::new();
-            let db = open_db(context.with_label("db"), partition.clone()).await;
+            let db = open_db(context.child("db"), partition.clone()).await;
             let root = db.root();
 
             // Empty range proof should not crash or verify, since even an empty db has a single
             // commit op.
             let proof = RangeProof {
                 proof: Proof::default(),
-                pre_prefix_acc: None,
                 unfolded_prefix_peaks: vec![],
+                unfolded_suffix_peaks: vec![],
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
@@ -427,7 +427,7 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let mut hasher = Sha256::new();
-            let db = open_db(context.with_label("db"), partition.clone()).await;
+            let db = open_db(context.child("db"), partition.clone()).await;
             let mut db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
@@ -517,7 +517,7 @@ pub mod tests {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let partition = "build-small".to_string();
-            let mut db = open_db(context.with_label("db"), partition.clone()).await;
+            let mut db = open_db(context.child("db"), partition.clone()).await;
 
             // Add one key.
             let k = Sha256::fill(0x00);

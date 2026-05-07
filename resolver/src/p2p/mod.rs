@@ -97,7 +97,8 @@ mod tests {
         Blocker, Manager as _, Provider, TrackedPeers,
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Quota, Runner,
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics as _, Quota, Runner,
+        Supervisor as _,
     };
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},
@@ -129,6 +130,22 @@ mod tests {
         success_rate: 0.5,
     };
 
+    fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {
+        let prefix = format!("{name}{{");
+        let status_label = format!("status=\"{status}\"");
+        metrics
+            .lines()
+            .filter(|line| line.starts_with(&prefix) && line.contains(&status_label))
+            .map(|line| {
+                line.split_whitespace()
+                    .next_back()
+                    .expect("metric line must have a value")
+                    .parse::<u64>()
+                    .expect("status metric value must be an integer")
+            })
+            .sum()
+    }
+
     async fn setup_network_and_peers(
         context: &deterministic::Context,
         peer_seeds: &[u64],
@@ -159,7 +176,7 @@ mod tests {
         )>,
     ) {
         let (network, oracle) = Network::new(
-            context.with_label("network"),
+            context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -222,7 +239,7 @@ mod tests {
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("actor_{public_key}")),
+            context.child("actor").with_attribute("peer", &public_key),
             Config {
                 peer_provider: provider,
                 blocker,
@@ -832,7 +849,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1394,7 +1411,10 @@ mod tests {
 
             // Verify metrics: 1 successful fetch (from peer 3 after peer 2 was blocked)
             let metrics = context.encode();
-            assert!(metrics.contains("_fetch_total{status=\"Success\"} 1"));
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                1
+            );
         });
     }
 
@@ -1593,7 +1613,10 @@ mod tests {
 
             // Verify metrics: 3 successful fetches
             let metrics = context.encode();
-            assert!(metrics.contains("_fetch_total{status=\"Success\"} 3"));
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                3
+            );
         });
     }
 
@@ -2131,7 +2154,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2237,7 +2260,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2370,7 +2393,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2568,12 +2591,12 @@ mod tests {
             let (cons1, mut cons_out1, mut started) =
                 BlockingConsumer::new(vec![(gate_receiver, true)]);
 
-            let actor_context = context.with_label("actor");
+            let actor_context = context.child("actor");
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
             let (engine, mut mailbox1) = Engine::new(
-                actor_context.with_label("peer_0"),
+                actor_context.child("peer").with_attribute("index", 0),
                 Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
@@ -2593,7 +2616,7 @@ mod tests {
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
             let (engine, _mailbox2) = Engine::new(
-                actor_context.with_label("peer_1"),
+                actor_context.child("peer").with_attribute("index", 1),
                 Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
@@ -2643,7 +2666,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn spawn_actors_with_handles(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         schemes: Vec<PrivateKey>,
         connections: Vec<(
@@ -2656,7 +2679,7 @@ mod tests {
         Vec<Mailbox<Key, PublicKey>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
-        let actor_context = context.with_label("actor");
+        let actor_context = context.child("actor");
         let mut mailboxes = Vec::new();
         let mut handles = Vec::new();
 
@@ -2666,7 +2689,7 @@ mod tests {
             .zip(consumers.into_iter().zip(producers))
             .enumerate()
         {
-            let ctx = actor_context.with_label(&format!("peer_{idx}"));
+            let ctx = actor_context.child("peer").with_attribute("index", idx);
             let public_key = scheme.public_key();
             let (engine, mailbox) = Engine::new(
                 ctx,
@@ -2707,7 +2730,7 @@ mod tests {
             let (cons1, mut cons_out1) = Consumer::new();
 
             let (mut mailboxes, handles) = spawn_actors_with_handles(
-                context.clone(),
+                &context,
                 &oracle,
                 schemes,
                 connections,
@@ -2766,7 +2789,7 @@ mod tests {
             let (cons1, mut cons_out1) = Consumer::new();
 
             let (mut mailboxes, handles) = spawn_actors_with_handles(
-                context.clone(),
+                &context,
                 &oracle,
                 schemes,
                 connections,

@@ -72,7 +72,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
+    sync::{AsyncMutex, Mutex},
 };
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
@@ -131,7 +131,6 @@ where
 /// This wrapper requires only [`crate::Block`] for `B`, not
 /// [`crate::CertifiableBlock`]. It is designed for applications that cannot
 /// recover consensus context directly from block payloads.
-#[derive(Clone)]
 pub struct Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -140,13 +139,33 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: E,
+    context: Arc<AsyncMutex<E>>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     available_blocks: AvailableBlocks<B::Digest>,
 
-    build_duration: Timed<E>,
+    build_duration: Timed,
+}
+
+impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E>,
+    B: Block + Clone,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            epocher: self.epocher.clone(),
+            available_blocks: self.available_blocks.clone(),
+            build_duration: self.build_duration.clone(),
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
@@ -171,10 +190,10 @@ where
             "Histogram of time taken for the application to build a new block, in seconds",
             Buckets::LOCAL,
         );
-        let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
+        let build_duration = Timed::new(build_histogram);
 
         Self {
-            context,
+            context: Arc::new(AsyncMutex::new(context)),
             application,
             marshal,
             epocher,
@@ -236,121 +255,76 @@ where
         let build_duration = self.build_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
-            .with_label("propose")
-            .with_attribute("round", consensus_context.round)
-            .spawn(move |runtime_context| async move {
-                // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal).
-                //
-                // The parent context recovered by simplex may differ from the one
-                // the cached block was built against, so the stored block is not safe to reuse
-                // and building a fresh block would land on the same prunable
-                // archive index and be silently dropped.
-                //
-                // Skip this view and let the voter nullify it via timeout.
-                if marshal
-                    .get_verified(consensus_context.round)
-                    .await
-                    .is_some()
-                {
-                    debug!(
-                        round = ?consensus_context.round,
-                        "skipping proposal: verified block already exists for round on restart"
-                    );
+        let context = self
+            .context
+            .lock()
+            .await
+            .child("propose")
+            .with_attribute("round", consensus_context.round);
+        context.spawn(move |runtime_context| async move {
+            // On leader recovery, marshal may already hold a verified block
+            // for this round (persisted by a pre-crash propose whose
+            // notarize vote never reached the journal).
+            //
+            // The parent context recovered by simplex may differ from the one
+            // the cached block was built against, so the stored block is not safe to reuse
+            // and building a fresh block would land on the same prunable
+            // archive index and be silently dropped.
+            //
+            // Skip this view and let the voter nullify it via timeout.
+            if marshal
+                .get_verified(consensus_context.round)
+                .await
+                .is_some()
+            {
+                debug!(
+                    round = ?consensus_context.round,
+                    "skipping proposal: verified block already exists for round on restart"
+                );
+                return;
+            }
+
+            let (parent_view, parent_digest) = consensus_context.parent;
+            let parent_request = fetch_parent(
+                parent_digest,
+                // We are guaranteed that the parent round for any `consensus_context` is
+                // in the same epoch (recall, the boundary block of the previous epoch
+                // is the genesis block of the current epoch).
+                Some(Round::new(consensus_context.epoch(), parent_view)),
+                &mut application,
+                &mut marshal,
+            )
+            .await;
+
+            let parent = select! {
+                _ = tx.closed() => {
+                    debug!(reason = "consensus dropped receiver", "skipping proposal");
                     return;
-                }
-
-                let (parent_view, parent_digest) = consensus_context.parent;
-                let parent_request = fetch_parent(
-                    parent_digest,
-                    // We are guaranteed that the parent round for any `consensus_context` is
-                    // in the same epoch (recall, the boundary block of the previous epoch
-                    // is the genesis block of the current epoch).
-                    Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
-                    &mut marshal,
-                )
-                .await;
-
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                ?parent_digest,
-                                reason = "failed to fetch parent block",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-
-                // At epoch boundary, re-propose the parent block.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
-                if parent.height() == last_in_epoch {
-                    let digest = parent.digest();
-                    if !marshal.verified(consensus_context.round, parent).await {
+                },
+                result = parent_request => match result {
+                    Ok(parent) => parent,
+                    Err(_) => {
                         debug!(
-                            round = ?consensus_context.round,
-                            ?digest,
-                            "marshal rejected re-proposed boundary block"
+                            ?parent_digest,
+                            reason = "failed to fetch parent block",
+                            "skipping proposal"
                         );
                         return;
                     }
-                    let success = tx.send_lossy(digest);
+                },
+            };
+
+            // At epoch boundary, re-propose the parent block.
+            let last_in_epoch = epocher
+                .last(consensus_context.epoch())
+                .expect("current epoch should exist");
+            if parent.height() == last_in_epoch {
+                let digest = parent.digest();
+                if !marshal.verified(consensus_context.round, parent).await {
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
-                        success,
-                        "re-proposed parent block at epoch boundary"
-                    );
-                    return;
-                }
-
-                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
-                let build_request = application.propose(
-                    (
-                        runtime_context.with_label("app_propose"),
-                        consensus_context.clone(),
-                    ),
-                    ancestor_stream,
-                );
-
-                let mut build_timer = build_duration.timer();
-                let built_block = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = build_request => match result {
-                        Some(block) => block,
-                        None => {
-                            debug!(
-                                ?parent_digest,
-                                reason = "block building failed",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-                build_timer.observe();
-
-                let digest = built_block.digest();
-                if !marshal.proposed(consensus_context.round, built_block).await {
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?digest,
-                        "marshal rejected proposed block"
+                        "marshal rejected re-proposed boundary block"
                     );
                     return;
                 }
@@ -359,9 +333,57 @@ where
                     round = ?consensus_context.round,
                     ?digest,
                     success,
-                    "proposed new block"
+                    "re-proposed parent block at epoch boundary"
                 );
-            });
+                return;
+            }
+
+            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let build_request = application.propose(
+                (
+                    runtime_context.child("app_propose"),
+                    consensus_context.clone(),
+                ),
+                ancestor_stream,
+            );
+
+            let build_timer = build_duration.timer(&runtime_context);
+            let built_block = select! {
+                _ = tx.closed() => {
+                    debug!(reason = "consensus dropped receiver", "skipping proposal");
+                    return;
+                },
+                result = build_request => match result {
+                    Some(block) => block,
+                    None => {
+                        debug!(
+                            ?parent_digest,
+                            reason = "block building failed",
+                            "skipping proposal"
+                        );
+                        return;
+                    }
+                },
+            };
+            build_timer.observe(&runtime_context);
+
+            let digest = built_block.digest();
+            if !marshal.proposed(consensus_context.round, built_block).await {
+                debug!(
+                    round = ?consensus_context.round,
+                    ?digest,
+                    "marshal rejected proposed block"
+                );
+                return;
+            }
+            let success = tx.send_lossy(digest);
+            debug!(
+                round = ?consensus_context.round,
+                ?digest,
+                success,
+                "proposed new block"
+            );
+        });
         rx
     }
 
@@ -386,73 +408,76 @@ where
         let available_blocks = self.available_blocks.clone();
 
         let (mut tx, rx) = oneshot::channel();
-        self.context
-            .with_label("inline_verify")
-            .with_attribute("round", context.round)
-            .spawn(move |runtime_context| async move {
-                let block_request = marshal
-                    .subscribe_by_commitment(
-                        digest,
-                        CommitmentRequest::FetchByRound {
-                            round: context.round,
-                        },
-                    )
-                    .await;
-                let Some(block) =
-                    await_block_subscription(&mut tx, block_request, &digest, "verification").await
-                else {
-                    return;
-                };
-
-                // Shared pre-checks:
-                // - Blocks are invalid if they are not in the expected epoch and are
-                //   not a valid boundary re-proposal.
-                // - Re-proposals are detected when `digest == context.parent.1`.
-                // - Re-proposals skip normal parent/height checks because:
-                //   1) the block was already verified when originally proposed
-                //   2) parent-child checks would fail by construction when parent == block
-                let Some(decision) =
-                    precheck_epoch_and_reproposal(&epocher, &mut marshal, &context, digest, block)
-                        .await
-                else {
-                    return;
-                };
-                let block = match decision {
-                    Decision::Complete(valid) => {
-                        if valid {
-                            available_blocks.lock().insert((context.round, digest));
-                        }
-                        tx.send_lossy(valid);
-                        return;
-                    }
-                    Decision::Continue(block) => block,
-                };
-
-                // Non-reproposal path: fetch expected parent, validate ancestry, then
-                // run application verification over the ancestry stream.
-                //
-                // The helper returns `None` when work should stop early (for example,
-                // receiver closed or parent unavailable).
-                let round = context.round;
-                let application_valid = match verify_with_parent(
-                    runtime_context,
-                    context,
-                    block,
-                    &mut application,
-                    &mut marshal,
-                    &mut tx,
-                    Stage::Verified,
+        let runtime_context = self
+            .context
+            .lock()
+            .await
+            .child("inline_verify")
+            .with_attribute("round", context.round);
+        runtime_context.spawn(move |runtime_context| async move {
+            let block_request = marshal
+                .subscribe_by_commitment(
+                    digest,
+                    CommitmentRequest::FetchByRound {
+                        round: context.round,
+                    },
                 )
-                .await
-                {
-                    Some(valid) => valid,
-                    None => return,
-                };
-                if application_valid {
-                    available_blocks.lock().insert((round, digest));
+                .await;
+            let Some(block) =
+                await_block_subscription(&mut tx, block_request, &digest, "verification").await
+            else {
+                return;
+            };
+
+            // Shared pre-checks:
+            // - Blocks are invalid if they are not in the expected epoch and are
+            //   not a valid boundary re-proposal.
+            // - Re-proposals are detected when `digest == context.parent.1`.
+            // - Re-proposals skip normal parent/height checks because:
+            //   1) the block was already verified when originally proposed
+            //   2) parent-child checks would fail by construction when parent == block
+            let Some(decision) =
+                precheck_epoch_and_reproposal(&epocher, &mut marshal, &context, digest, block)
+                    .await
+            else {
+                return;
+            };
+            let block = match decision {
+                Decision::Complete(valid) => {
+                    if valid {
+                        available_blocks.lock().insert((context.round, digest));
+                    }
+                    tx.send_lossy(valid);
+                    return;
                 }
-                tx.send_lossy(application_valid);
-            });
+                Decision::Continue(block) => block,
+            };
+
+            // Non-reproposal path: fetch expected parent, validate ancestry, then
+            // run application verification over the ancestry stream.
+            //
+            // The helper returns `None` when work should stop early (for example,
+            // receiver closed or parent unavailable).
+            let round = context.round;
+            let application_valid = match verify_with_parent(
+                runtime_context,
+                context,
+                block,
+                &mut application,
+                &mut marshal,
+                &mut tx,
+                Stage::Verified,
+            )
+            .await
+            {
+                Some(valid) => valid,
+                None => return,
+            };
+            if application_valid {
+                available_blocks.lock().insert((round, digest));
+            }
+            tx.send_lossy(application_valid);
+        });
         rx
     }
 }
@@ -496,25 +521,28 @@ where
             .await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
-        self.context
-            .with_label("inline_certify")
-            .with_attribute("round", round)
-            .spawn(move |_| async move {
-                let Some(block) =
-                    await_block_subscription(&mut tx, block_rx, &digest, "certification").await
-                else {
-                    return;
-                };
+        let context = self
+            .context
+            .lock()
+            .await
+            .child("inline_certify")
+            .with_attribute("round", round);
+        context.spawn(move |_| async move {
+            let Some(block) =
+                await_block_subscription(&mut tx, block_rx, &digest, "certification").await
+            else {
+                return;
+            };
 
-                // `certify` resolving true drives the finalize vote, so mere
-                // buffered availability is not sufficient here. Persist the
-                // block through marshal before signaling success. The caller
-                // holds a notarization for this block, so route it into the
-                // notarized cache directly rather than the verified cache.
-                if marshal.certified(round, block).await {
-                    tx.send_lossy(true);
-                }
-            });
+            // `certify` resolving true drives the finalize vote, so mere
+            // buffered availability is not sufficient here. Persist the
+            // block through marshal before signaling success. The caller
+            // holds a notarization for this block, so route it into the
+            // notarized cache directly rather than the verified cache.
+            if marshal.certified(round, block).await {
+                tx.send_lossy(true);
+            }
+        });
 
         // We don't need to verify the block here because we could not have
         // reached certification without a notarization (implying at least f+1
@@ -588,7 +616,7 @@ mod tests {
         Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor as _};
     use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
     use rand::Rng;
     use std::time::Duration;
@@ -626,13 +654,16 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -643,7 +674,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -704,13 +735,16 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -721,7 +755,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -776,12 +810,12 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
                     .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -792,8 +826,7 @@ mod tests {
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-            let mut inline = Inline::new(
-                context.clone(),
+            let mut inline = Inline::new(context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -874,14 +907,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -895,7 +931,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -949,7 +985,9 @@ mod tests {
             // persisted - otherwise the validator would have voted notarize
             // for a block it cannot serve from local storage.
             let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -987,14 +1025,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1007,7 +1048,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1051,7 +1092,9 @@ mod tests {
             drop(buffer);
 
             let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1076,14 +1119,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1097,7 +1143,7 @@ mod tests {
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1163,7 +1209,9 @@ mod tests {
             drop(buffer);
 
             let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1197,9 +1245,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1214,7 +1265,7 @@ mod tests {
             // mirroring an aborted pre-crash `Inline::propose` that persisted
             // its verified block before the voter could journal a notarize.
             let pre_setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1239,7 +1290,9 @@ mod tests {
             // be recovered from storage during archive restore so that
             // `Message::GetVerified` on the new mailbox observes it.
             let post_setup = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1251,7 +1304,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 post_marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),

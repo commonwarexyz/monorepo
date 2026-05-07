@@ -154,27 +154,17 @@ pub struct Standard<H: CHasher> {
 }
 
 impl<H: CHasher> Standard<H> {
-    /// Creates a new [Standard] hasher with the default forward-fold bagging.
-    pub const fn new() -> Self {
-        Self::forward()
-    }
-
-    /// Creates a new [Standard] hasher with forward-fold bagging.
-    pub const fn forward() -> Self {
-        Self::with_bagging(Bagging::ForwardFold)
-    }
-
-    /// Creates a new [Standard] hasher with backward-fold bagging.
-    pub const fn backward() -> Self {
-        Self::with_bagging(Bagging::BackwardFold)
-    }
-
     /// Creates a new [Standard] hasher with the given bagging policy.
-    pub const fn with_bagging(bagging: Bagging) -> Self {
+    pub const fn new(bagging: Bagging) -> Self {
         Self {
             _hasher: PhantomData,
             bagging,
         }
+    }
+
+    /// Return the bagging policy used when folding peaks into a root.
+    pub const fn root_bagging(&self) -> Bagging {
+        self.bagging
     }
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
@@ -192,12 +182,6 @@ impl<H: CHasher> Standard<H> {
     }
 }
 
-impl<H: CHasher> Default for Standard<H> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
@@ -206,7 +190,7 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     }
 
     fn root_bagging(&self) -> Bagging {
-        self.bagging
+        Self::root_bagging(self)
     }
 }
 
@@ -225,7 +209,10 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Location, Position, StandardHasher as Standard};
+    use crate::merkle::{
+        mmr::{Location, Position, StandardHasher as Standard},
+        Bagging::{BackwardFold, ForwardFold},
+    };
     use alloc::vec::Vec;
     use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
 
@@ -246,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_invalid_inactive_prefix_returns_err() {
-        let mmr_hasher: Standard<Sha256> = Standard::backward();
+        let mmr_hasher: Standard<Sha256> = Standard::new(BackwardFold);
         let d1 = test_digest::<Sha256>(1);
         let d2 = test_digest::<Sha256>(2);
         let digests = [d1, d2];
@@ -292,7 +279,7 @@ mod tests {
     }
 
     fn test_leaf_digest<H: CHasher>() {
-        let mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
@@ -310,7 +297,7 @@ mod tests {
     }
 
     fn test_node_digest<H: CHasher>() {
-        let mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
 
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
@@ -345,7 +332,7 @@ mod tests {
     }
 
     fn test_root<H: CHasher>() {
-        let mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);

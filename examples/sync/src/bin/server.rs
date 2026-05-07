@@ -10,7 +10,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf,
+    Spawner, Storage, StreamOf, Supervisor as _,
 };
 use commonware_storage::{
     mmr,
@@ -481,7 +481,7 @@ async fn recv_loop<DB, E, Mode>(
             }
         };
 
-        context.with_label("request_handler").spawn({
+        context.child("request_handler").spawn({
             let state = state.clone();
             let response_sender = response_sender.clone();
             move |_| async move {
@@ -518,7 +518,7 @@ where
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
 
-    let recv_handle = context.with_label("recv").spawn({
+    let recv_handle = context.child("recv").spawn({
         let state = state.clone();
         let response_sender = response_sender.clone();
         move |context| {
@@ -615,12 +615,12 @@ where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
     Mode: ServeMode<DB> + 'static,
 {
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
-    let mut listener = context.with_label("listener").bind(addr).await?;
+    let mut listener = context.child("listener").bind(addr).await?;
     info!(
         addr = %addr,
         op_interval = ?config.op_interval,
@@ -629,7 +629,7 @@ where
         Mode::LISTENING_MESSAGE
     );
 
-    let state = Arc::new(State::new(context.with_label("server"), database));
+    let state = Arc::new(State::new(context.child("server"), database));
     let mut next_op_time = context.current() + config.op_interval;
     select_loop! {
         context,
@@ -647,7 +647,7 @@ where
             match client_result {
                 Ok((client_addr, sink, stream)) => {
                     let state = state.clone();
-                    context.with_label("client").spawn(move |context| async move {
+                    context.child("client").spawn(move |context| async move {
                         if let Err(err) = handle_client::<DB, _, Mode>(
                             context,
                             state,
@@ -677,7 +677,7 @@ where
     DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let database = initialize_database(database, &config, &mut context).await?;
     run_server::<DB, E, FullMode>(context, config, database).await
@@ -693,7 +693,7 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
         Family = mmr::Family,
         Op = DB::Operation,
@@ -708,10 +708,10 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = any::create_config(&context);
-    let database = any::Database::init(context.with_label("database"), db_config).await?;
+    let database = any::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -719,10 +719,10 @@ where
 /// Run the Current database server.
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = current::create_config(&context);
-    let database = current::Database::init(context.with_label("database"), db_config).await?;
+    let database = current::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -730,10 +730,10 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = immutable::create_config(&context);
-    let database = immutable::Database::init(context.with_label("database"), db_config).await?;
+    let database = immutable::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -744,10 +744,10 @@ async fn run_immutable_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = immutable::create_config(&context);
-    let database = immutable::Database::init(context.with_label("database"), db_config).await?;
+    let database = immutable::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
 }
@@ -755,10 +755,10 @@ where
 /// Run the Keyless database server.
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = keyless::create_config(&context);
-    let database = keyless::Database::init(context.with_label("database"), db_config).await?;
+    let database = keyless::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -769,10 +769,10 @@ async fn run_keyless_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = keyless::create_config(&context);
-    let database = keyless::Database::init(context.with_label("database"), db_config).await?;
+    let database = keyless::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
 }
@@ -783,11 +783,10 @@ async fn run_immutable_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = immutable_compact::create_config(&context);
-    let database =
-        immutable_compact::Database::init(context.with_label("database"), db_config).await?;
+    let database = immutable_compact::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
 }
@@ -798,11 +797,10 @@ async fn run_keyless_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = keyless_compact::create_config(&context);
-    let database =
-        keyless_compact::Database::init(context.with_label("database"), db_config).await?;
+    let database = keyless_compact::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
 }
@@ -968,7 +966,7 @@ fn main() {
     let executor = tokio_runtime::Runner::new(executor_config);
     executor.start(|context| async move {
         tokio_runtime::telemetry::init(
-            context.with_label("telemetry"),
+            context.child("telemetry"),
             tokio_runtime::telemetry::Logging {
                 level: tracing::Level::INFO,
                 json: false,

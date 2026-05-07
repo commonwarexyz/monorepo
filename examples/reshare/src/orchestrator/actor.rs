@@ -169,7 +169,7 @@ where
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut vote_mux, mut vote_backup) = Muxer::builder(
-            self.context.with_label("vote_mux"),
+            self.context.child("vote_mux"),
             vote_sender,
             vote_receiver,
             self.muxer_size,
@@ -178,7 +178,7 @@ where
         .build();
         mux.start();
         let (mux, mut certificate_mux) = Muxer::builder(
-            self.context.with_label("certificate_mux"),
+            self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
             self.muxer_size,
@@ -186,7 +186,7 @@ where
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
-            self.context.with_label("resolver_mux"),
+            self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
             self.muxer_size,
@@ -303,7 +303,7 @@ where
         let elector = L::default();
         let context = self
             .context
-            .with_label("consensus_engine")
+            .child("consensus_engine")
             .with_attribute("epoch", epoch);
         let engine = simplex::Engine::new(
             context,

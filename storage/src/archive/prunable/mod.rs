@@ -222,7 +222,9 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{
+        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
+    };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
@@ -259,7 +261,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.with_label("first"), cfg.clone())
+            let mut archive = Archive::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -290,12 +292,10 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.with_label("second"),
-                cfg.clone(),
-            )
-            .await
-            .unwrap();
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Getting the value should fail because compression settings mismatch.
             // Without compression, the codec sees extra bytes after decoding the value
@@ -328,7 +328,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -369,7 +369,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 2"));
+            assert!(has_metric_value(&buffer, "items_tracked", 2));
             assert!(buffer.contains("unnecessary_reads_total 1"));
             assert!(buffer.contains("gets_total 2"));
         });
@@ -393,7 +393,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -452,7 +452,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -474,7 +474,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 5"));
+            assert!(has_metric_value(&buffer, "items_tracked", 5));
 
             // Prune sections less than 3
             archive.prune(3).await.expect("Failed to prune");
@@ -494,9 +494,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 3"));
-            assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("pruned_total 0")); // no lazy cleanup yet
+            assert!(has_metric_value(&buffer, "items_tracked", 3));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
+            assert!(has_metric_value(&buffer, "pruned_total", 0)); // no lazy cleanup yet
 
             // Try to prune older section
             archive.prune(2).await.expect("Failed to prune");
@@ -516,9 +516,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
-            assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("pruned_total 1"));
+            assert!(has_metric_value(&buffer, "items_tracked", 4)); // lazily remove one, add one
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
+            assert!(has_metric_value(&buffer, "pruned_total", 1));
         });
     }
 
@@ -540,9 +540,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(context.with_label("init1"), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let mut archive = Archive::init(
+                context.child("init").with_attribute("index", 1),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Insert multiple keys across different sections
             let mut keys = BTreeMap::new();
@@ -580,9 +583,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {num_keys:?}");
-            assert!(buffer.contains(&tracked));
-            assert!(buffer.contains("pruned_total 0"));
+            assert!(has_metric_value(&buffer, "items_tracked", num_keys));
+            assert!(has_metric_value(&buffer, "pruned_total", 0));
 
             // Sync and drop the archive
             archive.sync().await.expect("Failed to sync archive");
@@ -602,7 +604,7 @@ mod tests {
                 items_per_section: NZU64!(items_per_section),
             };
             let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
-                context.with_label("init2"),
+                context.child("init").with_attribute("index", 2),
                 cfg.clone(),
             )
             .await
@@ -661,11 +663,13 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {:?}", num_keys - removed);
-            assert!(buffer.contains(&tracked));
-            let pruned = format!("indices_pruned_total {removed}");
-            assert!(buffer.contains(&pruned));
-            assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
+            assert!(has_metric_value(
+                &buffer,
+                "items_tracked",
+                num_keys - removed
+            ));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
+            assert!(has_metric_value(&buffer, "pruned_total", 0)); // have not lazily removed keys yet
 
             context.auditor().state()
         })
@@ -707,7 +711,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -758,7 +762,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -795,7 +799,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -805,7 +809,7 @@ mod tests {
             archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
 
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 2"));
+            assert!(has_metric_value(&buffer, "items_tracked", 2));
 
             // Prune below index 3
             archive.prune(3).await.unwrap();
@@ -836,8 +840,8 @@ mod tests {
             );
 
             let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 1"));
-            assert!(buffer.contains("indices_pruned_total 1"));
+            assert!(has_metric_value(&buffer, "items_tracked", 1));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 1));
 
             // put_multi below pruned index is rejected
             let result = archive.put_multi(2, test_key("ddd"), 40).await;

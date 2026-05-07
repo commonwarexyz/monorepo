@@ -154,7 +154,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -280,7 +280,7 @@ pub(crate) mod test {
     fn test_ordered_any_variable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("initial")).await;
+            let db = open_variable_db(context.child("initial")).await;
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
@@ -289,7 +289,7 @@ pub(crate) mod test {
     fn test_ordered_any_variable_db_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("initial")).await;
+            let db = open_variable_db(context.child("initial")).await;
             test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
@@ -298,7 +298,7 @@ pub(crate) mod test {
     fn test_ordered_any_update_collision_edge_case_variable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
+            let db = open_variable_db(context.child("storage")).await;
             test_ordered_any_update_collision_edge_case(db).await;
         });
     }
@@ -309,7 +309,7 @@ pub(crate) mod test {
     fn test_ordered_any_update_batch_create_between_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_variable_db(context.clone()).await;
+            let mut db = open_variable_db(context.child("storage")).await;
 
             // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
             // collisions.
@@ -369,7 +369,7 @@ pub(crate) mod test {
             let val3 = Sha256::fill(3u8);
 
             // Delete the previous key of a newly created key.
-            let mut db = open_variable_db(context.with_label("first")).await;
+            let mut db = open_variable_db(context.child("first")).await;
             let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val1))
@@ -398,7 +398,7 @@ pub(crate) mod test {
             db.destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
-            let mut db = open_variable_db(context.with_label("second")).await;
+            let mut db = open_variable_db(context.child("second")).await;
             let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val1))

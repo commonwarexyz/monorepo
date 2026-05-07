@@ -10,6 +10,7 @@ use crate::common::{
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
+    Supervisor as _,
 };
 use commonware_storage::{
     merkle::{mmb, mmr, Family},
@@ -74,7 +75,7 @@ fn bench_fixed_value_generate(c: &mut Criterion) {
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += dispatch_fixed!(ctx.clone(), variant, |db| {
+                                total += dispatch_fixed!(ctx.child("storage"), variant, |db| {
                                     bench_db(
                                         db,
                                         elements,
@@ -120,7 +121,7 @@ fn bench_var_value_generate(c: &mut Criterion) {
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += dispatch_var!(ctx.clone(), variant, |db| {
+                                total += dispatch_var!(ctx.child("storage"), variant, |db| {
                                     bench_db(db, elements, operations, commit_freq, make_var_value)
                                         .await
                                 });
@@ -182,11 +183,11 @@ macro_rules! keyless_variants {
 keyless_variants! {
     Mmr {
         name: "keyless::mmr",
-        init: |ctx| open_keyless_db::<mmr::Family>(ctx.clone()),
+        init: |ctx| open_keyless_db::<mmr::Family>(ctx.child("storage")),
     }
     Mmb {
         name: "keyless::mmb",
-        init: |ctx| open_keyless_db::<mmb::Family>(ctx.clone()),
+        init: |ctx| open_keyless_db::<mmb::Family>(ctx.child("storage")),
     }
 }
 
@@ -206,7 +207,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            dispatch_keyless!(ctx.clone(), variant, |db| {
+                            dispatch_keyless!(ctx.child("storage"), variant, |db| {
                                 let mut rng = StdRng::seed_from_u64(42);
                                 let mut batch = db.new_batch();
                                 for _ in 0u64..operations {

@@ -65,7 +65,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     }
     let start = Location::<F>::new(input.range_start % *leaves);
     for (bagging, inactive_peaks) in supported_root_specs::<F>(&merkle) {
-        let hasher = Standard::<Sha256>::with_bagging(bagging);
+        let hasher = Standard::<Sha256>::new(bagging);
         let _ = merkle.range_proof(&hasher, start..leaves, inactive_peaks);
     }
 }

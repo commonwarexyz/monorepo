@@ -21,14 +21,14 @@ use crate::{
     },
     Context,
 };
+use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::{iter, ops::Range};
-use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::BTreeMap,
     sync::{Arc, Weak},
 };
 use tracing::debug;
@@ -468,21 +468,37 @@ where
             .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
             .collect();
 
-        // Batch-read disk misses concurrently.
-        let disk_results = try_join_all(
-            locations
-                .iter()
-                .zip(results.iter())
-                .filter(|(_, cached)| cached.is_none())
-                .map(|(loc, _)| reader.read(**loc)),
-        )
-        .await?;
+        // Batch-read disk misses. Reader::read_many requires sorted, unique positions, while this
+        // helper preserves the caller's order and permits duplicates.
+        let misses: Vec<(usize, u64)> = locations
+            .iter()
+            .zip(results.iter())
+            .enumerate()
+            .filter_map(|(idx, (loc, cached))| cached.is_none().then_some((idx, **loc)))
+            .collect();
+        if misses.is_empty() {
+            return Ok(results.into_iter().map(Option::unwrap).collect());
+        }
+
+        let mut miss_positions: Vec<u64> = misses.iter().map(|(_, loc)| *loc).collect();
+        miss_positions.sort_unstable();
+        miss_positions.dedup();
+
+        let disk_results = reader.read_many(&miss_positions).await?;
 
         // Merge disk results back in order.
-        let mut disk_iter = disk_results.into_iter();
+        let mut results = results;
+        for (idx, loc) in misses {
+            // `miss_positions` is sorted and deduped, and `loc` came from it before deduping, so
+            // binary search must find the matching read_many result.
+            let result_idx = miss_positions
+                .binary_search(&loc)
+                .expect("disk result missing for requested location");
+            results[idx] = Some(disk_results[result_idx].clone());
+        }
         Ok(results
             .into_iter()
-            .map(|r| r.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch")))
+            .map(|r| r.expect("operation should be resolved"))
             .collect())
     }
 
@@ -1198,15 +1214,21 @@ where
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
         // but are invisible to the base-DB-only `prev_translated_key` lookup above.
         //
-        // Walk ancestors closest-first; a BTreeSet tracks keys already seen so each key is
-        // processed only once (closest-ancestor's entry wins). BTreeSet is faster than HashMap
-        // for 32-byte Digest keys because Digest cmp (~5ns, SIMD) is cheaper than SipHash
-        // (~200ns) per op at the sizes involved.
+        // Walk ancestors closest-first; a set tracks keys already seen so each key is processed
+        // only once (closest-ancestor's entry wins). We use AHashSet (keyed per-process via
+        // runtime-rng) instead of std's default SipHash: ahash is DoS-resistant for adversarial
+        // inputs but several times faster on 32-byte Digest keys, where SipHash dominates over
+        // the actual probe.
         //
-        // Depth-1 chains skip the BTreeSet entirely — a single ancestor can't shadow itself,
+        // Depth-1 chains skip the set entirely — a single ancestor can't shadow itself,
         // and each diff's keys are unique by construction.
         let track_shadow = m.ancestors.len() > 1;
-        let mut seen: BTreeSet<&K> = BTreeSet::new();
+        let seen_cap = if track_shadow {
+            m.ancestors.iter().map(|a| a.diff.len()).sum()
+        } else {
+            0
+        };
+        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         let mut ancestor_deleted: Vec<K> = Vec::new();
         for batch in m.ancestors.iter() {
             for (key, entry) in batch.diff.iter() {
@@ -1335,7 +1357,7 @@ where
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
             // Safe to use a HashSet here since we don't rely on iteration order.
-            let mut rewritten_predecessors = HashSet::new();
+            let mut rewritten_predecessors = AHashSet::with_capacity(created.len() + deleted.len());
             for key in created
                 .iter()
                 .map(|(k, _, _)| k)
@@ -1593,10 +1615,27 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
+        // Pre-size the two hash collections used below in one pass over ancestors. Each
+        // ancestor's diff lands in exactly one of:
+        //   - `committed_locs`, if the ancestor's ops are already in the DB (`end <= db_size`)
+        //   - the `seen` set, if the ancestor's ops still need to be applied
+        let mut committed_diff_total = 0usize;
+        let mut uncommitted_diff_total = 0usize;
+        for (ancestor_diff, &ancestor_end) in
+            batch.ancestor_diffs.iter().zip(&batch.ancestor_diff_ends)
+        {
+            if ancestor_end <= db_size {
+                committed_diff_total += ancestor_diff.len();
+            } else {
+                uncommitted_diff_total += ancestor_diff.len();
+            }
+        }
+
         // Build committed_locs: for each key in a committed ancestor batch, record the nearest
         // (to child) committed ancestor's final state. Some(loc) = Active at loc, None =
         // Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
-        let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
+        let mut committed_locs: AHashMap<&U::Key, Option<Location<F>>> =
+            AHashMap::with_capacity(committed_diff_total);
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.ancestor_diff_ends[i] <= db_size {
                 for (key, entry) in ancestor_diff.iter() {
@@ -1611,9 +1650,10 @@ where
             let mut bitmap = self.bitmap.write();
             bitmap.extend_to(*batch.new_last_commit_loc + 1);
 
-            // Apply child's diff (child wins via seen set). Safe to use a HashSet here since we
-            // don't rely on iteration order.
-            let mut seen = HashSet::<&U::Key>::new();
+            // Apply child's diff (child wins via seen set). Safe to use an AHashSet here since
+            // we don't rely on iteration order.
+            let mut seen =
+                AHashSet::<&U::Key>::with_capacity(batch.diff.len() + uncommitted_diff_total);
             for (key, entry) in batch.diff.iter() {
                 seen.insert(key);
                 let base_old_loc = committed_locs
@@ -2107,11 +2147,12 @@ mod tests {
                 value_current,
             ))];
 
-            // read_ops should resolve all three sources correctly.
+            // read_ops should resolve all three sources correctly while preserving order and
+            // duplicates across the disk-backed subset.
             let reader = db.log.reader().await;
             let ops = merkleizer
                 .read_ops(
-                    &[committed_loc, parent_loc, current_loc],
+                    &[current_loc, committed_loc, parent_loc, committed_loc],
                     &batch_ops,
                     &reader,
                 )
@@ -2122,9 +2163,10 @@ mod tests {
             assert_eq!(
                 ops,
                 vec![
+                    Operation::Update(update::Unordered(key_current, value_current)),
                     Operation::Update(update::Unordered(key_db, value_db)),
                     Operation::Update(update::Unordered(key_parent, value_parent)),
-                    Operation::Update(update::Unordered(key_current, value_current)),
+                    Operation::Update(update::Unordered(key_db, value_db)),
                 ]
             );
 

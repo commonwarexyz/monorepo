@@ -93,7 +93,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16};
     use std::time::Duration;
 
@@ -287,12 +287,15 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -374,19 +377,22 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
 
             let victim_setup = CodingHarness::setup_validator(
-                context.with_label("victim"),
+                context.child("victim"),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
             let peer_setup = CodingHarness::setup_validator(
-                context.with_label("peer"),
+                context.child("peer"),
                 &mut oracle,
                 participants[1].clone(),
                 ConstantProvider::new(schemes[1].clone()),
@@ -470,7 +476,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
             let round = Round::new(Epoch::zero(), View::new(3));
             let commitment = CodingHarness::commitment(&block3);
             let _verify = marshaled.verify(block3.context(), commitment).await;
@@ -518,15 +524,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -552,7 +561,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Create parent block at height 1
             let parent_ctx = CodingCtx {
@@ -640,15 +649,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -673,7 +685,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
             // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
@@ -856,15 +868,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -889,7 +904,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Create parent block at height 1 so the commitment is well-formed.
             let parent_ctx = CodingCtx {
@@ -948,13 +963,13 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone()).await;
+            let mut oracle = setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone()).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -979,7 +994,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Re-proposal payload with valid coding config, but no block available.
             let missing_payload = Commitment::from((
@@ -1025,13 +1040,13 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone()).await;
+            let mut oracle = setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone()).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1056,7 +1071,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Re-proposal payload with valid coding config, but no block available.
             let missing_payload = Commitment::from((
@@ -1117,12 +1132,15 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1214,15 +1232,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1251,7 +1272,7 @@ mod tests {
                 epocher: limited_epocher,
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent_ctx = CodingCtx {
@@ -1318,15 +1339,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1353,7 +1377,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Test case 1: Non-contiguous height
             //
@@ -1486,15 +1510,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1519,7 +1546,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Create parent at height 1.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
@@ -1606,15 +1633,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1641,7 +1671,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_context = CodingCtx {
@@ -1698,7 +1728,7 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
-                context.clone(),
+                context.child("network"),
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
             )
@@ -1713,14 +1743,14 @@ mod tests {
             };
 
             let v0_setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
             let v1_setup = CodingHarness::setup_validator(
-                context.with_label("validator_1"),
+                context.child("validator").with_attribute("index", 1),
                 &mut oracle,
                 participants[1].clone(),
                 ConstantProvider::new(schemes[1].clone()),
@@ -1809,14 +1839,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1840,7 +1873,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let ctx = CodingCtx {
                 round: Round::new(Epoch::zero(), View::new(1)),
@@ -1884,15 +1917,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1945,7 +1981,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Optimistic verify - returns shard validity (true).
             let shard_validity = marshaled
@@ -1974,7 +2010,9 @@ mod tests {
             // persisted - otherwise the validator would have voted finalize
             // for a block it cannot serve from local storage.
             let setup2 = CodingHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2004,15 +2042,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2063,7 +2104,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Drive the leader-side propose path. `propose` must persist the
             // block before returning the commitment.
@@ -2082,7 +2123,9 @@ mod tests {
             drop(shards);
 
             let setup2 = CodingHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2117,15 +2160,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2177,7 +2223,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let commitment = marshaled
                 .propose(ctx)
@@ -2207,15 +2253,18 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator").with_attribute("index", 0),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -2267,7 +2316,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
-            let mut marshaled = Marshaled::new(context.clone(), cfg);
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let commitment_rx = marshaled.propose(new_ctx).await;
             assert!(

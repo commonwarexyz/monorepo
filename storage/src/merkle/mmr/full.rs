@@ -26,14 +26,14 @@ pub type Mmr<E, D, S = Sequential> = crate::merkle::full::Merkle<Family, E, D, S
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, Family as _},
+        merkle::{conformance::build_test_mmr, Bagging::ForwardFold, Family as _},
         mmr::{mem, Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
     };
     use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -62,14 +62,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let test_mmr = mem::Mmr::new();
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&hasher, 0).unwrap();
 
             let mut mmr = Mmr::init(
-                context.clone(),
-                &Standard::<Sha256>::new(),
+                context.child("storage"),
+                &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
             )
             .await
@@ -92,11 +92,15 @@ mod tests {
     fn test_full_mmr_peek_root_empty_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new();
-            let peek =
-                Mmr::<_, Digest>::peek_root(context.clone(), test_config(&context), &hasher, 0)
-                    .await
-                    .unwrap();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let peek = Mmr::<_, Digest>::peek_root(
+                context.child("storage"),
+                test_config(&context),
+                &hasher,
+                0,
+            )
+            .await
+            .unwrap();
 
             let empty_root = mem::Mmr::new().root(&hasher, 0).unwrap();
             assert_eq!(peek, Some((Location::new(0), Location::new(0), empty_root)));
@@ -109,7 +113,7 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let cfg = test_config(&context);
             let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
 
@@ -234,12 +238,12 @@ mod tests {
     fn test_full_mmr_batch_stacking() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
             let mut mmr = Mmr::init(
-                context.clone(),
-                &Standard::<Sha256>::new(),
+                context.child("storage"),
+                &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
             )
             .await
@@ -297,11 +301,11 @@ mod tests {
     fn test_init_sync_fresh_start_updates_journal_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
             let mut mmr =
-                Mmr::<_, Digest>::init(context.with_label("init"), &hasher, test_config(&context))
+                Mmr::<_, Digest>::init(context.child("init"), &hasher, test_config(&context))
                     .await
                     .unwrap();
             let mut batch = mmr.new_batch();
@@ -323,7 +327,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut ref_mmr = Mmr::<_, Digest>::init(context.with_label("ref"), &hasher, ref_cfg)
+            let mut ref_mmr = Mmr::<_, Digest>::init(context.child("ref"), &hasher, ref_cfg)
                 .await
                 .unwrap();
             let mut batch = ref_mmr.new_batch();
@@ -347,7 +351,7 @@ mod tests {
                 range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
-            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg)
+            let mut sync_mmr = Mmr::init_sync(context.child("sync"), sync_cfg)
                 .await
                 .unwrap();
 

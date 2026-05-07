@@ -48,9 +48,10 @@ use crate::{
         contiguous::{Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{Family, Location},
+    merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
     qmdb::operation::Operation,
 };
+use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -73,6 +74,14 @@ pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
+
+/// Merkle peak bagging policy used by QMDB operation roots.
+pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
+
+/// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
+pub const fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
+    StandardHasher::new(ROOT_BAGGING)
+}
 
 /// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
 ///
