@@ -414,7 +414,7 @@ where
 /// view immediately before GST. The post-GST check requires every
 /// correct reporter to finalize a strictly newer view.
 ///
-/// If all non-byzantine reporters reach `required_containers` during the
+/// If all non-byzantine reporters reach `required_containers` during theg
 /// fault phase, the run skips the post-GST check and proceeds directly to
 /// safety invariants.
 pub fn run_liveness<P: Simplex>(mut input: crate::FuzzInput)
@@ -570,7 +570,7 @@ where
                 );
             }
         }
-g
+
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
 
