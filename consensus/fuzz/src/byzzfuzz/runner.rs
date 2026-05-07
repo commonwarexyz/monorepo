@@ -429,8 +429,7 @@ where
             let mut baselines: Vec<(usize, u64)> = Vec::with_capacity(non_byzantine.len());
             let mut watcher_inputs = Vec::with_capacity(non_byzantine.len());
             for &i in &non_byzantine {
-                let (latest, monitor): (View, ViewReceiver<View>) =
-                    reporters[i].subscribe().await;
+                let (latest, monitor): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
                 let baseline = latest.get();
                 baselines.push((i, baseline));
                 watcher_inputs.push((i, baseline, latest, monitor));
@@ -470,17 +469,12 @@ where
             if !phase2_complete {
                 let mut diag = String::new();
                 for &(i, baseline) in &baselines {
-                    let (latest, _monitor): (View, ViewReceiver<View>) =
-                        reporters[i].subscribe().await;
+                    let (latest, _): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
                     let current = latest.get();
-                    let _ = write!(
-                        diag,
-                        " node{i}={{baseline={baseline} current={current} delta={}}}",
-                        current.saturating_sub(baseline),
-                    );
+                    let _ = write!(diag, " node{i}={{baseline={baseline} current={current}}}");
                 }
                 panic!(
-                    "byzzfuzz liveness: post-GST window {:?} elapsed before all non-byzantine reporters advanced past pre-GST baseline;{diag}",
+                    "byzzfuzz_liveness: no post-GST progress within {:?};{diag}",
                     BYZZFUZZ_POST_GST_WINDOW,
                 );
             }
