@@ -1,17 +1,23 @@
-//! Geometry helpers for range proofs over grafted current trees.
+//! Geometry for current range proofs.
 //!
-//! The proof format starts from ops-tree peaks, but the current root commits to bitmap chunks
-//! grafted onto those ops-tree digests. This module keeps track of where the proven operation range
-//! falls among the ops-tree peaks and which boundary peaks must stay unfolded so verification can
-//! regroup them by complete grafted chunk.
+//! Current proofs combine two views of the operation log. The range proof is collected from the ops
+//! tree, while the current root commits to activity bitmap chunks grafted onto that tree. This
+//! module records how the requested operation range lines up with the ops-tree peaks so proof
+//! generation and verification can translate between those two views.
+//!
+//! For MMR, each bitmap chunk corresponds to one ops-tree peak, so this translation is one-for-one.
+//! For MMB-like families, one bitmap chunk can span multiple sub-grafting-height ops-tree peaks.
+//! If the requested range covers only part of such a chunk, a standard range proof may fold the
+//! out-of-range peaks into its prefix or suffix witnesses. This module identifies those peaks so
+//! the proof can carry their digests explicitly and verification can rebuild the bitmap chunk root.
 
 use crate::merkle::{self, Family, Graftable, Location, Position};
 use core::ops::Range;
 
-/// An inventory of current ops-tree peaks, paired with their heights, from oldest to youngest
-/// relative to the bounds of a range proof. Every peak is assigned to exactly one of three
-/// sequential layout regions: before the operation range, overlapping the operation range, or
-/// after the operation range.
+/// An inventory of ops-tree peaks, paired with their heights, from oldest to youngest relative to
+/// the bounds of a range proof. Every peak is assigned to exactly one of three sequential layout
+/// regions: before the operation range, overlapping the operation range, or after the operation
+/// range.
 struct PeakLayout<F: Family> {
     /// Ops-tree peaks whose leaves all precede the operation range's starting location.
     prefix: Vec<(Position<F>, u32)>,
@@ -29,7 +35,7 @@ pub(super) fn covered_leaves<F: Family>(peaks: &[(Position<F>, u32)]) -> u64 {
 }
 
 impl<F: Family> PeakLayout<F> {
-    /// Bucket an ops tree's current peaks into prefix, range, and after sub-vectors.
+    /// Bucket the ops-tree peaks into prefix, range, and after sub-vectors.
     fn new(leaves: Location<F>, range: Range<Location<F>>) -> Result<Self, merkle::Error<F>> {
         if range.is_empty() {
             return Err(merkle::Error::Empty);
@@ -153,16 +159,15 @@ impl<F: Graftable> RangeProofGeometry<F> {
     /// Each returned count corresponds to one digest in the unfolded prefix/suffix witness. Most
     /// ops-tree peaks stay one-for-one and produce count `1`.
     ///
-    /// Adjacent sub-grafting-height peaks are grouped when they belong to the same complete bitmap
-    /// chunk. `complete_chunks` is the number of grafted-tree leaves, so chunk indexes at or above
-    /// this boundary are incomplete and cannot be grouped here.
+    /// Adjacent sub-grafting-height peaks are grouped when they belong to the same bitmap chunk.
+    /// `complete_chunks` is the number of peak-tree leaves, not counting the partial chunk if any.
     ///
-    /// For example, if `p1` and `p2` are adjacent sub-grafting-height peaks in complete chunk `7`,
-    /// input peaks `[p0, p1, p2, p3]` produce counts `[1, 2, 1]`. If chunk `7` is incomplete,
-    /// the same input produces `[1, 1, 1, 1]`.
+    /// For example, if `p1` and `p2` are adjacent sub-grafting-height peaks covered by chunk `7`,
+    /// input peaks `[p0, p1, p2, p3]` produce counts `[1, 2, 1]`.
     ///
     /// For MMRs this always returns one `1` per input peak. The grouping only matters for families
-    /// such as MMB, where a complete chunk can be represented by multiple smaller ops-tree peaks.
+    /// such as MMB, where a chunk can be represented by multiple
+    /// sub-grafting-height ops-tree peaks.
     pub(super) fn witness_peak_counts(
         &self,
         peaks: &[(Position<F>, u32)],
@@ -198,11 +203,11 @@ impl<F: Graftable> RangeProofGeometry<F> {
         covered_leaves(&self.layout.prefix) + covered_leaves(&self.layout.range)
     }
 
-    /// Index in `layout.prefix` where prefix peaks stop being pre-grouped as grafted witnesses.
+    /// Index in `layout.prefix` where prefix peaks stop being pre-grouped as bitmap chunk witnesses.
     ///
     /// Prefix peaks before this index are fully before the range's first bitmap chunk and can stay
-    /// in grafted form. Peaks at or after this index may share a complete grafted chunk with the
-    /// proven range, so reconstruction needs their ops-tree digests.
+    /// pre-grouped. Peaks at or after this index may share a bitmap chunk with the proven
+    /// range, so reconstruction needs their ops-tree digests.
     pub(super) fn prefix_regroup_start(&self) -> usize {
         let chunk_start = self.start_chunk << self.grafting_height;
         let mut leaf_cursor = 0u64;
@@ -215,11 +220,11 @@ impl<F: Graftable> RangeProofGeometry<F> {
         self.layout.prefix.len()
     }
 
-    /// Index in `layout.after` where after peaks start being pre-grouped as grafted witnesses.
+    /// Index in `layout.after` where after peaks start being pre-grouped as bitmap chunk witnesses.
     ///
-    /// After peaks before this index may share a complete grafted chunk with the proven range, so
+    /// After peaks before this index may share a bitmap chunk with the proven range, so
     /// reconstruction needs their ops-tree digests. Peaks at or after this index are fully after
-    /// the range's last bitmap chunk and can stay in grafted form.
+    /// the range's last bitmap chunk and can stay pre-grouped.
     pub(super) fn after_regroup_end(&self) -> usize {
         let chunk_end = (self.end_chunk + 1) << self.grafting_height;
         let mut leaf_cursor = self.after_start();
@@ -232,12 +237,14 @@ impl<F: Graftable> RangeProofGeometry<F> {
         self.layout.after.len()
     }
 
-    /// Return true when a generic range proof would hide boundary peaks needed for grafting.
+    /// Return true when proof verification needs extra prefix/suffix ops-tree peak digests.
     ///
-    /// This happens when some ops-tree peak is smaller than a grafted chunk and belongs to a
-    /// complete bitmap chunk represented by multiple ops-tree peaks. In that case the proof must
-    /// include unfolded prefix/suffix peak digests so verification can regroup the complete chunk
-    /// correctly.
+    /// For MMB, a bitmap chunk may be represented by several sub-grafting-height ops-tree peaks. If
+    /// one of those peaks is outside the proven operation range, the generic range proof can hide
+    /// it behind a prefix or suffix accumulator. Verification then needs the hidden peak digest so
+    /// it can rebuild the bitmap chunk root.
+    ///
+    /// MMR chunks are already single ops-tree peaks, so this returns false for MMR layouts.
     pub(super) fn needs_unfolded_boundary_peaks(&self) -> Result<bool, merkle::Error<F>> {
         let size = Position::<F>::try_from(self.leaves)?;
         let mut leaf_cursor = 0u64;
@@ -246,16 +253,12 @@ impl<F: Graftable> RangeProofGeometry<F> {
             let peak_start = leaf_cursor;
             leaf_cursor += 1u64 << *height;
 
+            let chunk_idx = peak_start >> self.grafting_height;
             *height < self.grafting_height
-                && self.has_multiple_ops_peaks(size, peak_start >> self.grafting_height)
+                && chunk_idx < self.complete_chunks
+                && F::chunk_peaks(size, chunk_idx, self.grafting_height)
+                    .nth(1)
+                    .is_some()
         }))
-    }
-
-    /// Return true when `chunk_idx` is complete and spans more than one ops-tree peak.
-    fn has_multiple_ops_peaks(&self, size: Position<F>, chunk_idx: u64) -> bool {
-        chunk_idx < self.complete_chunks
-            && F::chunk_peaks(size, chunk_idx, self.grafting_height)
-                .nth(1)
-                .is_some()
     }
 }

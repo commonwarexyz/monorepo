@@ -112,7 +112,7 @@ where
     }
 }
 
-// Lightweight view of the status bitmap as complete grafted chunks. Pruned chunks are represented
+// Lightweight view of the status bitmap as complete bitmap chunks. Pruned chunks are represented
 // by zero-filled chunks because their bits are folded into the inactive prefix.
 struct BitmapGrafting<'a, B, const N: usize> {
     status: &'a B,
@@ -192,7 +192,7 @@ fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
     // The grafted list has three regions: already-grafted entries before the range-adjacent
     // chunks, ops-tree peak entries that may regroup with the proven range, and already-grafted
     // entries after that middle region. `middle_iter` covers exactly the chunk span from the first
-    // prefix peak through the last suffix peak that can share a grafted chunk with the proven
+    // prefix peak through the last suffix peak that can share a bitmap chunk with the proven
     // range.
     let middle_iter = geometry.prefix_peaks()[prefix_regroup_start..]
         .iter()
@@ -411,7 +411,7 @@ pub struct RangeProof<F: Family, D: Digest> {
     /// suffix accumulator that grafted reconstruction must inspect.
     ///
     /// This vector is intentionally split by convention. It starts with ops-tree peak digests
-    /// adjacent to the proven range, because those peaks may share grafted chunks with
+    /// adjacent to the proven range, because those peaks may share bitmap chunks with
     /// in-range peaks. It then contains already-grafted digests for the remaining
     /// suffix region. The verifier reconstructs the split point from the peak layout.
     pub unfolded_suffix_peaks: Vec<D>,
@@ -1623,8 +1623,8 @@ mod tests {
 
             // Grafted reconstruction needs the individual prefix/suffix peaks that generic
             // backward proofs may otherwise hide behind fold accumulators. These witnesses are
-            // already grouped by grafted chunk, so their counts can be smaller than the ops-tree
-            // peak counts.
+            // already grouped by bitmap chunk, so the witness vectors can have fewer entries
+            // than the ops-tree peak lists.
             let prefix_counts = geometry.witness_peak_counts(geometry.prefix_peaks(), 0);
             let suffix_start = geometry.after_start();
             let suffix_counts = geometry.witness_peak_counts(geometry.after_peaks(), suffix_start);
@@ -1717,7 +1717,7 @@ mod tests {
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
 
             // The ops root is the inner QMDB log root and commits the ops-tree inactive peak count.
-            // The grafted bitmap root commits the chunk-aligned count, since grafted chunks are
+            // The grafted bitmap root commits the chunk-aligned count, since bitmap chunks are
             // the atomic inactive-prefix boundary for the current root.
             let ops_root = ops.root(&hasher, ops_inactive_peaks).unwrap();
 
