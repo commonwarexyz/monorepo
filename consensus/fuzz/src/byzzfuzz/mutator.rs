@@ -276,8 +276,9 @@ impl Strategy for ByzzFuzzMutator {
         match rng.gen_range(0..5) {
             0 => proposal_with_view(
                 proposal,
-                nearby_context_value(
+                nearby_context_value_except(
                     rng,
+                    proposal.view().get(),
                     last_vote_view,
                     last_finalized_view,
                     last_notarized_view,
@@ -301,8 +302,9 @@ impl Strategy for ByzzFuzzMutator {
             3 => Proposal::new(
                 Round::new(
                     Epoch::new(EPOCH),
-                    View::new(nearby_context_value(
+                    View::new(nearby_context_value_except(
                         rng,
+                        proposal.view().get(),
                         last_vote_view,
                         last_finalized_view,
                         last_notarized_view,
@@ -313,7 +315,7 @@ impl Strategy for ByzzFuzzMutator {
                     rng,
                     proposal.parent.get(),
                     last_finalized_view,
-                    last_notarized_view,
+                    last_notarized_view,g
                     last_nullified_view,
                 )),
                 proposal.payload,
