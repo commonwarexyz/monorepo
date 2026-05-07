@@ -126,6 +126,137 @@ struct PeakLayout<F: Family> {
     after: Vec<(Position<F>, u32)>,
 }
 
+#[derive(Clone, Copy)]
+struct GraftingInfo {
+    height: u32,
+    complete_chunks: u64,
+}
+
+impl GraftingInfo {
+    fn from_status<const N: usize>(status: &impl BitmapReadable<N>) -> Self {
+        Self {
+            height: grafting::height::<N>(),
+            complete_chunks: status.complete_chunks() as u64,
+        }
+    }
+}
+
+struct BitmapGrafting<'a, B, const N: usize> {
+    status: &'a B,
+    info: GraftingInfo,
+    pruned_chunks: u64,
+}
+
+impl<'a, B: BitmapReadable<N>, const N: usize> BitmapGrafting<'a, B, N> {
+    fn new(status: &'a B) -> Self {
+        Self {
+            status,
+            info: GraftingInfo::from_status(status),
+            pruned_chunks: status.pruned_chunks() as u64,
+        }
+    }
+
+    fn chunk(&self, idx: u64) -> Option<[u8; N]> {
+        if idx >= self.info.complete_chunks {
+            None
+        } else if idx < self.pruned_chunks {
+            Some([0u8; N])
+        } else {
+            Some(self.status.get_chunk(idx as usize))
+        }
+    }
+}
+
+struct ProofPlan<F: Family> {
+    leaves: Location<F>,
+    range: Range<Location<F>>,
+    layout: PeakLayout<F>,
+    inactive_peaks: usize,
+    start_chunk: u64,
+    end_chunk: u64,
+    grafting: GraftingInfo,
+}
+
+impl<F: Family> ProofPlan<F> {
+    fn new(
+        leaves: Location<F>,
+        range: Range<Location<F>>,
+        inactive_peaks: usize,
+        grafting: GraftingInfo,
+    ) -> Result<Self, merkle::Error<F>> {
+        let layout = peak_layout(leaves, range.clone())?;
+        let end_loc = range.end.checked_sub(1).expect("range is non-empty");
+        let start_chunk = *range.start >> grafting.height;
+        let end_chunk = *end_loc >> grafting.height;
+
+        Ok(Self {
+            leaves,
+            range,
+            layout,
+            inactive_peaks,
+            start_chunk,
+            end_chunk,
+            grafting,
+        })
+    }
+
+    fn range_start(&self) -> u64 {
+        peaks_leaf_len(&self.layout.prefix)
+    }
+
+    fn after_start(&self) -> u64 {
+        self.range_start() + peaks_leaf_len(&self.layout.range)
+    }
+
+    fn prefix_raw_start(&self) -> usize {
+        prefix_raw_start_idx(
+            &self.layout.prefix,
+            self.start_chunk,
+            self.grafting.height,
+        )
+    }
+
+    fn after_raw_end(&self) -> usize {
+        after_raw_end_idx(
+            &self.layout.after,
+            self.after_start(),
+            self.end_chunk,
+            self.grafting.height,
+        )
+    }
+
+    const fn chunk_available(&self, idx: u64) -> bool {
+        idx < self.grafting.complete_chunks
+    }
+
+    const fn total_peaks(&self) -> usize {
+        self.layout.prefix.len() + self.layout.range.len() + self.layout.after.len()
+    }
+}
+
+impl<F: Graftable> ProofPlan<F> {
+    fn from_inactivity_floor(
+        leaves: Location<F>,
+        range: Range<Location<F>>,
+        inactivity_floor: Location<F>,
+        grafting: GraftingInfo,
+    ) -> Result<Self, merkle::Error<F>> {
+        let inactive_peaks =
+            grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting.height)?;
+        Self::new(leaves, range, inactive_peaks, grafting)
+    }
+
+    fn needs_grafted_peak_fold(&self) -> Result<bool, merkle::Error<F>> {
+        let size = Position::<F>::try_from(self.leaves)?;
+        Ok(proof_needs_grafted_peak_fold(
+            &self.layout,
+            size,
+            self.grafting.height,
+            self.grafting.complete_chunks,
+        ))
+    }
+}
+
 /// Helper to bucket a tree's current peaks into prefix, range, and after sub-vectors.
 ///
 /// Traverses all structural peaks left-to-right (from largest/leftmost to smallest/rightmost)
@@ -304,40 +435,33 @@ fn transformed_peak_counts<F: Graftable>(
 
 // Reconstructs the canonical grafted root from the combination of generic proof boundaries,
 // operation elements, and grafted prefix/suffix witnesses provided by the prover.
-#[allow(clippy::too_many_arguments)]
 fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
     verifier: &grafting::Verifier<'_, F, H>,
     proof: &RangeProof<F, H::Digest>,
-    layout: &PeakLayout<F>,
-    leaves: Location<F>,
-    range: Range<Location<F>>,
+    plan: &ProofPlan<F>,
     collected: &BTreeMap<Position<F>, H::Digest>,
-    grafting_height: u32,
     get_chunk: impl Fn(u64) -> Option<C>,
 ) -> Option<H::Digest> {
     let prefix_start = 0;
-    let range_start = peaks_leaf_len(&layout.prefix);
-    let after_start = range_start + peaks_leaf_len(&layout.range);
-    let chunk_available = |idx| idx < (*leaves >> grafting_height);
-    let start_chunk = *range.start >> grafting_height;
-    let end_chunk = *range.end.checked_sub(1)? >> grafting_height;
-    let prefix_raw_start = prefix_raw_start_idx(&layout.prefix, start_chunk, grafting_height);
-    let after_raw_end = after_raw_end_idx(&layout.after, after_start, end_chunk, grafting_height);
+    let range_start = plan.range_start();
+    let after_start = plan.after_start();
+    let prefix_raw_start = plan.prefix_raw_start();
+    let after_raw_end = plan.after_raw_end();
 
     let prefix_counts = transformed_peak_counts(
-        &layout.prefix[..prefix_raw_start],
+        &plan.layout.prefix[..prefix_raw_start],
         prefix_start,
-        grafting_height,
-        chunk_available,
+        plan.grafting.height,
+        |idx| plan.chunk_available(idx),
     );
     let suffix_counts = transformed_peak_counts(
-        &layout.after[after_raw_end..],
-        after_start + peaks_leaf_len(&layout.after[..after_raw_end]),
-        grafting_height,
-        chunk_available,
+        &plan.layout.after[after_raw_end..],
+        after_start + peaks_leaf_len(&plan.layout.after[..after_raw_end]),
+        plan.grafting.height,
+        |idx| plan.chunk_available(idx),
     );
-    let prefix_witness_len = prefix_counts.len() + layout.prefix[prefix_raw_start..].len();
-    let suffix_witness_len = layout.after[..after_raw_end].len() + suffix_counts.len();
+    let prefix_witness_len = prefix_counts.len() + plan.layout.prefix[prefix_raw_start..].len();
+    let suffix_witness_len = plan.layout.after[..after_raw_end].len() + suffix_counts.len();
     if proof.unfolded_prefix_peaks.len() != prefix_witness_len
         || proof.unfolded_suffix_peaks.len() != suffix_witness_len
     {
@@ -345,36 +469,38 @@ fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
     }
 
     let mut transformed = Vec::with_capacity(
-        proof.unfolded_prefix_peaks.len() + layout.range.len() + proof.unfolded_suffix_peaks.len(),
+        proof.unfolded_prefix_peaks.len()
+            + plan.layout.range.len()
+            + proof.unfolded_suffix_peaks.len(),
     );
     let (prefix_transformed, prefix_raw) =
         proof.unfolded_prefix_peaks.split_at(prefix_counts.len());
     transformed.extend(prefix_transformed.iter().copied().zip(prefix_counts));
-    let mut range_digests = Vec::with_capacity(layout.range.len());
-    for (pos, _) in &layout.range {
+    let mut range_digests = Vec::with_capacity(plan.layout.range.len());
+    for (pos, _) in &plan.layout.range {
         range_digests.push(*collected.get(pos)?);
     }
     let (suffix_raw, suffix_transformed) = proof
         .unfolded_suffix_peaks
-        .split_at(layout.after[..after_raw_end].len());
+        .split_at(plan.layout.after[..after_raw_end].len());
 
     // The transformed list has three regions: entries before the range-adjacent chunks, the
     // middle chunks that may combine raw prefix/range/suffix peaks, and entries after that middle
     // region. `middle_peaks` covers exactly the chunk span from the first raw prefix peak through
     // the last raw suffix peak that can share a grafted chunk with the proven range.
-    let middle_iter = layout.prefix[prefix_raw_start..]
+    let middle_iter = plan.layout.prefix[prefix_raw_start..]
         .iter()
         .map(|(_, h)| *h)
         .zip(prefix_raw.iter().copied())
         .chain(
-            layout
+            plan.layout
                 .range
                 .iter()
                 .map(|(_, h)| *h)
                 .zip(range_digests.iter().copied()),
         )
         .chain(
-            layout.after[..after_raw_end]
+            plan.layout.after[..after_raw_end]
                 .iter()
                 .map(|(_, h)| *h)
                 .zip(suffix_raw.iter().copied()),
@@ -382,8 +508,8 @@ fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
     transformed.extend(grafting::transform_peak_digests::<F, _, _, _>(
         verifier,
         middle_iter,
-        range_start - peaks_leaf_len(&layout.prefix[prefix_raw_start..]),
-        grafting_height,
+        range_start - peaks_leaf_len(&plan.layout.prefix[prefix_raw_start..]),
+        plan.grafting.height,
         get_chunk,
     ));
     transformed.extend(suffix_transformed.iter().copied().zip(suffix_counts));
@@ -392,32 +518,17 @@ fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
     let inactive_to_fold = grafting::transformed_inactive_peaks::<F, _>(
         &transformed,
         inactive_peaks,
-        layout.prefix.len() + layout.range.len() + layout.after.len(),
+        plan.total_peaks(),
     )
     .ok()?;
     let digests = transformed.iter().map(|(digest, _count)| digest);
-    verifier.root_with_folded_peaks(leaves, inactive_to_fold, inactive_peaks, digests)
+    verifier.root_with_folded_peaks(plan.leaves, inactive_to_fold, inactive_peaks, digests)
 }
 
 struct GraftedProofParts<F: Family, D: Digest> {
     proof: Proof<F, D>,
     unfolded_prefix_peaks: Vec<D>,
     unfolded_suffix_peaks: Vec<D>,
-}
-
-fn grafted_chunk<const N: usize>(
-    status: &impl BitmapReadable<N>,
-    complete_chunks: u64,
-    pruned_chunks: u64,
-    idx: u64,
-) -> Option<[u8; N]> {
-    if idx >= complete_chunks {
-        None
-    } else if idx < pruned_chunks {
-        Some([0u8; N])
-    } else {
-        Some(status.get_chunk(idx as usize))
-    }
 }
 
 fn peak_digests<F: Family, D: Digest>(
@@ -435,16 +546,18 @@ fn peak_digests<F: Family, D: Digest>(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prefix_witness<F: Graftable, D: Digest, H: CHasher<Digest = D>, const N: usize>(
+fn prefix_witness<
+    F: Graftable,
+    D: Digest,
+    H: CHasher<Digest = D>,
+    B: BitmapReadable<N>,
+    const N: usize,
+>(
     hasher: &StandardHasher<H>,
-    status: &impl BitmapReadable<N>,
+    bitmap: &BitmapGrafting<'_, B, N>,
     peaks: &[(Position<F>, u32)],
     raw_digests: &[D],
     raw_start: usize,
-    grafting_height: u32,
-    complete_chunks: u64,
-    pruned_chunks: u64,
 ) -> Vec<D> {
     let mut witness = grafting::transform_peak_digests::<F, _, _, _>(
         hasher,
@@ -453,8 +566,8 @@ fn prefix_witness<F: Graftable, D: Digest, H: CHasher<Digest = D>, const N: usiz
             .map(|(_, h)| *h)
             .zip(raw_digests[..raw_start].iter().copied()),
         0,
-        grafting_height,
-        |idx| grafted_chunk(status, complete_chunks, pruned_chunks, idx),
+        bitmap.info.height,
+        |idx| bitmap.chunk(idx),
     )
     .into_iter()
     .map(|(digest, _count)| digest)
@@ -463,17 +576,19 @@ fn prefix_witness<F: Graftable, D: Digest, H: CHasher<Digest = D>, const N: usiz
     witness
 }
 
-#[allow(clippy::too_many_arguments)]
-fn suffix_witness<F: Graftable, D: Digest, H: CHasher<Digest = D>, const N: usize>(
+fn suffix_witness<
+    F: Graftable,
+    D: Digest,
+    H: CHasher<Digest = D>,
+    B: BitmapReadable<N>,
+    const N: usize,
+>(
     hasher: &StandardHasher<H>,
-    status: &impl BitmapReadable<N>,
+    bitmap: &BitmapGrafting<'_, B, N>,
     peaks: &[(Position<F>, u32)],
     raw_digests: &[D],
     suffix_start: u64,
     raw_end: usize,
-    grafting_height: u32,
-    complete_chunks: u64,
-    pruned_chunks: u64,
 ) -> Vec<D> {
     let mut witness = raw_digests[..raw_end].to_vec();
     witness.extend(
@@ -484,8 +599,8 @@ fn suffix_witness<F: Graftable, D: Digest, H: CHasher<Digest = D>, const N: usiz
                 .map(|(_, h)| *h)
                 .zip(raw_digests[raw_end..].iter().copied()),
             suffix_start + peaks_leaf_len(&peaks[..raw_end]),
-            grafting_height,
-            |idx| grafted_chunk(status, complete_chunks, pruned_chunks, idx),
+            bitmap.info.height,
+            |idx| bitmap.chunk(idx),
         )
         .into_iter()
         .map(|(digest, _count)| digest),
@@ -493,32 +608,24 @@ fn suffix_witness<F: Graftable, D: Digest, H: CHasher<Digest = D>, const N: usiz
     witness
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn build_grafted_range_proof<
     F: Graftable,
     D: Digest,
     H: CHasher<Digest = D>,
     S: Storage<F, Digest = D>,
+    B: BitmapReadable<N>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
-    status: &impl BitmapReadable<N>,
+    bitmap: &BitmapGrafting<'_, B, N>,
     storage: &S,
-    layout: &PeakLayout<F>,
-    leaves: Location<F>,
-    inactive_peaks: usize,
-    range: Range<Location<F>>,
-    grafting_height: u32,
-    complete_chunks: u64,
-    pruned_chunks: u64,
+    plan: &ProofPlan<F>,
 ) -> Result<GraftedProofParts<F, D>, Error<F>> {
-    let proof_start_chunk = *range.start >> grafting_height;
-    let proof_end_chunk = *range.end.checked_sub(1).ok_or(merkle::Error::Empty)? >> grafting_height;
-
-    let proof_positions = merkle::range_collection_nodes(leaves, inactive_peaks, range)?;
+    let proof_positions =
+        merkle::range_collection_nodes(plan.leaves, plan.inactive_peaks, plan.range.clone())?;
     let mut fetch_positions = proof_positions.clone();
-    fetch_positions.extend(layout.prefix.iter().map(|&(pos, _)| pos));
-    fetch_positions.extend(layout.after.iter().map(|&(pos, _)| pos));
+    fetch_positions.extend(plan.layout.prefix.iter().map(|&(pos, _)| pos));
+    fetch_positions.extend(plan.layout.after.iter().map(|&(pos, _)| pos));
     fetch_positions.sort_unstable();
     debug_assert!(
         fetch_positions
@@ -542,44 +649,31 @@ async fn build_grafted_range_proof<
         .collect::<Result<_, Error<F>>>()?;
 
     let proof = merkle::build_range_collection_proof::<F, D, Error<F>>(
-        leaves,
-        inactive_peaks,
+        plan.leaves,
+        plan.inactive_peaks,
         &proof_positions,
         |pos| fetched.get(&pos).copied(),
         |pos| Error::from(merkle::Error::<F>::MissingNode(pos)),
     )?;
 
-    let prefix_raw = peak_digests(&layout.prefix, &fetched)?;
-    let prefix_raw_start = prefix_raw_start_idx(&layout.prefix, proof_start_chunk, grafting_height);
-    let unfolded_prefix_peaks = prefix_witness::<F, D, H, N>(
+    let prefix_raw = peak_digests(&plan.layout.prefix, &fetched)?;
+    let unfolded_prefix_peaks = prefix_witness::<F, D, H, B, N>(
         hasher,
-        status,
-        &layout.prefix,
+        bitmap,
+        &plan.layout.prefix,
         &prefix_raw,
-        prefix_raw_start,
-        grafting_height,
-        complete_chunks,
-        pruned_chunks,
+        plan.prefix_raw_start(),
     );
 
-    let suffix_raw = peak_digests(&layout.after, &fetched)?;
-    let suffix_start = peaks_leaf_len(&layout.prefix) + peaks_leaf_len(&layout.range);
-    let suffix_raw_end = after_raw_end_idx(
-        &layout.after,
-        suffix_start,
-        proof_end_chunk,
-        grafting_height,
-    );
-    let unfolded_suffix_peaks = suffix_witness::<F, D, H, N>(
+    let suffix_raw = peak_digests(&plan.layout.after, &fetched)?;
+    let suffix_start = plan.after_start();
+    let unfolded_suffix_peaks = suffix_witness::<F, D, H, B, N>(
         hasher,
-        status,
-        &layout.after,
+        bitmap,
+        &plan.layout.after,
         &suffix_raw,
         suffix_start,
-        suffix_raw_end,
-        grafting_height,
-        complete_chunks,
-        pruned_chunks,
+        plan.after_raw_end(),
     );
 
     Ok(GraftedProofParts {
@@ -632,18 +726,12 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         ops_root: D,
     ) -> Result<Self, Error<F>> {
         let std_hasher = qmdb::hasher::<H>();
-        let range_for_layout = range.clone();
-        let complete_chunks = status.complete_chunks() as u64;
-        let pruned_chunks = status.pruned_chunks() as u64;
+        let bitmap = BitmapGrafting::new(status);
         let leaves = Location::try_from(storage.size().await)?;
-        let layout = peak_layout(leaves, range_for_layout)?;
-        let grafting_height = grafting::height::<N>();
-        let inactive_peaks =
-            grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
+        let plan =
+            ProofPlan::from_inactivity_floor(leaves, range, inactivity_floor, bitmap.info)?;
 
-        let size = Position::<F>::try_from(leaves)?;
-        let needs_grafted_peak_fold =
-            proof_needs_grafted_peak_fold(&layout, size, grafting_height, complete_chunks);
+        let needs_grafted_peak_fold = plan.needs_grafted_peak_fold()?;
         let GraftedProofParts {
             proof,
             unfolded_prefix_peaks,
@@ -651,15 +739,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         } = if needs_grafted_peak_fold {
             build_grafted_range_proof(
                 &std_hasher,
-                status,
+                &bitmap,
                 storage,
-                &layout,
-                leaves,
-                inactive_peaks,
-                range.clone(),
-                grafting_height,
-                complete_chunks,
-                pruned_chunks,
+                &plan,
             )
             .await?
         } else {
@@ -667,9 +749,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 proof: merkle::verification::historical_range_proof(
                     &std_hasher,
                     storage,
-                    leaves,
-                    range.clone(),
-                    inactive_peaks,
+                    plan.leaves,
+                    plan.range.clone(),
+                    plan.inactive_peaks,
                 )
                 .await?,
                 unfolded_prefix_peaks: Vec::new(),
@@ -812,6 +894,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let grafting_height = grafting::height::<N>();
+        let grafting = GraftingInfo {
+            height: grafting_height,
+            complete_chunks,
+        };
         let verifier = grafting::Verifier::<F, H>::new(
             grafting_height,
             start_chunk,
@@ -840,22 +926,25 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             return false;
         }
 
-        let layout = match peak_layout(leaves, start_loc..end_loc) {
-            Ok(layout) => layout,
+        let plan = match ProofPlan::new(
+            leaves,
+            start_loc..end_loc,
+            self.proof.inactive_peaks,
+            grafting,
+        ) {
+            Ok(plan) => plan,
             Err(error) => {
                 debug!(?error, "verification failed, invalid peak layout");
                 return false;
             }
         };
-        let size = match Position::<F>::try_from(leaves) {
-            Ok(size) => size,
+        let needs_grafted_peak_fold = match plan.needs_grafted_peak_fold() {
+            Ok(needs_grafted_peak_fold) => needs_grafted_peak_fold,
             Err(error) => {
                 debug!(?error, "verification failed, invalid size");
                 return false;
             }
         };
-        let needs_grafted_peak_fold =
-            proof_needs_grafted_peak_fold(&layout, size, grafting_height, complete_chunks);
         let merkle_root = if !needs_grafted_peak_fold {
             if !self.unfolded_prefix_peaks.is_empty() || !self.unfolded_suffix_peaks.is_empty() {
                 debug!("verification failed, unexpected grafted metadata");
@@ -893,11 +982,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             let Some(root) = reconstruct_grafted_root(
                 &verifier,
                 self,
-                &layout,
-                leaves,
-                start_loc..end_loc,
+                &plan,
                 &collected,
-                grafting_height,
                 get_chunk,
             ) else {
                 debug!("verification failed, could not reconstruct grafted root");
