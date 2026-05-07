@@ -231,7 +231,7 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.context.clone().shared(true).spawn(|_| async move {
+                let handle = self.context.child("decode").shared(true).spawn(|_| async move {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result)
                 });
@@ -271,7 +271,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
+    use commonware_runtime::{deterministic, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{ordered::Set, NZUsize};
     use std::{io, num::NonZeroU32, time::Duration};
 
@@ -285,7 +285,7 @@ mod tests {
 
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
-            context.with_label("network"),
+            context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -393,7 +393,7 @@ mod tests {
     fn test_valid_messages_forwarded() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.clone());
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -406,7 +406,7 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
-                context.with_label("bg"),
+                context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
@@ -430,7 +430,7 @@ mod tests {
     fn test_invalid_codec_blocks_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.clone());
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -443,7 +443,7 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
-                context.with_label("bg"),
+                context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
@@ -489,7 +489,7 @@ mod tests {
     fn test_multiple_valid_messages() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.clone());
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -502,7 +502,7 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
-                context.with_label("bg"),
+                context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
@@ -534,7 +534,7 @@ mod tests {
     fn test_concurrency_bounded_by_strategy() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.clone());
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -550,7 +550,7 @@ mod tests {
             // decode task. Send many messages and verify all are delivered (the
             // backpressure mechanism drains tasks before accepting new ones).
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
-                context.with_label("bg"),
+                context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
@@ -581,7 +581,7 @@ mod tests {
     fn test_invalid_among_valid_only_blocks_offender() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.clone());
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -598,7 +598,7 @@ mod tests {
             let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
-                context.with_label("bg"),
+                context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
@@ -654,7 +654,7 @@ mod tests {
             drop(tx);
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
-                context.with_label("bg"),
+                context.child("bg"),
                 MockReceiver { receiver },
                 (),
                 NoopBlocker,

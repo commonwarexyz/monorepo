@@ -58,7 +58,7 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager as _};
-use commonware_runtime::{tokio, Metrics, Quota, Runner as _};
+use commonware_runtime::{tokio, Quota, Runner as _, Supervisor as _};
 use commonware_utils::{ordered::Set, sync::Mutex, TryCollect, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -165,8 +165,7 @@ fn main() {
     // Start context
     executor.start(|context| async move {
         // Initialize network
-        let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -187,7 +186,7 @@ fn main() {
 
         // Block on GUI
         handler::run(
-            context.with_label("handler"),
+            context.child("handler"),
             signer.public_key().to_string(),
             logs,
             chat_sender,

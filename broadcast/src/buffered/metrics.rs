@@ -27,7 +27,7 @@ pub struct Metrics<P: PublicKey> {
 
 impl<P: PublicKey> Metrics<P> {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init<E: RuntimeMetrics>(context: E) -> Self {
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         Self {
             peer: context.family("peer", "Number of broadcasts received by peer"),
             receive: context.family("receive", "Number of received messages by status"),

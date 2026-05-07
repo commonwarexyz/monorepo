@@ -143,7 +143,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -262,7 +262,7 @@ pub(crate) mod test {
     pub fn test_any_variable_db_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.child("storage")).await;
             crate::qmdb::any::test::test_any_db_build_and_authenticate(
                 context,
                 db,
@@ -279,7 +279,7 @@ pub(crate) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let db = open_db(context.with_label("open1")).await;
+            let db = open_db(context.child("open").with_attribute("index", 1)).await;
             let root = db.root();
 
             // Build a batch but don't apply it (simulate failure before commit).
@@ -296,7 +296,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.with_label("open2")).await;
+            let mut db = open_db(context.child("open").with_attribute("index", 2)).await;
             assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
@@ -327,7 +327,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.with_label("open3")).await;
+            let mut db = open_db(context.child("open").with_attribute("index", 3)).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
@@ -360,7 +360,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.with_label("open4")).await;
+            let mut db = open_db(context.child("open").with_attribute("index", 4)).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
@@ -387,7 +387,7 @@ pub(crate) mod test {
             drop(db);
 
             // Confirm state is preserved after reopen.
-            let db = open_db(context.with_label("open5")).await;
+            let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
             assert_eq!(db.bounds().await, bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
@@ -401,7 +401,7 @@ pub(crate) mod test {
     fn test_any_variable_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             // Add some operations
             let key1 = Digest::random(&mut context);
@@ -437,7 +437,7 @@ pub(crate) mod test {
     fn test_stale_batch_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -484,7 +484,7 @@ pub(crate) mod test {
     fn test_stale_batch_rejected_different_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             // A writes 1 key, B writes 5 keys -- different total_size.
             let batch_a = db
@@ -526,7 +526,7 @@ pub(crate) mod test {
     fn test_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -571,7 +571,7 @@ pub(crate) mod test {
     fn test_stale_batch_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -626,7 +626,7 @@ pub(crate) mod test {
     fn test_sequential_commit_parent_then_child() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -660,7 +660,7 @@ pub(crate) mod test {
     fn test_stale_batch_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);

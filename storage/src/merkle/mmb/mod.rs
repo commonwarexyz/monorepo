@@ -392,7 +392,7 @@ impl Graftable for Family {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmb::mem::Mmb;
+    use crate::{merkle::Bagging::ForwardFold, mmb::mem::Mmb};
     use commonware_cryptography::Sha256;
 
     /// Verify the MMB merge schedule via `Family::parent_heights`.
@@ -455,7 +455,7 @@ mod tests {
     fn test_leftmost_leaf() {
         // Verify leftmost_leaf is consistent with subtree_root_position:
         // subtree_root_position(leftmost_leaf(pos, h), h) == pos.
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmb = Mmb::new();
         let digest = [1u8; 32];
         for _ in 0..200 {
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_chunk_peaks() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmb = Mmb::new();
         let digest = [1u8; 32];
 

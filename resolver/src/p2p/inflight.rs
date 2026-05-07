@@ -6,14 +6,14 @@ use commonware_utils::{
     Span,
 };
 use futures::future::Aborted;
-use std::collections::HashMap;
+use std::{collections::HashMap, marker::PhantomData};
 
 /// Tracks per-key state for an in-flight fetch.
 ///
 /// `delivery` is `Some` while the consumer is validating a response, and `None` while
 /// the request is still pending in the fetcher.
-struct Entry<E: Clock> {
-    timer: histogram::Timer<E>,
+struct Entry {
+    timer: histogram::Timer,
     delivery: Option<Aborter>,
 }
 
@@ -21,7 +21,7 @@ struct Entry<E: Clock> {
 pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> {
     /// Per-key entries tracking fetch duration timers and (when validating a response)
     /// the [Aborter] that cancels the in-flight consumer delivery.
-    entries: HashMap<Key, Entry<E>>,
+    entries: HashMap<Key, Entry>,
 
     /// Holds futures that resolve once the `Consumer` has validated fetched data.
     /// Each completion yields `(peer, key, valid)`.
@@ -29,6 +29,9 @@ pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key
 
     /// Consumer cloned per delivery to validate fetched data.
     consumer: Con,
+
+    /// Clock type used to observe timers on completion.
+    _clock: PhantomData<E>,
 }
 
 impl<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> Inflight<E, Con, P, Key>
@@ -40,6 +43,7 @@ where
             entries: HashMap::new(),
             deliveries: AbortablePool::default(),
             consumer,
+            _clock: PhantomData,
         }
     }
 
@@ -49,7 +53,7 @@ where
     }
 
     /// Insert a new in-flight entry for the key.
-    pub(super) fn insert(&mut self, key: Key, timer: histogram::Timer<E>) {
+    pub(super) fn insert(&mut self, key: Key, timer: histogram::Timer) {
         self.entries.insert(
             key,
             Entry {
@@ -63,37 +67,34 @@ where
     /// the recording). If delivery validation was in progress, it is aborted and any
     /// invalid result is discarded. Returns true if an entry was present.
     pub(super) fn cancel(&mut self, key: &Key) -> bool {
-        let Some(entry) = self.entries.remove(key) else {
+        let Some(_entry) = self.entries.remove(key) else {
             return false;
         };
-        // Dropping `entry` aborts the in-flight delivery (if any).
-        entry.timer.cancel(); // don't record duration metric
+        // Dropping the entry aborts the in-flight delivery (if any) and suppresses duration
+        // recording.
         true
     }
 
-    /// Mark the in-flight entry for the key as complete, recording its duration via the
-    /// timer's drop. Panics if no entry exists for the key.
-    pub(super) fn complete(&mut self, key: &Key) {
-        self.entries.remove(key).expect("inflight entry");
+    /// Mark the in-flight entry for the key as complete, recording its duration.
+    /// Panics if no entry exists for the key.
+    pub(super) fn complete(&mut self, key: &Key, clock: &E) {
+        self.entries
+            .remove(key)
+            .expect("inflight entry")
+            .timer
+            .observe(clock);
     }
 
-    /// Drop entries for which the predicate returns false. Cancels the timer
-    /// for each dropped entry. Returns the count of dropped entries.
+    /// Drop entries for which the predicate returns false. Returns the count of dropped entries.
     pub(super) fn retain<F: FnMut(&Key) -> bool>(&mut self, mut predicate: F) -> usize {
         let removed: Vec<_> = self.entries.extract_if(|k, _| !predicate(k)).collect();
-        let count = removed.len();
-        for (_, entry) in removed {
-            entry.timer.cancel();
-        }
-        count
+        removed.len()
     }
 
-    /// Drop all entries, canceling each timer. Returns the count of dropped entries.
+    /// Drop all entries. Returns the count of dropped entries.
     pub(super) fn drain(&mut self) -> usize {
         let count = self.entries.len();
-        for (_, entry) in self.entries.drain() {
-            entry.timer.cancel();
-        }
+        self.entries.clear();
         count
     }
 
@@ -137,7 +138,6 @@ mod tests {
         telemetry::metrics::{histogram::Buckets, MetricsExt},
         Metrics, Runner as _,
     };
-    use std::sync::Arc;
 
     type TestInflight = Inflight<Context, MockConsumer<MockKey, Bytes>, PublicKey, MockKey>;
 
@@ -145,9 +145,9 @@ mod tests {
         Inflight::new(MockConsumer::dummy())
     }
 
-    fn make_timed(context: &Context) -> histogram::Timed<Context> {
+    fn make_timed(context: &Context) -> histogram::Timed {
         let registered = context.histogram("test_duration", "Test histogram", Buckets::LOCAL);
-        histogram::Timed::new(registered, Arc::new(context.clone()))
+        histogram::Timed::new(registered)
     }
 
     fn pubkey() -> PublicKey {
@@ -162,7 +162,7 @@ mod tests {
             let mut inflight: TestInflight = dummy_inflight();
 
             assert!(!inflight.contains(&MockKey(1)));
-            inflight.insert(MockKey(1), timed.timer());
+            inflight.insert(MockKey(1), timed.timer(&context));
             assert!(inflight.contains(&MockKey(1)));
 
             assert!(inflight.cancel(&MockKey(1)));
@@ -180,7 +180,7 @@ mod tests {
             let timed = make_timed(&context);
             let mut inflight: TestInflight = dummy_inflight();
 
-            inflight.insert(MockKey(1), timed.timer());
+            inflight.insert(MockKey(1), timed.timer(&context));
             inflight.cancel(&MockKey(1));
 
             let metrics = context.encode();
@@ -195,8 +195,8 @@ mod tests {
             let timed = make_timed(&context);
             let mut inflight: TestInflight = dummy_inflight();
 
-            inflight.insert(MockKey(1), timed.timer());
-            inflight.complete(&MockKey(1));
+            inflight.insert(MockKey(1), timed.timer(&context));
+            inflight.complete(&MockKey(1), &context);
 
             let metrics = context.encode();
             assert!(metrics.contains("test_duration_count 1"));
@@ -207,9 +207,9 @@ mod tests {
     #[should_panic(expected = "inflight entry")]
     fn test_complete_panics_on_missing_key() {
         let runner = Runner::default();
-        runner.start(|_context| async move {
+        runner.start(|context| async move {
             let mut inflight: TestInflight = dummy_inflight();
-            inflight.complete(&MockKey(1));
+            inflight.complete(&MockKey(1), &context);
         });
     }
 
@@ -220,9 +220,9 @@ mod tests {
             let timed = make_timed(&context);
             let mut inflight: TestInflight = dummy_inflight();
 
-            inflight.insert(MockKey(1), timed.timer());
-            inflight.insert(MockKey(2), timed.timer());
-            inflight.insert(MockKey(3), timed.timer());
+            inflight.insert(MockKey(1), timed.timer(&context));
+            inflight.insert(MockKey(2), timed.timer(&context));
+            inflight.insert(MockKey(3), timed.timer(&context));
 
             let dropped = inflight.retain(|k| k.0 % 2 == 1);
             assert_eq!(dropped, 1);
@@ -242,8 +242,8 @@ mod tests {
             let timed = make_timed(&context);
             let mut inflight: TestInflight = dummy_inflight();
 
-            inflight.insert(MockKey(1), timed.timer());
-            inflight.insert(MockKey(2), timed.timer());
+            inflight.insert(MockKey(1), timed.timer(&context));
+            inflight.insert(MockKey(2), timed.timer(&context));
 
             assert_eq!(inflight.drain(), 2);
             assert!(!inflight.contains(&MockKey(1)));
@@ -265,7 +265,7 @@ mod tests {
             let key = MockKey(7);
             let value = Bytes::from("data");
 
-            inflight.insert(key.clone(), timed.timer());
+            inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(key.clone(), peer.clone(), value.clone());
 
             let (delivered_peer, delivered_key, valid) =
@@ -291,7 +291,7 @@ mod tests {
             let peer = pubkey();
             let key = MockKey(1);
 
-            inflight.insert(key.clone(), timed.timer());
+            inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(key.clone(), peer, Bytes::from("v"));
 
             // Drop the entry (and its aborter) before the delivery future is ever polled.
@@ -312,14 +312,14 @@ mod tests {
             let peer = pubkey();
             let key = MockKey(1);
 
-            inflight.insert(key.clone(), timed.timer());
+            inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(key.clone(), peer, Bytes::from("v"));
 
             let (_, delivered_key, valid) =
                 inflight.next_delivery().await.expect("delivery completed");
             assert_eq!(delivered_key, key);
             assert!(valid);
-            inflight.complete(&key);
+            inflight.complete(&key, &context);
 
             // Late cancel finds no entry; must not panic.
             assert!(!inflight.cancel(&key));
@@ -336,7 +336,7 @@ mod tests {
             let peer = pubkey();
             let key = MockKey(1);
 
-            inflight.insert(key.clone(), timed.timer());
+            inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(key.clone(), peer, Bytes::from("v"));
 
             // Cancel before any poll of the pool: drops the Aborter, removes the entry.
@@ -358,7 +358,7 @@ mod tests {
             let peer = pubkey();
             let key = MockKey(1);
 
-            inflight.insert(key.clone(), timed.timer());
+            inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(key, peer, Bytes::from("v"));
 
             assert_eq!(inflight.drain(), 1);

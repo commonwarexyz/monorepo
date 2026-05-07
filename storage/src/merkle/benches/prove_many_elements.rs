@@ -1,6 +1,8 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::merkle::{self, mem::Mem, Family, Location, LocationRangeExt as _};
+use commonware_storage::merkle::{
+    self, mem::Mem, Bagging::ForwardFold, Family, Location, LocationRangeExt as _,
+};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -16,7 +18,7 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 
 fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) {
     for n in N_LEAVES {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mem = Mem::<F, _>::new();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
@@ -61,7 +63,7 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
                             })
                         },
                         |samples| {
-                            let hasher = StandardHasher::<Sha256>::new();
+                            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
                             block_on(async {
                                 for range in samples {
                                     let proof = mem.range_proof(&hasher, range.clone(), 0).unwrap();

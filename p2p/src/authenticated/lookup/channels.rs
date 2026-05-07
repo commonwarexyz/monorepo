@@ -42,9 +42,16 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 }
 
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
-#[derive(Clone)]
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
+}
+
+impl<P: PublicKey, C: Clock> Clone for Sender<P, C> {
+    fn clone(&self) -> Self {
+        Self {
+            limited_sender: self.limited_sender.clone(),
+        }
+    }
 }
 
 impl<P: PublicKey, C: Clock> Sender<P, C> {
@@ -68,7 +75,7 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
 impl<P, C> crate::LimitedSender for Sender<P, C>
 where
     P: PublicKey,
-    C: Clock + Clone + Send + 'static,
+    C: Clock + Send + 'static,
 {
     type PublicKey = P;
     type Checked<'a>

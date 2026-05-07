@@ -249,7 +249,8 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Runner, Spawner,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -352,10 +353,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_shared_concurrent", &context);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
             // Spawn writer task
-            let writer_handle = context.with_label("writer").spawn(|_ctx| async move {
+            let writer_handle = context.child("writer").spawn(|_ctx| async move {
                 for i in 0..10u8 {
                     writer.enqueue(vec![i]).await.unwrap();
                 }
@@ -385,7 +386,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_shared_select", &context);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
             // Enqueue an item
             writer.enqueue(b"test".to_vec()).await.unwrap();
@@ -411,7 +412,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_shared_writer_dropped", &context);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
             // Enqueue items then drop writer
             writer.enqueue(b"item1".to_vec()).await.unwrap();
@@ -465,24 +466,32 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_shared_multi_writer", &context);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
             // Clone writer for second task
             let writer2 = writer.clone();
 
             // Spawn two writer tasks
-            let handle1 = context.with_label("writer1").spawn(|_ctx| async move {
-                for i in 0..5u8 {
-                    writer.enqueue(vec![i]).await.unwrap();
-                }
-                writer
-            });
+            let handle1 =
+                context
+                    .child("writer")
+                    .with_attribute("index", 1)
+                    .spawn(|_ctx| async move {
+                        for i in 0..5u8 {
+                            writer.enqueue(vec![i]).await.unwrap();
+                        }
+                        writer
+                    });
 
-            let handle2 = context.with_label("writer2").spawn(|_ctx| async move {
-                for i in 5..10u8 {
-                    writer2.enqueue(vec![i]).await.unwrap();
-                }
-            });
+            let handle2 =
+                context
+                    .child("writer")
+                    .with_attribute("index", 2)
+                    .spawn(|_ctx| async move {
+                        for i in 5..10u8 {
+                            writer2.enqueue(vec![i]).await.unwrap();
+                        }
+                    });
 
             // Reader receives all 10 items
             let mut received = Vec::new();

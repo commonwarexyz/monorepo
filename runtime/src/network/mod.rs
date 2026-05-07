@@ -156,6 +156,7 @@ mod tests {
         const NUM_CLIENTS: usize = 3;
 
         // Start a server
+        let network = Arc::new(network);
         let mut listener = network
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -637,6 +638,7 @@ mod tests {
         const NUM_MESSAGES: usize = 16_384;
         const MESSAGE_SIZE: usize = 4096;
 
+        let network = Arc::new(network);
         let mut listener = network
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await

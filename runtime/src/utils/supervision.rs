@@ -6,15 +6,15 @@ use std::{
 };
 
 /// Delay reaping dropped children until enough stale weak pointers accumulate to
-/// amortize the cleanup cost for clone-heavy parents.
+/// amortize the cleanup cost for child-heavy parents.
 const STALE_CHILD_THRESHOLD: usize = 32;
 
 /// Tracks the relationship between runtime contexts.
 ///
-/// Each [`Tree`] node corresponds to a single context instance. Cloning a context
-/// registers a new child node beneath the current node. When the task spawned from
-/// a context finishes or is aborted, the runtime drains the node and aborts all descendant
-/// tasks (leaving siblings intact).
+/// Each [`Tree`] node corresponds to a single context instance. Creating a child
+/// context registers a new child node beneath the current node. When the task spawned
+/// from a context finishes or is aborted, the runtime drains the node and aborts all
+/// descendant tasks.
 pub(crate) struct Tree {
     // Keep the strong parent link outside `inner`.
     //

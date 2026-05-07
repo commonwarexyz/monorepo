@@ -172,6 +172,51 @@ pub fn add_attribute(
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+fn matches_metric_name(full: &str, name: &str) -> bool {
+    full == name
+        || full
+            .strip_suffix(name)
+            .is_some_and(|prefix| prefix.ends_with('_'))
+}
+
+/// Return `true` if encoded Prometheus metrics contain a sample with `name` and `value`.
+///
+/// `name` may be either the full encoded metric name or its unprefixed suffix.
+/// Labels attached to the sample are ignored.
+#[cfg(any(test, feature = "test-utils"))]
+#[must_use]
+pub fn has_metric_value(metrics: &str, name: &str, value: impl std::fmt::Display) -> bool {
+    let value = value.to_string();
+    metrics.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with('#') {
+            return false;
+        }
+
+        let Some(sample_end) = line.find(|c: char| c == '{' || c.is_whitespace()) else {
+            return false;
+        };
+        let sample_name = &line[..sample_end];
+        if !matches_metric_name(sample_name, name) {
+            return false;
+        }
+
+        let mut rest = &line[sample_end..];
+        if let Some(labeled) = rest.strip_prefix('{') {
+            let Some(labels_end) = labeled.find('}') else {
+                return false;
+            };
+            rest = &labeled[labels_end + 1..];
+        }
+        if !rest.chars().next().is_some_and(char::is_whitespace) {
+            return false;
+        }
+
+        rest.split_whitespace().next() == Some(value.as_str())
+    })
+}
+
 /// Count the number of running tasks whose name starts with the given prefix.
 ///
 /// This function encodes metrics and counts tasks that are currently running
@@ -185,13 +230,14 @@ pub fn add_attribute(
 /// ```rust
 /// use commonware_runtime::{
 ///     deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Runner, Spawner,
+///     Supervisor,
 /// };
 /// use std::time::Duration;
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Spawn a task under a labeled context
-///     let handle = context.with_label("worker").spawn(|ctx| async move {
+///     let handle = context.child("worker").spawn(|ctx| async move {
 ///         ctx.sleep(Duration::from_secs(100)).await;
 ///     });
 ///
@@ -811,10 +857,26 @@ impl Register for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Metrics, Runner, Spawner};
+    use crate::{deterministic, Metrics as _, Runner, Spawner, Supervisor as _};
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};
+
+    #[test]
+    fn test_has_metric_value_unlabeled() {
+        let metrics = "# HELP storage_items_tracked items\nstorage_items_tracked 2\n";
+        assert!(has_metric_value(metrics, "items_tracked", 2));
+        assert!(has_metric_value(metrics, "storage_items_tracked", 2));
+        assert!(!has_metric_value(metrics, "items_tracked_extra", 2));
+        assert!(!has_metric_value(metrics, "items_tracked", 3));
+    }
+
+    #[test]
+    fn test_has_metric_value_labeled() {
+        let metrics = r#"storage_init_items_tracked{index="2"} 2"#;
+        assert!(has_metric_value(metrics, "items_tracked", 2));
+        assert!(has_metric_value(metrics, "storage_init_items_tracked", 2));
+    }
 
     #[test_traced]
     fn test_count_running_tasks() {
@@ -828,8 +890,7 @@ mod tests {
             );
 
             // Spawn a task under a labeled context that stays running
-            let worker_ctx = context.with_label("worker");
-            let handle1 = worker_ctx.clone().spawn(|_| async move {
+            let handle1 = context.child("worker").spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -845,9 +906,12 @@ mod tests {
             );
 
             // Spawn a nested task (worker_child)
-            let handle2 = worker_ctx.with_label("child").spawn(|_| async move {
-                future::pending::<()>().await;
-            });
+            let handle2 = context
+                .child("worker")
+                .child("child")
+                .spawn(|_| async move {
+                    future::pending::<()>().await;
+                });
 
             // Count should include both parent and nested tasks
             let count = count_running_tasks(&context, "worker");
@@ -880,9 +944,9 @@ mod tests {
         executor.start(|context| async move {
             // Register metrics under different labels (no duplicates)
             let c1 = raw::Counter::<u64>::default();
-            let _metric_a = context.with_label("a").register("test", "help", c1);
+            let _metric_a = context.child("a").register("test", "help", c1);
             let c2 = raw::Counter::<u64>::default();
-            let _metric_b = context.with_label("b").register("test", "help", c2);
+            let _metric_b = context.child("b").register("test", "help", c2);
         });
         // Test passes if runtime doesn't panic on shutdown
     }
@@ -892,9 +956,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let c1 = raw::Counter::<u64>::default();
-            let metric_a = context.with_label("a").register("test", "help", c1);
+            let metric_a = context.child("a").register("test", "help", c1);
             let c2 = raw::Counter::<u64>::default();
-            let metric_b = context.with_label("a").register("test", "help", c2);
+            let metric_b = context.child("a").register("test", "help", c2);
 
             assert!(std::ptr::eq(metric_a.metric(), metric_b.metric()));
 
@@ -969,9 +1033,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let counter = raw::Counter::<u64>::default();
-            let _metric_a = context.with_label("a").register("test", "help", counter);
+            let _metric_a = context.child("a").register("test", "help", counter);
             let gauge = raw::Gauge::<i64>::default();
-            let _metric_b = context.with_label("a").register("test", "help", gauge);
+            let _metric_b = context.child("a").register("test", "help", gauge);
         });
     }
 

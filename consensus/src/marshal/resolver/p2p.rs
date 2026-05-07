@@ -48,7 +48,7 @@ where
 
 /// Initialize a P2P resolver.
 pub fn init<E, C, B, D, S, R, P>(
-    ctx: &E,
+    context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (
@@ -67,7 +67,7 @@ where
     let (sender, receiver) = mpsc::channel(config.mailbox_size);
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
-        ctx.with_label("resolver"),
+        context,
         p2p::Config {
             peer_provider: config.peer_provider,
             blocker: config.blocker,

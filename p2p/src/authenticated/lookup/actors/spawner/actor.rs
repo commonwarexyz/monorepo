@@ -110,7 +110,7 @@ impl<
 
                         // Spawn peer
                         self.context
-                            .with_label("peer")
+                            .child("peer")
                             .spawn(move |context| async move {
                                 // Create peer
                                 debug!(?peer, "peer started");

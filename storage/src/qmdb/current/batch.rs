@@ -6,10 +6,11 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
-        mem::Mem, storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
+        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
+        self,
         any::{
             self,
             batch::{lookup_sorted, DiffEntry},
@@ -609,7 +610,7 @@ where
         (idx, chunk)
     });
 
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
         &hasher,
         &ops_tree_adapter,
@@ -669,6 +670,7 @@ where
         &bitmap_batch,
         &grafted_storage,
         partial,
+        inner.bounds.inactivity_floor,
         &ops_root,
     )
     .await?;
@@ -937,12 +939,12 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        fn merkleize(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(db, metadata)
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            self.merkleize(db, metadata).await
         }
     }
 
@@ -971,12 +973,12 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        fn merkleize(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(db, metadata)
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            self.merkleize(db, metadata).await
         }
     }
 

@@ -29,7 +29,7 @@ use commonware_utils::{
     ordered::{Quorum, Set},
 };
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 use tracing::{debug, trace};
 
 /// Tracks the current view, its leader, and whether the voter has
@@ -73,8 +73,8 @@ where
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     latest_seen: Vec<View>,
     batch_size: Histogram,
-    verify_latency: histogram::Timed<E>,
-    recover_latency: histogram::Timed<E>,
+    verify_latency: histogram::Timed,
+    recover_latency: histogram::Timed,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -113,8 +113,6 @@ where
             "certificate recover latency",
             Buckets::CRYPTOGRAPHY,
         );
-        // TODO(#1833): Metrics should use the post-start context
-        let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
@@ -141,8 +139,8 @@ where
                 latest_vote,
                 latest_seen: vec![View::zero(); participant_count],
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
-                recover_latency: histogram::Timed::new(recover_latency, clock),
+                verify_latency: histogram::Timed::new(verify_latency),
+                recover_latency: histogram::Timed::new(recover_latency),
             },
             Mailbox::new(sender),
         )
@@ -402,7 +400,7 @@ where
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
@@ -424,7 +422,7 @@ where
 
                         // Verify the certificate
                         if !nullification.verify::<_, D>(
-                            &mut self.context,
+                            self.context.as_mut(),
                             &self.scheme,
                             &self.strategy,
                         ) {
@@ -448,7 +446,7 @@ where
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }
@@ -549,20 +547,20 @@ where
                 };
 
                 // Batch verify votes if ready
-                let mut timer = self.verify_latency.timer();
+                let timer = self.verify_latency.timer(self.context.as_ref());
                 let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(&mut self.context, &self.strategy))
+                    Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
                 } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(&mut self.context, &self.strategy))
+                    Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
                 } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(&mut self.context, &self.strategy))
+                    Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
                 } else {
                     None
                 };
 
                 // Process batch verification results
                 if let Some((voters, failed)) = verified {
-                    timer.observe();
+                    timer.observe(self.context.as_ref());
 
                     // Process verified votes
                     let batch = voters.len() + failed.len();
@@ -586,7 +584,6 @@ where
                         round.add_verified(valid);
                     }
                 } else {
-                    timer.cancel();
                     trace!(
                         current = %current.view,
                         %finalized,
@@ -597,7 +594,9 @@ where
                 // Try to construct and forward certificates
                 if let Some(notarization) = self
                     .recover_latency
-                    .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
+                    .time_some(self.context.as_ref(), || {
+                        round.try_construct_notarization(&self.scheme, &self.strategy)
+                    })
                 {
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
@@ -608,7 +607,9 @@ where
                 }
                 if let Some(nullification) = self
                     .recover_latency
-                    .time_some(|| round.try_construct_nullification(&self.scheme, &self.strategy))
+                    .time_some(self.context.as_ref(), || {
+                        round.try_construct_nullification(&self.scheme, &self.strategy)
+                    })
                 {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
@@ -617,7 +618,9 @@ where
                 }
                 if let Some(finalization) = self
                     .recover_latency
-                    .time_some(|| round.try_construct_finalization(&self.scheme, &self.strategy))
+                    .time_some(self.context.as_ref(), || {
+                        round.try_construct_finalization(&self.scheme, &self.strategy)
+                    })
                 {
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter

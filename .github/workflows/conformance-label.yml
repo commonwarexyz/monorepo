@@ -7,10 +7,11 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  conformance-label-check:
-    name: Conformance Label Check
+  Check:
+    name: Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

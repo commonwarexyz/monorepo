@@ -8,10 +8,10 @@ use crate::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
-    merkle::{self, Family},
+    merkle::Family,
     qmdb::{
         any::{value::FixedEncoding, FixedValue},
-        Error,
+        Error, ROOT_BAGGING,
     },
     translator::Translator,
 };
@@ -54,11 +54,11 @@ impl<
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, K, V, H, S> = Journal::new(
-            context.clone(),
+            context.child("journal"),
             cfg.merkle_config,
             cfg.log,
             Operation::<F, K, V>::is_commit,
-            merkle::Bagging::BackwardFold,
+            ROOT_BAGGING,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator).await
@@ -86,7 +86,9 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -300,8 +302,8 @@ mod tests {
     }
 
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
-        let mut db = open_db::<F>(ctx.with_label("db")).await;
-        let mut compact = open_compact::<F>(ctx.with_label("compact")).await;
+        let mut db = open_db::<F>(ctx.child("db")).await;
+        let mut compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let k1 = Sha256::fill(1u8);
@@ -334,7 +336,7 @@ mod tests {
         assert_eq!(compact.get_metadata(), Some(metadata));
 
         drop(compact);
-        let reopened = open_compact::<F>(ctx.with_label("reopen")).await;
+        let reopened = open_compact::<F>(ctx.child("reopen")).await;
         assert_eq!(db.root(), reopened.root());
         assert_eq!(reopened.get_metadata(), Some(metadata));
 

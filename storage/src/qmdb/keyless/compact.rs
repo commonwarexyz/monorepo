@@ -22,8 +22,9 @@
 
 use super::operation::Operation;
 use crate::{
-    merkle::{self, batch, compact as compact_merkle, Family, Location, Proof},
+    merkle::{batch, compact as compact_merkle, Family, Location, Proof},
     qmdb::{
+        self,
         any::value::ValueEncoding,
         batch_chain,
         compact::{
@@ -203,7 +204,7 @@ where
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let root = db
             .merkle
             .with_mem(|mem| merkle.root(mem, &hasher, inactive_peaks))
@@ -289,8 +290,8 @@ where
         )?;
 
         Ok(Self {
-            last_commit_loc,
             merkle,
+            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -350,7 +351,7 @@ where
     where
         F: Family,
     {
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(*self.last_commit_loc + 1)),
             self.inactivity_floor_loc,
@@ -551,7 +552,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::sequence::{prefixed_u64::U64 as MetadataKey, U64};
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256>;
@@ -586,7 +587,7 @@ mod tests {
         partition: &str,
     ) -> Metadata<deterministic::Context, MetadataKey, Vec<u8>> {
         Metadata::<_, MetadataKey, Vec<u8>>::init(
-            context.with_label("meta_write"),
+            context.child("meta_write"),
             MConfig {
                 partition: partition.into(),
                 codec_config: ((0..).into(), ()),
@@ -610,7 +611,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_stale_batch_rejected() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db::<mmr::Family>(context.with_label("db"), "keyless-stale").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-stale").await;
             let floor = db.inactivity_floor_loc();
 
             let batch_a =
@@ -639,8 +640,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_to_batch_reflects_live_state() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-to-batch-live").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-to-batch-live").await;
             let floor = db.inactivity_floor_loc();
 
             let pre_apply_root = db.root();
@@ -679,8 +679,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_stale_batch_chained() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-chained-stale").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-chained-stale").await;
             let floor = db.inactivity_floor_loc();
 
             let parent =
@@ -712,8 +711,7 @@ mod tests {
     fn test_compact_stale_parent_after_child_applied() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-child-before-parent")
-                    .await;
+                open_db::<mmr::Family>(context.child("db"), "keyless-child-before-parent").await;
             let floor = db.inactivity_floor_loc();
 
             let parent =
@@ -739,8 +737,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_sequential_commit_parent_then_child() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-parent-child").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-parent-child").await;
             let floor = db.inactivity_floor_loc();
 
             let parent =
@@ -770,11 +767,9 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_ancestor_floor_regression_rejected() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db::<mmr::Family>(
-                context.with_label("db"),
-                "keyless-ancestor-floor-regressed",
-            )
-            .await;
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-regressed")
+                    .await;
 
             // parent: append + commit at loc 2 with floor=2.
             let parent = db
@@ -801,8 +796,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_rewind_restores_commit_metadata_and_floor() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-rewind-meta").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-meta").await;
 
             let v1 = U64::new(1);
             let meta1 = U64::new(11);
@@ -848,7 +842,7 @@ mod tests {
             let floor2 = Location::new(1);
 
             let root_after_first = {
-                let mut db = open_db::<mmr::Family>(context.with_label("first"), partition).await;
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
                 db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
                     &db,
                     Some(meta1.clone()),
@@ -870,7 +864,7 @@ mod tests {
                 root
             };
 
-            let db = open_db::<mmr::Family>(context.with_label("second"), partition).await;
+            let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
             assert_eq!(db.inactivity_floor_loc(), floor1);
@@ -883,7 +877,7 @@ mod tests {
     fn test_compact_reopen_rejects_tampered_witness() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-witness-tamper";
-            let mut db = open_db::<mmr::Family>(context.with_label("db"), partition).await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
             db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
                 &db,
                 Some(U64::new(11)),
@@ -895,7 +889,7 @@ mod tests {
             drop(db);
 
             tamper_metadata_key(
-                context.with_label("tamper"),
+                context.child("tamper"),
                 partition,
                 crate::qmdb::compact::witness::last_commit_proof_key(slot),
             )
@@ -903,7 +897,7 @@ mod tests {
 
             let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _> =
                 crate::merkle::compact::Merkle::init(
-                    context.with_label("reopen"),
+                    context.child("reopen"),
                     crate::merkle::compact::Config {
                         partition: partition.into(),
                         strategy: Sequential,
@@ -920,7 +914,7 @@ mod tests {
     fn test_compact_reopen_rejects_commit_floor_beyond_tip() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-invalid-persisted-floor";
-            let mut db = open_db::<mmr::Family>(context.with_label("db"), partition).await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
             db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
                 &db,
                 Some(U64::new(11)),
@@ -933,7 +927,7 @@ mod tests {
             let oversized_floor = Location::new(10);
 
             overwrite_metadata_key(
-                context.with_label("tamper"),
+                context.child("tamper"),
                 partition,
                 crate::qmdb::compact::witness::last_commit_op_key(slot),
                 Operation::<mmr::Family, FixedEncoding<U64>>::Commit(
@@ -947,7 +941,7 @@ mod tests {
 
             let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _> =
                 crate::merkle::compact::Merkle::init(
-                    context.with_label("reopen"),
+                    context.child("reopen"),
                     crate::merkle::compact::Config {
                         partition: partition.into(),
                         strategy: Sequential,
@@ -966,8 +960,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_rewind_beyond_history() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-rewind-beyond").await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-beyond").await;
             assert!(matches!(
                 db.rewind().await,
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
@@ -979,11 +972,9 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_rewind_preserves_pre_advance_batch() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db::<mmr::Family>(
-                context.with_label("db"),
-                "keyless-rewind-preserves-pre-advance",
-            )
-            .await;
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "keyless-rewind-preserves-pre-advance")
+                    .await;
 
             db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
                 &db,
@@ -1021,7 +1012,7 @@ mod tests {
     fn test_compact_noop_commit_after_commit() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-noop-after-commit").await;
+                open_db::<mmr::Family>(context.child("db"), "keyless-noop-after-commit").await;
 
             db.apply_batch(
                 db.new_batch()
@@ -1049,7 +1040,7 @@ mod tests {
             let partition = "keyless-noop-after-reopen";
 
             let root_before_drop = {
-                let mut db = open_db::<mmr::Family>(context.with_label("first"), partition).await;
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
                 db.apply_batch(
                     db.new_batch()
                         .append(U64::new(1))
@@ -1063,7 +1054,7 @@ mod tests {
                 root
             };
 
-            let db = open_db::<mmr::Family>(context.with_label("second"), partition).await;
+            let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_before_drop);
             assert_eq!(db.size(), Location::new(4));
 
@@ -1080,7 +1071,7 @@ mod tests {
     fn test_compact_noop_commit_after_rewind() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-noop-after-rewind").await;
+                open_db::<mmr::Family>(context.child("db"), "keyless-noop-after-rewind").await;
 
             db.apply_batch(
                 db.new_batch()
@@ -1117,8 +1108,7 @@ mod tests {
     fn test_compact_rewind_makes_post_advance_batch_stale() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-rewind-makes-stale")
-                    .await;
+                open_db::<mmr::Family>(context.child("db"), "keyless-rewind-makes-stale").await;
 
             db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
                 &db,
@@ -1158,8 +1148,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_witness_state_reports_cached_commit_corruption() {
         deterministic::Runner::default().start(|context| async move {
-            let db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-serve-corruption").await;
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-serve-corruption").await;
             db.witness
                 .mutate(|witness| witness.last_commit_op_bytes.clear());
 
@@ -1178,8 +1167,7 @@ mod tests {
     fn test_compact_ancestor_floor_beyond_commit_loc_rejected() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
-                open_db::<mmr::Family>(context.with_label("db"), "keyless-ancestor-floor-beyond")
-                    .await;
+                open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-beyond").await;
 
             // parent: append + commit at loc 2, floor=3 (one past parent's commit).
             let parent = db

@@ -19,6 +19,7 @@ mod prunable;
 pub use prunable::Prunable;
 
 pub mod historical;
+commonware_macros::stability_mod!(ALPHA, pub mod roaring);
 
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
@@ -844,11 +845,9 @@ impl<const N: usize> Write for BitMap<N> {
         self.len().write(buf);
 
         // Write all chunks
-        for chunk in &self.chunks {
-            for &byte in chunk {
-                byte.write(buf);
-            }
-        }
+        let (front, back) = self.chunks.as_slices();
+        buf.put_slice(front.as_flattened());
+        buf.put_slice(back.as_flattened());
     }
 }
 

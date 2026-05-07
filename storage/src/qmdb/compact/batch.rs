@@ -1,8 +1,8 @@
 //! Shared helpers for compact QMDB batches.
 
 use crate::{
-    merkle::{batch, compact, hasher::Standard as StandardHasher, Family},
-    Context,
+    merkle::{batch, compact, Family},
+    qmdb, Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -22,7 +22,7 @@ where
     S: Strategy,
     Op: EncodeShared,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     for op in ops {
         batch = batch.add(&hasher, &op.encode());
     }

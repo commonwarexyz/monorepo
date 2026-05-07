@@ -8,6 +8,7 @@ use crate::{
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::channel::{mpsc, oneshot};
 use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
@@ -22,10 +23,8 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
 }
 
 pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
+    context: ContextCell<R>,
     mailbox: mpsc::Receiver<Message<C, S, D>>,
-
-    // RNG used for signature verification with scheme.
-    rng: R,
 
     // Verifier for node signatures.
     chunk_verifier: ChunkVerifier,
@@ -63,7 +62,7 @@ where
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
-                rng,
+                context: ContextCell::new(rng),
                 mailbox: receiver,
                 chunk_verifier,
                 scheme,
@@ -75,6 +74,14 @@ where
             },
             Mailbox { sender },
         )
+    }
+
+    pub fn start(mut self) -> Handle<()>
+    where
+        R: Spawner,
+        S: scheme::Scheme<C, D>,
+    {
+        spawn_cell!(self.context, self.run())
     }
 
     pub async fn run(mut self)
@@ -99,7 +106,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.scheme, &Sequential) {
+                    if !lock.verify(self.context.as_mut(), &self.scheme, &Sequential) {
                         panic!("Invalid proof");
                     }
 
