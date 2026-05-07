@@ -13,8 +13,7 @@ const VOTE_SCOPE_WEIGHT: u32 = 45;
 /// `FaultScope::Certificate(_)` weight in [`sample`] (uniform over
 /// [`CERTIFICATE_KINDS`]).
 const CERTIFICATE_SCOPE_WEIGHT: u32 = 5;
-const TOTAL_SCOPE_WEIGHT: u32 =
-    ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT + CERTIFICATE_SCOPE_WEIGHT;
+const TOTAL_SCOPE_WEIGHT: u32 = ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT + CERTIFICATE_SCOPE_WEIGHT;
 
 /// All [`VoteKind`] variants, sampled uniformly when [`sample`] picks the
 /// `Vote(_)` bucket. Add new variants here so the sampler covers them.

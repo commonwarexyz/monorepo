@@ -1,13 +1,10 @@
 //! Observed-value pool used by ByzzFuzz vote mutation. Forwarders /
 //! extractors populate it from successfully decoded outgoing and inbound
-//! vote and certificate traffic; the mutator replays seen payloads /
-//! proposals and uses observed notarized/finalized/nullified views to
-//! pick semantically interesting nullify targets. Certificate and
-//! resolver process faults are omit-only so this pool deliberately does
-//! not retain raw cert bytes or resolver request views.
-//!
-//! BTree containers are used everywhere so iteration order is
-//! deterministic across process runs.
+//! vote and certificate traffic. Notarize/finalize vote mutations replay
+//! observed proposals and payloads; nullify vote mutations use observed
+//! notarized/finalized/nullified views as semantically interesting targets.
+//! Certificate and resolver process faults are omit-only so this pool
+//! deliberately does not retain raw cert bytes or resolver request views.
 
 use commonware_consensus::{
     simplex::types::{Certificate, Proposal, Vote},
