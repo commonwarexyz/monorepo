@@ -137,8 +137,9 @@ impl<T: MessagePolicy> QueueMailbox<T> {
         }
 
         let (result, wake) = if state.queue.len() < state.capacity {
+            let wake = state.queue.is_empty();
             state.queue.push_back(message);
-            (Enqueue::Queued, true)
+            (Enqueue::Queued, wake)
         } else {
             match message.full_policy() {
                 FullPolicy::Drop => (Enqueue::Dropped, false),
@@ -148,7 +149,7 @@ impl<T: MessagePolicy> QueueMailbox<T> {
                     panic!("actor mailbox full for {}", message.kind());
                 }
                 FullPolicy::Replace => match T::replace(&mut state.queue, message) {
-                    Ok(()) => (Enqueue::Replaced, true),
+                    Ok(()) => (Enqueue::Replaced, false),
                     Err(message) => match T::replace(&mut state.pending, message) {
                         Ok(()) => (Enqueue::Replaced, false),
                         Err(message) => retain_locked(&mut state, message),
