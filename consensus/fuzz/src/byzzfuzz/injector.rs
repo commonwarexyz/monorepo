@@ -205,16 +205,7 @@ where
                 ))
             }
             Vote::Nullify(_) => {
-                let mut nullify_view = strategy.mutate_nullify_view(rng, view, view, view, view);
-                // Identity guard: a Nullify mutation that returns the same
-                // view re-signs identical content -- a no-op for the
-                // receiver. Force a nearby different view.
-                if nullify_view == view {
-                    nullify_view = view.saturating_add(1);
-                    if nullify_view == view {
-                        nullify_view = view.saturating_sub(1);
-                    }
-                }
+                let nullify_view = strategy.mutate_nullify_view(rng, view, view, view, view);
                 let round = Round::new(Epoch::new(EPOCH), View::new(nullify_view));
                 let signed = Nullify::<S>::sign::<Sha256Digest>(scheme, round)?;
                 Some((

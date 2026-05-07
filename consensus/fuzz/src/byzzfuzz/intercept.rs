@@ -18,11 +18,13 @@
 //!   inbound also carries round-relevant data: [`commonware_resolver`]'s
 //!   wire `Payload::Request` is keyed by `U64` view (Simplex sets
 //!   `Resolver::Key = U64`), and `Payload::Response` is the serialized
-//!   [`Certificate`] whose `view()` we can recover. The resolver wire
-//!   module is private, so we hand-decode the small fixed prefix and reuse
-//!   the [`Certificate`] codec for the response payload.
+//!   [`Certificate`] whose `view()` we can recover. We decode the wire
+//!   message via the public re-export at
+//!   [`commonware_resolver::p2p::mocks::Message`] so the wire format
+//!   tracks the upstream codec, and reuse the [`Certificate`] codec for
+//!   the response payload.
 
-use commonware_codec::{Decode, DecodeExt, RangeCfg, Read};
+use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     simplex::{
         scheme::Scheme,
@@ -32,7 +34,11 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
 use commonware_p2p::{Message, Receiver};
-use commonware_utils::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
+use commonware_utils::{
+    channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sequence::U64,
+};
 use std::{
     fmt::{self, Debug},
     sync::{
@@ -233,64 +239,30 @@ where
     }
 }
 
-/// Hand-decode a resolver wire message and return its carried view --
-/// `Request(U64)`'s view, or the view of the [`Certificate`] embedded in
-/// `Response(Bytes)`. Returns `None` for `Error`, undecodable payloads,
-/// and trailing-byte violations the real decoder would reject. Folds the
-/// embedded certificate (when present) into the observed-value pool;
-/// request views are not retained because cert/resolver process faults
-/// are omit-only.
+/// Decode a resolver wire message via [`ResolverMessage`] / [`ResolverPayload`]
+/// and return its carried view -- `Request`'s key, or the view of the
+/// [`Certificate`] embedded in `Response`. Returns `None` for `Error` and
+/// undecodable payloads. Folds the embedded certificate (when present) into
+/// the observed-value pool; request views are not retained because
+/// cert/resolver process faults are omit-only.
 ///
-/// Single source of truth for the private resolver wire layout
-/// (`commonware_resolver::p2p::wire::Message`); both the outbound
-/// resolver forwarder and the inbound `RoundTrackingReceiver` extractor
-/// call this so a future wire-format change has only one update site.
-///
-/// Wire layout decoded:
-///   bytes 0..8   -- `id: u64` (BE) -- ignored;
-///   byte  8      -- payload tag (0 = Request, 1 = Response, 2 = Error);
-///   tag 0:  bytes 9..17 -- `Key = U64` (BE) view;
-///   tag 1:  varint length + Bytes -- length-prefixed serialized
-///                                    [`Certificate`];
-///   tag 2:  no payload.
+/// Both the outbound resolver forwarder and the inbound
+/// `RoundTrackingReceiver` extractor call this so the wire format tracks
+/// `commonware_resolver` through the real codec rather than a hand-decode.
 pub(crate) fn observe_resolver_wire_view<S: Scheme<Sha256Digest>>(
     bytes: &[u8],
     cert_codec: &<S::Certificate as Read>::Cfg,
     pool: &crate::byzzfuzz::observed::ObservedState,
 ) -> Option<u64> {
-    if bytes.len() < 9 {
-        return None;
-    }
-    let tag = bytes[8];
-    let payload = &bytes[9..];
-    match tag {
-        0 => {
-            // Request(U64) -- exactly 8 BE bytes, no trailing data.
-            if payload.len() != 8 {
-                return None;
-            }
-            let mut be = [0u8; 8];
-            be.copy_from_slice(payload);
-            Some(u64::from_be_bytes(be))
-        }
-        1 => {
-            // Response(Bytes) -- varint usize length, then exactly that
-            // many bytes. `Certificate::decode_cfg` enforces exact
-            // consumption inside the cert payload.
-            let mut buf = payload;
-            let range: RangeCfg<usize> = (..).into();
-            let len = usize::read_cfg(&mut buf, &range).ok()?;
-            if buf.len() != len {
-                return None;
-            }
-            let cert_slice = &buf[..len];
-            let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &cert_slice[..], cert_codec)
-                .ok()?;
+    let msg = ResolverMessage::<U64>::decode(bytes).ok()?;
+    match msg.payload {
+        ResolverPayload::Request(key) => Some(u64::from(key)),
+        ResolverPayload::Response(b) => {
+            let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &b[..], cert_codec).ok()?;
             pool.observe_certificate::<S, S::PublicKey>(&c);
             Some(c.view().get())
         }
-        // Error / unknown tag / Error-with-junk: do not advance rnd(m).
-        _ => None,
+        ResolverPayload::Error => None,
     }
 }
 

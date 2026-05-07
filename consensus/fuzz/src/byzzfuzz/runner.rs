@@ -504,9 +504,10 @@ where
             }
 
             // GST: disable partition drops. Append post-GST Byzantine
-            // process faults starting after the sender's current rnd(m) so
-            // Byzantine behavior does not disappear when the initial schedule
-            // was exhausted during Phase 1.
+            // process faults starting after both the sender's current rnd(m)
+            // and the highest pre-GST scheduled view, so the appended budget
+            // does not double-fire on views that already have a dormant
+            // pre-GST fault waiting for the byzantine to reach them.
             let byzantine_rnd = byzantine_view.get();
             let highest_pre_gst_proc_fault = proc_schedule
                 .lock()
@@ -514,7 +515,10 @@ where
                 .map(|f| f.view)
                 .max()
                 .unwrap_or(0);
-            let first_post_gst_view = byzantine_rnd.saturating_add(1).max(1);
+            let first_post_gst_view = byzantine_rnd
+                .max(highest_pre_gst_proc_fault)
+                .saturating_add(1)
+                .max(1);
             let last_post_gst_view = first_post_gst_view
                 .saturating_add(post_gst_fault_views.saturating_sub(1));
             let post_gst_faults = ByzzFuzz::post_gst_process_faults(
