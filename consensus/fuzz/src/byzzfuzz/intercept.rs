@@ -1,4 +1,4 @@
-//! Cross-task plumbing between forwarders and the injector.
+//! Shared interception data and receiver wrappers used by ByzzFuzz forwarders and injector.
 //!
 //! The forwarders run synchronously inside the simulated p2p split-sender
 //! plumbing; the injector runs on its own async task. This module defines
@@ -49,7 +49,7 @@ pub enum InterceptChannel {
     Vote,
     Cert,
     Resolver,
-}
+}g
 
 /// One intercepted byzantine message paired with one matching procFault.
 /// Pushed by a forwarder, consumed by [`super::injector::ByzzFuzzInjector`].
@@ -202,7 +202,7 @@ where
 
 /// Build a `Vote`-decoding extractor. Also populates the observed-value pool.
 pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
-    pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
+    pool: Arc<crate::byzzfuzz::observed::ObservedState>,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static {
     move |bytes: &[u8]| {
         let v = Vote::<S, Sha256Digest>::decode(bytes).ok()?;
@@ -217,7 +217,7 @@ pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
 /// for Notarization/Finalization).
 pub fn certificate_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
-    pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
+    pool: Arc<crate::byzzfuzz::observed::ObservedState>,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static
 where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
