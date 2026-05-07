@@ -32,9 +32,9 @@ pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 #[cfg(test)]
 pub(crate) use proof::build_range_proof;
-pub use proof::Proof;
 #[cfg(feature = "std")]
 pub(crate) use proof::{build_range_collection_proof, range_collection_nodes};
+pub use proof::{Proof, ReconstructionError};
 pub use read::Readable;
 use thiserror::Error;
 

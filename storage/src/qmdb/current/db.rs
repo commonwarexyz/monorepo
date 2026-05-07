@@ -854,7 +854,15 @@ pub(super) async fn compute_grafted_root<
 /// all-zero chunks the grafted leaf equals the `chunk_ops_digest` directly (zero-chunk identity).
 ///
 /// The provided strategy determines if or how to parallelize merkleization.
-pub(super) async fn compute_grafted_leaves<
+///
+/// # Errors
+///
+/// Returns [`merkle::Error::MissingGraftedLeaf`] if `ops_tree` is missing a covering peak.
+///
+/// # Panics
+///
+/// Panics if any `chunk_idx` refers to a chunk whose leaves are not fully present in `ops_tree`.
+pub async fn compute_grafted_leaves<
     F: merkle::Graftable,
     H: Hasher,
     S: Strategy,

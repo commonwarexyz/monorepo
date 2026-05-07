@@ -595,16 +595,22 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Authenticate the proven range without reconstructing the full generic Merkle root.
     ///
-    /// This consumes only the sibling digests needed to rebuild the proven range peaks, then returns
-    /// those peak digests in `collected`. It deliberately does not consume peak-bagging witnesses
-    /// such as prefix peaks, after peaks, or backward-fold suffix accumulators.
+    /// This consumes only the sibling digests needed to rebuild the proven range peaks, then
+    /// appends those peak digests to `collected`. It deliberately does not consume peak-bagging
+    /// witnesses such as prefix peaks, after peaks, or backward-fold suffix accumulators.
     ///
     /// Current QMDB grafted proofs use this path because their final root is rebuilt by the wrapper
     /// from the collected range peaks plus grafted prefix/suffix witnesses. Including generic
     /// peak-bagging witnesses here would create proof bytes that the wrapper root ignores, making
     /// those bytes malleable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ReconstructionError`] variant for empty `elements`, an out-of-range
+    /// `start_loc`/end location, an inconsistent proof size, or leftover elements/sibling digests
+    /// after reconstruction.
     #[cfg(feature = "std")]
-    pub(crate) fn reconstruct_range_collecting<H, E>(
+    pub fn reconstruct_range_collecting<H, E>(
         &self,
         hasher: &H,
         elements: &[E],

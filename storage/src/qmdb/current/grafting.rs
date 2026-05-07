@@ -7,7 +7,7 @@
 //! complete chunk of the bitmap is hashed together with the corresponding subtree root from the ops
 //! tree to produce a single "grafted leaf" digest. These digests, along with their ancestor nodes,
 //! are stored in an in-memory Merkle structure (using grafted-space positions internally, with ops-space
-//! positions in hash pre-images via [GraftedHasher]).
+//! positions in hash pre-images via `GraftedHasher`).
 //!
 //! This is more efficient than maintaining two independent authenticated structures. An inclusion
 //! proof for an operation and its activity status only requires one branch (which embeds the bitmap
@@ -38,7 +38,7 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard hashing with ops-space positions.
 //!
-//! The grafted tree is incrementally maintained via [GraftedHasher] when grafted leaves
+//! The grafted tree is incrementally maintained via `GraftedHasher` when grafted leaves
 //! change.
 
 use crate::merkle::{
@@ -87,9 +87,21 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
     Ok(aligned_count)
 }
 
-/// Transform raw ops-tree peaks into grafted peak digests, preserving how many original peaks
-/// each transformed digest represents.
-pub(super) fn transform_peak_digests<
+/// Transform raw ops-tree peaks into grafted peak digests.
+///
+/// `peaks` are walked left-to-right starting at leaf index `start_leaf` (use `0` if `peaks` begins
+/// at the start of the tree). Peaks at or above `grafting_height` pass through unchanged. Peaks
+/// below it are grouped by chunk index and combined with the chunk bytes returned by `get_chunk`;
+/// if `get_chunk` returns `None`, those peaks pass through unchanged.
+///
+/// Each output entry is `(digest, count)` where `count` is how many input peaks the digest
+/// represents — always `1`, except when several sub-chunk-height peaks were merged into a single
+/// grafted digest.
+///
+/// # Panics
+///
+/// Panics if any peak height or `grafting_height` is too large to be a valid tree node height.
+pub fn transform_peak_digests<
     F: Graftable,
     D: Digest,
     H: HasherTrait<F, Digest = D>,
@@ -280,10 +292,7 @@ fn grafted_root_full_forward<
 /// # Panics
 ///
 /// Panics if `ops_pos` is below the grafting height.
-pub(super) fn ops_to_grafted_pos<F: Graftable>(
-    ops_pos: Position<F>,
-    grafting_height: u32,
-) -> Position<F> {
+pub fn ops_to_grafted_pos<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> Position<F> {
     let ops_height = F::pos_to_height(ops_pos);
     assert!(
         ops_height >= grafting_height,
@@ -299,7 +308,11 @@ pub(super) fn ops_to_grafted_pos<F: Graftable>(
 
 /// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
 /// range.
-pub(super) fn grafted_to_ops_pos<F: Graftable>(
+///
+/// # Panics
+///
+/// Panics if the resulting ops-tree height or leaf index is too large to be valid.
+pub fn grafted_to_ops_pos<F: Graftable>(
     grafted_pos: Position<F>,
     grafting_height: u32,
 ) -> Position<F> {
@@ -366,9 +379,11 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
 ///
 /// - **Below or above**: standard hash using ops-space positions (`F`).
 /// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
-///   to reconstruct the grafted leaf digest.
+///   to reconstruct the grafted leaf digest. If the chunk is not in `chunks`, the ops subtree root
+///   passes through unchanged (zero-chunk identity); the caller must supply every chunk needed by
+///   the proof or verification will silently produce a non-matching root.
 #[derive(Clone)]
-pub(super) struct Verifier<'a, F: Graftable, H: CHasher> {
+pub struct Verifier<'a, F: Graftable, H: CHasher> {
     hasher: merkle::hasher::Standard<H>,
     grafting_height: u32,
 
@@ -384,8 +399,9 @@ pub(super) struct Verifier<'a, F: Graftable, H: CHasher> {
 impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
     /// Create a new Verifier whose internal hasher uses the supplied bagging policy.
     ///
-    /// `start_chunk_index` is the chunk index corresponding to `chunks[0]`.
-    pub(super) const fn new(
+    /// `chunks` must be a contiguous slice of bitmap chunks in ascending chunk-index order, with
+    /// `chunks[i]` corresponding to chunk index `start_chunk_index + i`.
+    pub const fn new(
         grafting_height: u32,
         start_chunk_index: u64,
         chunks: Vec<&'a [u8]>,
@@ -461,7 +477,7 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
 ///
 /// Both the ops structure and the grafted structure use the same [Family] `F`. The combined storage
 /// presents as `StorageTrait<F>` so that callers generic over `F` can use it transparently.
-pub(super) struct Storage<
+pub struct Storage<
     'a,
     F: Graftable,
     D: Digest,
@@ -485,8 +501,10 @@ impl<
         H: HasherTrait<F, Digest = D> + Clone,
     > Storage<'a, F, D, G, S, H>
 {
-    /// Creates a new [Storage] instance.
-    pub(super) const fn new(
+    /// Creates a new [Storage] over the given grafted tree (servicing nodes at and above
+    /// `grafting_height`) and ops tree (servicing nodes below). `hasher` is used to reconstruct
+    /// grafted ancestors that have been pruned from `grafted_tree`.
+    pub const fn new(
         grafted_tree: &'a G,
         grafting_height: u32,
         ops_tree: &'a S,

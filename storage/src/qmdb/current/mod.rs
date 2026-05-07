@@ -273,7 +273,7 @@ use std::sync::Arc;
 
 pub mod batch;
 pub mod db;
-mod grafting;
+pub mod grafting;
 
 pub mod ordered;
 pub mod proof;
