@@ -2,12 +2,17 @@
 
 use super::mpsc;
 use crate::sync::Mutex;
+use crossbeam_queue::ArrayQueue;
+use futures::task::AtomicWaker;
 use std::{
     collections::VecDeque,
     fmt,
     future::poll_fn,
-    sync::Arc,
-    task::{Context, Poll, Waker},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
 };
 
 /// Result of trying to enqueue a message.
@@ -50,7 +55,7 @@ pub enum FullPolicy {
     Reject,
     /// Queue the incoming message, even if this exceeds the configured capacity.
     Retain,
-    /// Try to replace a stale queued message, queueing the message if nothing was replaced.
+    /// Try to replace a stale overflow message, queueing the message if nothing was replaced.
     Replace,
 }
 
@@ -62,62 +67,71 @@ pub trait MessagePolicy: Sized {
     /// Full-inbox behavior for this message.
     fn full_policy(&self) -> FullPolicy;
 
-    /// Try to replace a stale queued message with `message`.
+    /// Try to replace a stale overflow message with `message`.
     ///
-    /// This is only called when [`Self::full_policy`] returns [`FullPolicy::Replace`].
-    fn replace(_queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    /// This is only called when [`Self::full_policy`] returns [`FullPolicy::Replace`] and the
+    /// bounded ready queue is full. Messages already in the ready queue are not provided here;
+    /// replacement only applies to overflow retained behind the ready queue.
+    fn replace(_queue: &mut VecDeque<Self>, _protected: usize, message: Self) -> Result<(), Self> {
         Err(message)
     }
 }
 
-struct State<T> {
+struct Overflow<T> {
     queue: VecDeque<T>,
-    capacity: usize,
-    closed: bool,
-    senders: usize,
-    receiver_waker: Option<Waker>,
+}
+
+struct Shared<T> {
+    ready: ArrayQueue<T>,
+    overflow: Mutex<Overflow<T>>,
+    overflow_len: AtomicUsize,
+    overflowing: AtomicBool,
+    closed: AtomicBool,
+    inflight: AtomicUsize,
+    senders: AtomicUsize,
+    receiver_waker: AtomicWaker,
+}
+
+struct SendPermit<'a, T> {
+    shared: &'a Shared<T>,
+}
+
+impl<T> Drop for SendPermit<'_, T> {
+    fn drop(&mut self) {
+        self.shared.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Sender half of an actor mailbox.
 pub struct ActorMailbox<T: MessagePolicy> {
-    state: Arc<Mutex<State<T>>>,
+    shared: Arc<Shared<T>>,
 }
 
 impl<T: MessagePolicy> Clone for ActorMailbox<T> {
     fn clone(&self) -> Self {
-        self.state.lock().senders += 1;
+        self.shared.senders.fetch_add(1, Ordering::Relaxed);
         Self {
-            state: self.state.clone(),
+            shared: self.shared.clone(),
         }
     }
 }
 
 impl<T: MessagePolicy> Drop for ActorMailbox<T> {
     fn drop(&mut self) {
-        let waker = {
-            let mut state = self.state.lock();
-            debug_assert!(state.senders > 0);
-            state.senders -= 1;
-            if state.senders == 0 {
-                state.receiver_waker.take()
-            } else {
-                None
-            }
-        };
-
-        if let Some(waker) = waker {
-            waker.wake();
+        let previous = self.shared.senders.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+        if previous == 1 {
+            self.shared.receiver_waker.wake();
         }
     }
 }
 
 impl<T: MessagePolicy> fmt::Debug for ActorMailbox<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = self.state.lock();
         f.debug_struct("ActorMailbox")
-            .field("len", &state.queue.len())
-            .field("capacity", &state.capacity)
-            .field("closed", &state.closed)
+            .field("len", &self.len())
+            .field("capacity", &self.shared.ready.capacity())
+            .field("closed", &self.shared.closed.load(Ordering::Acquire))
             .finish()
     }
 }
@@ -126,53 +140,116 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     /// Enqueue a message without waiting for inbox capacity.
     #[must_use = "handle queue rejection/closure; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Enqueue<T> {
-        let mut state = self.state.lock();
-        if state.closed {
+        let (_permit, message) = match self.acquire_send(message) {
+            Ok(send) => send,
+            Err(message) => return Enqueue::Closed(message),
+        };
+        let policy = message.full_policy();
+
+        let message = if self.shared.overflowing.load(Ordering::Acquire) {
+            message
+        } else {
+            match self.shared.ready.push(message) {
+                Ok(()) => {
+                    self.shared.receiver_waker.wake();
+                    return Enqueue::Queued;
+                }
+                Err(message) => message,
+            }
+        };
+
+        if matches!(policy, FullPolicy::Retain | FullPolicy::Replace) {
+            self.shared.overflowing.store(true, Ordering::Release);
+        }
+
+        match policy {
+            FullPolicy::Reject => {
+                if self.shared.closed.load(Ordering::Acquire) {
+                    Enqueue::Closed(message)
+                } else {
+                    Enqueue::Rejected(message)
+                }
+            }
+            FullPolicy::Retain => self.retain_overflow(message),
+            FullPolicy::Replace => self.replace_overflow(message),
+        }
+    }
+
+    fn acquire_send(&self, message: T) -> Result<(SendPermit<'_, T>, T), T> {
+        if self.shared.closed.load(Ordering::Acquire) {
+            return Err(message);
+        }
+
+        self.shared.inflight.fetch_add(1, Ordering::AcqRel);
+        if self.shared.closed.load(Ordering::Acquire) {
+            self.shared.inflight.fetch_sub(1, Ordering::AcqRel);
+            Err(message)
+        } else {
+            Ok((
+                SendPermit {
+                    shared: &self.shared,
+                },
+                message,
+            ))
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.shared.ready.len() + self.shared.overflow_len.load(Ordering::Acquire)
+    }
+
+    fn retain_overflow(&self, message: T) -> Enqueue<T> {
+        if self.shared.closed.load(Ordering::Acquire) {
+            return Enqueue::Closed(message);
+        }
+        self.shared.overflowing.store(true, Ordering::Release);
+
+        let mut overflow = self.shared.overflow.lock();
+        if self.shared.closed.load(Ordering::Acquire) {
             return Enqueue::Closed(message);
         }
 
-        let (result, wake) = if state.queue.len() < state.capacity {
-            let wake = state.queue.is_empty();
-            state.queue.push_back(message);
-            (Enqueue::Queued, wake)
-        } else {
-            match message.full_policy() {
-                FullPolicy::Reject => (Enqueue::Rejected(message), false),
-                FullPolicy::Retain => {
-                    state.queue.push_back(message);
-                    (Enqueue::Queued, false)
-                }
-                FullPolicy::Replace => match T::replace(&mut state.queue, message) {
-                    Ok(()) => (Enqueue::Replaced, false),
-                    Err(message) => {
-                        state.queue.push_back(message);
-                        (Enqueue::Queued, false)
-                    }
-                },
-            }
-        };
-        let waker = if wake {
-            state.receiver_waker.take()
-        } else {
-            None
-        };
-        drop(state);
+        overflow.queue.push_back(message);
+        self.shared.overflow_len.fetch_add(1, Ordering::Release);
+        drop(overflow);
 
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-        result
+        self.shared.receiver_waker.wake();
+        Enqueue::Queued
     }
 
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.state.lock().queue.len()
+    fn replace_overflow(&self, message: T) -> Enqueue<T> {
+        if self.shared.closed.load(Ordering::Acquire) {
+            return Enqueue::Closed(message);
+        }
+        self.shared.overflowing.store(true, Ordering::Release);
+
+        let mut overflow = self.shared.overflow.lock();
+        if self.shared.closed.load(Ordering::Acquire) {
+            return Enqueue::Closed(message);
+        }
+
+        match T::replace(&mut overflow.queue, 0, message) {
+            Ok(()) => {
+                if overflow.queue.is_empty() {
+                    self.shared.overflowing.store(false, Ordering::Release);
+                }
+                Enqueue::Replaced
+            }
+            Err(message) => {
+                overflow.queue.push_back(message);
+                self.shared.overflow_len.fetch_add(1, Ordering::Release);
+                drop(overflow);
+
+                self.shared.receiver_waker.wake();
+                Enqueue::Queued
+            }
+        }
     }
 }
 
 /// Receiver half of an actor mailbox.
 pub struct ActorInbox<T> {
-    state: Arc<Mutex<State<T>>>,
+    shared: Arc<Shared<T>>,
 }
 
 impl<T> ActorInbox<T> {
@@ -182,77 +259,141 @@ impl<T> ActorInbox<T> {
     }
 
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        let mut state = self.state.lock();
-        if let Some(message) = state.queue.pop_front() {
+        if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
         }
 
-        if state.closed || state.senders == 0 {
+        if self.is_disconnected() {
             return Poll::Ready(None);
         }
 
-        match &state.receiver_waker {
-            Some(waker) if waker.will_wake(cx.waker()) => {}
-            _ => state.receiver_waker = Some(cx.waker().clone()),
+        self.shared.receiver_waker.register(cx.waker());
+
+        if let Some(message) = self.pop() {
+            return Poll::Ready(Some(message));
         }
 
-        Poll::Pending
+        if self.is_disconnected() {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
     }
 
     /// Try to receive the next queued message without waiting.
     pub fn try_recv(&mut self) -> Result<T, mpsc::error::TryRecvError> {
-        let mut state = self.state.lock();
-        if let Some(message) = state.queue.pop_front() {
+        if let Some(message) = self.pop() {
             return Ok(message);
         }
-        if state.closed || state.senders == 0 {
+        if self.is_disconnected() {
             return Err(mpsc::error::TryRecvError::Disconnected);
         }
         Err(mpsc::error::TryRecvError::Empty)
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        if let Some(message) = self.shared.ready.pop() {
+            self.refill_ready_if_pending();
+            return Some(message);
+        }
+
+        self.refill_ready();
+        self.shared.ready.pop()
+    }
+
+    fn refill_ready_if_pending(&self) {
+        if self.shared.overflow_len.load(Ordering::Acquire) > 0 {
+            self.refill_ready();
+        }
+    }
+
+    fn refill_ready(&self) {
+        let mut overflow = self.shared.overflow.lock();
+        while let Some(message) = overflow.queue.pop_front() {
+            match self.shared.ready.push(message) {
+                Ok(()) => {
+                    self.shared.overflow_len.fetch_sub(1, Ordering::AcqRel);
+                }
+                Err(message) => {
+                    overflow.queue.push_front(message);
+                    break;
+                }
+            }
+        }
+        if overflow.queue.is_empty() {
+            self.shared.overflowing.store(false, Ordering::Release);
+        }
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.shared.closed.load(Ordering::Acquire)
+            || self.shared.senders.load(Ordering::Acquire) == 0
     }
 }
 
 impl<T> Drop for ActorInbox<T> {
     fn drop(&mut self) {
-        let mut state = self.state.lock();
-        state.closed = true;
-        state.queue.clear();
-        state.receiver_waker.take();
+        self.shared.closed.store(true, Ordering::Release);
+        while self.shared.inflight.load(Ordering::Acquire) != 0 {
+            std::hint::spin_loop();
+        }
+        while self.shared.ready.pop().is_some() {}
+        let mut overflow = self.shared.overflow.lock();
+        overflow.queue.clear();
+        self.shared.overflow_len.store(0, Ordering::Release);
+        self.shared.overflowing.store(false, Ordering::Release);
     }
 }
 
-/// Create an actor mailbox with a capacity threshold.
+/// Create an actor mailbox with a bounded ready queue and policy-managed overflow.
 pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbox<T>) {
     assert!(capacity > 0, "actor mailbox capacity must be greater than zero");
 
-    let state = Arc::new(Mutex::new(State {
-        queue: VecDeque::with_capacity(capacity),
-        capacity,
-        closed: false,
-        senders: 1,
-        receiver_waker: None,
-    }));
+    let shared = Arc::new(Shared {
+        ready: ArrayQueue::new(capacity),
+        overflow: Mutex::new(Overflow {
+            queue: VecDeque::new(),
+        }),
+        overflow_len: AtomicUsize::new(0),
+        overflowing: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        inflight: AtomicUsize::new(0),
+        senders: AtomicUsize::new(1),
+        receiver_waker: AtomicWaker::new(),
+    });
     (
         ActorMailbox {
-            state: state.clone(),
+            shared: shared.clone(),
         },
-        ActorInbox { state },
+        ActorInbox { shared },
     )
 }
 
-/// Replace the newest matching queued message.
+/// Replace the newest matching queued message after the protected prefix.
 pub fn replace_last<T>(
     queue: &mut VecDeque<T>,
+    protected: usize,
     message: T,
-    mut is_stale: impl FnMut(&T) -> bool,
+    is_stale: impl FnMut(&T) -> bool,
 ) -> Result<(), T> {
-    for queued in queue.iter_mut().rev() {
-        if is_stale(queued) {
-            *queued = message;
-            return Ok(());
-        }
+    if let Some(queued) = find_last_mut(queue, protected, is_stale) {
+        *queued = message;
+        Ok(())
+    } else {
+        Err(message)
     }
-    Err(message)
+}
+
+/// Find the newest matching queued message after the protected prefix.
+pub fn find_last_mut<T>(
+    queue: &mut VecDeque<T>,
+    protected: usize,
+    mut is_match: impl FnMut(&T) -> bool,
+) -> Option<&mut T> {
+    let index = (protected..queue.len())
+        .rev()
+        .find(|&index| is_match(queue.get(index).expect("index is in bounds")))?;
+    queue.get_mut(index)
 }
 
 #[cfg(test)]
@@ -290,9 +431,9 @@ mod tests {
             }
         }
 
-        fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
             match message {
-                Self::Update(value) => replace_last(queue, Self::Update(value), |pending| {
+                Self::Update(value) => replace_last(queue, protected, Self::Update(value), |pending| {
                     matches!(pending, Self::Update(_))
                 }),
                 message => Err(message),
@@ -301,12 +442,14 @@ mod tests {
     }
 
     #[commonware_macros::test_async]
-    async fn full_inbox_replaces_stale_message() {
+    async fn full_inbox_replaces_stale_overflow_message() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Update(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Replaced);
+        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Update(3)), Enqueue::Replaced);
 
-        assert_eq!(receiver.recv().await, Some(Message::Update(2)));
+        assert_eq!(receiver.recv().await, Some(Message::Update(1)));
+        assert_eq!(receiver.recv().await, Some(Message::Update(3)));
     }
 
     #[commonware_macros::test_async]
@@ -332,6 +475,16 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(Message::Buffered(2)));
     }
 
+    #[test]
+    fn try_recv_refills_from_overflow() {
+        let (sender, mut receiver) = channel(1);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Enqueue::Queued);
+
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+    }
+
     #[commonware_macros::test_async]
     async fn full_inbox_retains_unmatched_replaceable_message() {
         let (sender, mut receiver) = channel(1);
@@ -348,10 +501,12 @@ mod tests {
         let (sender, mut receiver) = channel(2);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
         assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Update(3)), Enqueue::Replaced);
+        assert_eq!(sender.enqueue(Message::Update(3)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Update(4)), Enqueue::Replaced);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
-        assert_eq!(receiver.recv().await, Some(Message::Update(3)));
+        assert_eq!(receiver.recv().await, Some(Message::Update(2)));
+        assert_eq!(receiver.recv().await, Some(Message::Update(4)));
     }
 
     #[commonware_macros::test_async]
@@ -401,5 +556,16 @@ mod tests {
             Err(mpsc::error::TryRecvError::Disconnected)
         );
         assert_eq!(receiver.recv().await, None);
+    }
+
+    #[test]
+    fn enqueue_after_receiver_drop_returns_closed() {
+        let (sender, receiver) = channel(1);
+        drop(receiver);
+
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Enqueue::Closed(Message::Vote(1))
+        );
     }
 }

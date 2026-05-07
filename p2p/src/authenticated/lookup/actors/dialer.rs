@@ -304,10 +304,11 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::Dialable(dialable) => actor::replace_last(
                 queue,
+                protected,
                 Self::Dialable(dialable),
                 |pending| matches!(pending, Self::Dialable(_)),
             ),

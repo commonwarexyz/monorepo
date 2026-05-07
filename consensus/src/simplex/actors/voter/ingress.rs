@@ -80,11 +80,11 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match &message {
             Self::Proposal(proposal) => {
                 let view = proposal.view();
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(
                         pending,
                         Self::Timeout(timeout_view, TimeoutReason::Inactivity)
@@ -94,20 +94,22 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
             }
             Self::Timeout(view, _) => {
                 let view = *view;
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(pending, Self::Timeout(pending_view, _) if *pending_view == view)
                 })
             }
             Self::Verified(certificate, _) => {
                 let key = certificate_key(certificate);
                 let mut message = Some(message);
-                for pending in queue.iter_mut().rev() {
-                    let Self::Verified(pending_certificate, pending_resolved) = pending else {
-                        continue;
-                    };
-                    if certificate_key(pending_certificate) != key {
-                        continue;
-                    }
+                if let Some(Self::Verified(pending_certificate, pending_resolved)) =
+                    actor::find_last_mut(queue, protected, |pending| {
+                        matches!(
+                            pending,
+                            Self::Verified(pending_certificate, _)
+                                if certificate_key(pending_certificate) == key
+                        )
+                    })
+                {
                     let Some(Self::Verified(certificate, resolved)) = message.take() else {
                         unreachable!("message is verified");
                     };
@@ -117,19 +119,19 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
                 }
 
                 let message = message.expect("message was not replaced");
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(pending, Self::Timeout(view, _) if *view <= key.1)
                 })
             }
             Self::RetryVote(vote) => {
                 let key = vote_key(vote);
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(pending, Self::RetryVote(vote) if vote_key(vote) == key)
                 })
             }
             Self::RetryCertificate(certificate) => {
                 let key = certificate_key(certificate);
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(
                         pending,
                         Self::RetryCertificate(certificate) if certificate_key(certificate) == key

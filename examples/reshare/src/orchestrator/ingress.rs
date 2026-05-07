@@ -38,9 +38,11 @@ impl<V: Variant, P: PublicKey> MessagePolicy for Message<V, P> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         let epoch = message.epoch();
-        actor::replace_last(queue, message, |pending| pending.epoch() == epoch)
+        actor::replace_last(queue, protected, message, |pending| {
+            pending.epoch() == epoch
+        })
     }
 }
 

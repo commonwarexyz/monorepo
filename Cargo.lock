@@ -1772,6 +1772,7 @@ dependencies = [
  "commonware-invariants",
  "commonware-macros",
  "criterion",
+ "crossbeam-queue",
  "futures",
  "getrandom 0.2.16",
  "hashbrown 0.16.1",

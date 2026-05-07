@@ -58,34 +58,27 @@ impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(pending, Self::Certificate(pending) if certificate_key(pending) == key)
                 })
             }
             Self::Certified { view, success } => {
                 let view = *view;
                 let success = *success;
-                let mut message = Some(message);
-                for pending in queue.iter_mut().rev() {
-                    let Self::Certified {
-                        view: pending_view,
-                        success: pending_success,
-                    } = pending
-                    else {
-                        continue;
-                    };
-                    if *pending_view != view {
-                        continue;
-                    }
+                if let Some(Self::Certified {
+                    success: pending_success,
+                    ..
+                }) = actor::find_last_mut(queue, protected, |pending| {
+                    matches!(pending, Self::Certified { view: pending_view, .. } if *pending_view == view)
+                }) {
                     *pending_success |= success;
-                    message.take();
                     return Ok(());
                 }
-                Err(message.expect("message was not replaced"))
+                Err(message)
             }
         }
     }
@@ -152,14 +145,14 @@ impl MessagePolicy for HandlerMessage {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match &message {
-            Self::Deliver { .. } => actor::replace_last(queue, message, |pending| {
+            Self::Deliver { .. } => actor::replace_last(queue, protected, message, |pending| {
                 matches!(pending, Self::Produce { .. })
             }),
             Self::Produce { view, .. } => {
                 let view = *view;
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(pending, Self::Produce { view: pending, .. } if *pending == view)
                 })
             }

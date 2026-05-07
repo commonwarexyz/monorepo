@@ -2,7 +2,7 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use commonware_utils::channel::actor::{FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{find_last_mut, FullPolicy, MessagePolicy};
 use std::{
     collections::{HashSet, VecDeque},
     ops::Deref,
@@ -45,8 +45,8 @@ impl MessagePolicy for ListenableIps {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
-        if let Some(pending) = queue.back_mut() {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+        if let Some(pending) = find_last_mut(queue, protected, |_| true) {
             *pending = message;
             Ok(())
         } else {

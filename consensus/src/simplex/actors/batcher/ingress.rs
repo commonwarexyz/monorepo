@@ -47,14 +47,14 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match &message {
-            Self::Update { .. } => actor::replace_last(queue, message, |pending| {
+            Self::Update { .. } => actor::replace_last(queue, protected, message, |pending| {
                 matches!(pending, Self::Update { .. })
             }),
             Self::Constructed(vote) => {
                 let key = vote_key(vote);
-                actor::replace_last(queue, message, |pending| {
+                actor::replace_last(queue, protected, message, |pending| {
                     matches!(pending, Self::Constructed(pending) if vote_key(pending) == key)
                 })
             }

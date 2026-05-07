@@ -12,7 +12,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
     channel::{
-        actor::{ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
         oneshot,
     },
     vec::NonEmptyVec,
@@ -195,23 +195,24 @@ impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
         }
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::HintFinalized {
                 height,
                 targets,
             } => {
-                for pending in queue.iter_mut().rev() {
-                    let Self::HintFinalized {
-                        height: pending_height,
-                        targets: pending_targets,
-                    } = pending
-                    else {
-                        continue;
-                    };
-                    if *pending_height != height {
-                        continue;
-                    }
+                if let Some(Self::HintFinalized {
+                    targets: pending_targets,
+                    ..
+                }) = actor::find_last_mut(queue, protected, |pending| {
+                    matches!(
+                        pending,
+                        Self::HintFinalized {
+                            height: pending_height,
+                            ..
+                        } if *pending_height == height
+                    )
+                }) {
                     pending_targets.extend(targets);
                     return Ok(());
                 }

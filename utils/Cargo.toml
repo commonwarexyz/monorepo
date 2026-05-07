@@ -20,6 +20,7 @@ cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-formatting = { workspace = true, default-features = false }
 commonware-macros.workspace = true
+crossbeam-queue = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
@@ -56,6 +57,7 @@ std = [
 	"commonware-codec/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",
+	"crossbeam-queue",
 	"futures",
 	"getrandom/std",
 	"num-bigint",

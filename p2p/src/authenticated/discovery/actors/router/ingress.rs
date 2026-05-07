@@ -60,11 +60,11 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
         }
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
-                actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
+                actor::replace_last(queue, protected, Self::Ready { peer, relay }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
@@ -73,7 +73,7 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
             }
             Self::Release { peer } => {
                 let key = peer.clone();
-                actor::replace_last(queue, Self::Release { peer }, |pending| {
+                actor::replace_last(queue, protected, Self::Release { peer }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key

@@ -297,15 +297,17 @@ impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::Acceptable(acceptable) => actor::replace_last(
                 queue,
+                protected,
                 Self::Acceptable(acceptable),
                 |pending| matches!(pending, Self::Acceptable(_)),
             ),
             Self::Listen(reservation) => actor::replace_last(
                 queue,
+                protected,
                 Self::Listen(reservation),
                 |pending| matches!(pending, Self::Listen(_)),
             ),

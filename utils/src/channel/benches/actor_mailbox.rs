@@ -8,6 +8,7 @@ use std::{
     collections::VecDeque,
     future::{poll_fn, Future},
     hint::black_box,
+    sync::Barrier,
     task::Poll,
 };
 
@@ -17,6 +18,7 @@ const MATRIX_MESSAGES_PER_PRODUCER: usize = 1024;
 const MESSAGES: usize = 1024;
 const PRODUCERS: usize = 4;
 const PRODUCER_MESSAGES: usize = CONTENDED_MESSAGES / PRODUCERS;
+const SPSC_OVERLAP_MESSAGES: usize = 1024 * 1024;
 const TOKIO_STYLE_MESSAGES: usize = 5_000;
 const TOKIO_STYLE_PRODUCERS: usize = 5;
 const TOKIO_STYLE_MESSAGES_PER_PRODUCER: usize = TOKIO_STYLE_MESSAGES / TOKIO_STYLE_PRODUCERS;
@@ -49,9 +51,9 @@ impl MessagePolicy for Message {
         }
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
-            Self::Replace(_) => actor::replace_last(queue, message, |pending| {
+            Self::Replace(_) => actor::replace_last(queue, protected, message, |pending| {
                 matches!(pending, Self::Replace(_))
             }),
             message => Err(message),
@@ -299,6 +301,7 @@ fn bench_full_queue(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = actor::channel::<Message>(1);
+                assert_eq!(sender.enqueue(Message::Reject(0)), Enqueue::Queued);
                 assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
                 (sender, receiver)
             },
@@ -319,15 +322,13 @@ fn fill_replace_queue(
     newest: bool,
 ) -> (actor::ActorMailbox<Message>, actor::ActorInbox<Message>) {
     let (sender, receiver) = actor::channel::<Message>(capacity);
-    if newest {
-        for i in 0..capacity.saturating_sub(1) {
-            assert_eq!(sender.enqueue(Message::Reject(i as u64)), Enqueue::Queued);
-        }
-        assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
-    } else {
-        assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
+    for i in 0..capacity {
+        assert_eq!(sender.enqueue(Message::Reject(i as u64)), Enqueue::Queued);
+    }
+    assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
+    if !newest {
         for i in 1..capacity {
-            assert_eq!(sender.enqueue(Message::Reject(i as u64)), Enqueue::Queued);
+            assert_eq!(sender.enqueue(Message::Retain(i as u64)), Enqueue::Queued);
         }
     }
     (sender, receiver)
@@ -434,6 +435,97 @@ fn bench_spsc_contended(c: &mut Criterion) {
                     }
                     handle.join().unwrap();
                 });
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn run_actor_spsc_overlap(messages: usize, capacity: usize) {
+    let (sender, mut receiver) = actor::channel::<Message>(capacity);
+    let start = Barrier::new(3);
+
+    std::thread::scope(|scope| {
+        let producer = scope.spawn(|| {
+            start.wait();
+            for i in 0..messages as u64 {
+                assert_eq!(sender.enqueue(Message::Reject(i)), Enqueue::Queued);
+            }
+        });
+
+        let consumer = scope.spawn(|| {
+            start.wait();
+            let mut received = 0;
+            while received < messages {
+                match receiver.try_recv() {
+                    Ok(message) => {
+                        black_box(message);
+                        received += 1;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => std::hint::spin_loop(),
+                    Err(error) => panic!("actor receiver closed early: {error:?}"),
+                }
+            }
+        });
+
+        start.wait();
+        producer.join().unwrap();
+        consumer.join().unwrap();
+    });
+}
+
+fn run_tokio_spsc_overlap(messages: usize, capacity: usize) {
+    let (sender, mut receiver) = mpsc::channel::<Message>(capacity);
+    let start = Barrier::new(3);
+
+    std::thread::scope(|scope| {
+        let producer = scope.spawn(|| {
+            start.wait();
+            for i in 0..messages as u64 {
+                sender.try_send(Message::Reject(i)).unwrap();
+            }
+        });
+
+        let consumer = scope.spawn(|| {
+            start.wait();
+            let mut received = 0;
+            while received < messages {
+                match receiver.try_recv() {
+                    Ok(message) => {
+                        black_box(message);
+                        received += 1;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => std::hint::spin_loop(),
+                    Err(error) => panic!("tokio receiver closed early: {error:?}"),
+                }
+            }
+        });
+
+        start.wait();
+        producer.join().unwrap();
+        consumer.join().unwrap();
+    });
+}
+
+fn bench_spsc_overlap(c: &mut Criterion) {
+    let mut group = c.benchmark_group(module_path!());
+    group.throughput(Throughput::Elements(SPSC_OVERLAP_MESSAGES as u64));
+
+    group.bench_function(
+        format!("operation=spsc_overlap impl=actor capacity={SPSC_OVERLAP_MESSAGES}"),
+        |b| {
+            b.iter(|| {
+                run_actor_spsc_overlap(SPSC_OVERLAP_MESSAGES, SPSC_OVERLAP_MESSAGES);
+            });
+        },
+    );
+
+    group.bench_function(
+        format!("operation=spsc_overlap impl=tokio_mpsc capacity={SPSC_OVERLAP_MESSAGES}"),
+        |b| {
+            b.iter(|| {
+                run_tokio_spsc_overlap(SPSC_OVERLAP_MESSAGES, SPSC_OVERLAP_MESSAGES);
             });
         },
     );
@@ -749,5 +841,5 @@ fn bench_tokio_style(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_enqueue_ready, bench_recv_ready, bench_round_trip_ready, bench_recv_waiting, bench_full_queue, bench_replace_hit, bench_spsc_contended, bench_concurrent_enqueue, bench_try_send_matrix, bench_tokio_style,
+    targets = bench_enqueue_ready, bench_recv_ready, bench_round_trip_ready, bench_recv_waiting, bench_full_queue, bench_replace_hit, bench_spsc_contended, bench_spsc_overlap, bench_concurrent_enqueue, bench_try_send_matrix, bench_tokio_style,
 }

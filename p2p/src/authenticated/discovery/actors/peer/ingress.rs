@@ -29,12 +29,12 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
-            Self::BitVec(bit_vec) => actor::replace_last(queue, Self::BitVec(bit_vec), |pending| {
+            Self::BitVec(bit_vec) => actor::replace_last(queue, protected, Self::BitVec(bit_vec), |pending| {
                 matches!(pending, Self::BitVec(_))
             }),
-            Self::Peers(peers) => actor::replace_last(queue, Self::Peers(peers), |pending| {
+            Self::Peers(peers) => actor::replace_last(queue, protected, Self::Peers(peers), |pending| {
                 matches!(pending, Self::Peers(_))
             }),
             Self::Kill => {

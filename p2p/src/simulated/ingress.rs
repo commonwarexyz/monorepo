@@ -116,10 +116,11 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::Track { id, peers } => actor::replace_last(
                 queue,
+                protected,
                 Self::Track { id, peers },
                 |pending| matches!(pending, Self::Track { id: pending, .. } if *pending == id),
             ),
@@ -132,6 +133,7 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected = public_key.clone();
                 actor::replace_last(
                     queue,
+                    protected,
                     Self::LimitBandwidth {
                         public_key,
                         egress_cap,
@@ -152,6 +154,7 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected_receiver = receiver.clone();
                 actor::replace_last(
                     queue,
+                    protected,
                     Self::AddLink {
                         sender,
                         receiver,
@@ -171,6 +174,7 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected_receiver = receiver.clone();
                 actor::replace_last(
                     queue,
+                    protected,
                     Self::RemoveLink {
                         sender,
                         receiver,
@@ -184,6 +188,7 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected_to = to.clone();
                 actor::replace_last(
                     queue,
+                    protected,
                     Self::Block { from, to },
                     |pending| matches!(pending, Self::Block { from, to } if from == &expected_from && to == &expected_to),
                 )

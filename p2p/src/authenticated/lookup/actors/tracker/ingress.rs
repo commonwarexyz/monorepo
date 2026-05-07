@@ -176,10 +176,11 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::Register { index, peers } => actor::replace_last(
                 queue,
+                protected,
                 Self::Register { index, peers },
                 |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
             ),
@@ -187,12 +188,14 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
                 let expected = public_key.clone();
                 actor::replace_last(
                     queue,
+                    protected,
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
                 )
             }
             Self::DialableForDialer { dialer } => actor::replace_last(
                 queue,
+                protected,
                 Self::DialableForDialer { dialer },
                 |pending| matches!(pending, Self::DialableForDialer { .. }),
             ),

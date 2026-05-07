@@ -78,32 +78,35 @@ impl<K: Span, P: PublicKey> MessagePolicy for Message<K, P> {
         FullPolicy::Replace
     }
 
-    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
         match message {
             Self::Fetch(requests) => {
                 if requests.is_empty() {
                     return Ok(());
                 }
-                for pending in queue.iter_mut().rev() {
-                    if let Self::Fetch(existing) = pending {
-                        merge_fetches(existing, requests);
-                        return Ok(());
-                    }
+                if let Some(Self::Fetch(existing)) = actor::find_last_mut(
+                    queue,
+                    protected,
+                    |pending| matches!(pending, Self::Fetch(_)),
+                ) {
+                    merge_fetches(existing, requests);
+                    return Ok(());
                 }
                 Err(Self::Fetch(requests))
             }
             Self::Cancel { key } => {
-                actor::replace_last(queue, Self::Cancel { key: key.clone() }, |pending| {
+                actor::replace_last(queue, protected, Self::Cancel { key: key.clone() }, |pending| {
                     matches!(pending, Self::Cancel { key: pending } if pending == &key)
                 })
             }
             Self::Clear => {
-                queue.clear();
+                queue.truncate(protected);
                 queue.push_back(Self::Clear);
                 Ok(())
             }
             Self::Retain { predicate } => actor::replace_last(
                 queue,
+                protected,
                 Self::Retain { predicate },
                 |pending| matches!(pending, Self::Retain { .. }),
             ),
