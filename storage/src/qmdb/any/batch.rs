@@ -372,19 +372,19 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
-/// Resolves a key's committed `base_old_loc` by walking parallel cursors over committed
+/// Resolves a key's `base_old_loc` by walking parallel cursors over already-applied
 /// ancestor diffs (parent-first). Lookups must be issued in ascending key order because
-/// cursors only advance forward. Returns `Some(Some(loc))` for an active commit,
-/// `Some(None)` for a committed deletion, and `None` when no committed ancestor touched
-/// the key.
-struct CommittedResolver<'a, K, F: Family, V> {
+/// cursors only advance forward. Returns `Some(Some(loc))` for an active entry,
+/// `Some(None)` for a deletion, and `None` when no already-applied ancestor touched the
+/// key.
+struct AppliedAncestorResolver<'a, K, F: Family, V> {
     cursors: Vec<(&'a DiffSlice<K, F, V>, usize)>,
 }
 
-impl<'a, K: Ord, F: Family, V> CommittedResolver<'a, K, F, V> {
-    fn new(committed: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+impl<'a, K: Ord, F: Family, V> AppliedAncestorResolver<'a, K, F, V> {
+    fn new(applied: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
         Self {
-            cursors: committed.into_iter().map(|s| (s, 0)).collect(),
+            cursors: applied.into_iter().map(|s| (s, 0)).collect(),
         }
     }
 
@@ -1707,21 +1707,20 @@ where
                 );
             }
         } else {
-            // Partition ancestor diffs into committed (already applied to the DB; provide
-            // `base_old_loc` fixups) and uncommitted (still to be applied; merged with the child).
-            let mut committed = Vec::with_capacity(batch.ancestor_diffs.len());
-            let mut uncommitted = Vec::with_capacity(batch.ancestor_diffs.len());
+            // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
+            // and pending (still to be applied; merged with the child).
+            let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
+            let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.ancestor_diff_ends[i] <= db_size {
-                    committed.push(ancestor_diff.as_slice());
+                    applied.push(ancestor_diff.as_slice());
                 } else {
-                    uncommitted.push(ancestor_diff.as_slice());
+                    pending.push(ancestor_diff.as_slice());
                 }
             }
-            let mut resolver = CommittedResolver::new(committed);
-            let merge = DiffMerge::new(
-                iter::once(batch.diff.as_slice()).chain(uncommitted.iter().copied()),
-            );
+            let mut resolver = AppliedAncestorResolver::new(applied);
+            let merge =
+                DiffMerge::new(iter::once(batch.diff.as_slice()).chain(pending.iter().copied()));
             for (key, entry) in merge {
                 let old = resolver.lookup(key).unwrap_or_else(|| entry.base_old_loc());
                 apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
@@ -2023,14 +2022,15 @@ mod tests {
     }
 
     #[test]
-    fn committed_resolver_uses_nearest_committed_touch() {
+    fn applied_ancestor_resolver_uses_nearest_touch() {
         let parent = vec![(2, active(20, 20)), (5, deleted(Some(5)))];
         let grandparent = vec![
             (2, active(200, 200)),
             (4, active(40, 40)),
             (5, active(50, 50)),
         ];
-        let mut resolver = CommittedResolver::new([parent.as_slice(), grandparent.as_slice()]);
+        let mut resolver =
+            AppliedAncestorResolver::new([parent.as_slice(), grandparent.as_slice()]);
 
         // Lookups are issued in ascending order, as they are from DiffMerge in apply_batch.
         assert_eq!(resolver.lookup(&1), None);
