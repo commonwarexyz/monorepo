@@ -49,7 +49,7 @@ pub enum InterceptChannel {
     Vote,
     Cert,
     Resolver,
-}g
+}
 
 /// One intercepted byzantine message paired with one matching procFault.
 /// Pushed by a forwarder, consumed by [`super::injector::ByzzFuzzInjector`].
