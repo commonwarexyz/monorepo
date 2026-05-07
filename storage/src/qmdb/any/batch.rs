@@ -373,37 +373,22 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
 }
 
 /// Resolves a key's committed `base_old_loc` by walking parallel cursors over committed
-/// ancestor diffs (parent-first). Lookups must be issued in ascending key order (cursors
-/// only advance forward; out-of-order calls would silently return stale results, so the
-/// invariant is enforced via `debug_assert`). Returns `Some(Some(loc))` for an active
-/// commit, `Some(None)` for a committed deletion, and `None` when no committed ancestor
-/// touched the key.
+/// ancestor diffs (parent-first). Lookups must be issued in ascending key order because
+/// cursors only advance forward. Returns `Some(Some(loc))` for an active commit,
+/// `Some(None)` for a committed deletion, and `None` when no committed ancestor touched
+/// the key.
 struct CommittedResolver<'a, K, F: Family, V> {
     cursors: Vec<(&'a DiffSlice<K, F, V>, usize)>,
-    #[cfg(debug_assertions)]
-    last_key: Option<&'a K>,
 }
 
 impl<'a, K: Ord, F: Family, V> CommittedResolver<'a, K, F, V> {
     fn new(committed: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
         Self {
             cursors: committed.into_iter().map(|s| (s, 0)).collect(),
-            #[cfg(debug_assertions)]
-            last_key: None,
         }
     }
 
-    fn lookup(&mut self, key: &'a K) -> Option<Option<Location<F>>> {
-        #[cfg(debug_assertions)]
-        {
-            if let Some(prev) = self.last_key {
-                debug_assert!(
-                    key >= prev,
-                    "CommittedResolver lookups must be issued in ascending key order",
-                );
-            }
-            self.last_key = Some(key);
-        }
+    fn lookup(&mut self, key: &K) -> Option<Option<Location<F>>> {
         for (slice, idx) in self.cursors.iter_mut() {
             while *idx < slice.len() && slice[*idx].0 < *key {
                 *idx += 1;
@@ -1987,6 +1972,75 @@ mod tests {
         Shared::new(bm)
     }
 
+    fn active(value: u64, location: u64) -> DiffEntry<mmr::Family, u64> {
+        DiffEntry::Active {
+            value,
+            loc: loc(location),
+            base_old_loc: None,
+        }
+    }
+
+    fn deleted(base_old_loc: Option<u64>) -> DiffEntry<mmr::Family, u64> {
+        DiffEntry::Deleted {
+            base_old_loc: base_old_loc.map(loc),
+        }
+    }
+
+    #[test]
+    fn diff_merge_returns_sorted_newest_entries() {
+        let child = vec![(2, active(20, 20)), (5, active(50, 50))];
+        let parent = vec![
+            (1, active(11, 11)),
+            (2, active(12, 12)),
+            (4, deleted(Some(4))),
+            (7, active(17, 17)),
+        ];
+        let grandparent = vec![
+            (2, active(102, 102)),
+            (3, active(103, 103)),
+            (4, active(104, 104)),
+            (6, active(106, 106)),
+        ];
+
+        // Streams are priority ordered: child, parent, then grandparent. Equal keys should
+        // yield only the newest entry while preserving ascending key order for resolver lookups.
+        let merged: Vec<_> =
+            DiffMerge::new([child.as_slice(), parent.as_slice(), grandparent.as_slice()])
+                .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+                .collect();
+
+        assert_eq!(
+            merged,
+            vec![
+                (1, Some(11), Some(loc(11))),
+                (2, Some(20), Some(loc(20))),
+                (3, Some(103), Some(loc(103))),
+                (4, None, None),
+                (5, Some(50), Some(loc(50))),
+                (6, Some(106), Some(loc(106))),
+                (7, Some(17), Some(loc(17))),
+            ]
+        );
+    }
+
+    #[test]
+    fn committed_resolver_uses_nearest_committed_touch() {
+        let parent = vec![(2, active(20, 20)), (5, deleted(Some(5)))];
+        let grandparent = vec![
+            (2, active(200, 200)),
+            (4, active(40, 40)),
+            (5, active(50, 50)),
+        ];
+        let mut resolver = CommittedResolver::new([parent.as_slice(), grandparent.as_slice()]);
+
+        // Lookups are issued in ascending order, as they are from DiffMerge in apply_batch.
+        assert_eq!(resolver.lookup(&1), None);
+        assert_eq!(resolver.lookup(&2), Some(Some(loc(20))));
+        assert_eq!(resolver.lookup(&4), Some(Some(loc(40))));
+        assert_eq!(resolver.lookup(&5), Some(None));
+        assert_eq!(resolver.lookup(&9), None);
+    }
+
     #[test]
     fn bitmap_scan_empty() {
         let bitmap = shared_with(|_| {});
@@ -2145,6 +2199,99 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    #[test]
+    fn apply_batch_merges_committed_and_uncommitted_overlaps() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let key_update = Sha256::hash(b"update-through-all-layers");
+            let key_recreate_then_delete = Sha256::hash(b"recreate-then-delete");
+            let key_delete_from_uncommitted = Sha256::hash(b"delete-from-uncommitted");
+            let key_uncommitted_create = Sha256::hash(b"uncommitted-create");
+
+            let seed = db
+                .new_batch()
+                .write(key_update, Some(Sha256::hash(b"seed-update")))
+                .write(
+                    key_recreate_then_delete,
+                    Some(Sha256::hash(b"seed-recreate")),
+                )
+                .write(
+                    key_delete_from_uncommitted,
+                    Some(Sha256::hash(b"seed-delete")),
+                )
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(seed).await.unwrap();
+
+            let committed = db
+                .new_batch()
+                .write(key_update, Some(Sha256::hash(b"committed-update")))
+                .write(key_recreate_then_delete, None)
+                .write(
+                    key_delete_from_uncommitted,
+                    Some(Sha256::hash(b"committed-delete-base")),
+                )
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let uncommitted = committed
+                .new_batch::<Sha256>()
+                .write(key_update, Some(Sha256::hash(b"uncommitted-update")))
+                .write(
+                    key_recreate_then_delete,
+                    Some(Sha256::hash(b"uncommitted-recreate")),
+                )
+                .write(key_delete_from_uncommitted, None)
+                .write(
+                    key_uncommitted_create,
+                    Some(Sha256::hash(b"uncommitted-create")),
+                )
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let final_update = Sha256::hash(b"child-update");
+            let child = uncommitted
+                .new_batch::<Sha256>()
+                .write(key_update, Some(final_update))
+                .write(key_recreate_then_delete, None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let expected_root = child.root();
+
+            // Apply only the first ancestor. Applying the child must combine committed
+            // fixups from that ancestor with the still-uncommitted parent diff.
+            db.apply_batch(committed).await.unwrap();
+            db.apply_batch(child).await.unwrap();
+
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.get(&key_update).await.unwrap(), Some(final_update));
+            assert_eq!(db.get(&key_recreate_then_delete).await.unwrap(), None);
+            assert_eq!(db.get(&key_delete_from_uncommitted).await.unwrap(), None);
+            assert_eq!(
+                db.get(&key_uncommitted_create).await.unwrap(),
+                Some(Sha256::hash(b"uncommitted-create"))
+            );
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test]
