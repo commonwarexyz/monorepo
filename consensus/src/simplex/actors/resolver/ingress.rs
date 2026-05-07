@@ -72,13 +72,19 @@ impl Consumer for Handler {
 
     async fn deliver(
         &mut self,
-        delivery: Delivery<Self::Key, Self::RetainKey>,
+        keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
         value: Self::Value,
     ) -> bool {
+        let Some(key) = keys.iter().find_map(|key| match key {
+            Delivery::Request(key) => Some(key.clone()),
+            Delivery::Retain(_) => None,
+        }) else {
+            return false;
+        };
         self.sender
             .request_or(
                 |response| HandlerMessage::Deliver {
-                    view: View::new(delivery.key.into()),
+                    view: View::new(key.into()),
                     data: value,
                     response,
                 },

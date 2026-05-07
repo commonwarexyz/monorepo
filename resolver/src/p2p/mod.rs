@@ -95,7 +95,7 @@ mod tests {
         mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::{Delivery, Resolver, RetentionKey};
+    use crate::{Delivery, Resolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -308,10 +308,15 @@ mod tests {
 
         async fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::RetainKey>,
+            keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
             value: Self::Value,
         ) -> bool {
-            let key = delivery.key;
+            let Some(key) = keys.iter().find_map(|key| match key {
+                Delivery::Request(key) => Some(key.clone()),
+                Delivery::Retain(_) => None,
+            }) else {
+                return false;
+            };
             self.started.send_lossy(key.clone());
             let (gate, valid) = self
                 .gates
@@ -330,7 +335,7 @@ mod tests {
         }
     }
 
-    type RecordedDelivery = (Delivery<Key, Key>, Bytes);
+    type RecordedDelivery = (Vec<Delivery<Key, Key>>, Bytes);
 
     #[derive(Clone)]
     struct RetainRecordingConsumer {
@@ -351,10 +356,10 @@ mod tests {
 
         async fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::RetainKey>,
+            keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
             value: Self::Value,
         ) -> bool {
-            self.sender.send_lossy((delivery, value));
+            self.sender.send_lossy((keys, value));
             true
         }
     }
@@ -1985,13 +1990,13 @@ mod tests {
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            let (delivery, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(delivery.key, key);
+            let (keys, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
-                delivery.retainers,
+                keys,
                 vec![
-                    RetentionKey::Retain(first_retain_key),
-                    RetentionKey::Retain(second_retain_key),
+                    Delivery::Request(key),
+                    Delivery::Retain(first_retain_key),
+                    Delivery::Retain(second_retain_key),
                 ]
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2036,9 +2041,8 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            let (delivery, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(delivery.key, key);
-            assert_eq!(delivery.retainers, vec![RetentionKey::Request]);
+            let (keys, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(keys, vec![Delivery::Request(key)]);
             assert_eq!(value, Bytes::from("data for key 5"));
         });
     }

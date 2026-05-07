@@ -12,21 +12,13 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
-    /// A local reason retaining a fetch.
+    /// A local key attached to a resolved fetch.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum RetentionKey<R> {
-        /// The fetch is retained by the request key itself.
-        Request,
+    pub enum Delivery<K, R> {
+        /// The peer-visible request key.
+        Request(K),
         /// A separate local key that retained the fetch.
         Retain(R),
-    }
-
-    /// A resolved fetch and the local reasons that kept it alive.
-    pub struct Delivery<K, R> {
-        /// The peer-visible request key.
-        pub key: K,
-        /// The local reasons currently retaining the fetch.
-        pub retainers: Vec<RetentionKey<R>>,
     }
 
     /// Notified when data is available, and must validate it.
@@ -52,12 +44,13 @@ commonware_macros::stability_scope!(BETA {
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
         ///
-        /// `delivery` contains the peer-visible request key and the currently retained
-        /// local reasons for the fetch. Ordinary fetches use [`RetentionKey::Request`],
-        /// avoiding a duplicate retain key when the request key itself retains the fetch.
+        /// `keys` contains the peer-visible request key and the currently retained
+        /// explicit local keys for the fetch. Ordinary fetches include only
+        /// [`Delivery::Request`], avoiding a duplicate retain key when the request
+        /// key itself retains the fetch.
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::RetainKey>,
+            keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
             value: Self::Value,
         ) -> impl Future<Output = bool> + Send;
     }

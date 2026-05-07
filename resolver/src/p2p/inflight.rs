@@ -99,19 +99,19 @@ where
     }
 
     /// Begin a consumer delivery for the entry, attaching the abort handle.
-    /// Spawns `consumer.deliver(delivery, value)` as an in-flight future and records
+    /// Spawns `consumer.deliver(keys, value)` as an in-flight future and records
     /// the result for later handling.
     pub(super) fn deliver(
         &mut self,
         key: Key,
-        delivery: Delivery<Key, Con::RetainKey>,
+        keys: Vec<Delivery<Key, Con::RetainKey>>,
         peer: P,
         value: Con::Value,
     ) {
         let lookup_key = key.clone();
         let mut consumer = self.consumer.clone();
         let aborter = self.deliveries.push(async move {
-            let valid = consumer.deliver(delivery, value).await;
+            let valid = consumer.deliver(keys, value).await;
             (peer, key, valid)
         });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
@@ -273,10 +273,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Delivery {
-                    key: key.clone(),
-                    retainers: vec![],
-                },
+                vec![Delivery::Request(key.clone())],
                 peer.clone(),
                 value.clone(),
             );
@@ -307,10 +304,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Delivery {
-                    key: key.clone(),
-                    retainers: vec![],
-                },
+                vec![Delivery::Request(key.clone())],
                 peer,
                 Bytes::from("v"),
             );
@@ -336,10 +330,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Delivery {
-                    key: key.clone(),
-                    retainers: vec![],
-                },
+                vec![Delivery::Request(key.clone())],
                 peer,
                 Bytes::from("v"),
             );
@@ -368,10 +359,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Delivery {
-                    key: key.clone(),
-                    retainers: vec![],
-                },
+                vec![Delivery::Request(key.clone())],
                 peer,
                 Bytes::from("v"),
             );
@@ -398,10 +386,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Delivery {
-                    key,
-                    retainers: vec![],
-                },
+                vec![Delivery::Request(key)],
                 peer,
                 Bytes::from("v"),
             );

@@ -23,8 +23,8 @@ const NOTARIZED_REQUEST: u8 = 2;
 pub enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
-        /// The resolved request and local retainers.
-        delivery: Delivery<ResolverKey<D>, ResolverRetainKey<D>>,
+        /// The local keys attached to the resolved value.
+        keys: Vec<Delivery<ResolverKey<D>, ResolverRetainKey<D>>>,
         /// The value being delivered.
         value: Bytes,
         /// A channel to send the result of the delivery (true for success).
@@ -62,14 +62,14 @@ impl<D: Digest> Consumer for Handler<D> {
 
     async fn deliver(
         &mut self,
-        delivery: Delivery<Self::Key, Self::RetainKey>,
+        keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
         value: Self::Value,
     ) -> bool {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
             .send(Message::Deliver {
-                delivery,
+                keys,
                 value,
                 response,
             })

@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Resolver, RetentionKey};
+use commonware_resolver::{Delivery, Resolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -197,7 +197,7 @@ type ResolverRequestFor<V> = ResolverKey<<V as Variant>::Commitment>;
 type ResolverRetainKeyFor<V> = ResolverRetainKey<<V as Variant>::Commitment>;
 
 struct ResolverDelivery<V: Variant> {
-    delivery: Delivery<ResolverRequestFor<V>, ResolverRetainKeyFor<V>>,
+    keys: Vec<Delivery<ResolverRequestFor<V>, ResolverRetainKeyFor<V>>>,
     value: Bytes,
     response: oneshot::Sender<bool>,
 }
@@ -807,14 +807,14 @@ where
                             produces.push((key, response));
                         }
                         handler::Message::Deliver {
-                            delivery,
+                            keys,
                             value,
                             response,
                         } => {
                             needs_sync |= self
                                 .handle_deliver(
                                     ResolverDelivery {
-                                        delivery,
+                                        keys,
                                         value,
                                         response,
                                     },
@@ -1022,17 +1022,22 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let ResolverDelivery {
-            delivery,
+            keys,
             value,
             response,
         } = delivery;
-        let key = delivery.key;
-        let retain_keys: Vec<_> = delivery
-            .retainers
+        let Some(key) = keys.iter().find_map(|key| match key {
+            Delivery::Request(key) => Some(*key),
+            Delivery::Retain(_) => None,
+        }) else {
+            response.send_lossy(false);
+            return false;
+        };
+        let retain_keys: Vec<_> = keys
             .iter()
             .filter_map(|key| match key {
-                RetentionKey::Request => None,
-                RetentionKey::Retain(key) => Some(*key),
+                Delivery::Request(_) => None,
+                Delivery::Retain(key) => Some(*key),
             })
             .collect();
         match key {
@@ -1190,9 +1195,12 @@ where
                     return false;
                 }
 
-                let has_unscoped_request = delivery.retainers.iter().any(|retainer| {
-                    matches!(retainer, RetentionKey::Request)
-                        && matches!(key, ResolverKey::Request(Request::Notarized { round: retained_round }) if retained_round == round)
+                let has_unscoped_request = keys.iter().any(|delivery_key| {
+                    matches!(
+                        delivery_key,
+                        Delivery::Request(ResolverKey::Request(Request::Notarized { round: retained_round }))
+                            if *retained_round == round
+                    )
                 });
                 let has_commitment_scope = retain_keys.iter().any(|retain_key| {
                     matches!(

@@ -2,10 +2,10 @@ use super::{
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
     inflight::Inflight,
-    ingress::{FetchRequest, Mailbox, Message},
+    ingress::{FetchRequest, Mailbox, Message, Retainer},
     metrics, wire, Producer,
 };
-use crate::{Consumer, Delivery, RetentionKey};
+use crate::{Consumer, Delivery};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -77,7 +77,7 @@ pub struct Engine<
     inflight: Inflight<E, Con, P, Key>,
 
     /// Local reasons that keep each fetch key alive.
-    retainers: HashMap<Key, BTreeSet<RetentionKey<RetainKey>>>,
+    retainers: HashMap<Key, BTreeSet<Retainer<RetainKey>>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -286,8 +286,8 @@ where
 
                         self.retainers.retain(|key, retainers| {
                             retainers.retain(|retainer| match retainer {
-                                RetentionKey::Request => predicate(&RetainKey::from(key.clone())),
-                                RetentionKey::Retain(retain_key) => predicate(retain_key),
+                                Retainer::Request => predicate(&RetainKey::from(key.clone())),
+                                Retainer::Retain(retain_key) => predicate(retain_key),
                             });
                             !retainers.is_empty()
                         });
@@ -436,14 +436,13 @@ where
             return;
         };
 
-        let delivery = Delivery {
-            key: key.clone(),
-            retainers: self
-                .retainers
-                .get(&key)
-                .map(|retainers| retainers.iter().cloned().collect())
-                .unwrap_or_default(),
-        };
+        let mut delivery = vec![Delivery::Request(key.clone())];
+        if let Some(retainers) = self.retainers.get(&key) {
+            delivery.extend(retainers.iter().filter_map(|retainer| match retainer {
+                Retainer::Request => None,
+                Retainer::Retain(retain_key) => Some(Delivery::Retain(retain_key.clone())),
+            }));
+        }
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
         self.inflight.deliver(key, delivery, peer, response);
