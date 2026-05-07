@@ -1,8 +1,10 @@
 //! Observed-value pool used by ByzzFuzz vote mutation. Forwarders /
 //! extractors populate it from successfully decoded outgoing and inbound
 //! vote and certificate traffic. Notarize/finalize vote mutations replay
-//! observed proposals and payloads; nullify vote mutations use observed
-//! notarized/finalized/nullified views as semantically interesting targets.
+//! observed proposals, payloads, and parent views; nullify vote mutations use
+//! observed notarized/finalized certificate views and observed nullify views as
+//! semantically interesting targets. The pool is seeded with the mock genesis
+//! payload and genesis parent view.
 //! Certificate and resolver process faults are omit-only so this pool
 //! deliberately does not retain raw cert bytes or resolver request views.
 
@@ -21,14 +23,30 @@ use std::{
 pub struct ObservedState {
     pub proposals: Mutex<BTreeMap<u64, Vec<Proposal<Sha256Digest>>>>,
     pub payloads: Mutex<BTreeSet<Sha256Digest>>,
+    pub parent_views: Mutex<BTreeSet<u64>>,
     pub notarized_views: Mutex<BTreeSet<u64>>,
     pub finalized_views: Mutex<BTreeSet<u64>>,
     pub nullified_views: Mutex<BTreeSet<u64>>,
 }
 
 impl ObservedState {
-    pub fn new() -> Arc<Self> {
+    fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn new_with_genesis(genesis_payload: Sha256Digest) -> Arc<Self> {
+        let state = Self::new();
+        state.observe_payload(genesis_payload);
+        state.observe_parent_view(0);
+        state
+    }
+
+    pub fn observe_payload(&self, payload: Sha256Digest) {
+        self.payloads.lock().insert(payload);
+    }
+
+    pub fn observe_parent_view(&self, view: u64) {
+        self.parent_views.lock().insert(view);
     }
 
     pub fn observe_vote<S, P>(&self, v: &Vote<S, Sha256Digest>)
@@ -51,15 +69,18 @@ impl ObservedState {
 
     pub fn observe_proposal(&self, p: &Proposal<Sha256Digest>) {
         let view = p.view().get();
-        let mut proposals = self.proposals.lock();
-        let bucket = proposals.entry(view).or_default();
-        if !bucket
-            .iter()
-            .any(|q| q.payload == p.payload && q.parent == p.parent)
         {
-            bucket.push(p.clone());
+            let mut proposals = self.proposals.lock();
+            let bucket = proposals.entry(view).or_default();
+            if !bucket
+                .iter()
+                .any(|q| q.payload == p.payload && q.parent == p.parent)
+            {
+                bucket.push(p.clone());
+            }
         }
-        self.payloads.lock().insert(p.payload);
+        self.observe_payload(p.payload);
+        self.observe_parent_view(p.parent.get());
     }
 
     pub fn observe_certificate<S, P>(&self, c: &Certificate<S, Sha256Digest>)
@@ -92,6 +113,15 @@ impl ObservedState {
         payloads.iter().nth(idx).copied()
     }
 
+    pub fn random_parent_view(&self, rng: &mut impl rand::Rng) -> Option<u64> {
+        let parent_views = self.parent_views.lock();
+        if parent_views.is_empty() {
+            return None;
+        }
+        let idx = rng.gen_range(0..parent_views.len());
+        parent_views.iter().nth(idx).copied()
+    }
+
     pub fn random_proposal_at(
         &self,
         rng: &mut impl rand::Rng,
@@ -121,13 +151,15 @@ impl ObservedState {
         None
     }
 
-    pub fn random_notarized_or_finalized_view(&self, rng: &mut impl rand::Rng) -> Option<u64> {
-        let mut union: Vec<u64> = Vec::new();
-        union.extend(self.notarized_views.lock().iter().copied());
-        union.extend(self.finalized_views.lock().iter().copied());
-        if union.is_empty() {
+    pub fn random_nullify_target_view(&self, rng: &mut impl rand::Rng) -> Option<u64> {
+        let mut views = BTreeSet::new();
+        views.extend(self.notarized_views.lock().iter().copied());
+        views.extend(self.finalized_views.lock().iter().copied());
+        views.extend(self.nullified_views.lock().iter().copied());
+        if views.is_empty() {
             return None;
         }
-        Some(union[rng.gen_range(0..union.len())])
+        let idx = rng.gen_range(0..views.len());
+        views.iter().nth(idx).copied()
     }
 }

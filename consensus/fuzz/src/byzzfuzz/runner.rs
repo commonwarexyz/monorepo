@@ -27,15 +27,17 @@ use crate::{
     simplex::Simplex,
     spawn_honest_validator,
     utils::Partition,
-    PublicKeyOf, FAULT_INJECTION_RATIO, MAX_SLEEP_DURATION, N4F0C4,
+    PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, MAX_SLEEP_DURATION, N4F0C4,
 };
+use bytes::Bytes;
+use commonware_codec::Encode;
 use commonware_consensus::{
     simplex::mocks::{relay, reporter::Reporter},
-    types::View,
+    types::{Epoch, View},
     Monitor as _,
 };
 use commonware_cryptography::{
-    certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest,
+    certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest, Hasher, Sha256,
 };
 use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
@@ -62,6 +64,12 @@ const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(360);
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+
+fn genesis_payload() -> Sha256Digest {
+    let mut hasher = Sha256::default();
+    hasher.update(&(Bytes::from_static(b"genesis"), Epoch::new(EPOCH)).encode());
+    hasher.finalize()
+}
 
 /// Sample `(c, d, r)` from `context` and build the per-validator
 /// forwarder/receiver/injector wiring shared by [`run`] (safety) and
@@ -127,10 +135,9 @@ where
     let (intercept_tx, intercept_rx) = intercept::channel::<PublicKeyOf<P>>();
 
     // Observed-value pool shared by every extractor and by the
-    // byzantine injector's vote mutator (replays observed payloads /
-    // proposals; uses observed notarized/finalized/nullified views
-    // for nullify-target selection).
-    let pool = ObservedState::new();
+    // byzantine injector's vote mutator. Seed genesis so early mutations can
+    // replay the genesis payload and parent view before any proposal is seen.
+    let pool = ObservedState::new_with_genesis(genesis_payload());
 
     let relay = Arc::new(relay::Relay::new());
     let mut reporters = Vec::new();
@@ -241,8 +248,9 @@ where
     // Closes the intercept queue once all forwarder-held clones drop.
     drop(intercept_tx);
 
-    // Vote mutator: observed-value-first replay (seen payloads /
-    // proposals / known views), SmallScope local edits as fallback.
+    // Vote mutator: observed-value-first replay (seen payloads,
+    // parent views, proposals, and nullify targets), local +/-1 or +/-2 edits
+    // as fallback.
     // Cert/resolver process faults are omit-only so the injector
     // doesn't need their senders.
     let injector_ctx = context.with_label("byzzfuzz_injector");

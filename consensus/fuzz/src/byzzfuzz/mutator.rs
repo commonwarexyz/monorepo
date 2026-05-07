@@ -1,9 +1,9 @@
 //! ByzzFuzz self-contained small-scope mutator. Vote mutations are self-contained: proposal
 //! votes are biased toward observed-value replay before falling back to local
 //! +/-1 or +/-2 view/parent edits or payload edits. Nullify votes target
-//! observed notarized/finalized views before falling back to local +/-1 or
-//! +/-2 edits. Certificate and resolver process faults are omit-only, so
-//! their byte mutators must not run.
+//! observed notarized/finalized certificate views and observed nullify views
+//! before falling back to local +/-1 or +/-2 edits. Certificate and resolver
+//! process faults are omit-only, so their byte mutators must not run.
 
 use crate::{byzzfuzz::observed::ObservedState, strategy::Strategy, EPOCH};
 use commonware_consensus::{
@@ -235,8 +235,8 @@ impl Strategy for ByzzFuzzMutator {
                 }),
                 2 => self
                     .pool
-                    .random_proposal(rng)
-                    .map(|other| proposal_with_parent(proposal, other.parent.get())),
+                    .random_parent_view(rng)
+                    .map(|parent| proposal_with_parent(proposal, parent)),
                 _ => self.pool.random_proposal_at(rng, proposal.view().get()),
             };
             if let Some(c) = candidate {
@@ -302,10 +302,9 @@ impl Strategy for ByzzFuzzMutator {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
-        // Bias toward nullifying an observed notarized/finalized view --
-        // a more interesting fault than a small local view edit.
+        // Bias toward an observed nullify target before local view edits.
         if rng.gen_bool(0.5) {
-            if let Some(v) = self.pool.random_notarized_or_finalized_view(rng) {
+            if let Some(v) = self.pool.random_nullify_target_view(rng) {
                 if v != last_vote_view {
                     return v;
                 }
