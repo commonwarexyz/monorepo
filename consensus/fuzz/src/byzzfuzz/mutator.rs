@@ -1,9 +1,9 @@
-//! ByzzFuzz self-contained small-scope mutator. Vote mutations are self-contained: proposal
-//! votes are biased toward observed-value replay before falling back to local
-//! +/-1 or +/-2 view/parent edits or payload edits. Nullify votes target
-//! observed notarized/finalized certificate views and observed nullify views
-//! before falling back to local +/-1 or +/-2 edits. Certificate and resolver
-//! process faults are omit-only, so their byte mutators must not run.
+//! ByzzFuzz self-contained small-scope mutator. Proposal-vote mutations prefer
+//! observed-value replay, then fall back to local +/-1 or +/-2 edits around
+//! observed status views or payload edits. Nullify votes target observed
+//! notarized/finalized certificate views and observed nullify views before
+//! falling back to local +/-1 or +/-2 edits. Certificate and resolver process
+//! faults are omit-only, so their byte mutators must not run.
 
 use crate::{byzzfuzz::observed::ObservedState, strategy::Strategy, EPOCH};
 use commonware_consensus::{
@@ -25,6 +25,28 @@ pub struct ByzzFuzzMutator {
 impl ByzzFuzzMutator {
     pub fn new(pool: Arc<ObservedState>) -> Self {
         Self { pool }
+    }
+
+    // The injector only knows the intercepted vote's view. Use the Strategy
+    // arguments as fallbacks, but prefer status views observed by the
+    // interception layer.
+    fn status_context(
+        &self,
+        fallback_finalized_view: u64,
+        fallback_notarized_view: u64,
+        fallback_nullified_view: u64,
+    ) -> (u64, u64, u64) {
+        (
+            self.pool
+                .latest_finalized_view()
+                .unwrap_or(fallback_finalized_view),
+            self.pool
+                .latest_notarized_view()
+                .unwrap_or(fallback_notarized_view),
+            self.pool
+                .latest_nullified_view()
+                .unwrap_or(fallback_nullified_view),
+        )
     }
 }
 
@@ -216,6 +238,12 @@ impl Strategy for ByzzFuzzMutator {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
+        let (last_finalized_view, last_notarized_view, last_nullified_view) = self.status_context(
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
+
         // Bias 60% toward observed-value mutations; 40% local edits.
         // Identity mutations (== original proposal) are degenerate -- the
         // injector would re-sign and resend the same vote content. Reject
@@ -302,6 +330,12 @@ impl Strategy for ByzzFuzzMutator {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
+        let (last_finalized_view, last_notarized_view, last_nullified_view) = self.status_context(
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
+
         // Bias toward an observed nullify target before local view edits.
         if rng.gen_bool(0.5) {
             if let Some(v) = self.pool.random_nullify_target_view(rng) {
@@ -328,6 +362,12 @@ impl Strategy for ByzzFuzzMutator {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
+        let (last_finalized_view, last_notarized_view, last_nullified_view) = self.status_context(
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
+
         nearby_context_value(
             rng,
             base_view,
@@ -345,6 +385,12 @@ impl Strategy for ByzzFuzzMutator {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
+        let (last_finalized_view, last_notarized_view, last_nullified_view) = self.status_context(
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
+
         nearby_parent_for_context(
             rng,
             proposal_view,

@@ -122,6 +122,18 @@ impl ObservedState {
         parent_views.iter().nth(idx).copied()
     }
 
+    pub fn latest_notarized_view(&self) -> Option<u64> {
+        self.notarized_views.lock().iter().next_back().copied()
+    }
+
+    pub fn latest_finalized_view(&self) -> Option<u64> {
+        self.finalized_views.lock().iter().next_back().copied()
+    }
+
+    pub fn latest_nullified_view(&self) -> Option<u64> {
+        self.nullified_views.lock().iter().next_back().copied()
+    }
+
     pub fn random_proposal_at(
         &self,
         rng: &mut impl rand::Rng,
