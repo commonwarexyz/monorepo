@@ -89,7 +89,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         (_, context): (E, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
+        mut ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;
@@ -123,7 +123,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _: (E, Self::Context),
-        _: AncestorStream<A, Self::Block>,
+        _: AncestorStream<A>,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).
