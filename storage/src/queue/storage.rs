@@ -106,7 +106,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         let metrics = metrics::Metrics::init(&context);
 
         let journal = variable::Journal::init(
-            context.with_label("journal"),
+            context.child("journal"),
             variable::Config {
                 partition: cfg.partition,
                 items_per_section: cfg.items_per_section,
@@ -364,7 +364,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
@@ -388,7 +388,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_basic", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -436,7 +436,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -474,7 +474,7 @@ mod tests {
             let cfg = test_config("test_batch_persist", &context);
 
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
                 for i in 0..4u8 {
@@ -485,7 +485,7 @@ mod tests {
             }
 
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg)
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("second"), cfg)
                     .await
                     .unwrap();
                 assert_eq!(queue.size(), 4);
@@ -503,7 +503,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_seq_ack", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -531,7 +531,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ooo_ack", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -572,7 +572,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ack_up_to", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -605,7 +605,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ack_up_to_existing", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -636,7 +636,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ack_up_to_coalesce", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -662,7 +662,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ack_up_to_errors", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -688,7 +688,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_skip_acked", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -723,7 +723,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ack_errors", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -748,7 +748,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_prune", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -777,7 +777,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_multi_prune", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -835,7 +835,7 @@ mod tests {
 
             // First session: enqueue items, ack some (but not enough to prune)
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -854,10 +854,9 @@ mod tests {
 
             // Second session: all items are re-delivered (no pruning occurred)
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
 
                 // ack_floor = pruning_boundary = 0 (nothing was pruned)
                 assert_eq!(queue.ack_floor(), 0);
@@ -880,7 +879,7 @@ mod tests {
 
             // First session: enqueue many items, ack enough to trigger pruning
             let expected_pruning_boundary = {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -907,10 +906,9 @@ mod tests {
 
             // Second session: only non-pruned items are available
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
 
                 // ack_floor = pruning_boundary (items 0-9 were pruned)
                 let pruning_boundary = queue.journal.bounds().start;
@@ -934,7 +932,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_reset", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -965,7 +963,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_reset_ack", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1003,7 +1001,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_empty", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1023,7 +1021,7 @@ mod tests {
 
             // First session
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -1034,10 +1032,9 @@ mod tests {
 
             // Second session - data should persist
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
 
                 assert_eq!(queue.size(), 2);
 
@@ -1055,7 +1052,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_sparse", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1086,7 +1083,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_coalesce", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1116,7 +1113,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_ack_up_to_past_read_pos", &context);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1146,7 +1143,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test-metrics", &context);
-            let ctx = context.with_label("test_metrics");
+            let ctx = context.child("test_metrics");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
             let encoded = context.encode();
@@ -1250,7 +1247,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test-ff", &context);
-            let ctx = context.with_label("test_ff");
+            let ctx = context.child("test_ff");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
             // Enqueue 3 items, dequeue and ack only the first

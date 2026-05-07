@@ -201,6 +201,92 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
         self.0.read_at(position).await
     }
 
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+        // Sanity check the input.
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        debug_assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be sorted and unique"
+        );
+        if positions[0] < self.0.pruning_boundary {
+            return Err(Error::ItemPruned(positions[0]));
+        }
+        let last_position = *positions.last().expect("positions is not empty");
+        if last_position >= self.0.size {
+            return Err(Error::ItemOutOfRange(last_position));
+        }
+
+        // Read the items from cache if possible.
+        let mut result: Vec<Option<V>> = Vec::with_capacity(positions.len());
+        let mut miss_indices = Vec::with_capacity(positions.len());
+        let mut miss_positions = Vec::with_capacity(positions.len());
+        let mut buf = Vec::new();
+        for (i, &position) in positions.iter().enumerate() {
+            if let Some(item) = self.0.try_read_sync_into(position, &mut buf) {
+                result.push(Some(item));
+            } else {
+                result.push(None);
+                miss_indices.push(i);
+                miss_positions.push(position);
+            }
+        }
+
+        if miss_positions.is_empty() {
+            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
+        }
+
+        // Read the offsets of all items that were not found in the cache.
+        let miss_offsets = super::Reader::read_many(&self.0.offsets, &miss_positions)
+            .await
+            .map_err(|e| match e {
+                Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
+                    Error::Corruption(format!("section/item should be found, but got: {e}"))
+                }
+                other => other,
+            })?;
+
+        // Group runs of consecutive positions that fall into the same section and perform a
+        // consecutive read for each run.
+        let mut group_start = 0;
+        while group_start < miss_positions.len() {
+            let section =
+                position_to_section(miss_positions[group_start], self.0.items_per_section);
+            let mut group_end = group_start + 1;
+            while group_end < miss_positions.len()
+                && position_to_section(miss_positions[group_end], self.0.items_per_section)
+                    == section
+            {
+                group_end += 1;
+            }
+
+            let mut run_start = group_start;
+            while run_start < group_end {
+                let mut run_end = run_start + 1;
+                while run_end < group_end
+                    && miss_positions[run_end - 1].checked_add(1) == Some(miss_positions[run_end])
+                {
+                    run_end += 1;
+                }
+
+                let items = self
+                    .0
+                    .data
+                    .get_many_consecutive(section, &miss_offsets[run_start..run_end])
+                    .await?;
+
+                for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
+                    result[miss_idx] = Some(item);
+                }
+                run_start = run_end;
+            }
+            group_start = group_end;
+        }
+
+        Ok(result.into_iter().map(|r| r.unwrap()).collect())
+    }
+
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.0.try_read_sync(position)
     }
@@ -257,7 +343,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Initialize underlying variable data journal
         let mut data = variable::Journal::init(
-            context.with_label("data"),
+            context.child("data"),
             variable::Config {
                 partition: data_partition,
                 compression: cfg.compression,
@@ -270,7 +356,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal
         let mut offsets = fixed::Journal::init(
-            context.with_label("offsets"),
+            context.child("offsets"),
             fixed::Config {
                 partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
@@ -302,7 +388,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(
-            context.with_label("data"),
+            context.child("data"),
             variable::Config {
                 partition: cfg.data_partition(),
                 compression: cfg.compression,
@@ -315,7 +401,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal at the target size
         let offsets = fixed::Journal::init_at_size(
-            context.with_label("offsets"),
+            context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
@@ -377,7 +463,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         );
 
         // Initialize contiguous journal
-        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
+        let mut journal = Self::init(context.child("journal"), cfg.clone()).await?;
 
         let size = journal.size();
 
@@ -494,32 +580,67 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         if items.is_empty() {
             return Err(Error::EmptyAppend);
         }
+        let items_count = items.len();
 
-        let encode = |item: &V| variable::Journal::<E, V>::encode_item(self.compression, item);
-        let encoded: Vec<_> = match &items {
-            Many::Flat(s) => s.iter().map(encode).collect::<Result<Vec<_>, _>>()?,
-            Many::Nested(nested_items) => nested_items
-                .iter()
-                .flat_map(|items| items.iter())
-                .map(encode)
-                .collect::<Result<Vec<_>, _>>()?,
+        // Encode every item into a single buffer for bulk-writing.
+        let mut encoded = Vec::new();
+        let mut item_starts = Vec::with_capacity(items_count);
+        let mut encode = |item: &V| {
+            item_starts.push(encoded.len());
+            variable::Journal::<E, V>::encode_item_into(self.compression, item, &mut encoded)
         };
+        match &items {
+            Many::Flat(items) => {
+                for item in *items {
+                    encode(item)?;
+                }
+            }
+            Many::Nested(nested_items) => {
+                for items in *nested_items {
+                    for item in *items {
+                        encode(item)?;
+                    }
+                }
+            }
+        }
 
-        let mut last_position = 0;
-        for (buf, _item_len) in &encoded {
-            // Calculate which section this position belongs to.
+        let mut written = 0;
+        while written < items_count {
             let section = position_to_section(self.size, self.items_per_section);
+            let pos_in_section = self.size % self.items_per_section;
+            let remaining_space = (self.items_per_section - pos_in_section) as usize;
+            let batch_count = remaining_space.min(items_count - written);
+            let batch_start = item_starts[written];
+            let batch_end = item_starts
+                .get(written + batch_count)
+                .copied()
+                .unwrap_or(encoded.len());
 
-            // Append pre-encoded data to the data journal, get offset.
-            let offset = self.data.append_raw(section, buf).await?;
+            // Append pre-encoded data to the data journal, then convert relative item starts
+            // into absolute offsets.
+            let base_offset = self
+                .data
+                .append_raw(section, &encoded[batch_start..batch_end])
+                .await?;
 
-            // Append offset to offsets journal.
-            let offsets_pos = self.offsets.append(&offset).await?;
-            assert_eq!(offsets_pos, self.size);
+            let absolute_offsets = item_starts[written..written + batch_count]
+                .iter()
+                .map(|&start| {
+                    base_offset
+                        .checked_add((start - batch_start) as u64)
+                        .ok_or(Error::OffsetOverflow)
+                })
+                .collect::<Result<Vec<u64>, _>>()?;
 
-            // Return the current position.
-            last_position = self.size;
-            self.size += 1;
+            // Persist the offsets for this section batch in the offsets journal.
+            let last_offsets_pos = self
+                .offsets
+                .append_many(Many::Flat(&absolute_offsets))
+                .await?;
+            assert_eq!(last_offsets_pos, self.size + batch_count as u64 - 1);
+
+            self.size += batch_count as u64;
+            written += batch_count;
 
             // The section was filled and must be synced.
             if self.size.is_multiple_of(self.items_per_section) {
@@ -527,7 +648,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
         }
 
-        Ok(last_position)
+        Ok(self.size - 1)
     }
 
     /// Acquire a reader that borrows the journal.
@@ -558,12 +679,18 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     fn try_read_sync(&self, position: u64) -> Option<V> {
+        let mut buf = Vec::new();
+        self.try_read_sync_into(position, &mut buf)
+    }
+
+    /// Read an item synchronously using caller-provided buffer.
+    fn try_read_sync_into(&self, position: u64, buf: &mut Vec<u8>) -> Option<V> {
         if position >= self.size || position < self.pruning_boundary {
             return None;
         }
         let offset = super::Reader::try_read_sync(&self.offsets, position)?;
         let section = position_to_section(position, self.items_per_section);
-        self.data.try_get_sync(section, offset)
+        self.data.try_get_sync_into(section, offset, buf)
     }
 
     /// Prune items at positions strictly less than `min_position`.
@@ -1010,7 +1137,9 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner, Storage};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner, Storage, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
@@ -1041,7 +1170,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with data and prune ===
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1071,7 +1200,7 @@ mod tests {
                 .expect("Failed to remove offsets metadata partition");
 
             // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1097,7 +1226,7 @@ mod tests {
             };
 
             // === Setup: Create journal with data ===
-            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1116,7 +1245,7 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // === Verify init aligns the mismatch ===
-            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
 
@@ -1258,7 +1387,10 @@ mod tests {
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String, idx: usize| {
                 let label = test_name.replace('-', "_");
-                let context = context.with_label(&format!("{label}_{idx}"));
+                let context = context
+                    .child("test")
+                    .with_attribute("name", label)
+                    .with_attribute("index", idx);
                 async move {
                     let cfg = Config {
                         partition: format!("generic-test-{test_name}"),
@@ -1377,7 +1509,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal and append data ===
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1410,7 +1542,7 @@ mod tests {
             drop(journal);
 
             // === Phase 3: Re-init and verify position preserved ===
-            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1463,7 +1595,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1485,7 +1617,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1526,7 +1658,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1543,7 +1675,7 @@ mod tests {
             drop(variable);
 
             // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1563,7 +1695,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1584,7 +1716,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1620,7 +1752,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1642,7 +1774,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1689,7 +1821,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1709,7 +1841,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let mut variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1751,7 +1883,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with one full section ===
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1783,7 +1915,7 @@ mod tests {
             drop(journal);
 
             // === Phase 4: Verify recovery succeeds ===
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
 
@@ -1820,7 +1952,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1835,7 +1967,7 @@ mod tests {
             // Simulate a crash (offsets not synced)
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1862,9 +1994,10 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 0)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 0)
+                    .await
+                    .unwrap();
 
             // Size should be 0
             assert_eq!(journal.size(), 0);
@@ -1896,9 +2029,10 @@ mod tests {
             };
 
             // Initialize at position 10 (exactly at section 1 boundary with items_per_section=5)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             // Size should be 10
             let bounds = journal.bounds();
@@ -1936,9 +2070,10 @@ mod tests {
             };
 
             // Initialize at position 7 (middle of section 1 with items_per_section=5)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Size should be 7
             let bounds = journal.bounds();
@@ -1972,7 +2107,7 @@ mod tests {
 
             // Initialize at position 15
             let mut journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
                     .await
                     .unwrap();
 
@@ -1988,7 +2123,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2025,10 +2160,9 @@ mod tests {
             };
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
+                .await
+                .unwrap();
 
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 15);
@@ -2038,7 +2172,7 @@ mod tests {
             drop(journal);
 
             // Reopen and verify size persisted
-            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2071,7 +2205,7 @@ mod tests {
 
             // Initialize at position 7 (mid-section, 7 % 5 = 2)
             let mut journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
 
@@ -2090,7 +2224,7 @@ mod tests {
             drop(journal);
 
             // Reopen
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2127,7 +2261,7 @@ mod tests {
 
             // Initialize at position 7 (mid-section)
             let mut journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
 
@@ -2146,7 +2280,7 @@ mod tests {
             drop(journal);
 
             // Reopen
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2179,7 +2313,7 @@ mod tests {
             };
 
             // Phase 1: Create data and offsets, then simulate data-only pruning crash.
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..7u64 {
@@ -2192,7 +2326,7 @@ mod tests {
             drop(journal);
 
             // Phase 2: Init triggers data-empty repair and should treat journal as fully pruned at size 7.
-            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds();
@@ -2211,7 +2345,7 @@ mod tests {
             drop(journal);
 
             // Phase 3: Reopen and verify we did not lose the appended item.
-            let journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds();
@@ -2239,7 +2373,7 @@ mod tests {
 
             // Initialize at position 7 (mid-section)
             let mut journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
 
@@ -2254,7 +2388,7 @@ mod tests {
             drop(journal);
 
             // Reopen - should recover by rebuilding offsets from data
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2286,7 +2420,7 @@ mod tests {
             };
 
             let mut journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
 
@@ -2321,9 +2455,10 @@ mod tests {
             };
 
             // Initialize at a large position (position 1000)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 1000)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 1000);
@@ -2353,9 +2488,10 @@ mod tests {
             };
 
             // Initialize at position 20
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 20)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 20)
+                    .await
+                    .unwrap();
 
             // Append items 20-29
             for i in 0..10u64 {
@@ -2401,10 +2537,13 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 26;
-            let mut journal =
-                Journal::init_sync(context.clone(), cfg.clone(), lower_bound..upper_bound)
-                    .await
-                    .expect("Failed to initialize journal with sync boundaries");
+            let mut journal = Journal::init_sync(
+                context.child("storage"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with sync boundaries");
 
             let bounds = journal.bounds();
             assert_eq!(bounds.end, lower_bound);
@@ -2439,7 +2578,7 @@ mod tests {
 
             // Create initial journal with data in multiple sections
             let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -2455,7 +2594,7 @@ mod tests {
             let lower_bound = 8;
             let upper_bound = 31;
             let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2508,7 +2647,7 @@ mod tests {
 
             #[allow(clippy::reversed_empty_ranges)]
             let _result = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("storage"),
                 cfg,
                 10..5, // invalid range: lower > upper
             )
@@ -2533,7 +2672,7 @@ mod tests {
 
             // Create initial journal with data exactly matching sync range
             let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -2548,7 +2687,7 @@ mod tests {
             let lower_bound = 5; // section 1
             let upper_bound = 20; // section 3
             let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2601,12 +2740,10 @@ mod tests {
             };
 
             // Create initial journal with data beyond sync range
-            let mut journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("initial"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to create initial journal");
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.child("initial"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
@@ -2619,7 +2756,7 @@ mod tests {
             let lower_bound = 8; // section 1
             for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.with_label(&format!("sync_{i}")),
+                    context.child("sync").with_attribute("index", i),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )
@@ -2647,12 +2784,10 @@ mod tests {
             };
 
             // Create initial journal with stale data
-            let mut journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("first"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to create initial journal");
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {
@@ -2665,7 +2800,7 @@ mod tests {
             let lower_bound = 15; // section 3
             let upper_bound = 26; // last element in section 5
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.with_label("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2703,7 +2838,7 @@ mod tests {
 
             // Create journal with data at section boundaries
             let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -2718,7 +2853,7 @@ mod tests {
             let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
             let upper_bound = 25; // Last element exactly at section boundary (24/5 = 4)
             let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2771,7 +2906,7 @@ mod tests {
 
             // Create journal with data in multiple sections
             let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -2786,7 +2921,7 @@ mod tests {
             let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
             let upper_bound = 15; // Last operation 14 (section 2: 14/5 = 2)
             let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2841,7 +2976,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2922,7 +3057,7 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per section ===
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2945,7 +3080,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
             // Fresh journal for this test
-            let mut journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2965,7 +3100,7 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let journal = Journal::<_, u64>::init(context.with_label("fourth"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("fourth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2988,7 +3123,7 @@ mod tests {
             // === Test 6: Prune all items (edge case) ===
             // This tests the scenario where prune removes everything.
             // Callers must check bounds().is_empty() before reading.
-            let mut journal = Journal::<_, u64>::init(context.with_label("fifth"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("fifth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3030,7 +3165,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init(context.with_label("journal"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3060,7 +3195,7 @@ mod tests {
             // Verify size persists after restart without writing any data
             drop(journal);
             let mut journal =
-                Journal::<_, u64>::init(context.with_label("journal_after_clear"), cfg.clone())
+                Journal::<_, u64>::init(context.child("journal_after_clear"), cfg.clone())
                     .await
                     .unwrap();
             let bounds = journal.bounds();
@@ -3085,7 +3220,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.with_label("journal_reopened"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("journal_reopened"), cfg)
                 .await
                 .unwrap();
 

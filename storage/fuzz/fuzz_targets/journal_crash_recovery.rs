@@ -3,7 +3,7 @@
 //! Fuzz test for journal crash recovery (both fixed and variable journals).
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{deterministic, BufferPooler, Metrics as _, Runner};
+use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
@@ -543,7 +543,7 @@ where
         let operations = operations.clone();
         async move {
             let mut journal = J::init(
-                ctx.with_label("journal"),
+                ctx.child("journal"),
                 J::config(
                     &partition_name,
                     &ctx,
@@ -572,7 +572,7 @@ where
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let mut journal = J::init(
-            ctx.with_label("recovered"),
+            ctx.child("recovered"),
             J::config(
                 &partition_name,
                 &ctx,

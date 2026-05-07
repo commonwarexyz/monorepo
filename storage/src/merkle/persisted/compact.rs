@@ -195,7 +195,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Initialize a new `Merkle` instance, rebuilding in-memory state from the last sync.
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.with_label("compact_metadata"),
+            context.child("compact_metadata"),
             MConfig {
                 partition: cfg.partition,
                 codec_config: ((0..).into(), ()),
@@ -250,7 +250,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.with_label("compact_metadata"),
+            context.child("compact_metadata"),
             MConfig {
                 partition: cfg.partition,
                 codec_config: ((0..).into(), ()),
@@ -487,7 +487,7 @@ mod tests {
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     type TestMerkle<F> =
         Merkle<F, deterministic::Context, <Sha256 as commonware_cryptography::Hasher>::Digest>;
@@ -527,7 +527,7 @@ mod tests {
             strategy: Sequential,
         };
 
-        let mut merkle = TestMerkle::<F>::init(context.with_label("first"), cfg.clone())
+        let mut merkle = TestMerkle::<F>::init(context.child("first"), cfg.clone())
             .await
             .unwrap();
         let batch = {
@@ -540,7 +540,7 @@ mod tests {
         merkle.sync().await.unwrap();
         drop(merkle);
 
-        let mut reopened = TestMerkle::<F>::init(context.with_label("second"), cfg)
+        let mut reopened = TestMerkle::<F>::init(context.child("second"), cfg)
             .await
             .unwrap();
         assert_eq!(reopened.root(&hasher, 0).unwrap(), root_before);
@@ -662,7 +662,7 @@ mod tests {
                 strategy: Sequential,
             };
 
-            let mut merkle = open::<mmr::Family>(context.with_label("first"), partition).await;
+            let mut merkle = open::<mmr::Family>(context.child("first"), partition).await;
             append_and_sync(&mut merkle, &[b"a"]).await;
             let root_after_first = merkle.root(&hasher, 0).unwrap();
             append_and_sync(&mut merkle, &[b"b"]).await;
@@ -670,7 +670,7 @@ mod tests {
             drop(merkle);
 
             let reopened: TestMerkle<mmr::Family> =
-                Merkle::<mmr::Family, _, _>::init(context.with_label("second"), cfg)
+                Merkle::<mmr::Family, _, _>::init(context.child("second"), cfg)
                     .await
                     .unwrap();
             assert_eq!(reopened.root(&hasher, 0).unwrap(), root_after_first);
@@ -725,16 +725,15 @@ mod tests {
                 strategy: Sequential,
             };
 
-            let mut merkle =
-                TestMerkle::<mmr::Family>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+            let mut merkle = TestMerkle::<mmr::Family>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
             append_and_sync(&mut merkle, &[b"a"]).await;
             let slot = merkle.active_slot();
             drop(merkle);
 
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-                context.with_label("tamper"),
+                context.child("tamper"),
                 MConfig {
                     partition: partition.into(),
                     codec_config: ((0..).into(), ()),
@@ -750,7 +749,7 @@ mod tests {
             );
             metadata.sync().await.unwrap();
 
-            let reopened = TestMerkle::<mmr::Family>::init(context.with_label("second"), cfg).await;
+            let reopened = TestMerkle::<mmr::Family>::init(context.child("second"), cfg).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"))

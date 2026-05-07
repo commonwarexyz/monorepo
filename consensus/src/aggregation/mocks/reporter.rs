@@ -8,6 +8,7 @@ use crate::{
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::channel::{mpsc, oneshot};
 use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashSet};
@@ -23,10 +24,11 @@ enum Message<S: Scheme, D: Digest> {
 }
 
 pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
-    mailbox: mpsc::Receiver<Message<S, D>>,
+    // RNG used for signature verification
+    context: ContextCell<R>,
 
-    // RNG used for signature verification with scheme.
-    rng: R,
+    // Messages from the engine
+    mailbox: mpsc::Receiver<Message<S, D>>,
 
     // Signing scheme for verification
     scheme: S,
@@ -57,8 +59,8 @@ where
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
+                context: ContextCell::new(rng),
                 mailbox: receiver,
-                rng,
                 scheme,
                 acks: HashSet::new(),
                 digests: BTreeMap::new(),
@@ -70,12 +72,19 @@ where
         )
     }
 
+    pub fn start(mut self) -> Handle<()>
+    where
+        R: Spawner,
+    {
+        spawn_cell!(self.context, self.run())
+    }
+
     pub async fn run(mut self) {
         while let Some(msg) = self.mailbox.recv().await {
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&mut self.rng, &self.scheme, &Sequential));
+                    assert!(ack.verify(self.context.as_mut(), &self.scheme, &Sequential));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -89,7 +98,7 @@ where
                 }
                 Message::Certified(certificate) => {
                     // Verify certificate
-                    assert!(certificate.verify(&mut self.rng, &self.scheme, &Sequential));
+                    assert!(certificate.verify(self.context.as_mut(), &self.scheme, &Sequential));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();

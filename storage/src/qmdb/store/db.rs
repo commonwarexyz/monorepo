@@ -11,7 +11,9 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
-//! use commonware_runtime::{buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{
+//!     buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _, Supervisor as _,
+//! };
 //!
 //! use std::num::NonZeroU16;
 //! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);
@@ -31,7 +33,7 @@
 //!         translator: TwoCap,
 //!     };
 //!     let mut db =
-//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
+//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config)
 //!             .await
 //!             .unwrap();
 //!
@@ -340,11 +342,9 @@ where
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log = Journal::<E, Operation<crate::mmr::Family, K, V>>::init(
-            context.with_label("log"),
-            cfg.log,
-        )
-        .await?;
+        let mut log =
+            Journal::<E, Operation<crate::mmr::Family, K, V>>::init(context.child("log"), cfg.log)
+                .await?;
 
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
@@ -361,7 +361,7 @@ where
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
         // Build the snapshot.
-        let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
+        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
             let reader = log.reader();
             let op = reader.read(*last_commit_loc).await?;
@@ -522,7 +522,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -558,7 +558,7 @@ mod test {
     pub fn test_store_construct_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = create_test_store(context.with_label("store_0")).await;
+            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.log.bounds().start, 0);
             assert_eq!(db.inactivity_floor_loc(), 0);
@@ -575,7 +575,7 @@ mod test {
             apply_entries(&mut db, [(d1, Some(v1))]).await;
             drop(db);
 
-            let mut db = create_test_store(context.with_label("store_1")).await;
+            let mut db = create_test_store(context.child("store").with_attribute("index", 1)).await;
             assert_eq!(db.bounds().end, 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
@@ -589,7 +589,7 @@ mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
-            let mut db = create_test_store(context.with_label("store_2")).await;
+            let mut db = create_test_store(context.child("store").with_attribute("index", 2)).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
@@ -618,7 +618,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
             // Ensure the store is empty
             assert_eq!(db.bounds().end, 1);
@@ -647,7 +647,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store_1")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
 
             // Ensure the re-opened store removed the uncommitted operations
             assert_eq!(*db.bounds().end, 1);
@@ -673,7 +673,7 @@ mod test {
             assert_eq!(*db.inactivity_floor_loc, 2);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store_2")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 2)).await;
 
             // Ensure the re-opened store retained the committed operations
             assert_eq!(*db.bounds().end, 4);
@@ -731,7 +731,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -749,7 +749,7 @@ mod test {
             drop(db);
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
-            let mut db = create_test_store(ctx.with_label("store_1")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 
             let iter = db.snapshot.get(&k);
@@ -775,7 +775,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
             let (k1, v1) = (Digest::random(&mut ctx), vec![1, 2, 3, 4, 5]);
             let (mut k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8, 9, 10]);
@@ -795,7 +795,7 @@ mod test {
 
             // Re-open the store to ensure it builds the snapshot for the conflicting
             // keys correctly.
-            let db = create_test_store(ctx.with_label("store_1")).await;
+            let db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
 
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
@@ -809,7 +809,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
             // Insert a key-value pair
             let k = Digest::random(&mut ctx);
@@ -834,7 +834,7 @@ mod test {
             db.commit().await.unwrap();
 
             // Re-open the store and ensure the key is still deleted
-            let mut db = create_test_store(ctx.with_label("store_1")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
             let fetched_value = db.get(&k).await.unwrap();
             assert!(fetched_value.is_none());
 
@@ -848,7 +848,7 @@ mod test {
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
-            let mut db = create_test_store(ctx.with_label("store_2")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 2)).await;
             let fetched_value = db.get(&k).await.unwrap();
             assert_eq!(fetched_value.unwrap(), v);
 
@@ -873,7 +873,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store")).await;
+            let mut db = create_test_store(ctx.child("store")).await;
 
             let k_a = Digest::random(&mut ctx);
             let k_b = Digest::random(&mut ctx);
@@ -909,7 +909,7 @@ mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let db = create_test_store(context.with_label("store_0")).await;
+            let db = create_test_store(context.child("store").with_attribute("index", 0)).await;
 
             // Simulate building batches but not applying them (data is not persisted).
             {
@@ -922,7 +922,7 @@ mod test {
                 // Drop the batch without applying -- simulates a failure before apply.
             }
             drop(db);
-            let mut db = create_test_store(context.with_label("store_1")).await;
+            let mut db = create_test_store(context.child("store").with_attribute("index", 1)).await;
             assert_eq!(*db.bounds().end, 1);
 
             // Apply the updates and commit them.
@@ -960,7 +960,7 @@ mod test {
             // Sync and reopen the store to ensure the state is preserved.
             db.sync().await.unwrap();
             drop(db);
-            let mut db = create_test_store(context.with_label("store_2")).await;
+            let mut db = create_test_store(context.child("store").with_attribute("index", 2)).await;
             assert_eq!(db.bounds().end, final_count);
             assert_eq!(db.inactivity_floor_loc, final_floor);
 
@@ -977,7 +977,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
             // Ensure the store is empty
             assert_eq!(db.bounds().end, 1);
@@ -1005,7 +1005,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store_1")).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
 
             // Ensure the batch was not applied since we didn't commit.
             assert_eq!(db.bounds().end, 1);
@@ -1029,7 +1029,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let db = create_test_store(ctx.with_label("store_2")).await;
+            let db = create_test_store(ctx.child("store").with_attribute("index", 2)).await;
 
             // Ensure the re-opened store retained the committed operations
             assert_eq!(db.bounds().end, 4);

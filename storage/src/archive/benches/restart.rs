@@ -2,7 +2,7 @@ use super::utils::{append_random, Archive, Variant};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
+    Runner, Supervisor as _,
 };
 use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
@@ -49,7 +49,8 @@ fn bench_restart(c: &mut Criterion) {
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
                                 let start = Instant::now();
-                                let _a = Archive::init(ctx.clone(), variant, compression).await;
+                                let _a =
+                                    Archive::init(ctx.child("storage"), variant, compression).await;
                                 total += start.elapsed();
                             }
                             total

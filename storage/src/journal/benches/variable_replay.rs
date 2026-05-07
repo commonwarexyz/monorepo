@@ -2,7 +2,7 @@ use crate::{append_fixed_random_data, get_variable_journal, ITEMS_PER_BLOB, ITEM
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as _,
+    Runner as _, Supervisor as _,
 };
 use commonware_storage::journal::contiguous::variable::Journal;
 use commonware_utils::{sequence::FixedBytes, NZUsize};
@@ -64,7 +64,9 @@ fn bench_variable_replay(c: &mut Criterion) {
                     // Benchmark: measure replay time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j = get_variable_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
+                        let j =
+                            get_variable_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
+                                .await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();

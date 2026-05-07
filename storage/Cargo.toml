@@ -35,6 +35,7 @@ zstd = { workspace = true, optional = true }
 [dev-dependencies]
 commonware-conformance.workspace = true
 commonware-math.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
 rand.workspace = true

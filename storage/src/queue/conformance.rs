@@ -6,7 +6,9 @@ use crate::{
 };
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -33,10 +35,12 @@ impl Conformance for QueueConformance {
     async fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
-            let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed, &context))
-                    .await
-                    .unwrap();
+            let mut queue = Queue::<_, Vec<u8>>::init(
+                context.child("queue").with_attribute("index", 0),
+                config(seed, &context),
+            )
+            .await
+            .unwrap();
 
             // Enqueue random variable-length items across multiple sections
             let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
@@ -62,10 +66,12 @@ impl Conformance for QueueConformance {
             drop(queue);
 
             // Re-open and verify surviving items are readable
-            let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed, &context))
-                    .await
-                    .unwrap();
+            let mut queue = Queue::<_, Vec<u8>>::init(
+                context.child("queue").with_attribute("index", 1),
+                config(seed, &context),
+            )
+            .await
+            .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {
                 assert_eq!(item, data[pos as usize]);
                 queue.ack(pos).unwrap();

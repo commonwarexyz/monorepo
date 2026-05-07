@@ -185,7 +185,7 @@ where
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
 pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
-    mut ctx: R,
+    ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
     mut stream: I,
@@ -203,7 +203,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn) = dial_start(
-            &mut ctx,
+            ctx,
             Context::new(
                 &Transcript::new(&config.namespace),
                 current_time,
@@ -251,7 +251,7 @@ pub async fn listen<
     Fut: Future<Output = bool>,
     F: FnOnce(S::PublicKey) -> Fut,
 >(
-    mut ctx: R,
+    ctx: R,
     bouncer: F,
     config: Config<S>,
     mut stream: I,
@@ -269,7 +269,7 @@ pub async fn listen<
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn_ack) = listen_start(
-            &mut ctx,
+            ctx,
             Context::new(
                 &Transcript::new(&config.namespace),
                 current_time,
@@ -523,7 +523,7 @@ mod test {
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_runtime::{
         deterministic, mocks, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
-        Spawner as _,
+        Spawner as _, Supervisor as _,
     };
     use commonware_utils::{sync::Mutex, NZUsize};
     use std::{
@@ -591,7 +591,7 @@ mod test {
             let dialer_config = transport_config(dialer_crypto.clone());
             let listener_config = transport_config(listener_crypto.clone());
 
-            let listener_handle = context.clone().spawn(move |context| async move {
+            let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
                     |_| async { true },
@@ -642,7 +642,7 @@ mod test {
             let dialer_config = transport_config(dialer_crypto.clone());
             let listener_config = transport_config(listener_crypto.clone());
 
-            let listener_handle = context.clone().spawn(move |context| async move {
+            let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
                     |_| async { true },
@@ -717,7 +717,7 @@ mod test {
             let dialer_config = transport_config(dialer_crypto.clone());
             let listener_config = transport_config(listener_crypto.clone());
 
-            let listener_handle = context.clone().spawn(move |context| async move {
+            let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
                     |_| async { true },
@@ -788,7 +788,7 @@ mod test {
             let dialer_config = transport_config(dialer_crypto.clone());
             let listener_config = transport_config(listener_crypto.clone());
 
-            let listener_handle = context.clone().spawn(move |context| async move {
+            let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
                     |_| async { true },
@@ -847,7 +847,7 @@ mod test {
             let dialer_config = transport_config(dialer_crypto.clone());
             let listener_config = transport_config(listener_crypto.clone());
 
-            let listener_handle = context.clone().spawn(move |context| async move {
+            let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
                     |_| async { true },
@@ -953,25 +953,26 @@ mod test {
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_config.time_information(&context);
-            let mut listener_rng = context.clone();
+            let listener_public_key = listener_crypto.public_key();
+            let dialer_public_key = dialer_config.signing_key.public_key();
             let (_, syn) = dial_start(
-                context.clone(),
+                context.child("dialer"),
                 Context::new(
                     &Transcript::new(&dialer_config.namespace),
                     current_time,
                     ok_timestamps.clone(),
                     dialer_config.signing_key.clone(),
-                    listener_crypto.public_key(),
+                    listener_public_key.clone(),
                 ),
             );
             let (_, syn_ack) = listen_start(
-                &mut listener_rng,
+                context.child("listener"),
                 Context::new(
                     &Transcript::new(&dialer_config.namespace),
                     current_time,
                     ok_timestamps,
-                    listener_crypto.clone(),
-                    dialer_config.signing_key.public_key(),
+                    listener_crypto,
+                    dialer_public_key,
                 ),
                 syn,
             )
@@ -987,7 +988,7 @@ mod test {
             let result = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_public_key,
                 dialer_stream,
                 dialer_sink,
             )

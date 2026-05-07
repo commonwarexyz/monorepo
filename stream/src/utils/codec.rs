@@ -128,7 +128,9 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, mocks, BufMut, IoBufMut, Runner, Spawner};
+    use commonware_runtime::{
+        deterministic, mocks, BufMut, IoBufMut, Runner, Spawner, Supervisor as _,
+    };
     use rand::Rng;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
@@ -342,7 +344,7 @@ mod tests {
             // blocks, so send and recv must run concurrently).
             let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(0);
             let payload2 = payload.clone();
-            let send_handle = context.clone().spawn(|_| async move {
+            let send_handle = context.child("sender_empty_peek").spawn(|_| async move {
                 send_frame(&mut sink, payload2, MAX_MESSAGE_SIZE)
                     .await
                     .unwrap();
@@ -354,7 +356,7 @@ mod tests {
             // Slow path: peek returns partial varint
             let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(1);
             let payload2 = payload.clone();
-            let send_handle = context.clone().spawn(|_| async move {
+            let send_handle = context.child("sender_partial_peek").spawn(|_| async move {
                 send_frame(&mut sink, payload2, MAX_MESSAGE_SIZE)
                     .await
                     .unwrap();

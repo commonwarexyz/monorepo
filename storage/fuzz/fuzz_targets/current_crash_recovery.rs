@@ -12,7 +12,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic::{self, Context},
-    Metrics as _, Runner,
+    Runner, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -203,7 +203,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         let operations = operations.clone();
         async move {
             let mut db: Db<F> = Db::init(
-                ctx.with_label("db"),
+                ctx.child("db"),
                 make_config(
                     &ctx,
                     &suffix,
@@ -285,7 +285,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
             let mut db: Db<F> = Db::init(
-                ctx.with_label("recovered"),
+                ctx.child("recovered"),
                 make_config(
                     &ctx,
                     &suffix,

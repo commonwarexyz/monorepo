@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::journal::{
     contiguous::{
         fixed::{Config as JournalConfig, Journal},
@@ -115,7 +115,9 @@ fn fuzz(input: FuzzInput) {
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+        let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            .await
+            .unwrap();
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
@@ -219,7 +221,7 @@ fn fuzz(input: FuzzInput) {
                     drop(journal);
                     journal = Journal::init(
                         context
-                            .with_label("journal")
+                            .child("journal")
                             .with_attribute("instance", restarts),
                         cfg.clone(),
                     )
@@ -318,7 +320,7 @@ fn fuzz(input: FuzzInput) {
                     drop(journal);
                     journal = Journal::init_at_size(
                         context
-                            .with_label("journal")
+                            .child("journal")
                             .with_attribute("instance", restarts),
                         cfg.clone(),
                         target_size,

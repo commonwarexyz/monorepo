@@ -68,6 +68,7 @@ where
     test_persistence_basic(&indexed_factory).await;
     test_persistence_after_prune(&indexed_factory).await;
     test_read_by_position(&indexed_factory).await;
+    test_read_many(&indexed_factory).await;
     test_read_out_of_range(&indexed_factory).await;
     test_read_after_prune(&indexed_factory).await;
     test_rewind_to_middle(&indexed_factory).await;
@@ -728,6 +729,26 @@ where
     for i in 0..1000u64 {
         assert_eq!(read_item(&journal, i).await.unwrap(), i * 100);
     }
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test reading multiple items by position.
+pub(super) async fn test_read_many<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("read-many".into()).await.unwrap();
+
+    for i in 0..15u64 {
+        journal.append(&(i * 100)).await.unwrap();
+    }
+
+    let reader = journal.reader().await;
+    let items = reader.read_many(&[1, 4, 12]).await.unwrap();
+    assert_eq!(items, vec![100, 400, 1200]);
+    drop(reader);
 
     journal.destroy().await.unwrap();
 }

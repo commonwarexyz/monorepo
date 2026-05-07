@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     queue::{Config, Queue},
     Persistable,
@@ -174,7 +174,7 @@ fn fuzz(input: FuzzInput) {
             write_buffer,
         };
 
-        let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+        let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
             .await
             .unwrap();
         let mut reference = ReferenceQueue::new();

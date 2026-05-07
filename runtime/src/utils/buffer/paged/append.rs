@@ -944,8 +944,8 @@ impl<B: Blob> Append<B> {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, telemetry::metrics::Registry, BufferPool, BufferPoolConfig, Metrics as _,
-        Runner as _, Storage as _,
+        deterministic, telemetry::metrics::Registry, BufferPool, BufferPoolConfig, Runner as _,
+        Storage as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
@@ -960,11 +960,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -984,11 +980,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1019,11 +1011,7 @@ mod tests {
                 .open("test_partition", b"try_read_sync_tip")
                 .await
                 .unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1043,11 +1031,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1076,11 +1060,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1113,11 +1093,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1137,11 +1113,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1162,11 +1134,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1186,11 +1154,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1233,8 +1197,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             // Small cache: only 2 pages, so we can force eviction.
-            let cache_ref =
-                CacheRef::from_pooler(&context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -2506,11 +2469,7 @@ mod tests {
         // would observe pre-resize bytes at offsets later reclaimed by new appends.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let (blob, blob_size) = context
                 .open("test_partition", b"resize_invalidates_cache")
                 .await

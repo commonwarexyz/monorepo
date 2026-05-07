@@ -7,36 +7,43 @@ required_labels=(
   breaking-api
 )
 
-# Get changed files
-diff=$(gh pr diff "$PR_NUMBER" --name-only)
+repo="${GITHUB_REPOSITORY:-commonwarexyz/monorepo}"
 
-# Filter for conformance.toml files
-changed=$(echo "$diff" | grep 'conformance\.toml$' || true)
+if [ -z "${PR_NUMBER:-}" ]; then
+  echo "ERROR: PR_NUMBER is not set"
+  exit 1
+fi
 
-if [ -z "$changed" ]; then
+# Use the paginated PR files API instead of `gh pr diff`: GitHub rejects
+# oversized PR diffs, but this endpoint still returns per-file metadata.
+changed=()
+has_deletions=false
+files=$(gh api --paginate "repos/$repo/pulls/$PR_NUMBER/files" \
+  --jq '.[] | [.filename, (.deletions | tostring)] | @tsv')
+
+# Filter for conformance.toml files and flag any non-additive changes.
+while IFS=$'\t' read -r filename deletions; do
+  if [[ "$filename" != *conformance.toml ]]; then
+    continue
+  fi
+
+  changed+=("$filename")
+
+  # Any deleted line means an existing conformance case changed or was removed.
+  if (( deletions > 0 )); then
+    has_deletions=true
+    echo "Deletion/modification found in: $filename"
+  fi
+done <<< "$files"
+
+if [ "${#changed[@]}" -eq 0 ]; then
   echo "No conformance.toml files changed"
   exit 0
 fi
 
 echo "Conformance files changed:"
-echo "$changed"
+printf "%s\n" "${changed[@]}"
 echo ""
-
-# Check if any conformance.toml changes include deletions
-has_deletions=false
-current_file=""
-while IFS= read -r line; do
-  # Track which file we're in
-  if [[ "$line" =~ ^diff\ --git\ a/(.*)\ b/ ]]; then
-    current_file="${BASH_REMATCH[1]}"
-  fi
-  # If we're in a conformance.toml file and see a deletion line (starts with - but not ---)
-  if [[ "$current_file" == *conformance.toml ]] && [[ "$line" =~ ^-[^-] ]]; then
-    has_deletions=true
-    echo "Deletion/modification found in: $current_file"
-    break
-  fi
-done < <(gh pr diff "$PR_NUMBER")
 
 if [ "$has_deletions" = "false" ]; then
   echo "All conformance.toml changes are additive, no label required"
@@ -46,7 +53,7 @@ fi
 echo ""
 
 # Get PR labels
-labels=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')
+labels=$(gh pr view "$PR_NUMBER" --repo "$repo" --json labels --jq '.labels[].name')
 
 # Check if any required label is present
 for req in "${required_labels[@]}"; do

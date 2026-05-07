@@ -2,7 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     qmdb::store::db::{Config, Db},
@@ -113,7 +115,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = test_config("store-fuzz-test", &context);
-        let mut db = StoreDb::init(context.clone(), cfg)
+        let mut db = StoreDb::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init db");
         let mut restarts = 0usize;
@@ -180,9 +182,7 @@ fn fuzz(input: FuzzInput) {
 
                     let cfg = test_config("store-fuzz-test", &context);
                     db = StoreDb::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
