@@ -36,7 +36,7 @@ impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
         &mut self,
         connection: (Sender<Si>, Receiver<St>),
         reservation: Reservation<P>,
-    ) -> Enqueue {
+    ) -> Enqueue<Message<Si, St, P>> {
         self.enqueue(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
             connection,

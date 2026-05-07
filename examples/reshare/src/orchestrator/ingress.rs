@@ -68,11 +68,11 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
         Self { sender }
     }
 
-    pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Enqueue {
+    pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Enqueue<()> {
         self.sender.enqueue(Message::Enter(transition))
     }
 
-    pub fn exit(&mut self, epoch: Epoch) -> Enqueue {
+    pub fn exit(&mut self, epoch: Epoch) -> Enqueue<()> {
         self.sender.enqueue(Message::Exit(epoch))
     }
 }

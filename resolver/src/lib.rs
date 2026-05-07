@@ -46,11 +46,14 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to identify peers for targeted fetches.
         type PublicKey: PublicKey;
 
+        /// Message returned when a request cannot be enqueued.
+        type Message;
+
         /// Initiate a fetch request for a single key.
-        fn fetch(&mut self, key: Self::Key) -> Enqueue;
+        fn fetch(&mut self, key: Self::Key) -> Enqueue<Self::Message>;
 
         /// Initiate a fetch request for a batch of keys.
-        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Enqueue;
+        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Enqueue<Self::Message>;
 
         /// Initiate a fetch request restricted to specific target peers.
         ///
@@ -72,7 +75,7 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             key: Self::Key,
             targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Enqueue;
+        ) -> Enqueue<Self::Message>;
 
         /// Initiate fetch requests for multiple keys, each with their own targets.
         ///
@@ -80,20 +83,20 @@ commonware_macros::stability_scope!(BETA {
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Enqueue;
+        ) -> Enqueue<Self::Message>;
 
         /// Cancel a fetch request.
         ///
         /// If response validation is in progress, cancellation may drop the
         /// [`Consumer::deliver`] future before it reports whether the data was
         /// valid.
-        fn cancel(&mut self, key: Self::Key) -> Enqueue;
+        fn cancel(&mut self, key: Self::Key) -> Enqueue<Self::Message>;
 
         /// Cancel all fetch requests.
         ///
         /// See [`cancel`](Self::cancel) for how cancellation affects
         /// in-progress response validation.
-        fn clear(&mut self) -> Enqueue;
+        fn clear(&mut self) -> Enqueue<Self::Message>;
 
         /// Retain only the fetch requests that satisfy the predicate.
         ///
@@ -102,6 +105,6 @@ commonware_macros::stability_scope!(BETA {
         fn retain(
             &mut self,
             predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-        ) -> Enqueue;
+        ) -> Enqueue<Self::Message>;
     }
 });

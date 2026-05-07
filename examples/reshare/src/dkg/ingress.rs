@@ -120,11 +120,11 @@ where
 {
     type Activity = Update<Block<H, C, V>, A>;
 
-    fn report(&mut self, update: Self::Activity) -> Enqueue {
+    fn report(&mut self, update: Self::Activity) -> Enqueue<()> {
         // Report the finalized block to the DKG actor on a best-effort basis.
         let Update::Block(block, ack_tx) = update else {
             // We ignore any other updates sent by marshal.
-            return Enqueue::Dropped;
+            return Enqueue::Rejected(());
         };
         self.sender.enqueue(Message::Finalized {
             block,

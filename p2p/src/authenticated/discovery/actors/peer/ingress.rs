@@ -50,15 +50,15 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: PublicKey> Mailbox<Message<C>> {
-    pub fn bit_vec(&mut self, bit_vec: types::BitVec) -> Enqueue {
+    pub fn bit_vec(&mut self, bit_vec: types::BitVec) -> Enqueue<Message<C>> {
         self.enqueue(Message::BitVec(bit_vec))
     }
 
-    pub fn peers(&mut self, peers: Vec<types::Info<C>>) -> Enqueue {
+    pub fn peers(&mut self, peers: Vec<types::Info<C>>) -> Enqueue<Message<C>> {
         self.enqueue(Message::Peers(peers))
     }
 
-    pub fn kill(&mut self) -> Enqueue {
+    pub fn kill(&mut self) -> Enqueue<Message<C>> {
         self.enqueue(Message::Kill)
     }
 }

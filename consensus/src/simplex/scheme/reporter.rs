@@ -101,14 +101,14 @@ impl<
 {
     type Activity = Activity<S, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         // Verify peer activities if verification is enabled
         if self.verify
             && !activity.verified()
             && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
         {
             // Drop unverified peer activity
-            return Enqueue::Dropped;
+            return Enqueue::Rejected(());
         }
 
         // Filter based on scheme attributability
@@ -121,7 +121,7 @@ impl<
                 | Activity::ConflictingFinalize(_)
                 | Activity::NullifyFinalize(_) => {
                     // Drop per-validator peer activity for non-attributable scheme
-                    return Enqueue::Dropped;
+                    return Enqueue::Rejected(());
                 }
                 Activity::Notarization(_)
                 | Activity::Certification(_)
@@ -183,7 +183,7 @@ mod tests {
     impl<S: certificate::Scheme, D: Digest> Reporter for MockReporter<S, D> {
         type Activity = Activity<S, D>;
 
-        fn report(&mut self, activity: Self::Activity) -> Enqueue {
+        fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
             self.activities.lock().push(activity);
             Enqueue::Queued
         }

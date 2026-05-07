@@ -259,7 +259,7 @@ where
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         let subchannel = UInt(self.subchannel);
         let mut message = message.into();
         message.prepend(subchannel.encode().into());

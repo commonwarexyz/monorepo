@@ -453,15 +453,20 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
 impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     type Activity = Activity<S, V::Commitment>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
-                return Enqueue::Dropped;
+                return Enqueue::Rejected(());
             }
         };
-        self.sender.enqueue(message)
+        match self.sender.enqueue(message) {
+            Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Replaced => Enqueue::Replaced,
+            Enqueue::Rejected(_) => Enqueue::Rejected(()),
+            Enqueue::Closed(_) => Enqueue::Closed(()),
+        }
     }
 }

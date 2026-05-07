@@ -317,7 +317,7 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: PublicKey> Mailbox<Message<C>> {
-    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Enqueue {
+    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Enqueue<Message<C>> {
         self.enqueue(Message::Dialable(dialable))
     }
 
@@ -325,7 +325,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         reservation: Option<(Reservation<C>, Ingress)>,
-    ) -> Enqueue {
+    ) -> Enqueue<Message<C>> {
         self.enqueue(Message::Dial {
             public_key,
             reservation,

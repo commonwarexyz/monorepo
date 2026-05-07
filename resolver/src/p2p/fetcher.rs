@@ -631,8 +631,8 @@ mod tests {
             _recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Enqueue {
-            Enqueue::Dropped
+        ) -> Enqueue<()> {
+            Enqueue::Rejected(())
         }
     }
 
@@ -684,7 +684,7 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Enqueue {
+        ) -> Enqueue<()> {
             match recipients {
                 Recipients::One(_) => Enqueue::Queued,
                 _ => unimplemented!(),
@@ -753,7 +753,7 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Enqueue {
+        ) -> Enqueue<()> {
             let peer = match &recipients {
                 Recipients::One(p) => p,
                 _ => unimplemented!(),
@@ -761,7 +761,7 @@ mod tests {
 
             let rate_limiter = self.rate_limiter.write();
             if rate_limiter.check_key(peer).is_err() {
-                return Enqueue::Dropped;
+                return Enqueue::Rejected(());
             }
             Enqueue::Queued
         }

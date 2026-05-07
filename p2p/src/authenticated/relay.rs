@@ -15,7 +15,7 @@ impl<T: MessagePolicy> Relay<T> {
     }
 
     /// Sends the given `message` to the appropriate channel based on `priority`.
-    pub fn send(&self, message: T, priority: bool) -> Enqueue {
+    pub fn send(&self, message: T, priority: bool) -> Enqueue<T> {
         let sender = if priority { &self.high } else { &self.low };
         sender.enqueue(message)
     }

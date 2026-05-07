@@ -860,7 +860,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }
@@ -924,11 +924,11 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
         recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         let message = message.into().coalesce();
 
         if message.len() > self.max_size as usize {
-            return Enqueue::Rejected;
+            return Enqueue::Rejected(());
         }
 
         let channel = if priority { &self.high } else { &self.low };
@@ -936,7 +936,7 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
             .send((self.channel, self.me.clone(), recipients, message, None))
             .is_err()
         {
-            return Enqueue::Closed;
+            return Enqueue::Closed(());
         }
         Enqueue::Queued
     }
@@ -1054,7 +1054,7 @@ impl<P: PublicKey, E: Clock + Send + 'static> crate::MailboxSender for Sender<P,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         <UnlimitedSender<P> as crate::MailboxSender>::send(
             &self.mailbox_sender,
             recipients,
@@ -1139,10 +1139,10 @@ where
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         let message = message.into().coalesce();
         let Some(recipients) = (self.forwarder)(self.replica, &recipients, &message) else {
-            return Enqueue::Dropped;
+            return Enqueue::Rejected(());
         };
         <Sender<P, E> as crate::MailboxSender>::send(&self.inner, recipients, message, priority)
     }

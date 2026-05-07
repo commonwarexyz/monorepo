@@ -19,7 +19,7 @@ impl MessagePolicy for Message {
 }
 
 impl Mailbox<Message> {
-    pub fn kill(&mut self) -> Enqueue {
+    pub fn kill(&mut self) -> Enqueue<Message> {
         self.enqueue(Message::Kill)
     }
 }

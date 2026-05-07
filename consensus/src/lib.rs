@@ -213,7 +213,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Activity;
 
         /// Report some activity observed by the consensus implementation.
-        fn report(&mut self, activity: Self::Activity) -> Enqueue;
+        fn report(&mut self, activity: Self::Activity) -> Enqueue<()>;
     }
 
     /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.

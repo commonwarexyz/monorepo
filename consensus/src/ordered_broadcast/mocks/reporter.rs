@@ -197,15 +197,15 @@ pub struct Mailbox<C: PublicKey, S: Scheme, D: Digest> {
 impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
     type Activity = Activity<C, S, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         let message = match activity {
             Activity::Tip(proposal) => Message::Proposal(proposal),
             Activity::Lock(lock) => Message::Locked(lock),
         };
         match self.sender.try_send(message) {
             Ok(()) => Enqueue::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
-            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
+            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed(()),
         }
     }
 }

@@ -341,11 +341,11 @@ impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: commonware_cryptography::PublicKey> Mailbox<Message<C>> {
-    pub(crate) fn acceptable(&self, acceptable: bool) -> Enqueue {
+    pub(crate) fn acceptable(&self, acceptable: bool) -> Enqueue<Message<C>> {
         self.enqueue(Message::Acceptable(acceptable))
     }
 
-    pub(crate) fn listen(&self, reservation: Option<tracker::Reservation<C>>) -> Enqueue {
+    pub(crate) fn listen(&self, reservation: Option<tracker::Reservation<C>>) -> Enqueue<Message<C>> {
         self.enqueue(Message::Listen(reservation))
     }
 }

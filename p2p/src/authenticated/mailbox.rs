@@ -14,7 +14,7 @@ impl<T: MessagePolicy> Mailbox<T> {
     }
 
     /// Enqueue a message without waiting for inbox capacity.
-    pub fn enqueue(&self, msg: T) -> Enqueue {
+    pub fn enqueue(&self, msg: T) -> Enqueue<T> {
         self.0.enqueue(msg)
     }
 }

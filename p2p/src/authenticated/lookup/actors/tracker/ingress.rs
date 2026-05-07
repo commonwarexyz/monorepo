@@ -203,17 +203,21 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
 
 impl<C: PublicKey> Mailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
-    pub fn connect(&self, public_key: C, peer: Mailbox<peer::Message>) -> Enqueue {
+    pub fn connect(&self, public_key: C, peer: Mailbox<peer::Message>) -> Enqueue<Message<C>> {
         self.enqueue(Message::Connect { public_key, peer })
     }
 
     /// Request dialable peers from the tracker and send the response to the dialer actor.
-    pub fn request_dialable(&self, dialer: Mailbox<dialer::Message<C>>) -> Enqueue {
+    pub fn request_dialable(&self, dialer: Mailbox<dialer::Message<C>>) -> Enqueue<Message<C>> {
         self.enqueue(Message::DialableForDialer { dialer })
     }
 
     /// Request a dial reservation from the tracker and send the response to the dialer actor.
-    pub fn request_dial(&self, public_key: C, dialer: Mailbox<dialer::Message<C>>) -> Enqueue {
+    pub fn request_dial(
+        &self,
+        public_key: C,
+        dialer: Mailbox<dialer::Message<C>>,
+    ) -> Enqueue<Message<C>> {
         self.enqueue(Message::DialForDialer { public_key, dialer })
     }
 
@@ -223,7 +227,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         public_key: C,
         source_ip: IpAddr,
         listener: Mailbox<listener::Message<C>>,
-    ) -> Enqueue {
+    ) -> Enqueue<Message<C>> {
         self.enqueue(Message::AcceptableForListener {
             public_key,
             source_ip,
@@ -236,7 +240,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         listener: Mailbox<listener::Message<C>>,
-    ) -> Enqueue {
+    ) -> Enqueue<Message<C>> {
         self.enqueue(Message::ListenForListener {
             public_key,
             listener,
@@ -250,7 +254,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         let (responder, receiver) = oneshot::channel();
         match self.enqueue(Message::Dialable { responder }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_default(),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Dialable::default(),
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => Dialable::default(),
         }
     }
 
@@ -264,7 +268,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
                 reservation,
             }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => None,
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
 
@@ -279,7 +283,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             responder,
         }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or(false),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => false,
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => false,
         }
     }
 
@@ -293,7 +297,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
                 reservation,
             }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => None,
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
 }
@@ -341,7 +345,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
             responder,
         }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => None,
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
 
@@ -352,7 +356,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }
@@ -361,25 +365,40 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
-    fn track<R>(&mut self, index: u64, peers: R) -> Enqueue
+    fn track<R>(&mut self, index: u64, peers: R) -> Enqueue<()>
     where
         R: Into<AddressableTrackedPeers<Self::PublicKey>>,
     {
-        self.sender.enqueue(Message::Register {
+        match self.sender.enqueue(Message::Register {
             index,
             peers: peers.into(),
-        })
+        }) {
+            Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Replaced => Enqueue::Replaced,
+            Enqueue::Rejected(_) => Enqueue::Rejected(()),
+            Enqueue::Closed(_) => Enqueue::Closed(()),
+        }
     }
 
-    fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Enqueue {
-        self.sender.enqueue(Message::Overwrite { peers })
+    fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Enqueue<()> {
+        match self.sender.enqueue(Message::Overwrite { peers }) {
+            Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Replaced => Enqueue::Replaced,
+            Enqueue::Rejected(_) => Enqueue::Rejected(()),
+            Enqueue::Closed(_) => Enqueue::Closed(()),
+        }
     }
 }
 
 impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
-    fn block(&mut self, public_key: Self::PublicKey) -> Enqueue {
-        self.sender.enqueue(Message::Block { public_key })
+    fn block(&mut self, public_key: Self::PublicKey) -> Enqueue<()> {
+        match self.sender.enqueue(Message::Block { public_key }) {
+            Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Replaced => Enqueue::Replaced,
+            Enqueue::Rejected(_) => Enqueue::Rejected(()),
+            Enqueue::Closed(_) => Enqueue::Closed(()),
+        }
     }
 }

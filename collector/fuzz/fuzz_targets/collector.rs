@@ -200,7 +200,7 @@ struct FuzzBlocker;
 impl Blocker for FuzzBlocker {
     type PublicKey = PublicKey;
 
-    fn block(&mut self, _peer: Self::PublicKey) -> Enqueue {
+    fn block(&mut self, _peer: Self::PublicKey) -> Enqueue<()> {
         Enqueue::Queued
     }
 }
@@ -232,7 +232,7 @@ impl MailboxSender for MockSender {
         _recipients: Recipients<Self::PublicKey>,
         _message: impl Into<IoBufs> + Send,
         _priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         Enqueue::Queued
     }
 }

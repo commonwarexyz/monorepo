@@ -82,7 +82,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         leader: Participant,
         finalized: View,
         forwardable_proposal: Option<Proposal<D>>,
-    ) -> Enqueue {
+    ) -> Enqueue<Message<S, D>> {
         self.sender.enqueue(Message::Update {
             current,
             leader,
@@ -92,7 +92,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a constructed vote.
-    pub fn constructed(&mut self, message: Vote<S, D>) -> Enqueue {
+    pub fn constructed(&mut self, message: Vote<S, D>) -> Enqueue<Message<S, D>> {
         self.sender.enqueue(Message::Constructed(message))
     }
 

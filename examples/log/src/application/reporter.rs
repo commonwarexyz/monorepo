@@ -22,7 +22,7 @@ impl<D: Digest> Reporter<D> {
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
     type Activity = Activity<Scheme, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {

@@ -152,22 +152,22 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a leader's proposal.
-    pub fn proposal(&mut self, proposal: Proposal<D>) -> Enqueue {
+    pub fn proposal(&mut self, proposal: Proposal<D>) -> Enqueue<Message<S, D>> {
         self.sender.enqueue(Message::Proposal(proposal))
     }
 
     /// Signal that the current view should timeout (if not already).
-    pub fn timeout(&mut self, view: View, reason: TimeoutReason) -> Enqueue {
+    pub fn timeout(&mut self, view: View, reason: TimeoutReason) -> Enqueue<Message<S, D>> {
         self.sender.enqueue(Message::Timeout(view, reason))
     }
 
     /// Send a recovered certificate.
-    pub fn recovered(&mut self, certificate: Certificate<S, D>) -> Enqueue {
+    pub fn recovered(&mut self, certificate: Certificate<S, D>) -> Enqueue<Message<S, D>> {
         self.sender.enqueue(Message::Verified(certificate, false))
     }
 
     /// Send a resolved certificate.
-    pub fn resolved(&mut self, certificate: Certificate<S, D>) -> Enqueue {
+    pub fn resolved(&mut self, certificate: Certificate<S, D>) -> Enqueue<Message<S, D>> {
         self.sender.enqueue(Message::Verified(certificate, true))
     }
 

@@ -1705,32 +1705,33 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = handler::Request<D>;
+        type Message = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, _key: Self::Key) -> Enqueue {
+        fn fetch(&mut self, _key: Self::Key) -> Enqueue<()> {
             Enqueue::Queued
         }
-        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Enqueue {
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Enqueue<()> {
             Enqueue::Queued
         }
-        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Enqueue {
+        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Enqueue<()> {
             self.targeted.lock().push((key, targets));
             Enqueue::Queued
         }
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Enqueue {
+        ) -> Enqueue<()> {
             self.targeted.lock().extend(requests);
             Enqueue::Queued
         }
-        fn cancel(&mut self, _key: Self::Key) -> Enqueue {
+        fn cancel(&mut self, _key: Self::Key) -> Enqueue<()> {
             Enqueue::Queued
         }
-        fn clear(&mut self) -> Enqueue {
+        fn clear(&mut self) -> Enqueue<()> {
             Enqueue::Queued
         }
-        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue {
+        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue<()> {
             Enqueue::Queued
         }
     }
@@ -1777,7 +1778,7 @@ mod tests {
     impl Reporter for GatedBlockReporter {
         type Activity = Update<B>;
 
-        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::actor::Enqueue {
+        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::actor::Enqueue<()> {
             match activity {
                 Update::Block(block, _ack) => {
                     if let Some(started) = self.started.lock().take() {
@@ -1787,7 +1788,7 @@ mod tests {
                 }
                 Update::Tip(_, _, _) => {}
             }
-            commonware_utils::channel::actor::Enqueue::Queued
+            commonware_utils::channel::actor::Enqueue::<()>::Queued
         }
     }
 

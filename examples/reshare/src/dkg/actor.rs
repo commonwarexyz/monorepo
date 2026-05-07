@@ -694,7 +694,7 @@ mod tests {
     }
 
     impl<P: PublicKey> Manager for NoopManager<P> {
-        fn track<R>(&mut self, _: u64, _: R) -> Enqueue
+        fn track<R>(&mut self, _: u64, _: R) -> Enqueue<()>
         where
             R: Into<TrackedPeers<Self::PublicKey>>,
         {

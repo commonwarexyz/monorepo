@@ -308,11 +308,11 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: PublicKey> Mailbox<Message<C>> {
-    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Enqueue {
+    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Enqueue<Message<C>> {
         self.enqueue(Message::Dialable(dialable))
     }
 
-    pub(crate) fn dial(&self, public_key: C, reservation: Option<Reservation<C>>) -> Enqueue {
+    pub(crate) fn dial(&self, public_key: C, reservation: Option<Reservation<C>>) -> Enqueue<Message<C>> {
         self.enqueue(Message::Dial {
             public_key,
             reservation,

@@ -127,6 +127,7 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
 
 impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     type Key = K;
+    type Message = self::Message<K, P>;
     type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
@@ -135,11 +136,9 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch(&mut self, key: Self::Key) -> Enqueue {
-        self.sender.enqueue(Message::Fetch(vec![FetchRequest {
-            key,
-            targets: None,
-        }]))
+    fn fetch(&mut self, key: Self::Key) -> Enqueue<Self::Message> {
+        self.sender
+            .enqueue(Message::Fetch(vec![FetchRequest { key, targets: None }]))
     }
 
     /// Send a fetch request to the peer actor for a batch of keys.
@@ -148,13 +147,13 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Enqueue {
+    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Enqueue<Self::Message> {
         let requests: Vec<_> = keys
             .into_iter()
             .map(|key| FetchRequest { key, targets: None })
             .collect();
         if requests.is_empty() {
-            return Enqueue::Dropped;
+            return Enqueue::Rejected(Message::Fetch(requests));
         }
         self.sender.enqueue(Message::Fetch(requests))
     }
@@ -162,11 +161,16 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a targeted fetch request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Enqueue {
-        self.sender.enqueue(Message::Fetch(vec![FetchRequest {
-            key,
-            targets: Some(targets),
-        }]))
+    fn fetch_targeted(
+        &mut self,
+        key: Self::Key,
+        targets: NonEmptyVec<Self::PublicKey>,
+    ) -> Enqueue<Self::Message> {
+        self.sender
+            .enqueue(Message::Fetch(vec![FetchRequest {
+                key,
+                targets: Some(targets),
+            }]))
     }
 
     /// Send targeted fetch requests to the peer actor for a batch of keys.
@@ -175,7 +179,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     fn fetch_all_targeted(
         &mut self,
         requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-    ) -> Enqueue {
+    ) -> Enqueue<Self::Message> {
         let requests: Vec<_> = requests
             .into_iter()
             .map(|(key, targets)| FetchRequest {
@@ -184,7 +188,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
             })
             .collect();
         if requests.is_empty() {
-            return Enqueue::Dropped;
+            return Enqueue::Rejected(Message::Fetch(requests));
         }
         self.sender.enqueue(Message::Fetch(requests))
     }
@@ -192,14 +196,17 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a cancel request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn cancel(&mut self, key: Self::Key) -> Enqueue {
+    fn cancel(&mut self, key: Self::Key) -> Enqueue<Self::Message> {
         self.sender.enqueue(Message::Cancel { key })
     }
 
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue {
+    fn retain(
+        &mut self,
+        predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
+    ) -> Enqueue<Self::Message> {
         self.sender.enqueue(Message::Retain {
             predicate: Box::new(predicate),
         })
@@ -208,7 +215,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a clear request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn clear(&mut self) -> Enqueue {
+    fn clear(&mut self) -> Enqueue<Self::Message> {
         self.sender.enqueue(Message::Clear)
     }
 }
@@ -223,8 +230,8 @@ mod tests {
         let (sender, mut receiver) = actor::channel(1);
         let mut mailbox = Mailbox::<u64, PublicKey>::new(sender);
 
-        assert_eq!(mailbox.fetch(1), Enqueue::Queued);
-        assert_eq!(mailbox.fetch(2), Enqueue::Replaced);
+        assert!(matches!(mailbox.fetch(1), Enqueue::Queued));
+        assert!(matches!(mailbox.fetch(2), Enqueue::Replaced));
 
         let Some(Message::Fetch(requests)) = receiver.recv().await else {
             panic!("expected fetch message");

@@ -103,13 +103,13 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a certificate.
-    pub fn updated(&mut self, certificate: Certificate<S, D>) -> Enqueue {
+    pub fn updated(&mut self, certificate: Certificate<S, D>) -> Enqueue<MailboxMessage<S, D>> {
         self.sender
             .enqueue(MailboxMessage::Certificate(certificate))
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, view: View, success: bool) -> Enqueue {
+    pub fn certified(&mut self, view: View, success: bool) -> Enqueue<MailboxMessage<S, D>> {
         self.sender
             .enqueue(MailboxMessage::Certified { view, success })
     }

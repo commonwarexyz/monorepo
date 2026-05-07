@@ -60,7 +60,7 @@ impl<S: crate::MailboxSender, V: Codec> WrappedMailboxSender<S, V> {
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority)
     }
@@ -415,8 +415,8 @@ mod tests {
     impl crate::Blocker for NoopBlocker {
         type PublicKey = PublicKey;
 
-        fn block(&mut self, _peer: Self::PublicKey) -> Enqueue {
-            Enqueue::Dropped
+        fn block(&mut self, _peer: Self::PublicKey) -> Enqueue<()> {
+            Enqueue::Rejected(())
         }
     }
 

@@ -48,14 +48,21 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         let message = message.into();
         if message.len() > self.max_size as usize {
-            return Enqueue::Rejected;
+            return Enqueue::Rejected(());
         }
 
-        self.messenger
+        match self
+            .messenger
             .enqueue_content(recipients, self.channel, message, priority)
+        {
+            Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Replaced => Enqueue::Replaced,
+            Enqueue::Rejected(_) => Enqueue::Rejected(()),
+            Enqueue::Closed(_) => Enqueue::Closed(()),
+        }
     }
 }
 
@@ -103,7 +110,7 @@ impl<P: PublicKey, C: Clock + Send + 'static> crate::MailboxSender for Sender<P,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<()> {
         <UnlimitedSender<P> as crate::MailboxSender>::send(
             &self.mailbox_sender,
             recipients,

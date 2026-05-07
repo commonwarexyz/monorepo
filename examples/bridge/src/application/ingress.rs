@@ -131,7 +131,7 @@ impl<D: Digest> Re for Mailbox<D> {
 impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<Scheme, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         self.sender.enqueue(Message::Report { activity })
     }
 }

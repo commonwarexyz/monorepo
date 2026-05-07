@@ -173,7 +173,7 @@ where
 {
     type Activity = Activity<S, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         let message = match activity {
             Activity::Ack(ack) => Message::Ack(ack),
             Activity::Certified(certificate) => Message::Certified(certificate),
@@ -181,8 +181,8 @@ where
         };
         match self.sender.try_send(message) {
             Ok(()) => Enqueue::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
-            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
+            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed(()),
         }
     }
 }

@@ -82,7 +82,7 @@ impl<B: Block> Application<B> {
 impl<B: Block> Reporter for Application<B> {
     type Activity = Update<B>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         match activity {
             Update::Block(block, ack_tx) => {
                 let height = block.height();

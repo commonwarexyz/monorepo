@@ -89,7 +89,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
     ///
     /// Returns `None` if the router has shut down.
-    pub fn ready(&mut self, peer: P, relay: Relay<EncodedData>) -> Enqueue {
+    pub fn ready(&mut self, peer: P, relay: Relay<EncodedData>) -> Enqueue<Message<P>> {
         self.enqueue(Message::Ready { peer, relay })
     }
 
@@ -97,7 +97,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     ///
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
-    pub fn release(&mut self, peer: P) -> Enqueue {
+    pub fn release(&mut self, peer: P) -> Enqueue<Message<P>> {
         self.enqueue(Message::Release { peer })
     }
 }
@@ -138,7 +138,7 @@ impl<P: PublicKey> Messenger<P> {
                 success: Some(success),
             }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_default(),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Vec::new(),
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => Vec::new(),
         }
     }
 
@@ -149,7 +149,7 @@ impl<P: PublicKey> Messenger<P> {
         channel: Channel,
         message: IoBufs,
         priority: bool,
-    ) -> Enqueue {
+    ) -> Enqueue<Message<P>> {
         let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
         self.sender.enqueue(Message::Content {
             recipients,
@@ -170,7 +170,7 @@ impl<P: PublicKey> Connected for Messenger<P> {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
-            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
+            Enqueue::Rejected(_) | Enqueue::Closed(_) => {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }

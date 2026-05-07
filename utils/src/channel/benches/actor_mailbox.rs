@@ -23,6 +23,7 @@ const TOKIO_STYLE_MESSAGES_PER_PRODUCER: usize = TOKIO_STYLE_MESSAGES / TOKIO_ST
 
 const MATRIX_CAPACITIES: &[usize] = &[1, 8, 64, 1024];
 const MATRIX_PRODUCERS: &[usize] = &[1, 2, 4, 8, 16];
+const REPLACE_CAPACITIES: &[usize] = &[1, 8, 64, 1024];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Message {
@@ -249,11 +250,11 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_reject impl=actor capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, _receiver) = actor::channel::<Message>(1);
+                let (sender, receiver) = actor::channel::<Message>(1);
                 assert_eq!(sender.enqueue(Message::Reject(0)), Enqueue::Queued);
-                sender
+                (sender, receiver)
             },
-            |sender| {
+            |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     black_box(sender.enqueue(black_box(Message::Reject(i))));
                 }
@@ -265,11 +266,11 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_reject impl=tokio_mpsc capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, _receiver) = mpsc::channel::<Message>(1);
+                let (sender, receiver) = mpsc::channel::<Message>(1);
                 sender.try_send(Message::Reject(0)).unwrap();
-                sender
+                (sender, receiver)
             },
-            |sender| {
+            |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     black_box(sender.try_send(black_box(Message::Reject(i))).unwrap_err());
                 }
@@ -281,11 +282,11 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_retain impl=actor capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, _receiver) = actor::channel_with_retention::<Message>(1, MESSAGES);
+                let (sender, receiver) = actor::channel::<Message>(1);
                 assert_eq!(sender.enqueue(Message::Reject(0)), Enqueue::Queued);
-                sender
+                (sender, receiver)
             },
-            |sender| {
+            |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     black_box(sender.enqueue(black_box(Message::Retain(i))));
                 }
@@ -297,11 +298,11 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_replace impl=actor capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, _receiver) = actor::channel::<Message>(1);
+                let (sender, receiver) = actor::channel::<Message>(1);
                 assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
-                sender
+                (sender, receiver)
             },
-            |sender| {
+            |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     black_box(sender.enqueue(black_box(Message::Replace(i))));
                 }
@@ -309,6 +310,68 @@ fn bench_full_queue(c: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
+
+    group.finish();
+}
+
+fn fill_replace_queue(
+    capacity: usize,
+    newest: bool,
+) -> (actor::ActorMailbox<Message>, actor::ActorInbox<Message>) {
+    let (sender, receiver) = actor::channel::<Message>(capacity);
+    if newest {
+        for i in 0..capacity.saturating_sub(1) {
+            assert_eq!(sender.enqueue(Message::Reject(i as u64)), Enqueue::Queued);
+        }
+        assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
+    } else {
+        assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
+        for i in 1..capacity {
+            assert_eq!(sender.enqueue(Message::Reject(i as u64)), Enqueue::Queued);
+        }
+    }
+    (sender, receiver)
+}
+
+fn bench_replace_hit(c: &mut Criterion) {
+    let mut group = c.benchmark_group(module_path!());
+    group.throughput(Throughput::Elements(MESSAGES as u64));
+
+    for &capacity in REPLACE_CAPACITIES {
+        group.bench_function(
+            format!("operation=replace_hit impl=actor capacity={capacity} position=newest"),
+            |b| {
+                b.iter_batched(
+                    || fill_replace_queue(capacity, true),
+                    |(sender, _receiver)| {
+                        for i in 0..MESSAGES as u64 {
+                            let result = sender.enqueue(black_box(Message::Replace(i)));
+                            debug_assert_eq!(result, Enqueue::Replaced);
+                            black_box(result);
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        group.bench_function(
+            format!("operation=replace_hit impl=actor capacity={capacity} position=oldest"),
+            |b| {
+                b.iter_batched(
+                    || fill_replace_queue(capacity, false),
+                    |(sender, _receiver)| {
+                        for i in 0..MESSAGES as u64 {
+                            let result = sender.enqueue(black_box(Message::Replace(i)));
+                            debug_assert_eq!(result, Enqueue::Replaced);
+                            black_box(result);
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
 
     group.finish();
 }
@@ -464,7 +527,7 @@ fn run_actor_try_send_contended(producers: usize, messages_per_producer: usize, 
                     loop {
                         match sender.enqueue(message) {
                             Enqueue::Queued => break,
-                            Enqueue::Rejected => std::hint::spin_loop(),
+                            Enqueue::Rejected(_) => std::hint::spin_loop(),
                             result => panic!("unexpected actor enqueue result: {result:?}"),
                         }
                     }
@@ -518,7 +581,7 @@ fn run_tokio_try_send_contended(producers: usize, messages_per_producer: usize, 
 
 fn run_actor_retain_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
     let total = producers * messages_per_producer;
-    let (sender, mut receiver) = actor::channel_with_retention::<Message>(capacity, total);
+    let (sender, mut receiver) = actor::channel::<Message>(capacity);
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(move || {
@@ -686,5 +749,5 @@ fn bench_tokio_style(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_enqueue_ready, bench_recv_ready, bench_round_trip_ready, bench_recv_waiting, bench_full_queue, bench_spsc_contended, bench_concurrent_enqueue, bench_try_send_matrix, bench_tokio_style,
+    targets = bench_enqueue_ready, bench_recv_ready, bench_round_trip_ready, bench_recv_waiting, bench_full_queue, bench_replace_hit, bench_spsc_contended, bench_concurrent_enqueue, bench_try_send_matrix, bench_tokio_style,
 }

@@ -253,27 +253,28 @@ mod tests {
 
     impl Resolver for MockResolver {
         type Key = U64;
+        type Message = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, key: U64) -> Enqueue {
+        fn fetch(&mut self, key: U64) -> Enqueue<()> {
             self.outstanding.lock().insert(key);
             Enqueue::Queued
         }
 
-        fn fetch_all(&mut self, keys: Vec<U64>) -> Enqueue {
+        fn fetch_all(&mut self, keys: Vec<U64>) -> Enqueue<()> {
             for key in keys {
                 self.outstanding.lock().insert(key);
             }
             Enqueue::Queued
         }
 
-        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Enqueue {
+        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Enqueue<()> {
             // For testing, just treat targeted fetch the same as regular fetch
             self.outstanding.lock().insert(key);
             Enqueue::Queued
         }
 
-        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Enqueue {
+        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Enqueue<()> {
             // For testing, just treat targeted fetch the same as regular fetch
             for (key, _targets) in requests {
                 self.outstanding.lock().insert(key);
@@ -281,17 +282,17 @@ mod tests {
             Enqueue::Queued
         }
 
-        fn cancel(&mut self, key: U64) -> Enqueue {
+        fn cancel(&mut self, key: U64) -> Enqueue<()> {
             self.outstanding.lock().remove(&key);
             Enqueue::Queued
         }
 
-        fn clear(&mut self) -> Enqueue {
+        fn clear(&mut self) -> Enqueue<()> {
             self.outstanding.lock().clear();
             Enqueue::Queued
         }
 
-        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue {
+        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue<()> {
             self.outstanding.lock().retain(|key| predicate(key));
             Enqueue::Queued
         }

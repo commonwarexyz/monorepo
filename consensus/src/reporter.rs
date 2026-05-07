@@ -11,9 +11,9 @@ use std::marker::PhantomData;
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         let Some(reporter) = self else {
-            return Enqueue::Dropped;
+            return Enqueue::Rejected(());
         };
         reporter.report(activity)
     }
@@ -36,24 +36,21 @@ where
 {
     type Activity = A;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
         match (&mut self.r1, &mut self.r2) {
             (Some(r1), Some(r2)) => combine(r1.report(activity.clone()), r2.report(activity)),
             (Some(r1), None) => r1.report(activity),
             (None, Some(r2)) => r2.report(activity),
-            (None, None) => Enqueue::Dropped,
+            (None, None) => Enqueue::Rejected(()),
         }
     }
 }
 
-fn combine(left: Enqueue, right: Enqueue) -> Enqueue {
+fn combine(left: Enqueue<()>, right: Enqueue<()>) -> Enqueue<()> {
     match (left, right) {
-        (Enqueue::Closed, _) | (_, Enqueue::Closed) => Enqueue::Closed,
-        (Enqueue::Rejected, _) | (_, Enqueue::Rejected) => Enqueue::Rejected,
-        (Enqueue::Queued | Enqueue::Replaced, _) | (_, Enqueue::Queued | Enqueue::Replaced) => {
-            Enqueue::Queued
-        }
-        (Enqueue::Dropped, Enqueue::Dropped) => Enqueue::Dropped,
+        (Enqueue::Closed(_), _) | (_, Enqueue::Closed(_)) => Enqueue::Closed(()),
+        (Enqueue::Rejected(_), _) | (_, Enqueue::Rejected(_)) => Enqueue::Rejected(()),
+        _ => Enqueue::Queued,
     }
 }
 
@@ -110,7 +107,7 @@ mod tests {
     impl crate::Reporter for SimpleAcknowledger {
         type Activity = Exact;
 
-        fn report(&mut self, activity: Self::Activity) -> Enqueue {
+        fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
             activity.acknowledge();
             Enqueue::Queued
         }

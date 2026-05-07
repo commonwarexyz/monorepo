@@ -714,7 +714,7 @@ where
     type Activity = A::Activity;
 
     /// Relays a report to the underlying [`Application`] and cleans up old verification tasks.
-    fn report(&mut self, update: Self::Activity) -> commonware_utils::channel::actor::Enqueue {
+    fn report(&mut self, update: Self::Activity) -> commonware_utils::channel::actor::Enqueue<()> {
         // Clean up verification tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
