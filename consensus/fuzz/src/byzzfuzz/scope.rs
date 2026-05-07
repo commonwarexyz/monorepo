@@ -6,6 +6,29 @@ use commonware_consensus::simplex::types::{Certificate, Vote};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
 use rand::Rng;
 
+/// `FaultScope::Any` weight in [`sample`].
+const ANY_SCOPE_WEIGHT: u32 = 50;
+/// `FaultScope::Vote(_)` weight in [`sample`] (uniform over [`VOTE_KINDS`]).
+const VOTE_SCOPE_WEIGHT: u32 = 45;
+/// `FaultScope::Certificate(_)` weight in [`sample`] (uniform over
+/// [`CERTIFICATE_KINDS`]).
+const CERTIFICATE_SCOPE_WEIGHT: u32 = 5;
+const TOTAL_SCOPE_WEIGHT: u32 =
+    ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT + CERTIFICATE_SCOPE_WEIGHT;
+
+/// All [`VoteKind`] variants, sampled uniformly when [`sample`] picks the
+/// `Vote(_)` bucket. Add new variants here so the sampler covers them.
+const VOTE_KINDS: [VoteKind; 3] = [VoteKind::Notarize, VoteKind::Finalize, VoteKind::Nullify];
+
+/// All [`CertificateKind`] variants, sampled uniformly when [`sample`] picks
+/// the `Certificate(_)` bucket. Add new variants here so the sampler
+/// covers them.
+const CERTIFICATE_KINDS: [CertificateKind; 3] = [
+    CertificateKind::Notarization,
+    CertificateKind::Nullification,
+    CertificateKind::Finalization,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoteKind {
     Notarize,
@@ -56,25 +79,20 @@ impl FaultScope {
     }
 }
 
-/// Sample a fault scope. 50% `Any`, 45% specific `Vote(_)`, 5% specific
-/// `Certificate(_)` (uniform within each variant).
+/// Sample a fault scope. Buckets are weighted by [`ANY_SCOPE_WEIGHT`],
+/// [`VOTE_SCOPE_WEIGHT`], [`CERTIFICATE_SCOPE_WEIGHT`]; within the
+/// `Vote(_)` and `Certificate(_)` buckets the kind is drawn uniformly from
+/// [`VOTE_KINDS`] / [`CERTIFICATE_KINDS`] so a new variant added to either
+/// list is automatically covered.
 pub fn sample(rng: &mut impl Rng) -> FaultScope {
-    let bucket = rng.gen_range(0..100);
-    if bucket < 50 {
+    let bucket = rng.gen_range(0..TOTAL_SCOPE_WEIGHT);
+    if bucket < ANY_SCOPE_WEIGHT {
         FaultScope::Any
-    } else if bucket < 95 {
-        let k = match rng.gen_range(0..3) {
-            0 => VoteKind::Notarize,
-            1 => VoteKind::Finalize,
-            _ => VoteKind::Nullify,
-        };
+    } else if bucket < ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT {
+        let k = VOTE_KINDS[rng.gen_range(0..VOTE_KINDS.len())];
         FaultScope::Vote(k)
     } else {
-        let k = match rng.gen_range(0..3) {
-            0 => CertificateKind::Notarization,
-            1 => CertificateKind::Nullification,
-            _ => CertificateKind::Finalization,
-        };
+        let k = CERTIFICATE_KINDS[rng.gen_range(0..CERTIFICATE_KINDS.len())];
         FaultScope::Certificate(k)
     }
 }
