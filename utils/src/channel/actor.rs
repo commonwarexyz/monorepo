@@ -5,7 +5,9 @@ use crate::sync::Mutex;
 use std::{
     collections::VecDeque,
     fmt,
+    future::poll_fn,
     sync::Arc,
+    task::{Context, Poll, Waker},
 };
 
 /// Result of trying to enqueue a message.
@@ -69,18 +71,38 @@ struct State<T> {
     capacity: usize,
     pending_capacity: usize,
     closed: bool,
+    senders: usize,
+    receiver_waker: Option<Waker>,
 }
 
 struct QueueMailbox<T> {
     state: Arc<Mutex<State<T>>>,
-    notify: mpsc::Sender<()>,
 }
 
 impl<T> Clone for QueueMailbox<T> {
     fn clone(&self) -> Self {
+        self.state.lock().senders += 1;
         Self {
             state: self.state.clone(),
-            notify: self.notify.clone(),
+        }
+    }
+}
+
+impl<T> Drop for QueueMailbox<T> {
+    fn drop(&mut self) {
+        let waker = {
+            let mut state = self.state.lock();
+            debug_assert!(state.senders > 0);
+            state.senders -= 1;
+            if state.senders == 0 {
+                state.receiver_waker.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 }
@@ -134,10 +156,15 @@ impl<T: MessagePolicy> QueueMailbox<T> {
                 },
             }
         };
+        let waker = if wake {
+            state.receiver_waker.take()
+        } else {
+            None
+        };
         drop(state);
 
-        if wake {
-            let _ = self.notify.try_send(());
+        if let Some(waker) = waker {
+            waker.wake();
         }
         result
     }
@@ -241,22 +268,31 @@ impl<T: MessagePolicy> ActorMailbox<T> {
 /// Receiver half of a bounded actor mailbox.
 pub struct ActorInbox<T> {
     state: Arc<Mutex<State<T>>>,
-    notify: mpsc::Receiver<()>,
 }
 
 impl<T> ActorInbox<T> {
     /// Receive the next queued message.
     pub async fn recv(&mut self) -> Option<T> {
-        loop {
-            {
-                let mut state = self.state.lock();
-                if let Some(message) = state.queue.pop_front() {
-                    promote_locked(&mut state);
-                    return Some(message);
-                }
-            }
-            self.notify.recv().await?;
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        let mut state = self.state.lock();
+        if let Some(message) = state.queue.pop_front() {
+            promote_locked(&mut state);
+            return Poll::Ready(Some(message));
         }
+
+        if state.closed || state.senders == 0 {
+            return Poll::Ready(None);
+        }
+
+        match &state.receiver_waker {
+            Some(waker) if waker.will_wake(cx.waker()) => {}
+            _ => state.receiver_waker = Some(cx.waker().clone()),
+        }
+
+        Poll::Pending
     }
 
     /// Try to receive the next queued message without waiting.
@@ -265,6 +301,9 @@ impl<T> ActorInbox<T> {
         if let Some(message) = state.queue.pop_front() {
             promote_locked(&mut state);
             return Ok(message);
+        }
+        if state.closed || state.senders == 0 {
+            return Err(mpsc::error::TryRecvError::Disconnected);
         }
         Err(mpsc::error::TryRecvError::Empty)
     }
@@ -276,6 +315,7 @@ impl<T> Drop for ActorInbox<T> {
         state.closed = true;
         state.queue.clear();
         state.pending.clear();
+        state.receiver_waker.take();
     }
 }
 
@@ -297,19 +337,16 @@ pub fn channel_with_retention<T: MessagePolicy>(
         capacity,
         pending_capacity,
         closed: false,
+        senders: 1,
+        receiver_waker: None,
     }));
-    let (notify, notify_receiver) = mpsc::channel(1);
     (
         ActorMailbox {
             inner: ActorMailboxInner::Queue(QueueMailbox {
                 state: state.clone(),
-                notify,
             }),
         },
-        ActorInbox {
-            state,
-            notify: notify_receiver,
-        },
+        ActorInbox { state },
     )
 }
 
@@ -331,6 +368,7 @@ pub fn replace_last<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{pin_mut, FutureExt};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Message {
@@ -445,6 +483,30 @@ mod tests {
         assert_eq!(sender.enqueue(Message::Hint(2)), Enqueue::Dropped);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
+    }
+
+    #[commonware_macros::test_async]
+    async fn empty_inbox_wakes_on_enqueue() {
+        let (sender, mut receiver) = channel(1);
+
+        let next = receiver.recv();
+        pin_mut!(next);
+        assert!(next.as_mut().now_or_never().is_none());
+
+        assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
+        assert_eq!(next.await, Some(Message::Vote(1)));
+    }
+
+    #[commonware_macros::test_async]
+    async fn empty_inbox_closes_when_senders_drop() {
+        let (sender, mut receiver) = channel::<Message>(1);
+        drop(sender);
+
+        assert_eq!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        );
+        assert_eq!(receiver.recv().await, None);
     }
 
     #[test]

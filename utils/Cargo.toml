@@ -102,3 +102,8 @@ required-features = ["analysis"]
 name = "rational"
 harness = false
 path = "src/rational/benches/bench.rs"
+
+[[bench]]
+name = "channel"
+harness = false
+path = "src/channel/benches/bench.rs"
