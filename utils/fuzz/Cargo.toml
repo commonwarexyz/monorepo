@@ -13,7 +13,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
 commonware-formatting.workspace = true
-commonware-utils = { path = ".." }
+commonware-utils = { path = "..", features = ["fuzz"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true
 num-bigint.workspace = true
@@ -107,6 +107,13 @@ bench = false
 [[bin]]
 name = "channel"
 path = "fuzz_targets/channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roaring"
+path = "fuzz_targets/roaring.rs"
 test = false
 doc = false
 bench = false
