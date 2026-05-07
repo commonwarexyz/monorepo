@@ -27,7 +27,7 @@ use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use core::num::NonZeroU64;
-use futures::{future::try_join_all, try_join, TryFutureExt as _};
+use futures::{try_join, TryFutureExt as _};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -646,10 +646,8 @@ where
             )
             .await?;
 
-        let futures = (*start_loc..*end_loc)
-            .map(|i| reader.read(i))
-            .collect::<Vec<_>>();
-        let ops = try_join_all(futures).await?;
+        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
+        let ops = reader.read_many(&positions).await?;
 
         Ok((proof, ops))
     }

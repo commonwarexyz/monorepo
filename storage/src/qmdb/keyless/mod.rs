@@ -172,7 +172,7 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be sorted in ascending order.
+    /// Locations must be sorted in strictly ascending order (sorted and unique).
     /// Returns results in the same order as the input locations.
     ///
     /// # Errors
@@ -183,8 +183,8 @@ where
             return Ok(Vec::new());
         }
         debug_assert!(
-            locs.is_sorted(),
-            "locations must be sorted in ascending order"
+            locs.windows(2).all(|window| window[0] < window[1]),
+            "locations must be sorted and unique"
         );
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;

@@ -200,7 +200,7 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be sorted in ascending order.
+    /// Locations must be sorted in strictly ascending order (sorted and unique).
     /// Returns results in the same order as the input locations.
     pub async fn get_many<E, C>(
         &self,
@@ -215,8 +215,8 @@ where
             return Ok(Vec::new());
         }
         debug_assert!(
-            locs.is_sorted(),
-            "locations must be sorted in ascending order"
+            locs.windows(2).all(|window| window[0] < window[1]),
+            "locations must be sorted and unique"
         );
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -365,7 +365,7 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be sorted in ascending order.
+    /// Locations must be sorted in strictly ascending order (sorted and unique).
     /// Returns results in the same order as the input locations.
     pub async fn get_many<E, H, C>(
         &self,
@@ -381,8 +381,8 @@ where
             return Ok(Vec::new());
         }
         debug_assert!(
-            locs.is_sorted(),
-            "locations must be sorted in ascending order"
+            locs.windows(2).all(|window| window[0] < window[1]),
+            "locations must be sorted and unique"
         );
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
