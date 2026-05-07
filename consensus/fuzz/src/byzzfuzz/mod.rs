@@ -15,9 +15,13 @@
 //! Public surface used from `lib.rs`:
 //! - [`run`] is the `Mode::Byzzfuzz` (safety) entry point;
 //! - [`run_liveness`] is the `Mode::ByzzfuzzLiveness` entry point: applies
-//!   faults during a bounded fault phase, reaches GST on the shared fault gate,
-//!   then requires every non-byzantine reporter to make at least one new
-//!   finalization within a fixed post-GST window;
+//!   network faults during a bounded fault phase, reaches GST on the shared
+//!   fault gate, then requires every non-byzantine reporter to make at least
+//!   one new finalization within a fixed post-GST window while Byzantine
+//!   process faults are scheduled across the post-GST window. After GST,
+//!   correct senders cannot omit messages, and the network cannot drop
+//!   messages, but the Byzantine sender can still omit or mutate its own
+//!   messages to the correct recipients;
 //! - [`log`] stores the bounded decision trace drained on panic.
 
 mod fault;

@@ -4,12 +4,11 @@
 //! - [`run`]: safety mode. Apply faults for the whole run, wait for
 //!   finalization (with a fixed virtual-time fallback), check invariants.
 //!   Timeouts are not failures.
-//! - [`run_liveness`]: liveness mode. Apply faults during a bounded
+//! - [`run_liveness`]: liveness mode. Apply network faults during a bounded
 //!   *fault phase*, then reach GST on a shared `FaultGate`, then require
 //!   each non-byzantine reporter to advance at least one finalized view
-//!   inside a fixed *post-GST window*. Failure to advance panics; faults
-//!   stopping mid-stream is what makes the post-GST liveness check
-//!   meaningful.
+//!   inside a fixed *post-GST window*. Failure to advance panics; Byzantine
+//!   process faults are explicitly scheduled for a second sampled view budget.
 
 use super::BYZANTINE_IDX;
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
         fault::ProcessFault,
         forwarder,
         injector::ByzzFuzzInjector,
-        intercept::{self, FaultGate},
+        intercept::{self, FaultGate, SenderViewCell},
         log,
         mutator::ByzzFuzzMutator,
         observed::ObservedState,
@@ -41,12 +40,12 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, FuzzRng};
+use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, FuzzRng};
 use futures::future::join_all;
 use rand::Rng;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 
-/// Liveness-mode fault phase length. The fuzzer applies network/process
+/// Liveness-mode fault phase length. The fuzzer applies network partition
 /// faults during this virtual-time window; after it elapses (or all
 /// non-byzantine reporters reach `required_containers`, whichever comes
 /// first) the [`FaultGate`] reaches GST. Kept close to [`MAX_SLEEP_DURATION`]
@@ -65,6 +64,19 @@ const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(360);
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
 
+struct EngineSetup<P: Simplex> {
+    reporters: Vec<ByzzReporter<P>>,
+    byzantine_view: SenderViewCell,
+    proc_schedule: Arc<Mutex<Vec<ProcessFault<PublicKeyOf<P>>>>>,
+    participants: Vec<PublicKeyOf<P>>,
+    post_gst_fault_views: Option<u64>,
+}
+
+enum RunMode {
+    Safety,
+    Liveness,
+}
+
 fn genesis_payload() -> Sha256Digest {
     let mut hasher = Sha256::default();
     hasher.update(&(Bytes::from_static(b"genesis"), Epoch::new(EPOCH)).encode());
@@ -74,15 +86,16 @@ fn genesis_payload() -> Sha256Digest {
 /// Sample `(c, d, r)` from `context` and build the per-validator
 /// forwarder/receiver/injector wiring shared by [`run`] (safety) and
 /// [`run_liveness`] (liveness). The returned reporters are already running;
-/// `gate` controls whether forwarders + injector apply faults (safety mode
-/// constructs a gate that never reaches GST; liveness mode reaches GST after
-/// the fault phase).
+/// `gate` controls whether forwarders apply network partition faults (safety
+/// mode constructs a gate that never reaches GST; liveness mode reaches GST
+/// after the fault phase). Byzantine process faults are not gated by GST.
 async fn setup_engines<P: Simplex>(
     context: &mut deterministic::Context,
     input: &mut crate::FuzzInput,
     gate: FaultGate,
     log_label: &'static str,
-) -> Vec<ByzzReporter<P>>
+    mode: RunMode,
+) -> EngineSetup<P>
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
@@ -96,7 +109,8 @@ where
         input.required_containers.saturating_mul(multiplier)
     };
 
-    let r = context.gen_range(1..=r_bound.max(input.required_containers));
+    let r_max = r_bound.max(input.required_containers);
+    let r = context.gen_range(1..=r_max);
     let max_per_fault_type = (r / FAULT_INJECTION_RATIO).max(1);
     let mut c = context.gen_range(0..=max_per_fault_type);
     let mut d = context.gen_range(0..=max_per_fault_type);
@@ -116,6 +130,10 @@ where
         crate::setup_network::<P>(context, input).await;
 
     let proc_faults = byzz.process_faults(&participants, context);
+    let r_post_gst = match mode {
+        RunMode::Safety => None,
+        RunMode::Liveness => Some(context.gen_range(1..=r_max)),
+    };
 
     log::push(format!(
         "{log_label} schedule: byzantine_idx={} required_containers={} (c,d,r)={:?} network_faults={:?} proc_faults={:?}",
@@ -128,8 +146,9 @@ where
 
     let participants_arc: Arc<[PublicKeyOf<P>]> = Arc::from(participants.clone());
     let network_schedule = Arc::new(network_schedule_vec);
-    let proc_schedule_arc = Arc::new(proc_faults);
-    let empty_proc_schedule: Arc<Vec<ProcessFault<PublicKeyOf<P>>>> = Arc::new(Vec::new());
+    let proc_schedule_arc = Arc::new(Mutex::new(proc_faults));
+    let empty_proc_schedule: Arc<Mutex<Vec<ProcessFault<PublicKeyOf<P>>>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     // Intercept queue. Forwarders push (sync); injector consumes (async).
     let (intercept_tx, intercept_rx) = intercept::channel::<PublicKeyOf<P>>();
@@ -142,6 +161,7 @@ where
     let relay = Arc::new(relay::Relay::new());
     let mut reporters = Vec::new();
     let config = input.configuration;
+    let mut byzantine_view = None;
 
     // Cloned byzantine vote sender for the injector. Grabbed BEFORE
     // split_with so injector emissions bypass the forwarder. Cert and
@@ -161,6 +181,9 @@ where
         }
 
         let sender_view = intercept::SenderViewCell::new();
+        if i == BYZANTINE_IDX {
+            byzantine_view = Some(sender_view.clone());
+        }
 
         let proc_for_sender = if i == BYZANTINE_IDX {
             proc_schedule_arc.clone()
@@ -258,14 +281,19 @@ where
         injector_ctx,
         schemes[BYZANTINE_IDX].clone(),
         ByzzFuzzMutator::new(pool.clone()),
-        gate,
     );
     injector.start(
         injector_vote_sender.expect("byzantine vote sender cloned"),
         intercept_rx,
     );
 
-    reporters
+    EngineSetup {
+        reporters,
+        byzantine_view: byzantine_view.expect("byzantine sender view captured"),
+        proc_schedule: proc_schedule_arc,
+        participants,
+        post_gst_fault_views: r_post_gst,
+    }
 }
 
 /// Run the ByzzFuzz fuzzing method on `input` to check whether safety holds.
@@ -291,10 +319,12 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        // Safety mode: gate is constructed but never reaches GST. Forwarders /
-        // injector remain in fault-applying mode for the entire run.
+        // Safety mode: gate is constructed but never reaches GST, so
+        // partition faults remain active for the entire run.
         let gate = FaultGate::new();
-        let mut reporters = setup_engines::<P>(&mut context, &mut input, gate, "byzzfuzz").await;
+        let setup =
+            setup_engines::<P>(&mut context, &mut input, gate, "byzzfuzz", RunMode::Safety).await;
+        let mut reporters = setup.reporters;
         let config = input.configuration;
 
         // Wait only on correct reporters: BYZANTINE_IDX is intentionally
@@ -340,20 +370,36 @@ where
 }
 
 /// Run the ByzzFuzz fuzzing method on `input` to check whether liveness holds.
-/// Faults apply during Phase 1, then the shared fault gate reaches GST and
-/// Phase 2 requires each non-byzantine reporter to advance at least one
-/// finalized view inside the post-GST window. Failure to advance is a
-/// liveness violation (panics).
+/// Network partition faults apply during Phase 1, then the shared fault gate
+/// reaches GST and Phase 2 requires each non-byzantine reporter to advance at
+/// least one finalized view inside the post-GST window. Failure to advance is
+/// a liveness violation (panics). Byzantine process faults may still apply
+/// after GST: correct senders cannot omit messages, and the network cannot
+/// drop messages, but the Byzantine sender can still omit or mutate its own
+/// messages to correct recipients. `setup_engines` samples a second
+/// post-GST view budget, and at GST the runner appends explicit process
+/// faults for that many future Byzantine sender views so this path is not
+/// accidentally exhausted by Phase 1 progress.
 /// The byzantine identity (always at index 0) is excluded; only correct
 /// process liveness is checked.
 ///
-/// Faults must stop at the Phase 1/Phase 2 boundary so the post-GST protocol
-/// can run unperturbed. Otherwise, a stuck-round drop or mutation could become
-/// a false liveness failure.
+/// **Post-GST fault budget.** The initial process-fault schedule samples
+/// views from `[1, r]` at setup, before any view advances. By the time GST
+/// is reached, the Byzantine sender's `rnd(m)` has typically progressed past
+/// most of those views, so the matching predicate `f.view == sender.rnd(m)`
+/// stops firing and the Byzantine becomes silently well-behaved. To keep
+/// the model claim honest, at GST the runner records the Byzantine's
+/// current `rnd(m)` and appends one process fault per view in
+/// `[byzantine_rnd + 1, byzantine_rnd + r_post_gst]`. `r_post_gst` is sampled
+/// from the same range as the initial `r`. The schedule lives behind a
+/// `Mutex<Vec<_>>` so the runtime extension is visible to the Byzantine's
+/// outgoing forwarders.
+///
 /// ```text
 /// time
 ///   |------ Phase 1: fault phase -------|---- Phase 2: post-GST window -----|
-///   | network/process faults are active | faults are disabled               |
+///   | network partitions may drop msgs  | all network links deliver msgs    |
+///   | Byzantine process faults may run  | Byzantine process faults may run  |
 ///   |                                   |                                   |
 ///   | phase timer or early completion   | each correct reporter must        |
 ///   |                                   | finalize above its baseline       |
@@ -388,8 +434,22 @@ where
 
     executor.start(|mut context| async move {
         let gate = FaultGate::new();
-        let mut reporters =
-            setup_engines::<P>(&mut context, &mut input, gate.clone(), "byzzfuzz_liveness").await;
+        let setup =
+            setup_engines::<P>(
+                &mut context,
+                &mut input,
+                gate.clone(),
+                "byzzfuzz_liveness",
+                RunMode::Liveness,
+            )
+            .await;
+        let mut reporters = setup.reporters;
+        let byzantine_view = setup.byzantine_view;
+        let proc_schedule = setup.proc_schedule;
+        let participants = setup.participants;
+        let post_gst_fault_views = setup
+            .post_gst_fault_views
+            .expect("liveness mode samples post-GST fault views");
         let config = input.configuration;
         let n = config.n as usize;
         let required_containers = input.required_containers;
@@ -443,9 +503,32 @@ where
                 watcher_inputs.push((i, baseline, latest, monitor));
             }
 
-            // GST: disable faults. From this point on, forwarders
-            // pass messages through and the injector drops queued intercepts.
-            log::push("byzzfuzz_liveness: gst_reached".to_string());
+            // GST: disable partition drops. Append post-GST Byzantine
+            // process faults starting after the sender's current rnd(m) so
+            // Byzantine behavior does not disappear when the initial schedule
+            // was exhausted during Phase 1.
+            let byzantine_rnd = byzantine_view.get();
+            let highest_pre_gst_proc_fault = proc_schedule
+                .lock()
+                .iter()
+                .map(|f| f.view)
+                .max()
+                .unwrap_or(0);
+            let first_post_gst_view = byzantine_rnd.saturating_add(1).max(1);
+            let last_post_gst_view = first_post_gst_view
+                .saturating_add(post_gst_fault_views.saturating_sub(1));
+            let post_gst_faults = ByzzFuzz::post_gst_process_faults(
+                first_post_gst_view..=last_post_gst_view,
+                &participants,
+                &mut context,
+            );
+            {
+                let mut schedule = proc_schedule.lock();
+                schedule.extend(post_gst_faults.clone());
+            }
+            log::push(format!(
+                "byzzfuzz_liveness: gst_reached byzantine_rnd={byzantine_rnd} highest_pre_gst_proc_fault={highest_pre_gst_proc_fault} post_gst_fault_views={post_gst_fault_views} appended_post_gst_proc_faults={post_gst_faults:?}",
+            ));
             gate.reach_gst();
 
             // Phase 2 watchers: true means the reporter advanced strictly
@@ -487,7 +570,7 @@ where
                 );
             }
         }
-
+g
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
 

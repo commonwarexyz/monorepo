@@ -20,6 +20,19 @@ use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 use rand::{seq::SliceRandom, Rng};
 
+fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
+    participants.iter().skip(1).cloned().collect()
+}
+
+fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P> {
+    let nonempty_subsets = (1u32 << candidates.len()) - 1;
+    let mask = rng.gen_range(1..=nonempty_subsets);
+    (0..candidates.len())
+        .filter(|i| (mask >> i) & 1 == 1)
+        .map(|i| candidates[i].clone())
+        .collect()
+}
+
 /// `(c, d, r)`: process-fault rounds (`c`), network-fault
 /// rounds (`d`), and total round budget (`r`). `c` and `d` are independent;
 /// either set to 0 disables that fault type.
@@ -79,26 +92,45 @@ impl ByzzFuzz {
         if self.c == 0 || self.r == 0 {
             return Vec::new();
         }
-        let candidates: Vec<P> = participants.iter().skip(1).cloned().collect();
+        let candidates = receiver_candidates(participants);
         if candidates.is_empty() {
             return Vec::new();
         }
-        let nonempty_subsets = (1u32 << candidates.len()) - 1;
         (0..self.c)
             .map(|_| {
                 let view = rng.gen_range(1..=self.r);
-                let mask = rng.gen_range(1..=nonempty_subsets);
-                let receivers: Vec<P> = (0..candidates.len())
-                    .filter(|i| (mask >> i) & 1 == 1)
-                    .map(|i| candidates[i].clone())
-                    .collect();
                 let omit = rng.gen_bool(0.25);
                 ProcessFault {
                     view,
-                    receivers,
+                    receivers: sample_receivers(&candidates, rng),
                     omit,
                     scope: scope::sample(rng),
                 }
+            })
+            .collect()
+    }
+
+    /// Liveness-only post-GST process faults. The network is synchronous
+    /// after GST, but the byzantine sender may continue to omit or mutate
+    /// its own messages. The caller supplies concrete future `views`
+    /// derived from the byzantine sender's current `rnd(m)` at GST so the
+    /// post-GST schedule is not accidentally exhausted by Phase 1 progress.
+    pub fn post_gst_process_faults<P: PublicKey>(
+        views: impl IntoIterator<Item = u64>,
+        participants: &[P],
+        rng: &mut impl Rng,
+    ) -> Vec<ProcessFault<P>> {
+        let candidates = receiver_candidates(participants);
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        views
+            .into_iter()
+            .map(|view| ProcessFault {
+                view,
+                receivers: sample_receivers(&candidates, rng),
+                omit: rng.gen_bool(0.25),
+                scope: scope::FaultScope::Any,
             })
             .collect()
     }

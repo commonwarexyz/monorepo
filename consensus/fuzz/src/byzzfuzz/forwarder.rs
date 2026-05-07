@@ -33,6 +33,8 @@
 //! Honest senders pass an empty procFault schedule and a `None` intercept
 //! sender, degenerating the closure to partition-only filtering. Same closure
 //! type for all four senders -> no opaque-type mismatch in `runner::run`.
+//! Once GST is reached, partition drops are skipped, but process-fault
+//! interception for the Byzantine sender still applies.
 
 use crate::{
     byzzfuzz::{
@@ -58,7 +60,7 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_runtime::IoBuf;
-use commonware_utils::channel::mpsc::UnboundedSender;
+use commonware_utils::{channel::mpsc::UnboundedSender, sync::Mutex};
 use std::{fmt::Write as _, sync::Arc};
 
 // -----------------------------------------------------------------------------
@@ -197,7 +199,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
     network_schedule: Arc<Vec<NetworkFault>>,
-    proc_schedule: Arc<Vec<ProcessFault<S::PublicKey>>>,
+    proc_schedule: Arc<Mutex<Vec<ProcessFault<S::PublicKey>>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
@@ -234,43 +236,44 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
         };
         pool.observe_vote::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
-        // After GST, decode + observe + sender_view
-        // updates still happen (rnd(m) attribution stays accurate), but
-        // no faults are applied -- the message passes through.
-        if gate.gst_reached() {
-            return Some(recipients.clone());
-        }
         let kind = scope::vote_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
         let expanded = expand(recipients, &participants, sender_idx);
-        let kept = match filter_by_partition(
-            expanded.clone(),
-            &participants,
-            sender_idx,
-            &network_schedule,
-            view,
-        ) {
-            None => {
-                log::push(format!(
-                    "byzzfuzz: drop channel=Vote kind={:?} view={view} sender={sender_idx} recipients={:?} reason=partition",
-                    kind, idx_of(&expanded, &participants),
-                ));
-                return None;
+        let kept = if gate.gst_reached() {
+            expanded
+        } else {
+            match filter_by_partition(
+                expanded.clone(),
+                &participants,
+                sender_idx,
+                &network_schedule,
+                view,
+            ) {
+                None => {
+                    log::push(format!(
+                        "byzzfuzz: drop channel=Vote kind={:?} view={view} sender={sender_idx} recipients={:?} reason=partition",
+                        kind, idx_of(&expanded, &participants),
+                    ));
+                    return None;
+                }
+                Some(k) => k,
             }
-            Some(k) => k,
         };
         let kept = match intercept_tx.as_ref() {
-            Some(tx) => intercept_proc_fault_targets(
-                InterceptChannel::Vote,
-                sender_idx,
-                view,
-                message.as_ref(),
-                kept,
-                &proc_schedule,
-                tx,
-                &participants,
-                |s| s.matches_vote(kind),
-            ),
+            Some(tx) => {
+                let proc_schedule = proc_schedule.lock();
+                intercept_proc_fault_targets(
+                    InterceptChannel::Vote,
+                    sender_idx,
+                    view,
+                    message.as_ref(),
+                    kept,
+                    &proc_schedule,
+                    tx,
+                    &participants,
+                    |s| s.matches_vote(kind),
+                )
+            }
             None => kept,
         };
         if kept.is_empty() {
@@ -288,7 +291,7 @@ pub fn make_certificate<S: Scheme<Sha256Digest>>(
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
     network_schedule: Arc<Vec<NetworkFault>>,
-    proc_schedule: Arc<Vec<ProcessFault<S::PublicKey>>>,
+    proc_schedule: Arc<Mutex<Vec<ProcessFault<S::PublicKey>>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
@@ -329,40 +332,44 @@ where
         };
         pool.observe_certificate::<S, S::PublicKey>(&msg);
         sender_view.update(msg.view().get());
-        if gate.gst_reached() {
-            return Some(recipients.clone());
-        }
         let kind = scope::certificate_kind::<S, S::PublicKey>(&msg);
         let view = sender_view.get();
         let expanded = expand(recipients, &participants, sender_idx);
-        let kept = match filter_by_partition(
-            expanded.clone(),
-            &participants,
-            sender_idx,
-            &network_schedule,
-            view,
-        ) {
-            None => {
-                log::push(format!(
-                    "byzzfuzz: drop channel=Cert kind={:?} view={view} sender={sender_idx} recipients={:?} reason=partition",
-                    kind, idx_of(&expanded, &participants),
-                ));
-                return None;
+        let kept = if gate.gst_reached() {
+            expanded
+        } else {
+            match filter_by_partition(
+                expanded.clone(),
+                &participants,
+                sender_idx,
+                &network_schedule,
+                view,
+            ) {
+                None => {
+                    log::push(format!(
+                        "byzzfuzz: drop channel=Cert kind={:?} view={view} sender={sender_idx} recipients={:?} reason=partition",
+                        kind, idx_of(&expanded, &participants),
+                    ));
+                    return None;
+                }
+                Some(k) => k,
             }
-            Some(k) => k,
         };
         let kept = match intercept_tx.as_ref() {
-            Some(tx) => intercept_proc_fault_targets(
-                InterceptChannel::Cert,
-                sender_idx,
-                view,
-                message.as_ref(),
-                kept,
-                &proc_schedule,
-                tx,
-                &participants,
-                |s| s.matches_certificate(kind),
-            ),
+            Some(tx) => {
+                let proc_schedule = proc_schedule.lock();
+                intercept_proc_fault_targets(
+                    InterceptChannel::Cert,
+                    sender_idx,
+                    view,
+                    message.as_ref(),
+                    kept,
+                    &proc_schedule,
+                    tx,
+                    &participants,
+                    |s| s.matches_certificate(kind),
+                )
+            }
             None => kept,
         };
         if kept.is_empty() {
@@ -381,7 +388,7 @@ pub fn make_resolver<S: Scheme<Sha256Digest>>(
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
     network_schedule: Arc<Vec<NetworkFault>>,
-    proc_schedule: Arc<Vec<ProcessFault<S::PublicKey>>>,
+    proc_schedule: Arc<Mutex<Vec<ProcessFault<S::PublicKey>>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
@@ -402,39 +409,43 @@ where
         {
             sender_view.update(v);
         }
-        if gate.gst_reached() {
-            return Some(recipients.clone());
-        }
         let view = sender_view.get();
         let expanded = expand(recipients, &participants, sender_idx);
-        let kept = match filter_by_partition(
-            expanded.clone(),
-            &participants,
-            sender_idx,
-            &network_schedule,
-            view,
-        ) {
-            None => {
-                log::push(format!(
-                    "byzzfuzz: drop channel=Resolver view={view} sender={sender_idx} recipients={:?} reason=partition",
-                    idx_of(&expanded, &participants),
-                ));
-                return None;
+        let kept = if gate.gst_reached() {
+            expanded
+        } else {
+            match filter_by_partition(
+                expanded.clone(),
+                &participants,
+                sender_idx,
+                &network_schedule,
+                view,
+            ) {
+                None => {
+                    log::push(format!(
+                        "byzzfuzz: drop channel=Resolver view={view} sender={sender_idx} recipients={:?} reason=partition",
+                        idx_of(&expanded, &participants),
+                    ));
+                    return None;
+                }
+                Some(k) => k,
             }
-            Some(k) => k,
         };
         let kept = match intercept_tx.as_ref() {
-            Some(tx) => intercept_proc_fault_targets(
-                InterceptChannel::Resolver,
-                sender_idx,
-                view,
-                message.as_ref(),
-                kept,
-                &proc_schedule,
-                tx,
-                &participants,
-                FaultScope::matches_resolver,
-            ),
+            Some(tx) => {
+                let proc_schedule = proc_schedule.lock();
+                intercept_proc_fault_targets(
+                    InterceptChannel::Resolver,
+                    sender_idx,
+                    view,
+                    message.as_ref(),
+                    kept,
+                    &proc_schedule,
+                    tx,
+                    &participants,
+                    FaultScope::matches_resolver,
+                )
+            }
             None => kept,
         };
         if kept.is_empty() {

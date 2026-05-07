@@ -19,7 +19,7 @@
 
 use crate::{
     byzzfuzz::{
-        intercept::{FaultGate, Intercept, InterceptChannel},
+        intercept::{Intercept, InterceptChannel},
         log,
     },
     strategy::Strategy,
@@ -53,7 +53,6 @@ where
     context: E,
     scheme: S,
     strategy: Arc<St>,
-    gate: FaultGate,
 }
 
 impl<S, St, E> ByzzFuzzInjector<S, St, E>
@@ -62,12 +61,11 @@ where
     St: Strategy + 'static,
     E: Clock + Spawner + CryptoRngCore,
 {
-    pub fn new(context: E, scheme: S, strategy: St, gate: FaultGate) -> Self {
+    pub fn new(context: E, scheme: S, strategy: St) -> Self {
         Self {
             context,
             scheme,
             strategy: Arc::new(strategy),
-            gate,
         }
     }
 
@@ -94,32 +92,22 @@ where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
         // Destructure so `context` can be borrowed as `&mut Rng` independently
-        // of the immutable `scheme` / `strategy` / `gate` borrows that
-        // `handle_intercept` needs. Method calls on `&self` would borrow the
-        // whole struct and conflict with `&mut self.context`.
+        // of the immutable `scheme` / `strategy` borrows that `handle_intercept`
+        // needs. Method calls on `&self` would borrow the whole struct and
+        // conflict with `&mut self.context`.
         let Self {
             mut context,
             scheme,
             strategy,
-            gate,
         } = self;
         while let Some(item) = intercept_rx.recv().await {
-            Self::handle_intercept(
-                &scheme,
-                &strategy,
-                &gate,
-                &mut vote_sender,
-                item,
-                &mut context,
-            )
-            .await;
+            Self::handle_intercept(&scheme, &strategy, &mut vote_sender, item, &mut context).await;
         }
     }
 
     async fn handle_intercept<VS, R>(
         scheme: &S,
         strategy: &St,
-        gate: &FaultGate,
         vote_sender: &mut VS,
         item: Intercept<S::PublicKey>,
         rng: &mut R,
@@ -127,16 +115,6 @@ where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
         R: Rng,
     {
-        // After GST, drain any in-flight intercepts without emitting:
-        // liveness mode needs the post-GST protocol to run unperturbed
-        // even if pre-GST intercepts are still queued.
-        if gate.gst_reached() {
-            log::push(format!(
-                "byzzfuzz: drop intercept channel={:?} view={} reason=post_gst",
-                item.channel, item.view,
-            ));
-            return;
-        }
         // Cert and resolver process faults are omit-only: a single byzantine
         // node cannot forge a valid quorum certificate or a meaningful
         // recovery response, so byte mutation on those channels would be

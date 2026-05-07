@@ -66,10 +66,14 @@ pub struct Intercept<P: PublicKey> {
     pub targets: Vec<P>,
 }
 
-/// Shared per-run flag that switches off ByzzFuzz fault application
-/// once GST is reached. Liveness mode reaches GST after the fault
-/// window so post-GST progress can be measured; safety mode constructs
-/// one and never reaches GST (so the gate never triggers).
+/// Shared per-run flag that switches off network partition faults once
+/// GST is reached. Liveness mode reaches GST after the fault window so
+/// post-GST progress can be measured under a synchronous network; Byzantine
+/// process faults are not disabled by GST. After GST, correct senders cannot
+/// omit messages, and the network cannot drop messages, but the Byzantine
+/// sender can still omit or mutate its own messages to correct recipients.
+/// Safety mode constructs one and never reaches GST (so the gate never
+/// triggers).
 ///
 /// Cheap to clone (Arc).
 #[derive(Clone, Default)]
