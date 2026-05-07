@@ -106,7 +106,7 @@ where
                 debug!(
                     stage,
                     ?digest,
-                    reason = "failed to fetch block",
+                    reason = "block unavailable",
                     "skipping block wait"
                 );
             }
@@ -517,7 +517,7 @@ where
         // Otherwise, subscribe to marshal for block availability.
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::FetchByRound { round })
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
             .await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();

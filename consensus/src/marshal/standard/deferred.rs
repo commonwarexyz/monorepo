@@ -622,7 +622,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::FetchByRound { round })
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
             .await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
@@ -647,7 +647,7 @@ where
                     Err(_) => {
                         debug!(
                             ?digest,
-                            reason = "failed to fetch block for certification",
+                            reason = "block unavailable for certification",
                             "skipping certification"
                         );
                         return;

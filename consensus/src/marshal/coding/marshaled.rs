@@ -933,7 +933,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::CommitmentRequest::FetchByRound { round })
+            .subscribe_by_commitment(payload, core::CommitmentRequest::Wait)
             .await;
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
@@ -958,7 +958,7 @@ where
                     Err(_) => {
                         debug!(
                             ?payload,
-                            reason = "failed to fetch block for certification",
+                            reason = "block unavailable for certification",
                             "skipping certification"
                         );
                         return;
