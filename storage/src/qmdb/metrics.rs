@@ -1,8 +1,10 @@
 //! Shared metrics for QMDB variants.
 
-use crate::metrics::{duration_histogram, timer, Timed, Timer};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{
+        histogram::{duration_histogram, ScopedTimer, Timed},
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+    },
     Clock, Metrics as RuntimeMetrics,
 };
 use std::sync::Arc;
@@ -121,20 +123,20 @@ impl<E: RuntimeMetrics + Clock> OperationMetrics<E> {
 }
 
 impl<E: Clock> OperationMetrics<E> {
-    pub(crate) fn apply_batch_timer(&self) -> Timer<E> {
-        timer(&self.apply_batch_duration, &self.clock)
+    pub(crate) fn apply_batch_timer(&self) -> ScopedTimer<E> {
+        self.apply_batch_duration.scoped(&self.clock)
     }
 
-    pub(crate) fn commit_timer(&self) -> Timer<E> {
-        timer(&self.commit_duration, &self.clock)
+    pub(crate) fn commit_timer(&self) -> ScopedTimer<E> {
+        self.commit_duration.scoped(&self.clock)
     }
 
-    pub(crate) fn sync_timer(&self) -> Timer<E> {
-        timer(&self.sync_duration, &self.clock)
+    pub(crate) fn sync_timer(&self) -> ScopedTimer<E> {
+        self.sync_duration.scoped(&self.clock)
     }
 
-    pub(crate) fn prune_timer(&self) -> Timer<E> {
-        timer(&self.prune_duration, &self.clock)
+    pub(crate) fn prune_timer(&self) -> ScopedTimer<E> {
+        self.prune_duration.scoped(&self.clock)
     }
 }
 
@@ -183,12 +185,12 @@ impl<E: RuntimeMetrics + Clock> KeyReadMetrics<E> {
 }
 
 impl<E: Clock> KeyReadMetrics<E> {
-    pub(crate) fn get_timer(&self) -> Timer<E> {
-        timer(&self.get_duration, &self.clock)
+    pub(crate) fn get_timer(&self) -> ScopedTimer<E> {
+        self.get_duration.scoped(&self.clock)
     }
 
-    pub(crate) fn get_many_timer(&self) -> Timer<E> {
-        timer(&self.get_many_duration, &self.clock)
+    pub(crate) fn get_many_timer(&self) -> ScopedTimer<E> {
+        self.get_many_duration.scoped(&self.clock)
     }
 }
 
@@ -237,11 +239,11 @@ impl<E: RuntimeMetrics + Clock> LocationReadMetrics<E> {
 }
 
 impl<E: Clock> LocationReadMetrics<E> {
-    pub(crate) fn get_timer(&self) -> Timer<E> {
-        timer(&self.get_duration, &self.clock)
+    pub(crate) fn get_timer(&self) -> ScopedTimer<E> {
+        self.get_duration.scoped(&self.clock)
     }
 
-    pub(crate) fn get_many_timer(&self) -> Timer<E> {
-        timer(&self.get_many_duration, &self.clock)
+    pub(crate) fn get_many_timer(&self) -> ScopedTimer<E> {
+        self.get_many_duration.scoped(&self.clock)
     }
 }

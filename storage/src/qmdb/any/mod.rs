@@ -1241,12 +1241,15 @@ pub(crate) mod test {
     }
 
     // Runner macros - each receives common args followed by (label, type, family, config)
-    // from with_all_variants.
+    // from with_all_variants. Each variant constructs a fresh `deterministic::Runner` so
+    // the outer state machine of one variant never has to fit alongside the outer state
+    // machines of the others on the test thread stack.
     macro_rules! test_with_reopen {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
+        ($sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
-            Box::pin(async {
-                let ctx = $ctx.child($l);
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let ctx = context.child($l);
                 let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
@@ -1263,137 +1266,97 @@ pub(crate) mod test {
                     to_digest,
                 )
                 .await;
-            })
-            .await
+            });
         }};
     }
 
     macro_rules! test_with_make_value {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
+        ($sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
-            Box::pin(async {
-                let ctx = $ctx.child($l);
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let ctx = context.child($l);
                 let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;
-            })
-            .await
+            });
         }};
     }
 
     // Macro to run a test on all DB variants (MMR + MMB).
     macro_rules! for_all_variants {
-        ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
-            with_all_variants!(test_with_reopen!($ctx, $sfx, $f));
+        ($sfx:expr, with_reopen: $f:expr) => {{
+            with_all_variants!(test_with_reopen!($sfx, $f));
         }};
-        ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
-            with_all_variants!(test_with_make_value!($ctx, $sfx, $f));
+        ($sfx:expr, with_make_value: $f:expr) => {{
+            with_all_variants!(test_with_make_value!($sfx, $f));
         }};
     }
 
     // Macro to run a test on MMR-only DB variants (for tests that use mmr::Family-specific
     // features like Location::new or verify_proof).
     macro_rules! for_mmr_variants {
-        ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
-            with_mmr_variants!(test_with_reopen!($ctx, $sfx, $f));
+        ($sfx:expr, with_reopen: $f:expr) => {{
+            with_mmr_variants!(test_with_reopen!($sfx, $f));
         }};
-        ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
-            with_mmr_variants!(test_with_make_value!($ctx, $sfx, $f));
+        ($sfx:expr, with_make_value: $f:expr) => {{
+            with_mmr_variants!(test_with_make_value!($sfx, $f));
         }};
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_log_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "lr", with_reopen: test_any_db_log_replay);
-        });
+        for_all_variants!("lr", with_reopen: test_any_db_log_replay);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "baa", with_reopen: test_any_db_build_and_authenticate);
-        });
+        for_mmr_variants!("baa", with_reopen: test_any_db_build_and_authenticate);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "hpb", with_make_value: test_any_db_historical_proof_basic);
-        });
+        for_mmr_variants!("hpb", with_make_value: test_any_db_historical_proof_basic);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_invalid() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(
-                context,
-                "hpi",
-                with_make_value: test_any_db_historical_proof_invalid
-            );
-        });
+        for_mmr_variants!("hpi", with_make_value: test_any_db_historical_proof_invalid);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_edge_cases() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(
-                context,
-                "hpec",
-                with_make_value: test_any_db_historical_proof_edge_cases
-            );
-        });
+        for_mmr_variants!("hpec", with_make_value: test_any_db_historical_proof_edge_cases);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_multiple_commits_delete_replayed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(
-                context,
-                "mcdr",
-                with_reopen: test_any_db_multiple_commits_delete_replayed
-            );
-        });
+        for_all_variants!("mcdr", with_reopen: test_any_db_multiple_commits_delete_replayed);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_non_empty_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "ner", with_reopen: test_any_db_non_empty_recovery);
-        });
+        for_all_variants!("ner", with_reopen: test_any_db_non_empty_recovery);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_empty_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "er", with_reopen: test_any_db_empty_recovery);
-        });
+        for_all_variants!("er", with_reopen: test_any_db_empty_recovery);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_rewind_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "rr", with_reopen: test_any_db_rewind_recovery);
-        });
+        for_mmr_variants!("rr", with_reopen: test_any_db_rewind_recovery);
     }
 
     fn key(i: u64) -> Digest {

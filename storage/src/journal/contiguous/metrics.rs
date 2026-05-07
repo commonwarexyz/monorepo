@@ -1,8 +1,10 @@
 //! Metrics for contiguous journals.
 
-use crate::metrics::{duration_histogram, timer, Timed, Timer};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{
+        histogram::{duration_histogram, ScopedTimer, Timed},
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+    },
     Clock, Metrics as RuntimeMetrics,
 };
 use std::{ops::Deref, sync::Arc};
@@ -148,24 +150,24 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
 }
 
 impl<E: Clock> CommonMetrics<E> {
-    pub(super) fn append_timer(&self) -> Timer<E> {
-        timer(&self.append_duration, &self.clock)
+    pub(super) fn append_timer(&self) -> ScopedTimer<E> {
+        self.append_duration.scoped(&self.clock)
     }
 
-    pub(super) fn append_many_timer(&self) -> Timer<E> {
-        timer(&self.append_many_duration, &self.clock)
+    pub(super) fn append_many_timer(&self) -> ScopedTimer<E> {
+        self.append_many_duration.scoped(&self.clock)
     }
 
-    pub(super) fn read_timer(&self) -> Timer<E> {
-        timer(&self.read_duration, &self.clock)
+    pub(super) fn read_timer(&self) -> ScopedTimer<E> {
+        self.read_duration.scoped(&self.clock)
     }
 
-    pub(super) fn read_many_timer(&self) -> Timer<E> {
-        timer(&self.read_many_duration, &self.clock)
+    pub(super) fn read_many_timer(&self) -> ScopedTimer<E> {
+        self.read_many_duration.scoped(&self.clock)
     }
 
-    pub(super) fn sync_timer(&self) -> Timer<E> {
-        timer(&self.sync_duration, &self.clock)
+    pub(super) fn sync_timer(&self) -> ScopedTimer<E> {
+        self.sync_duration.scoped(&self.clock)
     }
 
     /// Update state gauges from current bounds.
@@ -256,8 +258,8 @@ impl<E: RuntimeMetrics + Clock> VariableMetrics<E> {
 }
 
 impl<E: Clock> VariableMetrics<E> {
-    pub(super) fn commit_timer(&self) -> Timer<E> {
-        timer(&self.commit.duration, &self.common.clock)
+    pub(super) fn commit_timer(&self) -> ScopedTimer<E> {
+        self.commit.duration.scoped(&self.common.clock)
     }
 
     pub(super) fn record_commit(&self) {

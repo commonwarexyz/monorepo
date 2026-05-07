@@ -13,7 +13,6 @@ use crate::{
         Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
-    metrics::{duration_histogram, timer, Timed, Timer},
     qmdb::{
         self,
         any::{
@@ -33,7 +32,10 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::{Sequential, Strategy};
-use commonware_runtime::telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _};
+use commonware_runtime::telemetry::metrics::{
+    histogram::{duration_histogram, ScopedTimer, Timed},
+    Counter, Gauge, GaugeExt as _, MetricsExt as _,
+};
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
@@ -104,16 +106,16 @@ impl<E: Context> Metrics<E> {
         }
     }
 
-    pub fn apply_batch_timer(&self) -> Timer<E> {
-        timer(&self.apply_batch_duration, &self.clock)
+    pub fn apply_batch_timer(&self) -> ScopedTimer<E> {
+        self.apply_batch_duration.scoped(&self.clock)
     }
 
-    pub fn sync_timer(&self) -> Timer<E> {
-        timer(&self.sync_duration, &self.clock)
+    pub fn sync_timer(&self) -> ScopedTimer<E> {
+        self.sync_duration.scoped(&self.clock)
     }
 
-    pub fn prune_timer(&self) -> Timer<E> {
-        timer(&self.prune_duration, &self.clock)
+    pub fn prune_timer(&self) -> ScopedTimer<E> {
+        self.prune_duration.scoped(&self.clock)
     }
 
     /// Update Current-specific state gauges.
