@@ -42,7 +42,7 @@ impl MessagePolicy for ListenableIps {
             *pending = message;
             Backpressure::Replaced
         } else {
-            Backpressure::queue(queue, message)
+            Backpressure::retain(queue, message)
         }
     }
 }

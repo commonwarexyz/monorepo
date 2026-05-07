@@ -60,6 +60,7 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
             .enqueue_content(recipients, self.channel, message, priority)
         {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),

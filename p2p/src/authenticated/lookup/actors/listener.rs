@@ -125,7 +125,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 async move {
                     if !matches!(
                         tracker.request_acceptable(peer, source_ip, mailbox),
-                        Enqueue::Queued | Enqueue::Replaced
+                        Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
                     ) {
                         return false;
                     }
@@ -153,7 +153,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         let (listen_mailbox, mut listen_receiver) = Mailbox::new(1);
         if !matches!(
             tracker.request_listen(peer.clone(), listen_mailbox),
-            Enqueue::Queued | Enqueue::Replaced
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
         ) {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
@@ -315,12 +315,12 @@ pub(crate) enum Message<C: commonware_cryptography::PublicKey> {
 impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
-            Self::Acceptable(acceptable) => Backpressure::replace_or_queue(actor::replace_last(
+            Self::Acceptable(acceptable) => Backpressure::replace_or_retain(actor::replace_last(
                 queue,
                 Self::Acceptable(acceptable),
                 |pending| matches!(pending, Self::Acceptable(_)),
             ), queue),
-            Self::Listen(reservation) => Backpressure::replace_or_queue(actor::replace_last(
+            Self::Listen(reservation) => Backpressure::replace_or_retain(actor::replace_last(
                 queue,
                 Self::Listen(reservation),
                 |pending| matches!(pending, Self::Listen(_)),

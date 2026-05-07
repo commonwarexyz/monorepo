@@ -189,10 +189,10 @@ impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
                     pending_targets.extend(targets);
                     Backpressure::Replaced
                 } else {
-                    Backpressure::queue(queue, Self::HintFinalized { height, targets })
+                    Backpressure::retain(queue, Self::HintFinalized { height, targets })
                 }
             }
-            message => Backpressure::queue(queue, message),
+            message => Backpressure::retain(queue, message),
         }
     }
 }
@@ -439,6 +439,7 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
         };
         match self.sender.enqueue(message) {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),

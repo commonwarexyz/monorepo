@@ -19,10 +19,10 @@ pub enum Message<C: PublicKey> {
 impl<C: PublicKey> MessagePolicy for Message<C> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
-            Self::BitVec(bit_vec) => Backpressure::replace_or_queue(actor::replace_last(queue, Self::BitVec(bit_vec), |pending| {
+            Self::BitVec(bit_vec) => Backpressure::replace_or_retain(actor::replace_last(queue, Self::BitVec(bit_vec), |pending| {
                 matches!(pending, Self::BitVec(_))
             }), queue),
-            Self::Peers(peers) => Backpressure::replace_or_queue(actor::replace_last(queue, Self::Peers(peers), |pending| {
+            Self::Peers(peers) => Backpressure::replace_or_retain(actor::replace_last(queue, Self::Peers(peers), |pending| {
                 matches!(pending, Self::Peers(_))
             }), queue),
             Self::Kill => {
@@ -30,7 +30,7 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
                     *pending = Self::Kill;
                     Backpressure::Replaced
                 } else {
-                    Backpressure::queue(queue, Self::Kill)
+                    Backpressure::retain(queue, Self::Kill)
                 }
             }
         }

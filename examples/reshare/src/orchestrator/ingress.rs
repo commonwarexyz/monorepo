@@ -29,7 +29,7 @@ impl<V: Variant, P: PublicKey> Message<V, P> {
 impl<V: Variant, P: PublicKey> MessagePolicy for Message<V, P> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         let epoch = message.epoch();
-        Backpressure::replace_or_queue(
+        Backpressure::replace_or_retain(
             actor::replace_last(queue, message, |pending| pending.epoch() == epoch),
             queue,
         )

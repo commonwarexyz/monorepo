@@ -48,7 +48,7 @@ fn certificate_key<S: Scheme, D: Digest>(
 
 impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_queue(match &message {
+        Backpressure::replace_or_retain(match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
                 actor::replace_last(queue, message, |pending| {
@@ -125,7 +125,7 @@ impl Handler {
 
 impl MessagePolicy for HandlerMessage {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_queue(match &message {
+        Backpressure::replace_or_retain(match &message {
             Self::Deliver { .. } => actor::replace_last(queue, message, |pending| {
                 matches!(pending, Self::Produce { .. })
             }),
@@ -150,7 +150,7 @@ impl Consumer for Handler {
             data: value,
             response,
         });
-        if !matches!(result, Enqueue::Queued | Enqueue::Replaced) {
+        if !matches!(result, Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced) {
             return false;
         }
         receiver.await.unwrap_or(false)
@@ -167,7 +167,7 @@ impl Producer for Handler {
             view: View::new(key.into()),
             response,
         });
-        if !matches!(result, Enqueue::Queued | Enqueue::Replaced) {
+        if !matches!(result, Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced) {
             return receiver;
         }
         receiver

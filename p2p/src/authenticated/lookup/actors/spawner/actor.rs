@@ -133,7 +133,7 @@ impl<
                                 // Register peer with the router (may fail during shutdown).
                                 if !matches!(
                                     router.ready(peer.clone(), messenger),
-                                    Enqueue::Queued | Enqueue::Replaced
+                                    Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
                                 ) {
                                     debug!(?peer, "router shut down during peer setup");
                                     return;

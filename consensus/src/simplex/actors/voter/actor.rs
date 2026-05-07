@@ -268,7 +268,7 @@ impl<
 
         // Broadcast vote
         match sender.send(Recipients::All, vote.clone(), true) {
-            Enqueue::Queued | Enqueue::Replaced => {}
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {}
             result => {
                 warn!(?result, "unable to enqueue p2p vote");
                 self.schedule_p2p_retry(Message::RetryVote(vote));
@@ -292,7 +292,7 @@ impl<
 
         // Broadcast certificate
         match sender.send(Recipients::All, certificate.clone(), true) {
-            Enqueue::Queued | Enqueue::Replaced => {}
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {}
             result => {
                 warn!(?result, "unable to enqueue p2p certificate");
                 self.schedule_p2p_retry(Message::RetryCertificate(certificate));

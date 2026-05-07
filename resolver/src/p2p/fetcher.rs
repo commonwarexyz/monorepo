@@ -280,7 +280,7 @@ where
                     payload: wire::Payload::Request(key.clone()),
                 };
                 match sender.send(Recipients::One(peer.clone()), message, self.priority_requests) {
-                    Enqueue::Queued | Enqueue::Replaced => {
+                    Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);

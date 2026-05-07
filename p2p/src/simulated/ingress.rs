@@ -98,7 +98,7 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 
 impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_queue(match message {
+        Backpressure::replace_or_retain(match message {
             Self::Track { id, peers } => actor::replace_last(
                 queue,
                 Self::Track { id, peers },
@@ -243,7 +243,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         let (result, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Blocked { result }) {
-            Enqueue::Queued | Enqueue::Replaced => {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
                 receiver.await.map_err(|_| Error::NetworkClosed)?
             }
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Err(Error::NetworkClosed),
@@ -269,7 +269,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             ingress_cap,
             result,
         }) {
-            Enqueue::Queued | Enqueue::Replaced => {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
                 receiver.await.map_err(|_| Error::NetworkClosed)
             }
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Err(Error::NetworkClosed),
@@ -306,7 +306,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             success_rate: config.success_rate,
             result,
         }) {
-            Enqueue::Queued | Enqueue::Replaced => {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
                 result_receiver.await.map_err(|_| Error::NetworkClosed)?
             }
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Err(Error::NetworkClosed),
@@ -328,7 +328,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             receiver,
             result,
         }) {
-            Enqueue::Queued | Enqueue::Replaced => {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
                 result_receiver.await.map_err(|_| Error::NetworkClosed)?
             }
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Err(Error::NetworkClosed),
@@ -339,6 +339,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     fn track(&self, id: u64, peers: TrackedPeers<P>) -> Enqueue<()> {
         match self.sender.enqueue(Message::Track { id, peers }) {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),
@@ -349,7 +350,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::PeerSet { id, response }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
@@ -358,7 +359,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     async fn subscribe(&self) -> PeerSetSubscription<P> {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { response }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
@@ -511,7 +512,7 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
             quota,
             result,
         }) {
-            Enqueue::Queued | Enqueue::Replaced => {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
                 receiver.await.map_err(|_| Error::NetworkClosed)?
             }
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Err(Error::NetworkClosed),
@@ -528,6 +529,7 @@ impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
             to: public_key,
         }) {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),

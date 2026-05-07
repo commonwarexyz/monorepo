@@ -19,9 +19,9 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Enqueue<T> {
     /// The message was accepted by the mailbox.
-    ///
-    /// This may exceed the configured capacity for messages that must be retained.
     Queued,
+    /// The message was retained behind the bounded ready queue.
+    Retained,
     /// The message replaced a stale queued message.
     Replaced,
     /// The message could not be accepted.
@@ -33,13 +33,14 @@ pub enum Enqueue<T> {
 impl<T> Enqueue<T> {
     /// Returns true if the message was accepted by the mailbox.
     pub const fn accepted(&self) -> bool {
-        matches!(self, Self::Queued | Self::Replaced)
+        matches!(self, Self::Queued | Self::Retained | Self::Replaced)
     }
 
     /// Map the payload returned with rejected or closed messages.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Enqueue<U> {
         match self {
             Self::Queued => Enqueue::Queued,
+            Self::Retained => Enqueue::Retained,
             Self::Replaced => Enqueue::Replaced,
             Self::Rejected(message) => Enqueue::Rejected(f(message)),
             Self::Closed(message) => Enqueue::Closed(f(message)),
@@ -56,6 +57,7 @@ impl<T> fmt::Debug for Enqueue<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Queued => f.write_str("Queued"),
+            Self::Retained => f.write_str("Retained"),
             Self::Replaced => f.write_str("Replaced"),
             Self::Rejected(_) => f.write_str("Rejected"),
             Self::Closed(_) => f.write_str("Closed"),
@@ -66,8 +68,8 @@ impl<T> fmt::Debug for Enqueue<T> {
 /// Result of applying backpressure to a full actor inbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backpressure<T> {
-    /// The incoming message was queued behind the bounded ready queue.
-    Queued,
+    /// The incoming message was retained behind the bounded ready queue.
+    Retained,
     /// The incoming message replaced stale overflow work.
     Replaced,
     /// Skip the incoming message.
@@ -75,17 +77,17 @@ pub enum Backpressure<T> {
 }
 
 impl<T> Backpressure<T> {
-    /// Queue `message` behind the bounded ready queue.
-    pub fn queue(queue: &mut VecDeque<T>, message: T) -> Self {
+    /// Retain `message` behind the bounded ready queue.
+    pub fn retain(queue: &mut VecDeque<T>, message: T) -> Self {
         queue.push_back(message);
-        Self::Queued
+        Self::Retained
     }
 
-    /// Queue the message if it could not replace existing work.
-    pub fn replace_or_queue(result: Result<(), T>, queue: &mut VecDeque<T>) -> Self {
+    /// Retain the message if it could not replace existing work.
+    pub fn replace_or_retain(result: Result<(), T>, queue: &mut VecDeque<T>) -> Self {
         match result {
             Ok(()) => Self::Replaced,
-            Err(message) => Self::queue(queue, message),
+            Err(message) => Self::retain(queue, message),
         }
     }
 
@@ -104,8 +106,8 @@ pub trait MessagePolicy: Sized {
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
     /// overflow retained behind the ready queue.
-    fn backpressure(_queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::queue(_queue, message)
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
     }
 }
 
@@ -227,12 +229,12 @@ impl<T: MessagePolicy> ActorMailbox<T> {
 
         let old_len = overflow.queue.len();
         match T::backpressure(&mut overflow.queue, message) {
-            Backpressure::Queued => {
+            Backpressure::Retained => {
                 self.sync_overflow_state(overflow.queue.len());
                 drop(overflow);
 
                 self.shared.receiver_waker.wake();
-                Enqueue::Queued
+                Enqueue::Retained
             }
             Backpressure::Replaced => {
                 let new_len = overflow.queue.len();
@@ -421,14 +423,14 @@ mod tests {
     impl MessagePolicy for Message {
         fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
             match message {
-                Self::Update(value) => Backpressure::replace_or_queue(
+                Self::Update(value) => Backpressure::replace_or_retain(
                     replace_last(queue, Self::Update(value), |pending| {
                         matches!(pending, Self::Update(_))
                     }),
                     queue,
                 ),
-                Self::Required(_) => Backpressure::queue(queue, message),
-                Self::Buffered(_) => Backpressure::queue(queue, message),
+                Self::Required(_) => Backpressure::retain(queue, message),
+                Self::Buffered(_) => Backpressure::retain(queue, message),
                 Self::Hint(value) => Backpressure::replace_or_skip(replace_last(
                     queue,
                     Self::Hint(value),
@@ -443,7 +445,7 @@ mod tests {
     async fn full_inbox_replaces_stale_overflow_message() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Update(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Retained);
         assert_eq!(sender.enqueue(Message::Update(3)), Enqueue::Replaced);
 
         assert_eq!(receiver.recv().await, Some(Message::Update(1)));
@@ -466,7 +468,7 @@ mod tests {
     async fn full_inbox_retains_required_message() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Enqueue::Retained);
         assert_eq!(sender.len(), 2);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
@@ -477,7 +479,7 @@ mod tests {
     fn try_recv_refills_from_overflow() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Enqueue::Retained);
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
@@ -487,7 +489,7 @@ mod tests {
     async fn full_inbox_retains_unmatched_replaceable_message() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Required(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Required(2)), Enqueue::Retained);
         assert_eq!(sender.len(), 2);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
@@ -499,7 +501,7 @@ mod tests {
         let (sender, mut receiver) = channel(2);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
         assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Update(3)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Update(3)), Enqueue::Retained);
         assert_eq!(sender.enqueue(Message::Update(4)), Enqueue::Replaced);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
@@ -511,8 +513,8 @@ mod tests {
     async fn mailbox_capacity_is_soft_limit_for_required_messages() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Required(2)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Required(3)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Required(2)), Enqueue::Retained);
+        assert_eq!(sender.enqueue(Message::Required(3)), Enqueue::Retained);
         assert_eq!(sender.len(), 3);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
@@ -536,7 +538,7 @@ mod tests {
     async fn full_inbox_can_replace_or_skip_by_message() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
-        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Retained);
         assert_eq!(sender.enqueue(Message::Hint(3)), Enqueue::Replaced);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));

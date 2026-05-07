@@ -121,7 +121,7 @@ impl<
         }
         self.awaiting_dialable = matches!(
             tracker.request_dialable(self.mailbox.clone()),
-            Enqueue::Queued | Enqueue::Replaced
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
         );
     }
 
@@ -137,7 +137,7 @@ impl<
         };
         self.awaiting_dial = matches!(
             tracker.request_dial(peer.clone(), self.mailbox.clone()),
-            Enqueue::Queued | Enqueue::Replaced
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
         );
         if !self.awaiting_dial {
             self.queue.push(peer);
@@ -294,7 +294,7 @@ pub(crate) enum Message<C: PublicKey> {
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_queue(match message {
+        Backpressure::replace_or_retain(match message {
             Self::Dialable(dialable) => actor::replace_last(
                 queue,
                 Self::Dialable(dialable),

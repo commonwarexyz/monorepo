@@ -51,7 +51,7 @@ where
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
             Self::Act { .. } => Backpressure::Skip(message),
-            Self::Finalized { .. } => Backpressure::queue(queue, message),
+            Self::Finalized { .. } => Backpressure::retain(queue, message),
         }
     }
 }

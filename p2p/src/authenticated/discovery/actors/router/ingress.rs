@@ -47,7 +47,7 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
-                Backpressure::replace_or_queue(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
+                Backpressure::replace_or_retain(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
@@ -56,14 +56,14 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
             }
             Self::Release { peer } => {
                 let key = peer.clone();
-                Backpressure::replace_or_queue(actor::replace_last(queue, Self::Release { peer }, |pending| {
+                Backpressure::replace_or_retain(actor::replace_last(queue, Self::Release { peer }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
                 }), queue)
             }
-            Self::Content { .. } => Backpressure::queue(queue, message),
+            Self::Content { .. } => Backpressure::retain(queue, message),
             Self::SubscribePeers { .. } => Backpressure::Skip(message),
         }
     }
@@ -121,7 +121,7 @@ impl<P: PublicKey> Messenger<P> {
                 priority,
                 success: Some(success),
             }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_default(),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_default(),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Vec::new(),
         }
     }
@@ -150,7 +150,7 @@ impl<P: PublicKey> Connected for Messenger<P> {
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::SubscribePeers { response }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),

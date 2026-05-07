@@ -364,7 +364,7 @@ impl<
 
         // Log result, but do not handle errors
         match result {
-            Enqueue::Queued | Enqueue::Replaced => trace!(?peer, ?id, "serve sent"),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => trace!(?peer, ?id, "serve sent"),
             result => warn!(?peer, ?id, ?result, "serve send failed"),
         };
     }

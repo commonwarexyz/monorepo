@@ -153,7 +153,7 @@ pub(crate) enum Message<C: PublicKey> {
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_queue(match message {
+        Backpressure::replace_or_retain(match message {
             Self::Register { index, peers } => actor::replace_last(
                 queue,
                 Self::Register { index, peers },
@@ -229,7 +229,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     pub async fn dialable(&self) -> Dialable<C> {
         let (responder, receiver) = oneshot::channel();
         match self.enqueue(Message::Dialable { responder }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_default(),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_default(),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => Dialable::default(),
         }
     }
@@ -243,7 +243,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
                 public_key,
                 reservation,
             }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
@@ -258,7 +258,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             source_ip,
             responder,
         }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or(false),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or(false),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => false,
         }
     }
@@ -272,7 +272,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
                 public_key,
                 reservation,
             }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
@@ -320,7 +320,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
             index: id,
             responder,
         }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
             Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
         }
     }
@@ -328,7 +328,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         let (responder, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { responder }) {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
@@ -350,6 +350,7 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
             peers: peers.into(),
         }) {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),
@@ -359,6 +360,7 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
     fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Enqueue<()> {
         match self.sender.enqueue(Message::Overwrite { peers }) {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),
@@ -372,6 +374,7 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
     fn block(&mut self, public_key: Self::PublicKey) -> Enqueue<()> {
         match self.sender.enqueue(Message::Block { public_key }) {
             Enqueue::Queued => Enqueue::Queued,
+            Enqueue::Retained => Enqueue::Retained,
             Enqueue::Replaced => Enqueue::Replaced,
             Enqueue::Rejected(_) => Enqueue::Rejected(()),
             Enqueue::Closed(_) => Enqueue::Closed(()),

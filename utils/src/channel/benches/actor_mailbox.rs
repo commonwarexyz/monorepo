@@ -38,8 +38,8 @@ impl MessagePolicy for Message {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
             Self::Reject(_) => Backpressure::Skip(message),
-            Self::Retain(_) => Backpressure::queue(queue, message),
-            Self::Replace(_) => Backpressure::replace_or_queue(
+            Self::Retain(_) => Backpressure::retain(queue, message),
+            Self::Replace(_) => Backpressure::replace_or_retain(
                 actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Replace(_))
                 }),
@@ -290,7 +290,7 @@ fn bench_full_queue(c: &mut Criterion) {
             || {
                 let (sender, receiver) = actor::channel::<Message>(1);
                 assert_eq!(sender.enqueue(Message::Reject(0)), Enqueue::Queued);
-                assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
+                assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Retained);
                 (sender, receiver)
             },
             |(sender, _receiver)| {
@@ -313,10 +313,10 @@ fn fill_replace_queue(
     for i in 0..capacity {
         assert_eq!(sender.enqueue(Message::Reject(i as u64)), Enqueue::Queued);
     }
-    assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Queued);
+    assert_eq!(sender.enqueue(Message::Replace(0)), Enqueue::Retained);
     if !newest {
         for i in 1..capacity {
-            assert_eq!(sender.enqueue(Message::Retain(i as u64)), Enqueue::Queued);
+            assert_eq!(sender.enqueue(Message::Retain(i as u64)), Enqueue::Retained);
         }
     }
     (sender, receiver)

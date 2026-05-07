@@ -856,7 +856,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
             .mailbox
             .enqueue(ingress::Message::SubscribeConnected { response })
         {
-            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
+            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }),
