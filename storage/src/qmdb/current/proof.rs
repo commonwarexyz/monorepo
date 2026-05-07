@@ -209,11 +209,7 @@ impl<F: Family> ProofPlan<F> {
     }
 
     fn prefix_raw_start(&self) -> usize {
-        prefix_raw_start_idx(
-            &self.layout.prefix,
-            self.start_chunk,
-            self.grafting.height,
-        )
+        prefix_raw_start_idx(&self.layout.prefix, self.start_chunk, self.grafting.height)
     }
 
     fn after_raw_end(&self) -> usize {
@@ -728,8 +724,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let std_hasher = qmdb::hasher::<H>();
         let bitmap = BitmapGrafting::new(status);
         let leaves = Location::try_from(storage.size().await)?;
-        let plan =
-            ProofPlan::from_inactivity_floor(leaves, range, inactivity_floor, bitmap.info)?;
+        let plan = ProofPlan::from_inactivity_floor(leaves, range, inactivity_floor, bitmap.info)?;
 
         let needs_grafted_peak_fold = plan.needs_grafted_peak_fold()?;
         let GraftedProofParts {
@@ -737,13 +732,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             unfolded_prefix_peaks,
             unfolded_suffix_peaks,
         } = if needs_grafted_peak_fold {
-            build_grafted_range_proof(
-                &std_hasher,
-                &bitmap,
-                storage,
-                &plan,
-            )
-            .await?
+            build_grafted_range_proof(&std_hasher, &bitmap, storage, &plan).await?
         } else {
             GraftedProofParts {
                 proof: merkle::verification::historical_range_proof(
@@ -979,13 +968,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                     .filter(|&idx| idx < chunks.len() as u64)
                     .map(|idx| chunks[idx as usize].as_ref())
             };
-            let Some(root) = reconstruct_grafted_root(
-                &verifier,
-                self,
-                &plan,
-                &collected,
-                get_chunk,
-            ) else {
+            let Some(root) =
+                reconstruct_grafted_root(&verifier, self, &plan, &collected, get_chunk)
+            else {
                 debug!("verification failed, could not reconstruct grafted root");
                 return false;
             };
