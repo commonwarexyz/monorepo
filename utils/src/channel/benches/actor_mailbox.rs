@@ -466,7 +466,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
                         });
                     }
                 });
-                black_box(sender.len());
+                black_box(sender);
             });
         },
     );

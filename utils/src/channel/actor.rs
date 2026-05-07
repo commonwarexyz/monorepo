@@ -78,11 +78,12 @@ struct State<T> {
     receiver_waker: Option<Waker>,
 }
 
-struct QueueMailbox<T> {
+/// Sender half of an actor mailbox.
+pub struct ActorMailbox<T: MessagePolicy> {
     state: Arc<Mutex<State<T>>>,
 }
 
-impl<T> Clone for QueueMailbox<T> {
+impl<T: MessagePolicy> Clone for ActorMailbox<T> {
     fn clone(&self) -> Self {
         self.state.lock().senders += 1;
         Self {
@@ -91,7 +92,7 @@ impl<T> Clone for QueueMailbox<T> {
     }
 }
 
-impl<T> Drop for QueueMailbox<T> {
+impl<T: MessagePolicy> Drop for ActorMailbox<T> {
     fn drop(&mut self) {
         let waker = {
             let mut state = self.state.lock();
@@ -110,8 +111,21 @@ impl<T> Drop for QueueMailbox<T> {
     }
 }
 
-impl<T: MessagePolicy> QueueMailbox<T> {
-    fn enqueue(&self, message: T) -> Enqueue<T> {
+impl<T: MessagePolicy> fmt::Debug for ActorMailbox<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.lock();
+        f.debug_struct("ActorMailbox")
+            .field("len", &state.queue.len())
+            .field("capacity", &state.capacity)
+            .field("closed", &state.closed)
+            .finish()
+    }
+}
+
+impl<T: MessagePolicy> ActorMailbox<T> {
+    /// Enqueue a message without waiting for inbox capacity.
+    #[must_use = "handle queue rejection/closure; required actor messages must not be silently dropped"]
+    pub fn enqueue(&self, message: T) -> Enqueue<T> {
         let mut state = self.state.lock();
         if state.closed {
             return Enqueue::Closed(message);
@@ -150,87 +164,9 @@ impl<T: MessagePolicy> QueueMailbox<T> {
         result
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.state.lock().queue.len()
-    }
-
-    fn capacity(&self) -> usize {
-        self.state.lock().capacity
-    }
-
-    fn is_closed(&self) -> bool {
-        self.state.lock().closed
-    }
-}
-
-/// Sender half of an actor mailbox.
-pub struct ActorMailbox<T: MessagePolicy> {
-    inner: ActorMailboxInner<T>,
-}
-
-enum ActorMailboxInner<T: MessagePolicy> {
-    Queue(QueueMailbox<T>),
-}
-
-impl<T: MessagePolicy> Clone for ActorMailbox<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl<T: MessagePolicy> fmt::Debug for ActorMailbox<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ActorMailbox")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
-    }
-}
-
-impl<T: MessagePolicy> Clone for ActorMailboxInner<T> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Queue(mailbox) => Self::Queue(mailbox.clone()),
-        }
-    }
-}
-
-impl<T: MessagePolicy> ActorMailbox<T> {
-    /// Enqueue a message without waiting for inbox capacity.
-    #[must_use = "handle queue rejection/closure; required actor messages must not be silently dropped"]
-    pub fn enqueue(&self, message: T) -> Enqueue<T> {
-        match &self.inner {
-            ActorMailboxInner::Queue(mailbox) => mailbox.enqueue(message),
-        }
-    }
-
-    /// Returns whether the receiver has been dropped.
-    pub fn is_closed(&self) -> bool {
-        match &self.inner {
-            ActorMailboxInner::Queue(mailbox) => mailbox.is_closed(),
-        }
-    }
-
-    /// Returns the number of queued messages when known.
-    pub fn len(&self) -> usize {
-        match &self.inner {
-            ActorMailboxInner::Queue(mailbox) => mailbox.len(),
-        }
-    }
-
-    /// Returns true if the inbox is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns the configured capacity threshold.
-    pub fn capacity(&self) -> usize {
-        match &self.inner {
-            ActorMailboxInner::Queue(mailbox) => mailbox.capacity(),
-        }
     }
 }
 
@@ -298,9 +234,7 @@ pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbo
     }));
     (
         ActorMailbox {
-            inner: ActorMailboxInner::Queue(QueueMailbox {
-                state: state.clone(),
-            }),
+            state: state.clone(),
         },
         ActorInbox { state },
     )
