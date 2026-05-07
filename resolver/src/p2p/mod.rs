@@ -42,7 +42,10 @@
 //! [`Resolver::fetch_with_retain_key`](crate::Resolver::fetch_with_retain_key) lets callers fetch
 //! one key while retaining the request under another key. This is useful when several local reasons
 //! can share the same peer-visible fetch. A fetch remains active while at least one attached retain
-//! key satisfies the latest [`Resolver::retain`](crate::Resolver::retain) predicate.
+//! key satisfies the latest [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch
+//! resolves, the request key and currently retained reasons are supplied to
+//! [`Consumer::deliver`](crate::Consumer::deliver). Ordinary fetches are retained by a
+//! marker rather than by cloning the request key into a second retain key.
 //!
 //! # Peer Selection
 //!
@@ -92,7 +95,7 @@ mod tests {
         mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::Resolver;
+    use crate::{Delivery, Resolver, RetentionKey};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -241,7 +244,7 @@ mod tests {
             Sender<PublicKey, deterministic::Context>,
             Receiver<PublicKey>,
         ),
-        consumer: impl crate::Consumer<Key = Key, Value = Bytes>,
+        consumer: impl crate::Consumer<Key = Key, RetainKey = Key, Value = Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
@@ -300,9 +303,15 @@ mod tests {
 
     impl crate::Consumer for BlockingConsumer {
         type Key = Key;
+        type RetainKey = Key;
         type Value = Bytes;
 
-        async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+        async fn deliver(
+            &mut self,
+            delivery: Delivery<Self::Key, Self::RetainKey>,
+            value: Self::Value,
+        ) -> bool {
+            let key = delivery.key;
             self.started.send_lossy(key.clone());
             let (gate, valid) = self
                 .gates
@@ -318,6 +327,35 @@ mod tests {
                 self.sender.send_lossy((key, value));
             }
             valid
+        }
+    }
+
+    type RecordedDelivery = (Delivery<Key, Key>, Bytes);
+
+    #[derive(Clone)]
+    struct RetainRecordingConsumer {
+        sender: mpsc::UnboundedSender<RecordedDelivery>,
+    }
+
+    impl RetainRecordingConsumer {
+        fn new() -> (Self, mpsc::UnboundedReceiver<RecordedDelivery>) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            (Self { sender }, receiver)
+        }
+    }
+
+    impl crate::Consumer for RetainRecordingConsumer {
+        type Key = Key;
+        type RetainKey = Key;
+        type Value = Bytes;
+
+        async fn deliver(
+            &mut self,
+            delivery: Delivery<Self::Key, Self::RetainKey>,
+            value: Self::Value,
+        ) -> bool {
+            self.sender.send_lossy((delivery, value));
+            true
         }
     }
 
@@ -1897,6 +1935,110 @@ mod tests {
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 5"));
+        });
+    }
+
+    #[test_traced]
+    fn test_deliver_receives_retain_keys() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let (cons1, mut cons_out1) = RetainRecordingConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let first_retain_key = Key(50);
+            let second_retain_key = Key(51);
+            mailbox1
+                .fetch_with_retain_key(key.clone(), second_retain_key.clone())
+                .await;
+            mailbox1
+                .fetch_with_retain_key(key.clone(), first_retain_key.clone())
+                .await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (delivery, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(delivery.key, key);
+            assert_eq!(
+                delivery.retainers,
+                vec![
+                    RetentionKey::Retain(first_retain_key),
+                    RetentionKey::Retain(second_retain_key),
+                ]
+            );
+            assert_eq!(value, Bytes::from("data for key 5"));
+        });
+    }
+
+    #[test_traced]
+    fn test_deliver_uses_request_retainer_marker() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let (cons1, mut cons_out1) = RetainRecordingConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone()).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (delivery, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(delivery.key, key);
+            assert_eq!(delivery.retainers, vec![RetentionKey::Request]);
             assert_eq!(value, Bytes::from("data for key 5"));
         });
     }

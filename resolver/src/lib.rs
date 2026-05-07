@@ -12,10 +12,30 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
+    /// A local reason retaining a fetch.
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum RetentionKey<R> {
+        /// The fetch is retained by the request key itself.
+        Request,
+        /// A separate local key that retained the fetch.
+        Retain(R),
+    }
+
+    /// A resolved fetch and the local reasons that kept it alive.
+    pub struct Delivery<K, R> {
+        /// The peer-visible request key.
+        pub key: K,
+        /// The local reasons currently retaining the fetch.
+        pub retainers: Vec<RetentionKey<R>>,
+    }
+
     /// Notified when data is available, and must validate it.
     pub trait Consumer: Clone + Send + 'static {
         /// Type used to uniquely identify data.
         type Key: Span;
+
+        /// Type used to retain or prune fetch requests.
+        type RetainKey: Clone + Send + 'static;
 
         /// Type of data to retrieve.
         type Value;
@@ -31,9 +51,13 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
+        ///
+        /// `delivery` contains the peer-visible request key and the currently retained
+        /// local reasons for the fetch. Ordinary fetches use [`RetentionKey::Request`],
+        /// avoiding a duplicate retain key when the request key itself retains the fetch.
         fn deliver(
             &mut self,
-            key: Self::Key,
+            delivery: Delivery<Self::Key, Self::RetainKey>,
             value: Self::Value,
         ) -> impl Future<Output = bool> + Send;
     }
@@ -44,6 +68,9 @@ commonware_macros::stability_scope!(BETA {
         type Key: Span;
 
         /// Type used to retain or prune fetch requests.
+        ///
+        /// Implementations that also own the [`Consumer`] should supply the retained keys to
+        /// [`Consumer::deliver`] when a fetch resolves.
         type RetainKey: Clone + Send + 'static;
 
         /// Type used to identify peers for targeted fetches.
@@ -54,8 +81,9 @@ commonware_macros::stability_scope!(BETA {
 
         /// Initiate a fetch request with a separate key used by [`retain`](Self::retain).
         ///
-        /// The resolver still fetches and delivers `key`. `retain_key` only controls
-        /// whether the request is retained by [`retain`](Self::retain). If multiple
+        /// The resolver still fetches and delivers `key`. `retain_key` controls
+        /// whether the request is retained by [`retain`](Self::retain) and is also
+        /// supplied to [`Consumer::deliver`] when the fetch resolves. If multiple
         /// retain keys are attached to the same fetch key, the fetch is retained as
         /// long as at least one retain key satisfies the predicate.
         ///

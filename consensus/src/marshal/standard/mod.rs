@@ -2186,9 +2186,12 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    key: handler::ResolverKey::request(handler::Request::Finalized {
-                        height: Height::new(5),
-                    }),
+                    delivery: commonware_resolver::Delivery {
+                        key: handler::ResolverKey::request(handler::Request::Finalized {
+                            height: Height::new(5),
+                        }),
+                        retainers: vec![commonware_resolver::RetentionKey::Request],
+                    },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -2200,9 +2203,12 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    key: handler::ResolverKey::request(handler::Request::Notarized {
-                        round: Round::new(Epoch::zero(), View::new(1)),
-                    }),
+                    delivery: commonware_resolver::Delivery {
+                        key: handler::ResolverKey::request(handler::Request::Notarized {
+                            round: Round::new(Epoch::zero(), View::new(1)),
+                        }),
+                        retainers: vec![commonware_resolver::RetentionKey::Request],
+                    },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })

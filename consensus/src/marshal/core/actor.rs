@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::Resolver;
+use commonware_resolver::{Delivery, Resolver, RetentionKey};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -195,6 +195,12 @@ type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
 type ResolverRequestFor<V> = ResolverKey<<V as Variant>::Commitment>;
 type ResolverRetainKeyFor<V> = ResolverRetainKey<<V as Variant>::Commitment>;
+
+struct ResolverDelivery<V: Variant> {
+    delivery: Delivery<ResolverRequestFor<V>, ResolverRetainKeyFor<V>>,
+    value: Bytes,
+    response: oneshot::Sender<bool>,
+}
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
@@ -801,15 +807,17 @@ where
                             produces.push((key, response));
                         }
                         handler::Message::Deliver {
-                            key,
+                            delivery,
                             value,
                             response,
                         } => {
                             needs_sync |= self
                                 .handle_deliver(
-                                    key,
-                                    value,
-                                    response,
+                                    ResolverDelivery {
+                                        delivery,
+                                        value,
+                                        response,
+                                    },
                                     &mut resolver,
                                     &mut delivers,
                                     &mut application,
@@ -1008,13 +1016,25 @@ where
     /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver(
         &mut self,
-        key: ResolverRequestFor<V>,
-        value: Bytes,
-        response: oneshot::Sender<bool>,
+        delivery: ResolverDelivery<V>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
+        let ResolverDelivery {
+            delivery,
+            value,
+            response,
+        } = delivery;
+        let key = delivery.key;
+        let retain_keys: Vec<_> = delivery
+            .retainers
+            .iter()
+            .filter_map(|key| match key {
+                RetentionKey::Request => None,
+                RetentionKey::Retain(key) => Some(*key),
+            })
+            .collect();
         match key {
             ResolverKey::Block {
                 commitment,
@@ -1086,6 +1106,7 @@ where
             ResolverKey::Request(Request::Block { commitment }) => {
                 debug!(
                     ?commitment,
+                    retain_keys = retain_keys.len(),
                     "ignoring block delivery without local fetch context"
                 );
                 response.send_lossy(false);
@@ -1163,9 +1184,35 @@ where
                     return false;
                 };
 
-                if notarization.round() != round
-                    || V::commitment(&block) != notarization.proposal.payload
-                {
+                let commitment = notarization.proposal.payload;
+                if notarization.round() != round || V::commitment(&block) != commitment {
+                    response.send_lossy(false);
+                    return false;
+                }
+
+                let has_unscoped_request = delivery.retainers.iter().any(|retainer| {
+                    matches!(retainer, RetentionKey::Request)
+                        && matches!(key, ResolverKey::Request(Request::Notarized { round: retained_round }) if retained_round == round)
+                });
+                let has_commitment_scope = retain_keys.iter().any(|retain_key| {
+                    matches!(
+                        retain_key,
+                        ResolverRetainKey::Block {
+                            context: BlockFetchContext::Finalized { round: retained_round },
+                            ..
+                        } if *retained_round == round
+                    )
+                });
+                let has_matching_commitment_scope = retain_keys.iter().any(|retain_key| {
+                    matches!(
+                        retain_key,
+                        ResolverRetainKey::Block {
+                            commitment: retained_commitment,
+                            context: BlockFetchContext::Finalized { round: retained_round },
+                        } if *retained_commitment == commitment && *retained_round == round
+                    )
+                });
+                if has_commitment_scope && !has_unscoped_request && !has_matching_commitment_scope {
                     response.send_lossy(false);
                     return false;
                 }

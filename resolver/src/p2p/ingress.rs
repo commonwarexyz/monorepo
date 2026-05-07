@@ -1,4 +1,4 @@
-use crate::Resolver;
+use crate::{Resolver, RetentionKey};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
@@ -12,8 +12,8 @@ type Predicate<R> = Box<dyn Fn(&R) -> bool + Send>;
 pub struct FetchRequest<K, P, R> {
     /// The key to fetch.
     pub key: K,
-    /// The key used to decide whether the fetch should be retained.
-    pub retain_key: R,
+    /// The reason used to decide whether the fetch should be retained.
+    pub retainer: RetentionKey<R>,
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
@@ -54,7 +54,7 @@ impl<K, P, R> Resolver for Mailbox<K, P, R>
 where
     K: Span,
     P: PublicKey,
-    R: Clone + From<K> + Send + 'static,
+    R: Clone + Send + 'static,
 {
     type Key = K;
     type RetainKey = R;
@@ -69,7 +69,7 @@ where
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
-                retain_key: R::from(key.clone()),
+                retainer: RetentionKey::Request,
                 key,
                 targets: None,
             }]))
@@ -83,7 +83,7 @@ where
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
                 key,
-                retain_key,
+                retainer: RetentionKey::Retain(retain_key),
                 targets: None,
             }]))
             .await;
@@ -100,7 +100,7 @@ where
             .send_lossy(Message::Fetch(
                 keys.into_iter()
                     .map(|key| FetchRequest {
-                        retain_key: R::from(key.clone()),
+                        retainer: RetentionKey::Request,
                         key,
                         targets: None,
                     })
@@ -115,7 +115,7 @@ where
     async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
-                retain_key: R::from(key.clone()),
+                retainer: RetentionKey::Request,
                 key,
                 targets: Some(targets),
             }]))
@@ -134,7 +134,7 @@ where
                 requests
                     .into_iter()
                     .map(|(key, targets)| FetchRequest {
-                        retain_key: R::from(key.clone()),
+                        retainer: RetentionKey::Request,
                         key,
                         targets: Some(targets),
                     })

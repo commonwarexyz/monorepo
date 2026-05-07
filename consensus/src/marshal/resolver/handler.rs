@@ -2,7 +2,7 @@ use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery};
 use commonware_utils::{
     channel::{mpsc, oneshot},
     Span,
@@ -23,8 +23,8 @@ const NOTARIZED_REQUEST: u8 = 2;
 pub enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
-        /// The key of the value being delivered.
-        key: ResolverKey<D>,
+        /// The resolved request and local retainers.
+        delivery: Delivery<ResolverKey<D>, ResolverRetainKey<D>>,
         /// The value being delivered.
         value: Bytes,
         /// A channel to send the result of the delivery (true for success).
@@ -57,14 +57,19 @@ impl<D: Digest> Handler<D> {
 
 impl<D: Digest> Consumer for Handler<D> {
     type Key = ResolverKey<D>;
+    type RetainKey = ResolverRetainKey<D>;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+    async fn deliver(
+        &mut self,
+        delivery: Delivery<Self::Key, Self::RetainKey>,
+        value: Self::Value,
+    ) -> bool {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
             .send(Message::Deliver {
-                key,
+                delivery,
                 value,
                 response,
             })

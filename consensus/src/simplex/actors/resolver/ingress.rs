@@ -1,7 +1,7 @@
 use crate::{simplex::types::Certificate, types::View};
 use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     sequence::U64,
@@ -67,13 +67,18 @@ impl Handler {
 
 impl Consumer for Handler {
     type Key = U64;
+    type RetainKey = U64;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+    async fn deliver(
+        &mut self,
+        delivery: Delivery<Self::Key, Self::RetainKey>,
+        value: Self::Value,
+    ) -> bool {
         self.sender
             .request_or(
                 |response| HandlerMessage::Deliver {
-                    view: View::new(key.into()),
+                    view: View::new(delivery.key.into()),
                     data: value,
                     response,
                 },

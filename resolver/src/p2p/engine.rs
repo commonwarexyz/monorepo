@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::Consumer;
+use crate::{Consumer, Delivery, RetentionKey};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -26,8 +26,7 @@ use commonware_utils::{
 use futures::future::{self, Either};
 use rand::Rng;
 use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
+    collections::{BTreeSet, HashMap, HashSet},
     marker::PhantomData,
 };
 use tracing::{debug, error, trace, warn};
@@ -47,7 +46,7 @@ pub struct Engine<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, Value = Bytes>,
+    Con: Consumer<Key = Key, RetainKey = RetainKey, Value = Bytes>,
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
@@ -77,8 +76,8 @@ pub struct Engine<
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
 
-    /// Retain keys that keep each fetch key alive.
-    retainers: HashMap<Key, HashSet<RetainKey>>,
+    /// Local reasons that keep each fetch key alive.
+    retainers: HashMap<Key, BTreeSet<RetentionKey<RetainKey>>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -102,14 +101,14 @@ impl<
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
-        Con: Consumer<Key = Key, Value = Bytes>,
+        Con: Consumer<Key = Key, RetainKey = RetainKey, Value = Bytes>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
         RetainKey,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR, RetainKey>
 where
-    RetainKey: Clone + Eq + Hash + Send + 'static,
+    RetainKey: Clone + From<Key> + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
@@ -235,7 +234,7 @@ where
                     Message::Fetch(requests) => {
                         for FetchRequest {
                             key,
-                            retain_key,
+                            retainer,
                             targets,
                         } in requests
                         {
@@ -246,7 +245,7 @@ where
                             self.retainers
                                 .entry(key.clone())
                                 .or_default()
-                                .insert(retain_key);
+                                .insert(retainer);
 
                             // Update targets
                             match targets {
@@ -285,9 +284,12 @@ where
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.retainers.retain(|_, retain_keys| {
-                            retain_keys.retain(|retain_key| predicate(retain_key));
-                            !retain_keys.is_empty()
+                        self.retainers.retain(|key, retainers| {
+                            retainers.retain(|retainer| match retainer {
+                                RetentionKey::Request => predicate(&RetainKey::from(key.clone())),
+                                RetentionKey::Retain(retain_key) => predicate(retain_key),
+                            });
+                            !retainers.is_empty()
                         });
                         let retained: HashSet<_> = self.retainers.keys().cloned().collect();
                         self.fetcher.retain(|key| retained.contains(key));
@@ -434,8 +436,17 @@ where
             return;
         };
 
+        let delivery = Delivery {
+            key: key.clone(),
+            retainers: self
+                .retainers
+                .get(&key)
+                .map(|retainers| retainers.iter().cloned().collect())
+                .unwrap_or_default(),
+        };
+
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(key, peer, response);
+        self.inflight.deliver(key, delivery, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
