@@ -5,7 +5,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, MailboxSender, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::actor::{self, ActorInbox};
 use rand::Rng;
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ pub fn init<E, C, B, D, S, R, P>(
     config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (
-    mpsc::Receiver<handler::Message<D>>,
+    ActorInbox<handler::Message<D>>,
     p2p::Mailbox<handler::Request<D>, P>,
 )
 where
@@ -64,7 +64,7 @@ where
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mpsc::channel(config.mailbox_size);
+    let (sender, receiver) = actor::channel(config.mailbox_size);
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context,

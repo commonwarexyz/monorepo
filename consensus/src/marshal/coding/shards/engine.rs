@@ -167,7 +167,11 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     bitmap::BitMap,
-    channel::{actor::Enqueue, fallible::OneshotExt, mpsc, oneshot},
+    channel::{
+        actor::{self, ActorInbox, Enqueue},
+        fallible::OneshotExt,
+        oneshot,
+    },
     ordered::{Quorum, Set},
 };
 use rand::Rng;
@@ -285,7 +289,7 @@ where
     context: ContextCell<E>,
 
     /// Receiver for incoming messages to the actor.
-    mailbox: mpsc::Receiver<Message<B, C, H, P>>,
+    mailbox: ActorInbox<Message<B, C, H, P>>,
 
     /// The scheme provider.
     scheme_provider: S,
@@ -370,7 +374,7 @@ where
     /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = actor::channel(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -419,15 +423,15 @@ where
             self.context.network_buffer_pool().clone(),
             sender,
         );
-        let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
-            WrappedBackgroundReceiver::new(
-                self.context.child("shard_ingress"),
-                receiver,
-                self.shard_codec_cfg.clone(),
-                self.blocker.clone(),
-                self.background_channel_capacity,
-                &self.strategy,
-            );
+        let (receiver_service, mut receiver) =
+            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>>::new(
+            self.context.child("shard_ingress"),
+            receiver,
+            self.shard_codec_cfg.clone(),
+            self.blocker.clone(),
+            self.background_channel_capacity,
+            &self.strategy,
+        );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
         let mut peer_set_subscription = self.peer_provider.subscribe().await;

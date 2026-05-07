@@ -69,10 +69,8 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub fn new(sender: impl Into<ActorMailbox<Message<S, D>>>) -> Self {
-        Self {
-            sender: sender.into(),
-        }
+    pub const fn new(sender: ActorMailbox<Message<S, D>>) -> Self {
+        Self { sender }
     }
 
     /// Send an update message.

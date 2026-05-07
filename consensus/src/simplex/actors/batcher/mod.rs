@@ -75,7 +75,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _};
     use commonware_utils::{
-        channel::{actor::Enqueue, mpsc},
+        channel::actor::{self, Enqueue},
         ordered::Set,
         sync::Mutex,
         NZUsize,
@@ -250,7 +250,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -421,7 +421,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to.
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -583,7 +583,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -732,7 +732,7 @@ mod tests {
 
             // Create voter mailbox
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -912,7 +912,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1152,7 +1152,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1379,7 +1379,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1557,7 +1557,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1785,7 +1785,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -1993,7 +1993,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2191,7 +2191,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2399,7 +2399,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2525,7 +2525,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2654,7 +2654,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -2843,7 +2843,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -2969,7 +2969,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3110,7 +3110,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3239,7 +3239,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3369,7 +3369,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3576,7 +3576,7 @@ mod tests {
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -3808,7 +3808,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle
@@ -4019,7 +4019,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+                actor::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) = oracle

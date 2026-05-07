@@ -37,7 +37,11 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{
+        actor::{self, ActorInbox},
+        fallible::OneshotExt,
+        oneshot,
+    },
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
@@ -218,7 +222,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, V>>,
+    mailbox: ActorInbox<Message<P::Scheme, V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -324,7 +328,7 @@ where
         let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = actor::channel(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -358,7 +362,7 @@ where
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
-        resolver: (mpsc::Receiver<handler::Message<V::Commitment>>, R),
+        resolver: (ActorInbox<handler::Message<V::Commitment>>, R),
     ) -> Handle<()>
     where
         R: Resolver<
@@ -375,7 +379,7 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
+        (mut resolver_rx, mut resolver): (ActorInbox<handler::Message<V::Commitment>>, R),
     ) where
         R: Resolver<
             Key = handler::Request<V::Commitment>,

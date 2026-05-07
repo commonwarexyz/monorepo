@@ -25,7 +25,9 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
-use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
+use commonware_p2p::{
+    utils::mux::Muxer, MailboxSender, Manager, Receiver, Recipients, Sender, TrackedPeers,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell,
@@ -33,7 +35,11 @@ use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };
-use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
+use commonware_utils::{
+    channel::actor::{self, ActorInbox},
+    ordered::Set,
+    Acknowledgement as _, N3f1, NZU32,
+};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
@@ -116,7 +122,7 @@ where
 {
     context: ContextCell<E>,
     manager: P,
-    mailbox: mpsc::Receiver<MailboxMessage<H, C, V>>,
+    mailbox: ActorInbox<MailboxMessage<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
@@ -142,7 +148,7 @@ where
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = actor::channel(config.mailbox_size);
 
         // Create metrics
         let successful_epochs = context.counter("successful_epochs", "successful epochs");
@@ -186,7 +192,7 @@ where
         share: Option<Share>,
         orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -206,7 +212,7 @@ where
         share: Option<Share>,
         mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         mut callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -303,10 +309,17 @@ where
                 share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
             };
-            orchestrator.enter(transition).await;
+            let result = orchestrator.enter(transition);
+            if !result.accepted() {
+                warn!(
+                    ?result,
+                    %epoch,
+                    "failed to enqueue epoch transition"
+                );
+            }
 
             // Register a channel for this round
-            let (mut round_sender, mut round_receiver) = dkg_mux
+            let (round_sender, mut round_receiver) = dkg_mux
                 .register(epoch.get())
                 .await
                 .expect("should be able to create channel");
@@ -381,15 +394,14 @@ where
 
                                             let payload =
                                                 Message::<V, C::PublicKey>::Ack(ack).encode();
-                                            if let Err(e) = round_sender
-                                                .send(
-                                                    Recipients::One(sender_pk.clone()),
-                                                    payload,
-                                                    true,
-                                                )
-                                                .await
-                                            {
-                                                warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                                            let result = MailboxSender::send(
+                                                &round_sender,
+                                                Recipients::One(sender_pk.clone()),
+                                                payload,
+                                                true,
+                                            );
+                                            if !result.accepted() {
+                                                warn!(?epoch, dealer = ?sender_pk, ?result, "failed to enqueue ack");
                                             }
                                         }
                                     }
@@ -469,7 +481,7 @@ where
                                     epoch,
                                     ds,
                                     player_state.as_mut(),
-                                    &mut round_sender,
+                                    &round_sender,
                                 )
                                 .await;
                             }
@@ -574,7 +586,10 @@ where
                         };
 
                         // Exit the engine for this epoch now that the boundary is finalized
-                        orchestrator.exit(epoch).await;
+                        let result = orchestrator.exit(epoch);
+                        if !result.accepted() {
+                            warn!(?result, %epoch, "failed to enqueue epoch exit");
+                        }
 
                         // If the update is stop, wait forever.
                         if let PostUpdate::Stop = callback.on_update(update).await {
@@ -594,13 +609,13 @@ where
         info!("exiting DKG actor");
     }
 
-    async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
+    async fn distribute_shares<S: MailboxSender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: Epoch,
         dealer_state: &mut Dealer<V, C>,
         mut player_state: Option<&mut Player<V, C>>,
-        sender: &mut S,
+        sender: &S,
     ) {
         for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
             // Handle self-dealing if we are both dealer and player
@@ -625,20 +640,11 @@ where
 
             // Send to remote player
             let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
-            match sender
-                .send(Recipients::One(player.clone()), payload, true)
-                .await
-            {
-                Ok(success) => {
-                    if success.is_empty() {
-                        debug!(?epoch, ?player, "failed to send share");
-                    } else {
-                        debug!(?epoch, ?player, "sent share");
-                    }
-                }
-                Err(e) => {
-                    warn!(?epoch, ?player, ?e, "error sending share");
-                }
+            let result = sender.send(Recipients::One(player.clone()), payload, true);
+            if result.accepted() {
+                debug!(?epoch, ?player, "enqueued share");
+            } else {
+                warn!(?epoch, ?player, ?result, "failed to enqueue share");
             }
         }
     }
@@ -659,7 +665,7 @@ mod tests {
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::{
-        channel::{actor::Enqueue, mpsc, ring},
+        channel::{actor::Enqueue, ring},
         N3f1, NZUsize, TryCollect, NZU32,
     };
     use core::marker::PhantomData;
@@ -782,7 +788,7 @@ mod tests {
                 },
             );
             let (sender, receiver) = inert_channel(&peer_config.participants);
-            let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(4);
+            let (orchestrator_sender, mut orchestrator_receiver) = actor::channel(4);
             actor.start(
                 None,
                 None,

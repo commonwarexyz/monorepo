@@ -2,7 +2,10 @@ use crate::Broadcaster;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
+use commonware_utils::channel::{
+    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    oneshot,
+};
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: PublicKey, M: Digestible> {
@@ -32,14 +35,28 @@ pub enum Message<P: PublicKey, M: Digestible> {
     },
 }
 
+impl<P: PublicKey, M: Digestible + Codec> MessagePolicy for Message<P, M> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Broadcast { .. } => "broadcast",
+            Self::Subscribe { .. } => "subscribe",
+            Self::Get { .. } => "get",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Retain
+    }
+}
+
 /// Ingress mailbox for [super::Engine].
 #[derive(Clone)]
 pub struct Mailbox<P: PublicKey, M: Digestible + Codec> {
-    sender: mpsc::Sender<Message<P, M>>,
+    sender: ActorMailbox<Message<P, M>>,
 }
 
 impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<P, M>>) -> Self {
+    pub(super) const fn new(sender: ActorMailbox<Message<P, M>>) -> Self {
         Self { sender }
     }
 
@@ -52,9 +69,9 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
     pub async fn subscribe(&self, digest: M::Digest) -> oneshot::Receiver<M> {
         let (responder, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Subscribe { digest, responder })
-            .await;
+        let _ = self
+            .sender
+            .enqueue(Message::Subscribe { digest, responder });
         receiver
     }
 
@@ -66,19 +83,24 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     ///
     /// If the engine has shut down, this is a no-op.
     pub async fn subscribe_prepared(&self, digest: M::Digest, responder: oneshot::Sender<M>) {
-        self.sender
-            .send_lossy(Message::Subscribe { digest, responder })
-            .await;
+        let _ = self
+            .sender
+            .enqueue(Message::Subscribe { digest, responder });
     }
 
     /// Get a message by digest.
     ///
     /// If the engine has shut down, returns `None`.
     pub async fn get(&self, digest: M::Digest) -> Option<M> {
-        self.sender
-            .request(|responder| Message::Get { digest, responder })
-            .await
-            .unwrap_or_default()
+        let (responder, receiver) = oneshot::channel();
+        if !self
+            .sender
+            .enqueue(Message::Get { digest, responder })
+            .accepted()
+        {
+            return None;
+        }
+        receiver.await.unwrap_or_default()
     }
 }
 
@@ -96,13 +118,13 @@ impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
         message: Self::Message,
     ) -> oneshot::Receiver<Self::Response> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Broadcast {
+        let _ = self
+            .sender
+            .enqueue(Message::Broadcast {
                 recipients,
                 message,
                 responder: sender,
-            })
-            .await;
+            });
         receiver
     }
 }

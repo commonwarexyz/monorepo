@@ -4,7 +4,10 @@ use commonware_consensus::{
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::{
+    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    oneshot,
+};
 
 pub enum Message<D: Digest> {
     Genesis {
@@ -19,14 +22,28 @@ pub enum Message<D: Digest> {
     },
 }
 
+impl<D: Digest> MessagePolicy for Message<D> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Genesis { .. } => "genesis",
+            Self::Propose { .. } => "propose",
+            Self::Verify { .. } => "verify",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Retain
+    }
+}
+
 /// Mailbox for the application.
 #[derive(Clone)]
 pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+    sender: ActorMailbox<Message<D>>,
 }
 
 impl<D: Digest> Mailbox<D> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub(super) const fn new(sender: ActorMailbox<Message<D>>) -> Self {
         Self { sender }
     }
 }
@@ -37,10 +54,12 @@ impl<D: Digest> Au for Mailbox<D> {
 
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
+        assert!(
+            self.sender
+                .enqueue(Message::Genesis { epoch, response })
+                .accepted(),
+            "Failed to enqueue genesis"
+        );
         receiver.await.expect("Failed to receive genesis")
     }
 
@@ -51,10 +70,12 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Propose { response })
-            .await
-            .expect("Failed to send propose");
+        assert!(
+            self.sender
+                .enqueue(Message::Propose { response })
+                .accepted(),
+            "Failed to enqueue propose"
+        );
         receiver
     }
 
@@ -68,10 +89,10 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Verify { response })
-            .await
-            .expect("Failed to send verify");
+        assert!(
+            self.sender.enqueue(Message::Verify { response }).accepted(),
+            "Failed to enqueue verify"
+        );
         receiver
     }
 }

@@ -33,7 +33,7 @@ use commonware_runtime::{
     Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
+use commonware_utils::{channel::actor::ActorInbox, union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
@@ -338,15 +338,15 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         broadcast: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         dkg: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<H::Digest>>,
+            ActorInbox<handler::Message<H::Digest>>,
             commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -381,15 +381,15 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         broadcast: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         dkg: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<H::Digest>>,
+            ActorInbox<handler::Message<H::Digest>>,
             commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,

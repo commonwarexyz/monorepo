@@ -9,14 +9,21 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedMailboxSender, WrappedReceiver},
+    Blocker, MailboxSender, Receiver, Recipients, Sender,
+};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{
+        actor::{self, ActorInbox, ActorMailbox},
+        fallible::OneshotExt,
+        oneshot,
+    },
     futures::Pool,
 };
 use std::collections::{HashMap, HashSet};
@@ -44,7 +51,8 @@ where
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: mpsc::Receiver<Message<P, Rq>>,
+    mailbox_sender: ActorMailbox<Message<P, Rq>>,
+    mailbox: ActorInbox<Message<P, Rq>>,
 
     // State
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
@@ -70,8 +78,8 @@ where
     /// Returns a tuple of the engine and the mailbox for sending messages.
     pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
-        let (tx, rx) = mpsc::channel(cfg.mailbox_size);
-        let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
+        let (tx, rx) = actor::channel(cfg.mailbox_size);
+        let mailbox: Mailbox<P, Rq> = Mailbox::new(tx.clone());
 
         // Create metrics
         let outstanding = context.gauge("outstanding", "outstanding commitments");
@@ -88,6 +96,7 @@ where
                 response_codec: cfg.response_codec,
                 monitor: cfg.monitor,
                 handler: cfg.handler,
+                mailbox_sender: tx,
                 mailbox: rx,
                 tracked: HashMap::new(),
                 outstanding,
@@ -104,7 +113,10 @@ where
     pub fn start(
         mut self,
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        responses: (
+            impl MailboxSender<PublicKey = P>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses))
     }
@@ -112,19 +124,24 @@ where
     async fn run(
         mut self,
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        responses: (
+            impl MailboxSender<PublicKey = P>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) {
         // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(
+        let (req_tx, mut req_rx) = wrap(
             self.request_codec,
             self.context.network_buffer_pool().clone(),
             requests.0,
             requests.1,
         );
-        let (mut res_tx, mut res_rx) = wrap(
-            self.response_codec,
+        let res_tx = WrappedMailboxSender::<_, Rs>::new(
             self.context.network_buffer_pool().clone(),
             responses.0,
+        );
+        let mut res_rx = WrappedReceiver::<_, Rs>::new(
+            self.response_codec,
             responses.1,
         );
 
@@ -145,23 +162,54 @@ where
                     } => {
                         // Track commitment (if not already tracked)
                         let commitment = request.commitment();
-                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                        self.tracked.entry(commitment).or_insert_with(|| {
                             self.outstanding.inc();
                             (HashSet::new(), HashSet::new())
                         });
 
-                        // Send the request to recipients
-                        match req_tx
-                            .send(recipients, request, self.priority_request)
-                            .await
-                        {
+                        let mut sender = req_tx.clone();
+                        let mailbox = self.mailbox_sender.clone();
+                        let priority = self.priority_request;
+                        self.context.child("request_send").spawn(move |_| async move {
+                            let result = sender
+                                .send(recipients, request, priority)
+                                .await
+                                .map_err(|err| Error::SendFailed(err.into()));
+                            let result = mailbox.enqueue(Message::Sent {
+                                commitment,
+                                responder,
+                                result,
+                            });
+                            if !result.accepted() {
+                                error!(?result, "failed to enqueue send result");
+                            }
+                        });
+                    }
+                    Message::Sent {
+                        commitment,
+                        responder,
+                        result,
+                    } => {
+                        match result {
                             Ok(recipients) => {
-                                entry.0.extend(recipients.iter().cloned());
+                                if let Some(entry) = self.tracked.get_mut(&commitment) {
+                                    entry.0.extend(recipients.iter().cloned());
+                                }
                                 responder.send_lossy(Ok(recipients));
                             }
                             Err(err) => {
                                 error!(?err, ?commitment, "failed to send message");
-                                responder.send_lossy(Err(Error::SendFailed(err.into())));
+                                if self
+                                    .tracked
+                                    .get(&commitment)
+                                    .is_some_and(|(sent, received)| {
+                                        sent.is_empty() && received.is_empty()
+                                    })
+                                {
+                                    self.tracked.remove(&commitment);
+                                    let _ = self.outstanding.try_set(self.tracked.len());
+                                }
+                                responder.send_lossy(Err(err));
                             }
                         }
                     }
@@ -179,9 +227,10 @@ where
                 self.responses.inc();
 
                 // Send the response
-                let _ = res_tx
-                    .send(Recipients::One(peer), reply, self.priority_response)
-                    .await;
+                let result = res_tx.send(Recipients::One(peer), reply, self.priority_response);
+                if !result.accepted() {
+                    error!(?result, "failed to enqueue response");
+                }
             },
 
             // Request from an originator

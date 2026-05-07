@@ -121,7 +121,7 @@ fn is_mpsc_endpoint(cx: &LateContext<'_>, qpath: &QPath<'_>, hir_id: HirId) -> b
 }
 
 fn is_mpsc_path(path: &str) -> bool {
-    path.contains("tokio::sync::mpsc")
+    path.contains("tokio::sync::mpsc") || path.contains("commonware_utils::channel::mpsc")
 }
 
 fn resolved_path(cx: &LateContext<'_>, qpath: &QPath<'_>, hir_id: HirId) -> Option<String> {

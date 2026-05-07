@@ -26,8 +26,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    utils::codec::{WrappedMailboxSender, WrappedReceiver},
+    MailboxSender, Receiver, Recipients,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -260,11 +260,11 @@ impl<
     pub fn start(
         mut self,
         chunk_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         ack_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -275,20 +275,22 @@ impl<
     async fn run(
         mut self,
         chunk_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         ack_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
-        let mut node_sender = chunk_network.0;
+        let node_sender = chunk_network.0;
         let mut node_receiver = chunk_network.1;
-        let (mut ack_sender, mut ack_receiver) = wrap(
-            (),
+        let ack_sender = WrappedMailboxSender::<_, Ack<C::PublicKey, P::Scheme, D>>::new(
             self.context.network_buffer_pool().clone(),
             ack_network.0,
+        );
+        let mut ack_receiver = WrappedReceiver::<_, Ack<C::PublicKey, P::Scheme, D>>::new(
+            (),
             ack_network.1,
         );
 
@@ -303,7 +305,7 @@ impl<
         // and attempt to rebroadcast if necessary.
         if let Some(ref signer) = self.sequencer_signer {
             self.journal_prepare(&signer.public_key()).await;
-            if let Err(err) = self.rebroadcast(&mut node_sender).await {
+            if let Err(err) = self.rebroadcast(&node_sender).await {
                 // Rebroadcasting may return a non-critical error, so log the error and continue.
                 info!(?err, "initial rebroadcast failed");
             }
@@ -351,7 +353,7 @@ impl<
             _ = rebroadcast => {
                 if let Some(ref signer) = self.sequencer_signer {
                     debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
-                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                    if let Err(err) = self.rebroadcast(&node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
                     }
@@ -372,7 +374,7 @@ impl<
 
                 // Propose the chunk
                 if let Err(err) = self
-                    .propose(context.clone(), payload, &mut node_sender)
+                    .propose(context.clone(), payload, &node_sender)
                     .await
                 {
                     warn!(?err, ?context, "propose new failed");
@@ -485,7 +487,7 @@ impl<
                         debug!(?context, "verified");
                         self.metrics.verify.inc(Status::Success);
                         if let Err(err) = self
-                            .handle_app_verified(&context, &payload, &mut ack_sender)
+                            .handle_app_verified(&context, &payload, &ack_sender)
                             .await
                         {
                             debug!(?err, ?context, ?payload, "verified handle failed");
@@ -514,8 +516,8 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<
-            impl Sender<PublicKey = C::PublicKey>,
+        ack_sender: &WrappedMailboxSender<
+            impl MailboxSender<PublicKey = C::PublicKey>,
             Ack<C::PublicKey, P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -570,10 +572,11 @@ impl<
         self.handle_ack(&ack).await?;
 
         // Send the ack to the network
-        ack_sender
-            .send(Recipients::Some(recipients), ack, self.priority_acks)
-            .await
-            .map_err(|_| Error::UnableToSendMessage)?;
+        let result = ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
+        if !result.accepted() {
+            warn!(?result, "failed to enqueue ack");
+            return Err(Error::UnableToSendMessage);
+        }
 
         Ok(())
     }
@@ -721,7 +724,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let signer = self
@@ -794,7 +797,7 @@ impl<
     /// - this instance has not yet collected the certificate for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -839,7 +842,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
-        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
@@ -852,14 +855,15 @@ impl<
         self.relay.broadcast(node.chunk.payload, ()).await;
 
         // Send the node to all validators
-        node_sender
-            .send(
-                Recipients::Some(validators.iter().cloned().collect()),
-                node.encode(),
-                self.priority_proposals,
-            )
-            .await
-            .map_err(|_| Error::BroadcastFailed)?;
+        let result = node_sender.send(
+            Recipients::Some(validators.iter().cloned().collect()),
+            node.encode(),
+            self.priority_proposals,
+        );
+        if !result.accepted() {
+            warn!(?result, "failed to enqueue node");
+            return Err(Error::BroadcastFailed);
+        }
 
         // Set the rebroadcast deadline
         self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);

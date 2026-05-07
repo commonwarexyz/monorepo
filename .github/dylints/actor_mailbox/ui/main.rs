@@ -25,6 +25,22 @@ mod tokio {
     }
 }
 
+mod commonware_utils {
+    pub mod channel {
+        pub mod mpsc {
+            pub struct Sender<T>(core::marker::PhantomData<T>);
+            pub struct Receiver<T>(core::marker::PhantomData<T>);
+
+            pub fn channel<T>(_: usize) -> (Sender<T>, Receiver<T>) {
+                (
+                    Sender(core::marker::PhantomData),
+                    Receiver(core::marker::PhantomData),
+                )
+            }
+        }
+    }
+}
+
 mod system {
     pub mod actors {
         pub mod router {
@@ -56,6 +72,18 @@ mod system {
         struct Bad {
             sender: mpsc::UnboundedSender<u8>,
             receiver: mpsc::UnboundedReceiver<u8>,
+        }
+    }
+
+    pub mod actor {
+        use crate::commonware_utils::channel::mpsc;
+
+        struct Bad {
+            sender: mpsc::Sender<u8>,
+        }
+
+        fn bad() {
+            let _ = mpsc::channel::<u8>(1);
         }
     }
 }

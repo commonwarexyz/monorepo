@@ -12,11 +12,12 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     channel::{
-        actor::{Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, Enqueue, FullPolicy, MessagePolicy},
         oneshot, ring,
     },
     NZUsize,
 };
+use std::collections::VecDeque;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]
@@ -52,7 +53,35 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
     }
 
     fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
+        match self {
+            Self::Ready { .. } | Self::Release { .. } => FullPolicy::Replace,
+            Self::Content { .. } => FullPolicy::Retain,
+            Self::SubscribePeers { .. } => FullPolicy::Reject,
+        }
+    }
+
+    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        match message {
+            Self::Ready { peer, relay } => {
+                let key = peer.clone();
+                actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
+                    matches!(
+                        pending,
+                        Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
+                    )
+                })
+            }
+            Self::Release { peer } => {
+                let key = peer.clone();
+                actor::replace_last(queue, Self::Release { peer }, |pending| {
+                    matches!(
+                        pending,
+                        Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
+                    )
+                })
+            }
+            message => Err(message),
+        }
     }
 }
 

@@ -33,7 +33,7 @@ use commonware_runtime::{
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorInbox, Enqueue},
+        actor::{self, ActorInbox, ActorMailbox, Enqueue},
         oneshot,
     },
     futures::AbortablePool,
@@ -48,6 +48,7 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
+    time::Duration,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -124,6 +125,8 @@ pub struct Actor<
     journal: Option<Journal<E, Artifact<S, D>>>,
 
     mailbox_receiver: ActorInbox<Message<S, D>>,
+    mailbox_sender: ActorMailbox<Message<S, D>>,
+    p2p_retry: Duration,
 
     outbound_messages: CounterFamily<Outbound>,
     notarization_latency: Histogram,
@@ -156,7 +159,7 @@ impl<
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = actor::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(mailbox_sender);
+        let mailbox = Mailbox::new(mailbox_sender.clone());
         let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(
             context.child("state"),
@@ -187,6 +190,8 @@ impl<
                 journal: None,
 
                 mailbox_receiver,
+                mailbox_sender,
+                p2p_retry: cfg.timeout_retry,
 
                 outbound_messages,
                 notarization_latency,
@@ -262,9 +267,12 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast vote
-        match sender.send(Recipients::All, vote, true) {
+        match sender.send(Recipients::All, vote.clone(), true) {
             Enqueue::Queued | Enqueue::Replaced => {}
-            result => warn!(?result, "unable to enqueue p2p vote"),
+            result => {
+                warn!(?result, "unable to enqueue p2p vote");
+                self.schedule_p2p_retry(Message::RetryVote(vote));
+            }
         }
     }
 
@@ -283,10 +291,25 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast certificate
-        match sender.send(Recipients::All, certificate, true) {
+        match sender.send(Recipients::All, certificate.clone(), true) {
             Enqueue::Queued | Enqueue::Replaced => {}
-            result => warn!(?result, "unable to enqueue p2p certificate"),
+            result => {
+                warn!(?result, "unable to enqueue p2p certificate");
+                self.schedule_p2p_retry(Message::RetryCertificate(certificate));
+            }
         }
+    }
+
+    fn schedule_p2p_retry(&mut self, message: Message<S, D>) {
+        let sender = self.mailbox_sender.clone();
+        let delay = self.p2p_retry;
+        self.context.child("p2p_retry").spawn(move |context| async move {
+            context.sleep(delay).await;
+            let result = sender.enqueue(message);
+            if !result.accepted() {
+                warn!(?result, "unable to enqueue p2p retry");
+            }
+        });
     }
 
     /// Blocks an equivocator.
@@ -1025,6 +1048,14 @@ impl<
                             debug!(%target_view, ?reason, "timing out view");
                             self.state.trigger_timeout(target_view, reason);
                         }
+                    }
+                    Message::RetryVote(vote) => {
+                        self.broadcast_vote(&vote_sender, vote);
+                        continue;
+                    }
+                    Message::RetryCertificate(certificate) => {
+                        self.broadcast_certificate(&certificate_sender, certificate);
+                        continue;
                     }
                 }
             },

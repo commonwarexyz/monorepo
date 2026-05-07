@@ -7,7 +7,10 @@ use crate::{
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
+use commonware_utils::channel::{
+    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    oneshot,
+};
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -88,6 +91,31 @@ where
     },
 }
 
+impl<B, C, H, P> MessagePolicy for Message<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Proposed { .. } => "proposed",
+            Self::Discovered { .. } => "discovered",
+            Self::GetByCommitment { .. } => "get_by_commitment",
+            Self::GetByDigest { .. } => "get_by_digest",
+            Self::SubscribeAssignedShardVerified { .. } => "subscribe_assigned_shard_verified",
+            Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
+            Self::SubscribeByDigest { .. } => "subscribe_by_digest",
+            Self::Prune { .. } => "prune",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Retain
+    }
+}
+
 /// A mailbox for sending messages to the [`Engine`].
 ///
 /// [`Engine`]: super::Engine
@@ -99,7 +127,7 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    pub(super) sender: mpsc::Sender<Message<B, C, H, P>>,
+    pub(super) sender: ActorMailbox<Message<B, C, H, P>>,
 }
 
 impl<B, C, H, P> Mailbox<B, C, H, P>
@@ -110,14 +138,25 @@ where
     P: PublicKey,
 {
     /// Create a new [`Mailbox`] with the given sender.
-    pub const fn new(sender: mpsc::Sender<Message<B, C, H, P>>) -> Self {
+    pub const fn new(sender: ActorMailbox<Message<B, C, H, P>>) -> Self {
         Self { sender }
+    }
+
+    async fn request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Message<B, C, H, P>,
+    ) -> Option<T> {
+        let (response, receiver) = oneshot::channel();
+        if !self.sender.enqueue(make(response)).accepted() {
+            return None;
+        }
+        receiver.await.ok()
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
         let msg = Message::Proposed { block, round };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
@@ -127,13 +166,12 @@ where
             leader,
             round,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
     }
 
     /// Request a reconstructed block by its [`Commitment`].
     pub async fn get(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
-        self.sender
-            .request(|tx| Message::GetByCommitment {
+        self.request(|tx| Message::GetByCommitment {
                 commitment,
                 response: tx,
             })
@@ -143,8 +181,7 @@ where
 
     /// Request a reconstructed block by its digest.
     pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
-        self.sender
-            .request(|tx| Message::GetByDigest {
+        self.request(|tx| Message::GetByDigest {
                 digest,
                 response: tx,
             })
@@ -171,7 +208,7 @@ where
             commitment,
             response: responder,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
         receiver
     }
 
@@ -185,7 +222,7 @@ where
             commitment,
             response: responder,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
         receiver
     }
 
@@ -199,13 +236,13 @@ where
             digest,
             response: responder,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
         receiver
     }
 
     /// Request to prune all caches at and below the given commitment.
     pub async fn prune(&self, through: Commitment) {
         let msg = Message::Prune { through };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
     }
 }

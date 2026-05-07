@@ -98,10 +98,8 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub fn new(sender: impl Into<ActorMailbox<MailboxMessage<S, D>>>) -> Self {
-        Self {
-            sender: sender.into(),
-        }
+    pub const fn new(sender: ActorMailbox<MailboxMessage<S, D>>) -> Self {
+        Self { sender }
     }
 
     /// Send a certificate.
@@ -137,10 +135,8 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub fn new(sender: impl Into<ActorMailbox<HandlerMessage>>) -> Self {
-        Self {
-            sender: sender.into(),
-        }
+    pub const fn new(sender: ActorMailbox<HandlerMessage>) -> Self {
+        Self { sender }
     }
 }
 

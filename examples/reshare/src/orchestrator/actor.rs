@@ -26,7 +26,11 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{
+    channel::actor::{self, ActorInbox},
+    vec::NonEmptyVec,
+    NZUsize, NZU16,
+};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
@@ -74,7 +78,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
+    mailbox: ActorInbox<Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -109,7 +113,7 @@ where
         context: E,
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = actor::channel(config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration

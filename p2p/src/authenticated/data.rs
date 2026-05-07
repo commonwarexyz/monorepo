@@ -59,7 +59,7 @@ impl MessagePolicy for EncodedData {
     }
 
     fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Reject
+        FullPolicy::Retain
     }
 }
 

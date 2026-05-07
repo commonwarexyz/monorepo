@@ -14,7 +14,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
+use commonware_p2p::{Blocker, CheckedSender, LimitedSender, MailboxSender, Receiver, Recipients};
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };
@@ -221,6 +221,19 @@ impl LimitedSender for MockSender {
         _recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         Ok(MockCheckedSender)
+    }
+}
+
+impl MailboxSender for MockSender {
+    type PublicKey = PublicKey;
+
+    fn send(
+        &self,
+        _recipients: Recipients<Self::PublicKey>,
+        _message: impl Into<IoBufs> + Send,
+        _priority: bool,
+    ) -> Enqueue {
+        Enqueue::Queued
     }
 }
 

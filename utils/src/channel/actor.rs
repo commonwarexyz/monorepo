@@ -37,6 +37,8 @@ impl Enqueue {
 pub enum FullPolicy {
     /// Drop the incoming message.
     Drop,
+    /// Retain the incoming message until live inbox capacity becomes available.
+    Retain,
     /// Try to replace a stale queued message.
     Replace,
     /// Reject the incoming message.
@@ -91,6 +93,20 @@ fn promote_locked<T>(state: &mut State<T>) {
     }
 }
 
+fn retain_locked<T: MessagePolicy>(state: &mut State<T>, message: T) -> (Enqueue, bool) {
+    if state.pending.len() < state.pending_capacity {
+        state.pending.push_back(message);
+        (Enqueue::Queued, false)
+    } else {
+        match message.full_policy() {
+            FullPolicy::Fail => {
+                panic!("actor mailbox full for {}", message.kind());
+            }
+            _ => (Enqueue::Rejected, false),
+        }
+    }
+}
+
 impl<T: MessagePolicy> QueueMailbox<T> {
     fn enqueue(&self, message: T) -> Enqueue {
         let mut state = self.state.lock();
@@ -104,6 +120,7 @@ impl<T: MessagePolicy> QueueMailbox<T> {
         } else {
             match message.full_policy() {
                 FullPolicy::Drop => (Enqueue::Dropped, false),
+                FullPolicy::Retain => retain_locked(&mut state, message),
                 FullPolicy::Reject => (Enqueue::Rejected, false),
                 FullPolicy::Fail => {
                     panic!("actor mailbox full for {}", message.kind());
@@ -112,19 +129,7 @@ impl<T: MessagePolicy> QueueMailbox<T> {
                     Ok(()) => (Enqueue::Replaced, true),
                     Err(message) => match T::replace(&mut state.pending, message) {
                         Ok(()) => (Enqueue::Replaced, false),
-                        Err(message) => {
-                            if state.pending.len() < state.pending_capacity {
-                                state.pending.push_back(message);
-                                (Enqueue::Queued, false)
-                            } else {
-                                match message.full_policy() {
-                                    FullPolicy::Fail => {
-                                        panic!("actor mailbox full for {}", message.kind());
-                                    }
-                                    _ => (Enqueue::Rejected, false),
-                                }
-                            }
-                        }
+                        Err(message) => retain_locked(&mut state, message),
                     },
                 },
             }
@@ -161,7 +166,6 @@ pub struct ActorMailbox<T: MessagePolicy> {
 
 enum ActorMailboxInner<T: MessagePolicy> {
     Queue(QueueMailbox<T>),
-    Raw(mpsc::Sender<T>),
 }
 
 impl<T: MessagePolicy> Clone for ActorMailbox<T> {
@@ -187,7 +191,6 @@ impl<T: MessagePolicy> Clone for ActorMailboxInner<T> {
     fn clone(&self) -> Self {
         match self {
             Self::Queue(mailbox) => Self::Queue(mailbox.clone()),
-            Self::Raw(sender) => Self::Raw(sender.clone()),
         }
     }
 }
@@ -198,11 +201,6 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     pub fn enqueue(&self, message: T) -> Enqueue {
         match &self.inner {
             ActorMailboxInner::Queue(mailbox) => mailbox.enqueue(message),
-            ActorMailboxInner::Raw(sender) => match sender.try_send(message) {
-                Ok(()) => Enqueue::Queued,
-                Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
-                Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
-            },
         }
     }
 
@@ -210,7 +208,6 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     pub fn is_closed(&self) -> bool {
         match &self.inner {
             ActorMailboxInner::Queue(mailbox) => mailbox.is_closed(),
-            ActorMailboxInner::Raw(sender) => sender.is_closed(),
         }
     }
 
@@ -218,7 +215,6 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     pub fn len(&self) -> usize {
         match &self.inner {
             ActorMailboxInner::Queue(mailbox) => mailbox.len(),
-            ActorMailboxInner::Raw(_) => 0,
         }
     }
 
@@ -226,7 +222,6 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     pub fn pending_len(&self) -> usize {
         match &self.inner {
             ActorMailboxInner::Queue(mailbox) => mailbox.pending_len(),
-            ActorMailboxInner::Raw(_) => 0,
         }
     }
 
@@ -239,15 +234,6 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     pub fn capacity(&self) -> usize {
         match &self.inner {
             ActorMailboxInner::Queue(mailbox) => mailbox.capacity(),
-            ActorMailboxInner::Raw(_) => 0,
-        }
-    }
-}
-
-impl<T: MessagePolicy> From<mpsc::Sender<T>> for ActorMailbox<T> {
-    fn from(sender: mpsc::Sender<T>) -> Self {
-        Self {
-            inner: ActorMailboxInner::Raw(sender),
         }
     }
 }
@@ -286,7 +272,10 @@ impl<T> ActorInbox<T> {
 
 impl<T> Drop for ActorInbox<T> {
     fn drop(&mut self) {
-        self.state.lock().closed = true;
+        let mut state = self.state.lock();
+        state.closed = true;
+        state.queue.clear();
+        state.pending.clear();
     }
 }
 
@@ -348,6 +337,7 @@ mod tests {
         Update(u64),
         Vote(u64),
         Required(u64),
+        Buffered(u64),
         Hint(u64),
         Critical(u64),
     }
@@ -358,6 +348,7 @@ mod tests {
                 Self::Update(_) => "update",
                 Self::Vote(_) => "vote",
                 Self::Required(_) => "required",
+                Self::Buffered(_) => "buffered",
                 Self::Hint(_) => "hint",
                 Self::Critical(_) => "critical",
             }
@@ -368,6 +359,7 @@ mod tests {
                 Self::Update(_) => FullPolicy::Replace,
                 Self::Vote(_) => FullPolicy::Reject,
                 Self::Required(_) => FullPolicy::Replace,
+                Self::Buffered(_) => FullPolicy::Retain,
                 Self::Hint(_) => FullPolicy::Drop,
                 Self::Critical(_) => FullPolicy::Fail,
             }
@@ -399,6 +391,17 @@ mod tests {
         assert_eq!(sender.enqueue(Message::Vote(2)), Enqueue::Rejected);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
+    }
+
+    #[commonware_macros::test_async]
+    async fn full_inbox_retains_ordered_message() {
+        let (sender, mut receiver) = channel(1);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Enqueue::Queued);
+        assert_eq!(sender.pending_len(), 1);
+
+        assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
+        assert_eq!(receiver.recv().await, Some(Message::Buffered(2)));
     }
 
     #[commonware_macros::test_async]

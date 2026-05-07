@@ -3,8 +3,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedMailboxSender, WrappedReceiver},
+    MailboxSender, Provider, Receiver, Recipients,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -12,7 +12,11 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{
+        actor::{self, ActorInbox},
+        fallible::OneshotExt,
+        oneshot,
+    },
     ordered::Set,
 };
 use std::collections::{BTreeMap, VecDeque};
@@ -69,7 +73,7 @@ where
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<P, M>>,
+    mailbox_receiver: ActorInbox<Message<P, M>>,
 
     /// Pending requests from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
@@ -116,7 +120,7 @@ where
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) = actor::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
         let metrics = metrics::Metrics::init(&context);
@@ -143,17 +147,28 @@ where
     /// Starts the engine with the given network.
     pub fn start(
         mut self,
-        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        network: (
+            impl MailboxSender<PublicKey = P>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(
-            self.codec_config.clone(),
+    async fn run(
+        mut self,
+        network: (
+            impl MailboxSender<PublicKey = P>,
+            impl Receiver<PublicKey = P>,
+        ),
+    ) {
+        let sender = WrappedMailboxSender::<_, M>::new(
             self.context.network_buffer_pool().clone(),
             network.0,
+        );
+        let mut receiver = WrappedReceiver::<_, M>::new(
+            self.codec_config.clone(),
             network.1,
         );
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
@@ -187,8 +202,7 @@ where
                     responder,
                 } => {
                     trace!("mailbox: broadcast");
-                    self.handle_broadcast(&mut sender, recipients, message, responder)
-                        .await;
+                    self.handle_broadcast(&sender, recipients, message, responder);
                 }
                 Message::Subscribe { digest, responder } => {
                     trace!("mailbox: subscribe");
@@ -232,9 +246,9 @@ where
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
+    fn handle_broadcast<Sr: MailboxSender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, M>,
+        sender: &WrappedMailboxSender<Sr, M>,
         recipients: Recipients<P>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
@@ -244,14 +258,26 @@ where
         let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
-        let sent_to = sender
-            .send(recipients, msg, self.priority)
-            .await
-            .unwrap_or_else(|err| {
-                error!(?err, "failed to send message");
-                vec![]
-            });
+        let sent_to = if sender.send(recipients.clone(), msg, self.priority).accepted() {
+            self.resolve_recipients(recipients)
+        } else {
+            error!("failed to enqueue message");
+            vec![]
+        };
         responder.send_lossy(sent_to);
+    }
+
+    fn resolve_recipients(&self, recipients: Recipients<P>) -> Vec<P> {
+        match recipients {
+            Recipients::One(peer) => vec![peer],
+            Recipients::Some(peers) => peers,
+            Recipients::All => self
+                .latest_primary_peers
+                .iter()
+                .filter(|peer| *peer != &self.public_key)
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Handles a `subscribe` request from the application.

@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         metrics::TimeoutReason,
-        types::{Certificate, Proposal},
+        types::{Certificate, Proposal, Vote},
     },
     types::View,
     Viewable,
@@ -12,6 +12,13 @@ use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CertificateKind {
+    Notarization,
+    Nullification,
+    Finalization,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoteKind {
     Notarization,
     Nullification,
     Finalization,
@@ -28,6 +35,10 @@ pub enum Message<S: Scheme, D: Digest> {
     /// The boolean indicates if the certificate came from the resolver.
     /// When true, the voter will not send it back to the resolver (to avoid "boomerang").
     Verified(Certificate<S, D>, bool),
+    /// Retry broadcasting a vote that p2p could not enqueue.
+    RetryVote(Vote<S, D>),
+    /// Retry broadcasting a certificate that p2p could not enqueue.
+    RetryCertificate(Certificate<S, D>),
 }
 
 fn certificate_key<S: Scheme, D: Digest>(
@@ -46,12 +57,22 @@ fn certificate_key<S: Scheme, D: Digest>(
     }
 }
 
+fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View) {
+    match vote {
+        Vote::Notarize(vote) => (VoteKind::Notarization, vote.view()),
+        Vote::Nullify(vote) => (VoteKind::Nullification, vote.view()),
+        Vote::Finalize(vote) => (VoteKind::Finalization, vote.view()),
+    }
+}
+
 impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
     fn kind(&self) -> &'static str {
         match self {
             Self::Proposal(_) => "proposal",
             Self::Timeout(_, _) => "timeout",
             Self::Verified(_, _) => "verified",
+            Self::RetryVote(_) => "retry_vote",
+            Self::RetryCertificate(_) => "retry_certificate",
         }
     }
 
@@ -100,6 +121,21 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
                     matches!(pending, Self::Timeout(view, _) if *view <= key.1)
                 })
             }
+            Self::RetryVote(vote) => {
+                let key = vote_key(vote);
+                actor::replace_last(queue, message, |pending| {
+                    matches!(pending, Self::RetryVote(vote) if vote_key(vote) == key)
+                })
+            }
+            Self::RetryCertificate(certificate) => {
+                let key = certificate_key(certificate);
+                actor::replace_last(queue, message, |pending| {
+                    matches!(
+                        pending,
+                        Self::RetryCertificate(certificate) if certificate_key(certificate) == key
+                    )
+                })
+            }
         }
     }
 }
@@ -111,10 +147,8 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub fn new(sender: impl Into<ActorMailbox<Message<S, D>>>) -> Self {
-        Self {
-            sender: sender.into(),
-        }
+    pub const fn new(sender: ActorMailbox<Message<S, D>>) -> Self {
+        Self { sender }
     }
 
     /// Send a leader's proposal.

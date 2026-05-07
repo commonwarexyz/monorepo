@@ -10,7 +10,10 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{actor::Enqueue, mpsc, oneshot},
+    channel::{
+        actor::{ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+        oneshot,
+    },
     Acknowledgement,
 };
 use tracing::error;
@@ -37,6 +40,28 @@ where
     Finalized { block: Block<H, C, V>, response: A },
 }
 
+impl<H, C, V, A> MessagePolicy for Message<H, C, V, A>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+    A: Acknowledgement,
+{
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Act { .. } => "act",
+            Self::Finalized { .. } => "finalized",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        match self {
+            Self::Act { .. } => FullPolicy::Reject,
+            Self::Finalized { .. } => FullPolicy::Retain,
+        }
+    }
+}
+
 /// Inbox for sending messages to the DKG [Actor].
 ///
 /// [Actor]: super::Actor
@@ -48,7 +73,7 @@ where
     V: Variant,
     A: Acknowledgement,
 {
-    sender: mpsc::Sender<Message<H, C, V, A>>,
+    sender: ActorMailbox<Message<H, C, V, A>>,
 }
 
 impl<H, C, V, A> Mailbox<H, C, V, A>
@@ -59,7 +84,7 @@ where
     A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Message<H, C, V, A>>) -> Self {
+    pub const fn new(sender: ActorMailbox<Message<H, C, V, A>>) -> Self {
         Self { sender }
     }
 
@@ -71,8 +96,8 @@ where
         let message = Message::Act {
             response: response_tx,
         };
-        if let Err(err) = self.sender.send(message).await {
-            error!(?err, "failed to send act message");
+        if !self.sender.enqueue(message).accepted() {
+            error!("failed to enqueue act message");
             return None;
         }
 
@@ -101,13 +126,9 @@ where
             // We ignore any other updates sent by marshal.
             return Enqueue::Dropped;
         };
-        match self.sender.try_send(Message::Finalized {
+        self.sender.enqueue(Message::Finalized {
             block,
             response: ack_tx,
-        }) {
-            Ok(()) => Enqueue::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
-            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
-        }
+        })
     }
 }
