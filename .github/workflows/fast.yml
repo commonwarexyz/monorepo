@@ -61,9 +61,9 @@ jobs:
       run: just check-fmt
     - name: Lint
       run: just clippy ${{ matrix.flags }}
-    - name: Check borrowed child contexts
+    - name: Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
-      run: just check-no-borrowed-child
+      run: just dylint
     - name: Check docs
       run: just check-docs ${{ matrix.flags }}
     - name: Test docs

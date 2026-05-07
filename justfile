@@ -46,7 +46,7 @@ fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
 # Runs all lints (fmt, clippy, docs, features, toml, custom, publish order, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-no-borrowed-child check-publish-order check-stability
+lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-publish-order check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -76,8 +76,8 @@ check-docs *args='':
 check-publish-order:
     python3 .github/scripts/check_publish_order.py
 
-# Check for borrowed temporary child contexts
-check-no-borrowed-child:
+# Run custom Dylint lints
+dylint:
     cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
 
 # Run all fuzz tests in a given directory
