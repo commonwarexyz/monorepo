@@ -105,7 +105,7 @@ impl ObservedState {
         Some(bucket[rng.gen_range(0..bucket.len())].clone())
     }
 
-    pub fn random_proposal_any(&self, rng: &mut impl rand::Rng) -> Option<Proposal<Sha256Digest>> {
+    pub fn random_proposal(&self, rng: &mut impl rand::Rng) -> Option<Proposal<Sha256Digest>> {
         let proposals = self.proposals.lock();
         let total: usize = proposals.values().map(|v| v.len()).sum();
         if total == 0 {
@@ -121,31 +121,13 @@ impl ObservedState {
         None
     }
 
-    pub fn random_known_view(
-        &self,
-        rng: &mut impl rand::Rng,
-        kinds: KnownViewKinds,
-    ) -> Option<u64> {
+    pub fn random_notarized_or_finalized_view(&self, rng: &mut impl rand::Rng) -> Option<u64> {
         let mut union: Vec<u64> = Vec::new();
-        if kinds.notarized {
-            union.extend(self.notarized_views.lock().iter().copied());
-        }
-        if kinds.finalized {
-            union.extend(self.finalized_views.lock().iter().copied());
-        }
-        if kinds.nullified {
-            union.extend(self.nullified_views.lock().iter().copied());
-        }
+        union.extend(self.notarized_views.lock().iter().copied());
+        union.extend(self.finalized_views.lock().iter().copied());
         if union.is_empty() {
             return None;
         }
         Some(union[rng.gen_range(0..union.len())])
     }
-}
-
-#[derive(Clone, Copy)]
-pub struct KnownViewKinds {
-    pub notarized: bool,
-    pub finalized: bool,
-    pub nullified: bool,
 }

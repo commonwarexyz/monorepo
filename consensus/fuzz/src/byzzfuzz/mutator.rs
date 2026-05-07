@@ -6,7 +6,7 @@
 //! omit-only and never call them.
 
 use crate::{
-    byzzfuzz::observed::{KnownViewKinds, ObservedState},
+    byzzfuzz::observed::ObservedState,
     strategy::{SmallScope, Strategy},
     EPOCH,
 };
@@ -104,7 +104,7 @@ impl Strategy for ByzzFuzzMutator {
                     .pool
                     .random_payload(rng)
                     .map(|payload| proposal_with_payload(proposal, payload)),
-                1 => self.pool.random_proposal_any(rng).map(|other| {
+                1 => self.pool.random_proposal(rng).map(|other| {
                     Proposal::new(
                         Round::new(Epoch::new(EPOCH), proposal.view()),
                         other.parent,
@@ -113,7 +113,7 @@ impl Strategy for ByzzFuzzMutator {
                 }),
                 2 => self
                     .pool
-                    .random_proposal_any(rng)
+                    .random_proposal(rng)
                     .map(|other| proposal_with_parent(proposal, other.parent.get())),
                 _ => self.pool.random_proposal_at(rng, proposal.view().get()),
             };
@@ -146,14 +146,7 @@ impl Strategy for ByzzFuzzMutator {
         // Bias toward nullifying an observed notarized/finalized view --
         // a more interesting fault than a small local view edit.
         if rng.gen_bool(0.5) {
-            if let Some(v) = self.pool.random_known_view(
-                rng,
-                KnownViewKinds {
-                    notarized: true,
-                    finalized: true,
-                    nullified: false,
-                },
-            ) {
+            if let Some(v) = self.pool.random_notarized_or_finalized_view(rng) {
                 return v;
             }
         }
