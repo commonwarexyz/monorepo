@@ -141,10 +141,10 @@ fn idx_of<P: PublicKey>(set: &[P], participants: &[P]) -> Vec<usize> {
         .collect()
 }
 
-/// Apply procFault interception to `recipients`: enqueue an [`Intercept`] per
-/// matching fault (view *and* scope) and remove its targets from the list.
+/// Intercept process-fault targets: enqueue an [`Intercept`] per matching
+/// fault (view and scope), then remove its targets from normal delivery.
 #[allow(clippy::too_many_arguments)]
-fn apply_proc_faults<P: PublicKey>(
+fn intercept_proc_fault_targets<P: PublicKey>(
     channel: InterceptChannel,
     sender_idx: usize,
     view: u64,
@@ -260,7 +260,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
             Some(k) => k,
         };
         let kept = match intercept_tx.as_ref() {
-            Some(tx) => apply_proc_faults(
+            Some(tx) => intercept_proc_fault_targets(
                 InterceptChannel::Vote,
                 sender_idx,
                 view,
@@ -352,7 +352,7 @@ where
             Some(k) => k,
         };
         let kept = match intercept_tx.as_ref() {
-            Some(tx) => apply_proc_faults(
+            Some(tx) => intercept_proc_fault_targets(
                 InterceptChannel::Cert,
                 sender_idx,
                 view,
@@ -424,7 +424,7 @@ where
             Some(k) => k,
         };
         let kept = match intercept_tx.as_ref() {
-            Some(tx) => apply_proc_faults(
+            Some(tx) => intercept_proc_fault_targets(
                 InterceptChannel::Resolver,
                 sender_idx,
                 view,
