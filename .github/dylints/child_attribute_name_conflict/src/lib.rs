@@ -6,7 +6,7 @@ extern crate rustc_hir;
 extern crate rustc_span;
 
 use rustc_ast::ast::LitKind;
-use rustc_hir::{Expr, ExprKind};
+use rustc_hir::{Expr, ExprKind, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::{Span, Symbol};
 
@@ -42,6 +42,10 @@ dylint_linting::declare_late_lint! {
 impl<'tcx> LateLintPass<'tcx> for ChildAttributeNameConflict {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         if expr.span.from_expansion() {
+            return;
+        }
+
+        if is_receiver_of_method_call(cx, expr) {
             return;
         }
 
@@ -82,19 +86,16 @@ fn child_and_attributes(expr: &Expr<'_>) -> Option<(Vec<StringArg>, Vec<StringAr
     let mut attributes = Vec::new();
     let mut current = expr;
 
-    let ExprKind::MethodCall(segment, ..) = current.kind else {
-        return None;
-    };
-    if segment.ident.name != child && segment.ident.name != with_attribute {
+    if !matches!(current.kind, ExprKind::MethodCall(..)) {
         return None;
     }
 
-    while let ExprKind::MethodCall(segment, receiver, args, ..) = current.kind {
-        if segment.ident.name == child {
+    while let ExprKind::MethodCall(_, receiver, args, ..) = current.kind {
+        if is_method(current, child) {
             if let Some(child) = args.first().and_then(string_arg) {
                 children.push(child);
             }
-        } else if segment.ident.name == with_attribute {
+        } else if is_method(current, with_attribute) {
             if let Some(attribute) = args.first().and_then(string_arg) {
                 attributes.push(attribute);
             }
@@ -104,6 +105,25 @@ fn child_and_attributes(expr: &Expr<'_>) -> Option<(Vec<StringArg>, Vec<StringAr
     }
 
     (!children.is_empty()).then_some((children, attributes))
+}
+
+fn is_receiver_of_method_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let Node::Expr(parent) = cx.tcx.parent_hir_node(expr.hir_id) else {
+        return false;
+    };
+    let ExprKind::MethodCall(_, receiver, ..) = parent.kind else {
+        return false;
+    };
+
+    receiver.hir_id == expr.hir_id
+}
+
+fn is_method(expr: &Expr<'_>, method: Symbol) -> bool {
+    let ExprKind::MethodCall(segment, ..) = expr.kind else {
+        return false;
+    };
+
+    segment.ident.name == method
 }
 
 fn string_arg(expr: &Expr<'_>) -> Option<StringArg> {

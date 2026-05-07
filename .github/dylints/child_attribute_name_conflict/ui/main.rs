@@ -13,6 +13,14 @@ impl Context {
     fn spawn(self) -> Self {
         self
     }
+
+    fn shared(self, _: bool) -> Self {
+        self
+    }
+
+    fn with_span(self) -> Self {
+        self
+    }
 }
 
 #[rustfmt::skip]
@@ -25,8 +33,14 @@ fn main() {
         .with_attribute("validator", 2);
     let _ = context.with_attribute("worker", 3).child("worker");
     let _ = context.child("a").child("b").with_attribute("b", 4);
+    let _ = context.child("multi").with_attribute("index", 5).with_attribute("multi", 6);
+    let _ = context
+        .child("nested")
+        .shared(false)
+        .with_span()
+        .with_attribute("nested", 7);
     let _ = context
         .child("service")
-        .with_attribute("service", 5)
+        .with_attribute("service", 8)
         .spawn();
 }

@@ -4,6 +4,10 @@ impl Context {
     fn child(&self, _: &'static str) -> Self {
         Self
     }
+
+    fn shared(self, _: bool) -> Self {
+        self
+    }
 }
 
 struct Holder {
@@ -26,6 +30,7 @@ fn main() {
         &context
             .child("multiline"),
     );
+    takes_context(&context.child("shared").shared(false));
 
     let holder = Holder { context: Context };
     takes_context(&holder.context.child("field"));
