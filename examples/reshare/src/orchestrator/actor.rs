@@ -17,7 +17,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, Receiver, Sender,
+    Blocker, MailboxSender, Receiver, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -137,15 +137,15 @@ where
     pub fn start(
         mut self,
         votes: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         certificates: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         resolver: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -155,15 +155,15 @@ where
     async fn run(
         mut self,
         (vote_sender, vote_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         (certificate_sender, certificate_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         (resolver_sender, resolver_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
@@ -287,15 +287,15 @@ where
         epoch: Epoch,
         scheme: S,
         vote_mux: &mut MuxHandle<
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
         certificate_mux: &mut MuxHandle<
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
         resolver_mux: &mut MuxHandle<
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
     ) -> Handle<()> {

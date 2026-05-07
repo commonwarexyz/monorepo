@@ -25,6 +25,13 @@ pub enum Enqueue {
     Closed,
 }
 
+impl Enqueue {
+    /// Returns true if the message was accepted by the mailbox.
+    pub const fn accepted(self) -> bool {
+        matches!(self, Self::Queued | Self::Replaced)
+    }
+}
+
 /// Behavior to apply when an actor inbox is full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullPolicy {

@@ -16,9 +16,13 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::channel::{actor::ActorInbox, fallible::FallibleExt, mpsc};
+use commonware_utils::{
+    channel::{actor::ActorInbox, ring},
+    NZUsize,
+};
+use futures::Sink;
 use rand::Rng;
-use std::collections::HashMap;
+use std::{collections::HashMap, pin::Pin};
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -41,7 +45,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
 
     /// Subscribers to peer set updates.
-    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
+    subscribers: Vec<ring::Sender<PeerSetUpdate<C::PublicKey>>>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -148,8 +152,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     .directory
                     .latest_update()
                     .expect("latest update missing after successful track");
-                self.subscribers
-                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
+                self.subscribers.retain_mut(|subscriber| {
+                    Pin::new(subscriber).start_send(update.clone()).is_ok()
+                });
             }
             Message::Overwrite { peers } => {
                 let mut any_changed = false;
@@ -176,11 +181,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded_channel();
+                let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
                 // Send the latest peer set immediately
                 if let Some(update) = self.directory.latest_update() {
-                    sender.send_lossy(update);
+                    let _ = Pin::new(&mut sender).start_send(update);
                 }
                 self.subscribers.push(sender);
 
@@ -377,8 +382,7 @@ mod tests {
                 .track(
                     0,
                     Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             let dialable = mailbox.dialable().await;
@@ -409,8 +413,7 @@ mod tests {
                 .track(
                     0,
                     Map::<_, crate::Address>::try_from([(pk1.clone(), addr.into())]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             crate::block_peer(&mut oracle, pk1.clone());
@@ -471,8 +474,7 @@ mod tests {
                         (peer_pk2.clone(), peer_addr2.into()),
                     ])
                     .unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             // Not acceptable because self
@@ -519,8 +521,7 @@ mod tests {
                         (peer_pk2.clone(), peer_addr2.into()),
                     ])
                     .unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             // With bypass_ip_check=true, tracked peer with wrong IP is acceptable
@@ -568,8 +569,7 @@ mod tests {
                     0,
                     Map::<_, crate::Address>::try_from([(peer_pk.clone(), peer_addr.into())])
                         .unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
@@ -607,8 +607,7 @@ mod tests {
                     0,
                     Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())])
                         .unwrap(),
-                )
-                .await;
+                );
 
             let dialable = mailbox.dialable().await;
             assert_eq!(dialable.peers.len(), 1);
@@ -635,8 +634,7 @@ mod tests {
                     0,
                     Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())])
                         .unwrap(),
-                )
-                .await;
+                );
 
             let result = mailbox.dial(boot_pk.clone()).await;
             assert!(result.is_some());
@@ -689,8 +687,7 @@ mod tests {
                         )])
                         .unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 0);
@@ -738,8 +735,7 @@ mod tests {
                         Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
                         Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 0);
@@ -781,8 +777,7 @@ mod tests {
                     0,
                     Map::<_, crate::Address>::try_from([(peer_pk.clone(), peer_addr.into())])
                         .unwrap(),
-                )
-                .await;
+                );
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
 
@@ -840,8 +835,7 @@ mod tests {
                         (pk_1.clone(), addr_1.into()),
                     ])
                     .unwrap(),
-                )
-                .await;
+                );
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
 
@@ -863,8 +857,7 @@ mod tests {
                 .track(
                     1,
                     Map::<_, crate::Address>::try_from([(pk_2.clone(), addr_2.into())]).unwrap(),
-                )
-                .await;
+                );
 
             // Wait for a listener update
             let registered_ips = listener_receiver.recv().await.unwrap();
@@ -900,16 +893,14 @@ mod tests {
                         (pk_1.clone(), addr_1.into()),
                     ])
                     .unwrap(),
-                )
-                .await;
+                );
 
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
 
             oracle
-                .overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap())
-                .await;
+                .overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
@@ -936,8 +927,7 @@ mod tests {
                 .track(
                     0,
                     Map::<_, crate::Address>::try_from([(pk.clone(), addr_1.into())]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             let result = mailbox.dial(pk.clone()).await;
@@ -946,8 +936,7 @@ mod tests {
             assert_eq!(ingress, Ingress::Socket(addr_1));
 
             oracle
-                .overwrite([(pk.clone(), addr_2.into())].try_into().unwrap())
-                .await;
+                .overwrite([(pk.clone(), addr_2.into())].try_into().unwrap());
 
             context.sleep(Duration::from_millis(1010)).await;
 
@@ -980,8 +969,7 @@ mod tests {
                         (pk_1.clone(), addr_1.into()),
                     ])
                     .unwrap(),
-                )
-                .await;
+                );
 
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&addr_1.ip()));
@@ -991,8 +979,7 @@ mod tests {
             assert!(!registered_ips.contains(&addr_1.ip()));
 
             oracle
-                .overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap())
-                .await;
+                .overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
@@ -1012,8 +999,7 @@ mod tests {
 
             // Peer not in the directory is silently skipped (no error, no effect)
             oracle
-                .overwrite([(pk, addr.into())].try_into().unwrap())
-                .await;
+                .overwrite([(pk, addr.into())].try_into().unwrap());
         });
     }
 
@@ -1036,16 +1022,14 @@ mod tests {
                 .track(
                     0,
                     Map::<_, crate::Address>::try_from([(pk_1.clone(), addr_1.into())]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
             assert!(!mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
 
             oracle
-                .overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap())
-                .await;
+                .overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
             assert!(!mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
             assert!(mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
@@ -1071,8 +1055,7 @@ mod tests {
                 .track(
                     0,
                     Map::<_, crate::Address>::try_from([(pk.clone(), addr_1.into())]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             // Establish connection
@@ -1084,8 +1067,7 @@ mod tests {
 
             // Update address - should kill the connection
             oracle
-                .overwrite([(pk.clone(), addr_2.into())].try_into().unwrap())
-                .await;
+                .overwrite([(pk.clone(), addr_2.into())].try_into().unwrap());
 
             // Peer should receive kill message
             assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
@@ -1112,8 +1094,7 @@ mod tests {
                 .track(
                     0,
                     Map::<_, crate::Address>::try_from([(pk.clone(), addr_a.into())]).unwrap(),
-                )
-                .await;
+                );
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
 
@@ -1129,8 +1110,7 @@ mod tests {
                 .track(
                     1,
                     Map::<_, crate::Address>::try_from([(pk.clone(), addr_b.into())]).unwrap(),
-                )
-                .await;
+                );
 
             // Peer should receive Kill message (connection severed due to address change)
             assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
@@ -1170,8 +1150,7 @@ mod tests {
                         (pk_unchanged.clone(), addr_unchanged.into()),
                     ])
                     .unwrap(),
-                )
-                .await;
+                );
             let _ = listener_receiver.recv().await.unwrap();
 
             // Establish connection to pk_tracked
@@ -1196,8 +1175,7 @@ mod tests {
                     ]
                     .try_into()
                     .unwrap(),
-                )
-                .await;
+                );
 
             // Only tracked+changed peer (pk_tracked) gets killed
             assert!(matches!(tracked_rx.recv().await, Some(peer::Message::Kill)));

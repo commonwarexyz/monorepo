@@ -18,7 +18,7 @@ use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::{actor::Enqueue, mpsc, oneshot};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
@@ -200,7 +200,9 @@ struct FuzzBlocker;
 impl Blocker for FuzzBlocker {
     type PublicKey = PublicKey;
 
-    async fn block(&mut self, _peer: Self::PublicKey) {}
+    fn block(&mut self, _peer: Self::PublicKey) -> Enqueue {
+        Enqueue::Queued
+    }
 }
 
 #[derive(Debug, Clone)]

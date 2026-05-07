@@ -284,15 +284,13 @@ where
             // Secondary = current players + next-epoch players (give time to sync)
             //
             // Overlapping keys are deduplicated as primary (so we don't need to do any filtering here)
-            self.manager
-                .track(
-                    epoch.get(),
-                    TrackedPeers::new(
-                        dealers.clone(),
-                        Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
-                    ),
-                )
-                .await;
+            self.manager.track(
+                epoch.get(),
+                TrackedPeers::new(
+                    dealers.clone(),
+                    Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
+                ),
+            );
 
             let self_pk = self.signer.public_key();
             let am_dealer = dealers.position(&self_pk).is_some();
@@ -660,7 +658,10 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{channel::mpsc, N3f1, TryCollect, NZU32};
+    use commonware_utils::{
+        channel::{actor::Enqueue, mpsc, ring},
+        N3f1, NZUsize, TryCollect, NZU32,
+    };
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
 
@@ -681,16 +682,17 @@ mod tests {
         }
 
         async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-            let (_, rx) = mpsc::unbounded_channel();
+            let (_, rx) = ring::channel(NZUsize!(1));
             rx
         }
     }
 
     impl<P: PublicKey> Manager for NoopManager<P> {
-        async fn track<R>(&mut self, _: u64, _: R)
+        fn track<R>(&mut self, _: u64, _: R) -> Enqueue
         where
-            R: Into<TrackedPeers<Self::PublicKey>> + Send,
+            R: Into<TrackedPeers<Self::PublicKey>>,
         {
+            Enqueue::Queued
         }
     }
 

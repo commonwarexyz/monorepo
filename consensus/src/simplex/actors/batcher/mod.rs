@@ -153,8 +153,7 @@ mod tests {
                     Set::from_iter_dedup(primary.iter().cloned()),
                     Set::from_iter_dedup(secondary.iter().cloned()),
                 ),
-            )
-            .await;
+            );
         context.sleep(Duration::from_millis(10)).await;
     }
 

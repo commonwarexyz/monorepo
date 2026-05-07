@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{mpsc, oneshot},
+    channel::{actor::Enqueue, mpsc, oneshot},
     Acknowledgement,
 };
 use tracing::error;
@@ -95,18 +95,19 @@ where
 {
     type Activity = Update<Block<H, C, V>, A>;
 
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Enqueue {
         // Report the finalized block to the DKG actor on a best-effort basis.
         let Update::Block(block, ack_tx) = update else {
             // We ignore any other updates sent by marshal.
-            return;
+            return Enqueue::Dropped;
         };
-        let _ = self
-            .sender
-            .send(Message::Finalized {
-                block,
-                response: ack_tx,
-            })
-            .await;
+        match self.sender.try_send(Message::Finalized {
+            block,
+            response: ack_tx,
+        }) {
+            Ok(()) => Enqueue::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
+            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
+        }
     }
 }

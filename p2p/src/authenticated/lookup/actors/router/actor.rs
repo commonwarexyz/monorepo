@@ -66,7 +66,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool, sent: &mut Vec<P>) {
         let channel = encoded.channel;
         if let Some(relay) = self.connections.get_mut(&recipient) {
-            if relay.send(encoded, priority).is_ok() {
+            if relay.send(encoded, priority).accepted() {
                 sent.push(recipient);
             } else {
                 self.messages_dropped
@@ -134,7 +134,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                             Recipients::All => {
                                 // Send to all connected peers
                                 for (recipient, relay) in self.connections.iter_mut() {
-                                    if relay.send(encoded.clone(), priority).is_ok() {
+                                    if relay.send(encoded.clone(), priority).accepted() {
                                         sent.push(recipient.clone());
                                     } else {
                                         self.messages_dropped

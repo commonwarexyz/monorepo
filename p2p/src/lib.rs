@@ -17,7 +17,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::{actor::Enqueue, mpsc},
+        channel::{actor::Enqueue, ring},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -246,7 +246,7 @@ stability_scope!(BETA {
     }
 
     /// Alias for the subscription type returned by [`Provider::subscribe`].
-    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
+    pub type PeerSetSubscription<P> = ring::Receiver<PeerSetUpdate<P>>;
 
     /// Primary and secondary peers provided together to [`Manager::track`].
     ///
@@ -363,9 +363,9 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
+        fn track<R>(&mut self, id: u64, peers: R) -> Enqueue
         where
-            R: Into<TrackedPeers<Self::PublicKey>> + Send;
+            R: Into<TrackedPeers<Self::PublicKey>>;
     }
 
     /// Interface for managing peer set membership (where peer addresses are known).
@@ -395,9 +395,9 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
+        fn track<R>(&mut self, id: u64, peers: R) -> Enqueue
         where
-            R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
+            R: Into<AddressableTrackedPeers<Self::PublicKey>>;
 
         /// Update addresses for multiple peers without creating a new peer set.
         ///
@@ -405,10 +405,7 @@ stability_scope!(BETA {
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
-        fn overwrite(
-            &mut self,
-            peers: Map<Self::PublicKey, Address>,
-        ) -> impl Future<Output = ()> + Send;
+        fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Enqueue;
     }
 
     /// Interface for blocking other peers.

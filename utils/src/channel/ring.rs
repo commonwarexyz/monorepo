@@ -29,7 +29,7 @@
 
 use crate::sync::Mutex;
 use core::num::NonZeroUsize;
-use futures::{stream::FusedStream, Sink, Stream};
+use futures::{stream::FusedStream, Sink, Stream, StreamExt};
 use std::{
     collections::VecDeque,
     pin::Pin,
@@ -61,6 +61,18 @@ struct Shared<T: Send + Sync> {
 /// The channel remains open until all senders are dropped.
 pub struct Sender<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
+}
+
+impl<T: Send + Sync> core::fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let shared = self.shared.lock();
+        f.debug_struct("Sender")
+            .field("len", &shared.buffer.len())
+            .field("capacity", &shared.capacity)
+            .field("sender_count", &shared.sender_count)
+            .field("receiver_dropped", &shared.receiver_dropped)
+            .finish()
+    }
 }
 
 impl<T: Send + Sync> Sender<T> {
@@ -162,6 +174,13 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
 #[derive(Debug)]
 pub struct Receiver<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
+}
+
+impl<T: Send + Sync> Receiver<T> {
+    /// Receive the next item from the channel.
+    pub async fn recv(&mut self) -> Option<T> {
+        self.next().await
+    }
 }
 
 impl<T: Send + Sync> Stream for Receiver<T> {

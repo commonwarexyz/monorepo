@@ -1,6 +1,7 @@
 use super::Scheme;
 use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
+use commonware_utils::channel::actor::Enqueue;
 use std::marker::PhantomData;
 use tracing::info;
 
@@ -21,7 +22,7 @@ impl<D: Digest> Reporter<D> {
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
     type Activity = Activity<Scheme, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {
@@ -35,5 +36,6 @@ impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
             }
             _ => {}
         }
+        Enqueue::Queued
     }
 }

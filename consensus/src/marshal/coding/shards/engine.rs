@@ -2608,8 +2608,7 @@ mod tests {
                             Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
                             Set::from_iter_dedup([non_participant_pk.clone()]),
                         ),
-                    )
-                    .await;
+                    );
                 context.sleep(Duration::from_millis(10)).await;
 
                 peers[2]
@@ -2669,8 +2668,7 @@ mod tests {
                             Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
                             Set::from_iter_dedup([non_participant_pk.clone()]),
                         ),
-                    )
-                    .await;
+                    );
                 context.sleep(Duration::from_millis(10)).await;
 
                 let peer2_index = peers[2].index.get() as u16;
@@ -3740,8 +3738,7 @@ mod tests {
                 .track(
                     0,
                     Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             // Set up the receiver's engine with a multi-epoch provider.
@@ -3865,7 +3862,7 @@ mod tests {
                         .expect("link should be added");
                 }
             }
-            oracle.manager().track(0, participants.clone()).await;
+            oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let (_leader_control, mut leader_sender, _leader_receiver) = registrations
@@ -4739,7 +4736,7 @@ mod tests {
                 .expect("link should be added");
 
             // Track the full participant set so the engine sees all peers.
-            oracle.manager().track(0, participants.clone()).await;
+            oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
@@ -4794,7 +4791,7 @@ mod tests {
             // Now send a peer set update that excludes the leader.
             let remaining: Set<P> =
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
-            oracle.manager().track(1, remaining).await;
+            oracle.manager().track(1, remaining);
             context.sleep(Duration::from_millis(10)).await;
 
             // The retained overlap window still lets the leader reach the receiver,
@@ -4982,7 +4979,7 @@ mod tests {
                 .expect("link should be added");
 
             // Peer-set id 0: epoch 0 primaries before any cutover.
-            oracle.manager().track(0, epoch0_set.clone()).await;
+            oracle.manager().track(0, epoch0_set.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme_epoch0 =
@@ -5037,7 +5034,7 @@ mod tests {
             // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) is no
             // longer in `latest.primary`, so overlap-buffered shards for that sender must not feed
             // reconstruction.
-            oracle.manager().track(1, epoch1_set).await;
+            oracle.manager().track(1, epoch1_set);
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement for the old commitment: should not complete reconstruction from
@@ -5143,7 +5140,7 @@ mod tests {
             }
 
             // Start with the full committee so the receiver's signer scheme matches the coded block.
-            oracle.manager().track(0, participants.clone()).await;
+            oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
@@ -5226,7 +5223,7 @@ mod tests {
                     .filter(|pk| **pk != receiver_pk)
                     .cloned(),
             );
-            oracle.manager().track(1, latest_primary).await;
+            oracle.manager().track(1, latest_primary);
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement drains overlap-buffered peer shards; the evicted receiver should

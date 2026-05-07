@@ -8,9 +8,10 @@ use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{
         actor::{self, Enqueue, FullPolicy, MessagePolicy},
-        mpsc, oneshot, ring,
+        oneshot, ring,
     },
     ordered::Map,
+    NZUsize,
 };
 use rand_distr::Normal;
 use std::{collections::VecDeque, time::Duration};
@@ -354,8 +355,8 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    fn track(&self, id: u64, peers: TrackedPeers<P>) {
-        let _ = self.sender.enqueue(Message::Track { id, peers });
+    fn track(&self, id: u64, peers: TrackedPeers<P>) -> Enqueue {
+        self.sender.enqueue(Message::Track { id, peers })
     }
 
     /// Get the primary and secondary peers for a given ID.
@@ -372,11 +373,11 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { response }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
-                let (_, rx) = mpsc::unbounded_channel();
+                let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
             Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
-                let (_, rx) = mpsc::unbounded_channel();
+                let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }
         }
@@ -418,11 +419,11 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
-    async fn track<R>(&mut self, id: u64, peers: R)
+    fn track<R>(&mut self, id: u64, peers: R) -> Enqueue
     where
-        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+        R: Into<TrackedPeers<Self::PublicKey>>,
     {
-        self.oracle.track(id, peers.into());
+        self.oracle.track(id, peers.into())
     }
 }
 
@@ -467,20 +468,21 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
-    async fn track<R>(&mut self, id: u64, peers: R)
+    fn track<R>(&mut self, id: u64, peers: R) -> Enqueue
     where
-        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+        R: Into<AddressableTrackedPeers<Self::PublicKey>>,
     {
         // Ignore all addresses (simulated network doesn't use them)
         let peers = peers.into();
         self.oracle.track(
             id,
             TrackedPeers::new(peers.primary.into_keys(), peers.secondary.into_keys()),
-        );
+        )
     }
 
-    async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {
+    fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) -> Enqueue {
         // We consider all addresses to be valid, so this is a no-op
+        Enqueue::Queued
     }
 }
 

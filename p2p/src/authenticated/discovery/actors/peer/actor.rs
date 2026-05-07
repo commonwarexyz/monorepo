@@ -20,8 +20,8 @@ use commonware_runtime::{
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
     channel::{
-        actor::ActorInbox,
-        mpsc::{self, error::TrySendError},
+        actor::{self, ActorInbox},
+        mpsc::error::TrySendError,
     },
     time::SYSTEM_TIME_PRECISION,
 };
@@ -41,8 +41,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
     mailbox: Mailbox<Message<C>>,
     control: ActorInbox<Message<C>>,
-    high: mpsc::Receiver<EncodedData>,
-    low: mpsc::Receiver<EncodedData>,
+    high: ActorInbox<EncodedData>,
+    low: ActorInbox<EncodedData>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -53,8 +53,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (high_sender, high_receiver) = actor::channel(cfg.mailbox_size);
+        let (low_sender, low_receiver) = actor::channel(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -134,8 +134,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         batch: &mut Vec<IoBufs>,
         control: &mut ActorInbox<Message<C>>,
         pool: &commonware_runtime::BufferPool,
-        high: &mut mpsc::Receiver<EncodedData>,
-        low: &mut mpsc::Receiver<EncodedData>,
+        high: &mut ActorInbox<EncodedData>,
+        low: &mut ActorInbox<EncodedData>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {

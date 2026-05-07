@@ -261,7 +261,7 @@ impl NetworkScheme for Discovery {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.track(index as u64, subset).await;
+            oracle.track(index as u64, subset);
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -290,7 +290,7 @@ impl NetworkScheme for Discovery {
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.track(index, peer_pks).await;
+        let _ = oracle.track(index, peer_pks);
     }
 }
 
@@ -332,12 +332,10 @@ impl NetworkScheme for Lookup {
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets.get() {
-            oracle
-                .track(
-                    index as u64,
-                    Map::<_, Address>::try_from(peer_list.clone()).expect("public keys are unique"),
-                )
-                .await;
+            oracle.track(
+                index as u64,
+                Map::<_, Address>::try_from(peer_list.clone()).expect("public keys are unique"),
+            );
         }
 
         // Register randomized subsets of 3 peers for indices TRACKED_PEER_SETS..2*TRACKED_PEER_SETS
@@ -349,7 +347,7 @@ impl NetworkScheme for Lookup {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.track(index as u64, subset).await;
+            oracle.track(index as u64, subset);
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -381,7 +379,7 @@ impl NetworkScheme for Lookup {
             })
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.track(index, peer_list).await;
+        let _ = oracle.track(index, peer_list);
     }
 }
 
@@ -637,7 +635,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     let blocked_pk = peers[blocked_idx].info.public_key.clone();
                     #[allow(clippy::disallowed_methods, reason = "fuzz harness without tracing")]
-                    peers[blocker_idx].network.oracle.block(blocked_pk).await;
+                    peers[blocker_idx].network.oracle.block(blocked_pk);
                 }
             }
         }

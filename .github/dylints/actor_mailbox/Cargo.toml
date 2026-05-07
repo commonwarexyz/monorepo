@@ -1,0 +1,18 @@
+[package]
+name = "actor_mailbox"
+version = "0.0.1"
+description = "Reject raw mpsc actor mailboxes in actor code."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "5.0.0"
+
+[dev-dependencies]
+dylint_testing = "5.0.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

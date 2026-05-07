@@ -1,28 +1,23 @@
 use commonware_macros::select;
 use commonware_utils::channel::{
-    actor::{ActorInbox, MessagePolicy},
-    mpsc::{self, error::TrySendError},
+    actor::{ActorInbox, ActorMailbox, Enqueue, MessagePolicy},
 };
 
 #[derive(Clone, Debug)]
-pub struct Relay<T> {
-    low: mpsc::Sender<T>,
-    high: mpsc::Sender<T>,
+pub struct Relay<T: MessagePolicy> {
+    low: ActorMailbox<T>,
+    high: ActorMailbox<T>,
 }
 
-impl<T> Relay<T> {
-    pub const fn new(low: mpsc::Sender<T>, high: mpsc::Sender<T>) -> Self {
+impl<T: MessagePolicy> Relay<T> {
+    pub const fn new(low: ActorMailbox<T>, high: ActorMailbox<T>) -> Self {
         Self { low, high }
     }
 
     /// Sends the given `message` to the appropriate channel based on `priority`.
-    ///
-    /// Uses non-blocking `try_send` to avoid blocking the caller when the
-    /// channel buffer is full. Returns an error if the channel is full or
-    /// disconnected.
-    pub fn send(&self, message: T, priority: bool) -> Result<(), TrySendError<T>> {
+    pub fn send(&self, message: T, priority: bool) -> Enqueue {
         let sender = if priority { &self.high } else { &self.low };
-        sender.try_send(message)
+        sender.enqueue(message)
     }
 }
 
@@ -37,10 +32,10 @@ pub enum Prioritized<C, D> {
 }
 
 /// Awaits a message from an actor control inbox, high, or low priority receivers.
-pub async fn recv_actor_prioritized<C: MessagePolicy, D>(
+pub async fn recv_actor_prioritized<C: MessagePolicy, D: MessagePolicy>(
     control: &mut ActorInbox<C>,
-    high: &mut mpsc::Receiver<D>,
-    low: &mut mpsc::Receiver<D>,
+    high: &mut ActorInbox<D>,
+    low: &mut ActorInbox<D>,
 ) -> Prioritized<C, D> {
     select! {
         msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
@@ -52,33 +47,37 @@ pub async fn recv_actor_prioritized<C: MessagePolicy, D>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::channel::actor::{self, FullPolicy};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Data(u32);
+
+    impl MessagePolicy for Data {
+        fn kind(&self) -> &'static str {
+            "data"
+        }
+
+        fn full_policy(&self) -> FullPolicy {
+            FullPolicy::Reject
+        }
+    }
 
     #[test]
     fn test_relay_content_priority() {
-        let (low_sender, mut low_receiver) = mpsc::channel(1);
-        let (high_sender, mut high_receiver) = mpsc::channel(1);
+        let (low_sender, mut low_receiver) = actor::channel(1);
+        let (high_sender, mut high_receiver) = actor::channel(1);
         let relay = Relay::new(low_sender, high_sender);
 
         // Send a high priority message
-        let data = 123;
-        relay.send(data, true).unwrap();
-        match high_receiver.try_recv() {
-            Ok(received_data) => {
-                assert_eq!(data, received_data);
-            }
-            _ => panic!("Expected high priority message"),
-        }
+        let data = Data(123);
+        assert!(relay.send(data.clone(), true).accepted());
+        assert_eq!(high_receiver.try_recv(), Ok(data));
         assert!(low_receiver.try_recv().is_err());
 
         // Send a low priority message
-        let data = 456;
-        relay.send(data, false).unwrap();
-        match low_receiver.try_recv() {
-            Ok(received_data) => {
-                assert_eq!(data, received_data);
-            }
-            _ => panic!("Expected low priority message"),
-        }
+        let data = Data(456);
+        assert!(relay.send(data.clone(), false).accepted());
+        assert_eq!(low_receiver.try_recv(), Ok(data));
         assert!(high_receiver.try_recv().is_err());
     }
 }

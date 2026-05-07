@@ -139,7 +139,7 @@ fn main() {
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
         // Provide authorized peers
-        oracle.track(0, peer_keys.clone()).await;
+        oracle.track(0, peer_keys.clone());
 
         // Register flood channel
         let (mut flood_sender, mut flood_receiver) = network.register(

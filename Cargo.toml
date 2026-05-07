@@ -47,6 +47,7 @@ members = [
 exclude = [
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
+    ".github/dylints/actor_mailbox",
 ]
 resolver = "2"
 

@@ -4994,8 +4994,7 @@ mod tests {
                         Set::from_iter_dedup(participants.iter().cloned()),
                         Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
                     ),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(10)).await;
 
             // ========== Broadcast certificates over recovered network. ==========

@@ -26,7 +26,7 @@ use commonware_cryptography::{
     ed25519::Batch,
     BatchVerifier, Hasher, Signer,
 };
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, MailboxSender, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
@@ -326,15 +326,15 @@ where
     pub fn start(
         mut self,
         votes: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         certificates: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         resolver: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         broadcast: (
@@ -369,15 +369,15 @@ where
     async fn run(
         self,
         votes: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         certificates: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         resolver: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey> + MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         broadcast: (

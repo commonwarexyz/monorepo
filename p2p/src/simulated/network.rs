@@ -27,7 +27,6 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
     channel::{
         actor::{ActorInbox, Enqueue},
-        fallible::FallibleExt,
         mpsc, oneshot, ring,
     },
     ordered::Set,
@@ -179,7 +178,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     transmitter: transmitter::State<P>,
 
     // Subscribers to primary peer set updates (used by `Manager::subscribe`).
-    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<P>>>,
+    subscribers: Vec<ring::Sender<PeerSetUpdate<P>>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
@@ -420,8 +419,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let update = self
                     .latest_update()
                     .expect("latest update missing after successful track");
-                self.subscribers
-                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
+                self.subscribers.retain_mut(|subscriber| {
+                    Pin::new(subscriber).start_send(update.clone()).is_ok()
+                });
 
                 // Broadcast updated tracked membership to SubscribeConnected subscribers
                 self.broadcast_peer_list();
@@ -472,11 +472,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::Subscribe { response } => {
                 // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded_channel();
+                let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
                 // Send the latest peer set upon subscription.
                 if let Some(update) = self.latest_update() {
-                    sender.send_lossy(update);
+                    let _ = Pin::new(&mut sender).start_send(update);
                 }
                 self.subscribers.push(sender);
 
@@ -1622,8 +1622,7 @@ mod tests {
                 .track(
                     0,
                     Set::try_from([twin.clone(), peer_a.clone(), peer_b.clone()]).unwrap(),
-                )
-                .await;
+                );
 
             // Register normal peers
             let (mut peer_a_sender, mut peer_a_recv) = oracle
@@ -1746,8 +1745,7 @@ mod tests {
             // Register all peers
             let mut manager = oracle.manager();
             manager
-                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap())
-                .await;
+                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
 
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
@@ -1819,8 +1817,7 @@ mod tests {
             // Register all peers
             let mut manager = oracle.manager();
             manager
-                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap())
-                .await;
+                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
 
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
@@ -1908,8 +1905,7 @@ mod tests {
 
             // Register initial peer set
             manager
-                .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
-                .await;
+                .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 10);
             assert_eq!(update.latest.primary.len(), 2);
@@ -1920,14 +1916,12 @@ mod tests {
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
             manager
-                .track(9, Set::try_from([pk3.clone()]).unwrap())
-                .await;
+                .track(9, Set::try_from([pk3.clone()]).unwrap());
 
             // Add new peer set
             let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
             manager
-                .track(11, Set::try_from([pk4.clone()]).unwrap())
-                .await;
+                .track(11, Set::try_from([pk4.clone()]).unwrap());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
             assert_eq!(update.latest.primary, Set::try_from([pk4.clone()]).unwrap());
@@ -1968,8 +1962,7 @@ mod tests {
                         Set::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
                         Set::default(),
                     ),
-                )
-                .await;
+                );
             let _ = subscription.recv().await.unwrap();
 
             manager
@@ -1979,8 +1972,7 @@ mod tests {
                         Set::try_from([pk_b.clone()]).unwrap(),
                         Set::try_from([pk_overlap.clone(), pk_sec.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
 
@@ -2062,8 +2054,7 @@ mod tests {
                 .track(
                     0,
                     Set::try_from([sender_pk.clone(), recipient_pk.clone()]).unwrap(),
-                )
-                .await;
+                );
             let (mut sender, _sender_recv) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -2144,8 +2135,7 @@ mod tests {
                     0,
                     Set::try_from([sender_pk.clone(), recipient_a.clone(), recipient_b.clone()])
                         .unwrap(),
-                )
-                .await;
+                );
             let (mut sender, _recv_sender) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -2241,8 +2231,7 @@ mod tests {
                         Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
                         Set::try_from([pk2.clone(), pk3.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let mut updates = manager.subscribe().await;
             let update = updates.recv().await.unwrap();
@@ -2337,8 +2326,7 @@ mod tests {
                         Set::try_from([pk_x.clone()]).unwrap(),
                         Set::try_from([pk_y.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let update = sub.recv().await.unwrap();
             assert!(update.all.primary.position(&pk_x).is_some());
@@ -2352,8 +2340,7 @@ mod tests {
                         Set::try_from([pk_y.clone()]).unwrap(),
                         Set::try_from([pk_x.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             // Both indices retained: both peers are primary somewhere -> aggregate primary.
             let update = sub.recv().await.unwrap();
@@ -2369,8 +2356,7 @@ mod tests {
                         Set::try_from([pk_y.clone()]).unwrap(),
                         Set::try_from([pk_x.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             // Index 0 evicted. X is now purely secondary.
             let update = sub.recv().await.unwrap();
@@ -2408,8 +2394,7 @@ mod tests {
                         Set::try_from([primary_0.clone()]).unwrap(),
                         Set::try_from([secondary_0.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
             manager
                 .track(
                     1,
@@ -2417,8 +2402,7 @@ mod tests {
                         Set::try_from([primary_1.clone()]).unwrap(),
                         Set::try_from([secondary_1.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
@@ -2466,8 +2450,7 @@ mod tests {
                 &mut manager,
                 2,
                 TrackedPeers::primary([primary_2.clone()].try_into().unwrap()),
-            )
-            .await;
+            );
             oracle
                 .add_link(primary_2.clone(), secondary_0.clone(), link.clone())
                 .await

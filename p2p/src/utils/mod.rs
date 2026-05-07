@@ -4,11 +4,13 @@ use crate::{PeerSetUpdate, Provider, TrackedPeers};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        fallible::FallibleExt,
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        ring::{self, Receiver, Sender},
     },
     ordered::Set,
+    NZUsize,
 };
+use futures::Sink;
+use std::pin::Pin;
 
 pub mod codec;
 pub mod limited;
@@ -30,7 +32,7 @@ pub(crate) struct PeerSetsAtIndex<Primary, Secondary> {
 pub struct StaticProvider<P: PublicKey> {
     id: u64,
     peers: Set<P>,
-    senders: Vec<UnboundedSender<PeerSetUpdate<P>>>,
+    senders: Vec<Sender<PeerSetUpdate<P>>>,
 }
 
 impl<P: PublicKey> StaticProvider<P> {
@@ -52,9 +54,9 @@ impl<P: PublicKey> Provider for StaticProvider<P> {
         Some(TrackedPeers::primary(self.peers.clone()))
     }
 
-    async fn subscribe(&mut self) -> UnboundedReceiver<PeerSetUpdate<P>> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        sender.send_lossy(PeerSetUpdate {
+    async fn subscribe(&mut self) -> Receiver<PeerSetUpdate<P>> {
+        let (mut sender, receiver) = ring::channel(NZUsize!(1));
+        let _ = Pin::new(&mut sender).start_send(PeerSetUpdate {
             index: self.id,
             latest: TrackedPeers::new(self.peers.clone(), Set::default()),
             all: TrackedPeers::new(self.peers.clone(), Set::default()),

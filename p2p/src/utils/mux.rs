@@ -8,11 +8,14 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 
-use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
+use crate::{
+    Channel, CheckedSender, LimitedSender, MailboxSender, Message, Receiver, Recipients, Sender,
+};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufs, Spawner};
 use commonware_utils::channel::{
+    actor::Enqueue,
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
     oneshot,
@@ -242,6 +245,25 @@ impl<S: Sender> LimitedSender for SubSender<S> {
             .check(recipients)
             .await
             .map(|checked| checked.with_subchannel(self.subchannel))
+    }
+}
+
+impl<S> MailboxSender for SubSender<S>
+where
+    S: Sender + MailboxSender<PublicKey = <S as LimitedSender>::PublicKey>,
+{
+    type PublicKey = <S as LimitedSender>::PublicKey;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Enqueue {
+        let subchannel = UInt(self.subchannel);
+        let mut message = message.into();
+        message.prepend(subchannel.encode().into());
+        <S as MailboxSender>::send(&self.inner.inner, recipients, message, priority)
     }
 }
 
@@ -556,8 +578,7 @@ mod tests {
             .track(
                 0,
                 Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
-            )
-            .await;
+            );
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }

@@ -1,6 +1,7 @@
 use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
+use commonware_utils::channel::actor::{FullPolicy, MessagePolicy};
 use std::collections::HashMap;
 
 /// Data is an arbitrary message sent between peers.
@@ -50,6 +51,16 @@ pub struct EncodedData {
 
     /// Pre-encoded `Payload::Data(...)` bytes ready for transmission.
     pub payload: IoBufs,
+}
+
+impl MessagePolicy for EncodedData {
+    fn kind(&self) -> &'static str {
+        "data"
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Reject
+    }
 }
 
 impl EncodedData {

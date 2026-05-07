@@ -134,7 +134,7 @@ mod tests {
 
         // Track all peers so the simulated network allows message delivery.
         let all_peers = commonware_utils::ordered::Set::from_iter_dedup(peers.clone());
-        oracle.manager().track(0, all_peers).await;
+        oracle.manager().track(0, all_peers);
 
         (peers, registrations, oracle)
     }
@@ -986,7 +986,7 @@ mod tests {
 
             // Send a peer set update excluding peer A.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
-            oracle.manager().track(1, remaining).await;
+            oracle.manager().track(1, remaining);
             context.sleep(A_JIFFY).await;
 
             // Peer A's deque was evicted; the message should be gone.
@@ -1048,7 +1048,7 @@ mod tests {
 
             // Track all three peers in set 0.
             let all = commonware_utils::ordered::Set::from_iter_dedup(peers.clone());
-            oracle.manager().track(0, all).await;
+            oracle.manager().track(0, all);
 
             // Spawn engines for B (with its own manager) and the rest.
             let network_b = registrations.remove(&peer_b).unwrap();
@@ -1103,7 +1103,7 @@ mod tests {
                 peer_b.clone(),
                 peer_c.clone(),
             ]);
-            oracle.manager().track(1, remaining).await;
+            oracle.manager().track(1, remaining);
             context.sleep(A_JIFFY).await;
 
             assert!(
@@ -1180,8 +1180,7 @@ mod tests {
                 commonware_utils::ordered::Set::from_iter_dedup(vec![peer_a.clone()]);
             oracle
                 .manager()
-                .track(0, TrackedPeers::new(latest_primary, latest_secondary))
-                .await;
+                .track(0, TrackedPeers::new(latest_primary, latest_secondary));
 
             let mut mailboxes = BTreeMap::new();
             for (peer, network) in registrations {
@@ -1356,8 +1355,7 @@ mod tests {
                 .track(
                     0,
                     commonware_utils::ordered::Set::from_iter_dedup(peers.clone()),
-                )
-                .await;
+                );
             context.sleep(A_JIFFY).await;
 
             let after = TestMessage::shared(b"after-tracking");
@@ -1428,7 +1426,7 @@ mod tests {
 
             // Evict peer A only; C is still in the latest primary set.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
-            oracle.manager().track(1, remaining).await;
+            oracle.manager().track(1, remaining);
             context.sleep(A_JIFFY).await;
 
             // Message should still be available (C's deque still holds it).

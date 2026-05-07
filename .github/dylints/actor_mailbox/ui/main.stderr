@@ -1,0 +1,87 @@
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:34:25
+   |
+LL |                 sender: mpsc::Sender<u8>,
+   |                         ^^^^^^^^^^^^^^^^
+   |
+help: store ActorMailbox or ActorInbox instead
+  --> $DIR/main.rs:34:25
+   |
+LL |                 sender: mpsc::Sender<u8>,
+   |                         ^^^^^^^^^^^^^^^^
+   = note: `#[deny(actor_mailbox)]` on by default
+
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:35:27
+   |
+LL |                 receiver: mpsc::Receiver<u8>,
+   |                           ^^^^^^^^^^^^^^^^^^
+   |
+help: store ActorMailbox or ActorInbox instead
+  --> $DIR/main.rs:35:27
+   |
+LL |                 receiver: mpsc::Receiver<u8>,
+   |                           ^^^^^^^^^^^^^^^^^^
+
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:39:25
+   |
+LL |                 let _ = mpsc::channel::<u8>(1);
+   |                         ^^^^^^^^^^^^^^^^^^^
+   |
+help: create an ActorMailbox with actor::channel instead
+  --> $DIR/main.rs:39:25
+   |
+LL |                 let _ = mpsc::channel::<u8>(1);
+   |                         ^^^^^^^^^^^^^^^^^^^
+
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:40:25
+   |
+LL |                 let _ = mpsc::unbounded_channel::<u8>();
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: create an ActorMailbox with actor::channel instead
+  --> $DIR/main.rs:40:25
+   |
+LL |                 let _ = mpsc::unbounded_channel::<u8>();
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:49:21
+   |
+LL |             sender: UnboundedSender<u8>,
+   |                     ^^^^^^^^^^^^^^^^^^^
+   |
+help: store ActorMailbox or ActorInbox instead
+  --> $DIR/main.rs:49:21
+   |
+LL |             sender: UnboundedSender<u8>,
+   |                     ^^^^^^^^^^^^^^^^^^^
+
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:57:21
+   |
+LL |             sender: mpsc::UnboundedSender<u8>,
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: store ActorMailbox or ActorInbox instead
+  --> $DIR/main.rs:57:21
+   |
+LL |             sender: mpsc::UnboundedSender<u8>,
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: raw mpsc actor mailbox
+  --> $DIR/main.rs:58:23
+   |
+LL |             receiver: mpsc::UnboundedReceiver<u8>,
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: store ActorMailbox or ActorInbox instead
+  --> $DIR/main.rs:58:23
+   |
+LL |             receiver: mpsc::UnboundedReceiver<u8>,
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 7 previous errors
+

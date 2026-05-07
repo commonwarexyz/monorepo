@@ -11,9 +11,12 @@ use crate::{
     PeerSetSubscription, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::{
-    actor::{self, Enqueue, FullPolicy, MessagePolicy},
-    mpsc, oneshot,
+use commonware_utils::{
+    channel::{
+        actor::{self, Enqueue, FullPolicy, MessagePolicy},
+        ring, oneshot,
+    },
+    NZUsize,
 };
 use std::collections::VecDeque;
 
@@ -449,11 +452,11 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
         let (responder, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { responder }) {
             Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
-                let (_, rx) = mpsc::unbounded_channel();
+                let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
             Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
-                let (_, rx) = mpsc::unbounded_channel();
+                let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }
         }
@@ -461,14 +464,14 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
-    async fn track<R>(&mut self, index: u64, peers: R)
+    fn track<R>(&mut self, index: u64, peers: R) -> Enqueue
     where
-        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+        R: Into<TrackedPeers<Self::PublicKey>>,
     {
-        let _ = self.sender.enqueue(Message::Register {
+        self.sender.enqueue(Message::Register {
             index,
             peers: peers.into(),
-        });
+        })
     }
 }
 

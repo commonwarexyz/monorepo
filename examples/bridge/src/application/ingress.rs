@@ -8,7 +8,7 @@ use commonware_consensus::{
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::{actor::Enqueue, mpsc, oneshot};
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
@@ -107,10 +107,11 @@ impl<D: Digest> Re for Mailbox<D> {
 impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<Scheme, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        self.sender
-            .send(Message::Report { activity })
-            .await
-            .expect("Failed to send report");
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+        match self.sender.try_send(Message::Report { activity }) {
+            Ok(()) => Enqueue::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
+            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
+        }
     }
 }
