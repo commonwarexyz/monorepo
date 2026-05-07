@@ -12,6 +12,8 @@ type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 pub struct FetchRequest<K, P> {
     /// The key to fetch.
     pub key: K,
+    /// The key used to decide whether the fetch should be retained.
+    pub retain_key: K,
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
@@ -30,7 +32,7 @@ pub enum Message<K, P> {
     /// Cancel all fetch requests.
     Clear,
 
-    /// Cancel all fetch requests that do not satisfy the predicate.
+    /// Cancel all fetch requests without a retain key that satisfies the predicate.
     Retain { predicate: Predicate<K> },
 }
 
@@ -60,7 +62,24 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// If the engine has shut down, this is a no-op.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest { key, targets: None }]))
+            .send_lossy(Message::Fetch(vec![FetchRequest {
+                retain_key: key.clone(),
+                key,
+                targets: None,
+            }]))
+            .await;
+    }
+
+    /// Send a fetch request to the peer actor with a separate retain key.
+    ///
+    /// If the engine has shut down, this is a no-op.
+    async fn fetch_with_retain_key(&mut self, key: Self::Key, retain_key: Self::Key) {
+        self.sender
+            .send_lossy(Message::Fetch(vec![FetchRequest {
+                key,
+                retain_key,
+                targets: None,
+            }]))
             .await;
     }
 
@@ -74,7 +93,11 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
         self.sender
             .send_lossy(Message::Fetch(
                 keys.into_iter()
-                    .map(|key| FetchRequest { key, targets: None })
+                    .map(|key| FetchRequest {
+                        retain_key: key.clone(),
+                        key,
+                        targets: None,
+                    })
                     .collect(),
             ))
             .await;
@@ -86,6 +109,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
+                retain_key: key.clone(),
                 key,
                 targets: Some(targets),
             }]))
@@ -104,6 +128,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
                 requests
                     .into_iter()
                     .map(|(key, targets)| FetchRequest {
+                        retain_key: key.clone(),
                         key,
                         targets: Some(targets),
                     })

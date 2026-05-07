@@ -931,9 +931,21 @@ where
             // If this is a valid view, this request should be fine to keep open
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
-            resolver
-                .fetch(ResolverKey::request(Request::Notarized { round }))
-                .await;
+            let request = ResolverKey::request(Request::Notarized { round });
+            match key {
+                BlockSubscriptionKey::Digest(_) => resolver.fetch(request).await,
+                BlockSubscriptionKey::Commitment(commitment) => {
+                    resolver
+                        .fetch_with_retain_key(
+                            request,
+                            ResolverKey::block_request(
+                                commitment,
+                                BlockFetchContext::Finalized { round },
+                            ),
+                        )
+                        .await;
+                }
+            }
         } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
             if height <= self.last_processed_height {
                 // We already checked local storage. Missing ancestors at or below

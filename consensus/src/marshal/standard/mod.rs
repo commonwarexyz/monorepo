@@ -1895,6 +1895,7 @@ mod tests {
         type PublicKey = PublicKey;
 
         async fn fetch(&mut self, _key: Self::Key) {}
+        async fn fetch_with_retain_key(&mut self, _key: Self::Key, _retain_key: Self::Key) {}
         async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
         async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
             self.targeted.lock().push((key, targets));

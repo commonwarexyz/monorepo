@@ -25,7 +25,10 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand::Rng;
-use std::marker::PhantomData;
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+};
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -71,6 +74,9 @@ pub struct Engine<
 
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
+
+    /// Retain keys that keep each fetch key alive.
+    retainers: HashMap<Key, HashSet<Key>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -127,6 +133,7 @@ impl<
                 mailbox: receiver,
                 fetcher,
                 inflight: Inflight::new(cfg.consumer),
+                retainers: HashMap::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -186,6 +193,7 @@ impl<
             on_stopped => {
                 debug!("shutdown");
                 self.inflight.drain();
+                self.retainers.clear();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -217,11 +225,20 @@ impl<
             } => {
                 match msg {
                     Message::Fetch(requests) => {
-                        for FetchRequest { key, targets } in requests {
+                        for FetchRequest {
+                            key,
+                            retain_key,
+                            targets,
+                        } in requests
+                        {
                             trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
+                            self.retainers
+                                .entry(key.clone())
+                                .or_default()
+                                .insert(retain_key);
 
                             // Update targets
                             match targets {
@@ -251,6 +268,7 @@ impl<
                     Message::Cancel { key } => {
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
+                        self.retainers.remove(&key);
                         self.fetcher.cancel(&key);
                         if self.inflight.cancel(&key) {
                             guard.set(Status::Success);
@@ -259,13 +277,19 @@ impl<
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.fetcher.retain(&predicate);
-                        let count = self.inflight.retain(predicate) as u64;
+                        self.retainers.retain(|_, retain_keys| {
+                            retain_keys.retain(|retain_key| predicate(retain_key));
+                            !retain_keys.is_empty()
+                        });
+                        let retained: HashSet<_> = self.retainers.keys().cloned().collect();
+                        self.fetcher.retain(|key| retained.contains(key));
+                        let count = self.inflight.retain(|key| retained.contains(key)) as u64;
                         self.record_cancellations(count);
                     }
                     Message::Clear => {
                         trace!("mailbox: clear");
 
+                        self.retainers.clear();
                         self.fetcher.clear();
                         let count = self.inflight.drain() as u64;
                         self.record_cancellations(count);
@@ -411,6 +435,7 @@ impl<
         if valid {
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());
+            self.retainers.remove(&key);
             self.fetcher.clear_targets(&key);
             return;
         }

@@ -49,6 +49,20 @@ commonware_macros::stability_scope!(BETA {
         /// Initiate a fetch request for a single key.
         fn fetch(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
 
+        /// Initiate a fetch request with a separate key used by [`retain`](Self::retain).
+        ///
+        /// The resolver still fetches and delivers `key`. `retain_key` only controls
+        /// whether the request is retained by [`retain`](Self::retain). If multiple
+        /// retain keys are attached to the same fetch key, the fetch is retained as
+        /// long as at least one retain key satisfies the predicate.
+        ///
+        /// [`cancel`](Self::cancel) still cancels by fetch key.
+        fn fetch_with_retain_key(
+            &mut self,
+            key: Self::Key,
+            retain_key: Self::Key,
+        ) -> impl Future<Output = ()> + Send;
+
         /// Initiate a fetch request for a batch of keys.
         fn fetch_all(&mut self, keys: Vec<Self::Key>) -> impl Future<Output = ()> + Send;
 
@@ -95,7 +109,7 @@ commonware_macros::stability_scope!(BETA {
         /// in-progress response validation.
         fn clear(&mut self) -> impl Future<Output = ()> + Send;
 
-        /// Retain only the fetch requests that satisfy the predicate.
+        /// Retain only the fetch requests with at least one retain key satisfying the predicate.
         ///
         /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
         /// how cancellation affects in-progress response validation.

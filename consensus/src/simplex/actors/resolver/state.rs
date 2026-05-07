@@ -259,6 +259,10 @@ mod tests {
             self.outstanding.lock().insert(key);
         }
 
+        async fn fetch_with_retain_key(&mut self, key: U64, _retain_key: U64) {
+            self.outstanding.lock().insert(key);
+        }
+
         async fn fetch_all(&mut self, keys: Vec<U64>) {
             for key in keys {
                 self.outstanding.lock().insert(key);

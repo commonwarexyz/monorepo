@@ -37,6 +37,13 @@
 //! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
 //! or blocked peer), the targets for that key are cleared automatically.
 //!
+//! # Retention
+//!
+//! [`Resolver::fetch_with_retain_key`](crate::Resolver::fetch_with_retain_key) lets callers fetch
+//! one key while retaining the request under another key. This is useful when several local reasons
+//! can share the same peer-visible fetch. A fetch remains active while at least one attached retain
+//! key satisfies the latest [`Resolver::retain`](crate::Resolver::retain) predicate.
+//!
 //! # Peer Selection
 //!
 //! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
@@ -1830,6 +1837,64 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, Bytes::from("data for key 5"));
+        });
+    }
+
+    #[test_traced]
+    fn test_retain_uses_retain_keys() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let dropped_retain_key = Key(50);
+            let kept_retain_key = Key(51);
+            mailbox1
+                .fetch_with_retain_key(key.clone(), dropped_retain_key)
+                .await;
+            mailbox1
+                .fetch_with_retain_key(key.clone(), kept_retain_key.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(100)).await;
+            mailbox1
+                .retain(move |retain_key| retain_key == &kept_retain_key)
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, Bytes::from("data for key 5"));
