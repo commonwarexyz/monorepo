@@ -13,9 +13,16 @@ use std::{
 
 const CAPACITY: usize = 1024;
 const CONTENDED_MESSAGES: usize = 64 * 1024;
+const MATRIX_MESSAGES_PER_PRODUCER: usize = 1024;
 const MESSAGES: usize = 1024;
 const PRODUCERS: usize = 4;
 const PRODUCER_MESSAGES: usize = CONTENDED_MESSAGES / PRODUCERS;
+const TOKIO_STYLE_MESSAGES: usize = 5_000;
+const TOKIO_STYLE_PRODUCERS: usize = 5;
+const TOKIO_STYLE_MESSAGES_PER_PRODUCER: usize = TOKIO_STYLE_MESSAGES / TOKIO_STYLE_PRODUCERS;
+
+const MATRIX_CAPACITIES: &[usize] = &[1, 8, 64, 1024];
+const MATRIX_PRODUCERS: &[usize] = &[1, 2, 4, 8, 16];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Message {
@@ -429,8 +436,255 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
     group.finish();
 }
 
+fn run_actor_try_send_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
+    let total = producers * messages_per_producer;
+    let (sender, mut receiver) = actor::channel::<Message>(capacity);
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(move || {
+            let mut received = 0;
+            while received < total {
+                match receiver.try_recv() {
+                    Ok(message) => {
+                        black_box(message);
+                        received += 1;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => std::hint::spin_loop(),
+                    Err(error) => panic!("actor receiver closed early: {error:?}"),
+                }
+            }
+        });
+
+        for producer in 0..producers {
+            let sender = sender.clone();
+            scope.spawn(move || {
+                let base = producer * messages_per_producer;
+                for offset in 0..messages_per_producer {
+                    let message = Message::Reject((base + offset) as u64);
+                    loop {
+                        match sender.enqueue(message) {
+                            Enqueue::Queued => break,
+                            Enqueue::Rejected => std::hint::spin_loop(),
+                            result => panic!("unexpected actor enqueue result: {result:?}"),
+                        }
+                    }
+                }
+            });
+        }
+
+        handle.join().unwrap();
+    });
+}
+
+fn run_tokio_try_send_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
+    let total = producers * messages_per_producer;
+    let (sender, mut receiver) = mpsc::channel::<Message>(capacity);
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(move || {
+            let mut received = 0;
+            while received < total {
+                match receiver.try_recv() {
+                    Ok(message) => {
+                        black_box(message);
+                        received += 1;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => std::hint::spin_loop(),
+                    Err(error) => panic!("tokio receiver closed early: {error:?}"),
+                }
+            }
+        });
+
+        for producer in 0..producers {
+            let sender = sender.clone();
+            scope.spawn(move || {
+                let base = producer * messages_per_producer;
+                for offset in 0..messages_per_producer {
+                    let message = Message::Reject((base + offset) as u64);
+                    loop {
+                        match sender.try_send(message) {
+                            Ok(()) => break,
+                            Err(mpsc::error::TrySendError::Full(_)) => std::hint::spin_loop(),
+                            Err(error) => panic!("unexpected tokio try_send result: {error:?}"),
+                        }
+                    }
+                }
+            });
+        }
+
+        handle.join().unwrap();
+    });
+}
+
+fn run_actor_retain_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
+    let total = producers * messages_per_producer;
+    let (sender, mut receiver) = actor::channel_with_retention::<Message>(capacity, total);
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(move || {
+            futures::executor::block_on(async {
+                for _ in 0..total {
+                    black_box(receiver.recv().await.unwrap());
+                }
+            });
+        });
+
+        for producer in 0..producers {
+            let sender = sender.clone();
+            scope.spawn(move || {
+                let base = producer * messages_per_producer;
+                for offset in 0..messages_per_producer {
+                    assert!(sender
+                        .enqueue(Message::Retain((base + offset) as u64))
+                        .accepted());
+                }
+            });
+        }
+
+        handle.join().unwrap();
+    });
+}
+
+fn run_tokio_send_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
+    let total = producers * messages_per_producer;
+    let (sender, mut receiver) = mpsc::channel::<Message>(capacity);
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(move || {
+            futures::executor::block_on(async {
+                for _ in 0..total {
+                    black_box(receiver.recv().await.unwrap());
+                }
+            });
+        });
+
+        for producer in 0..producers {
+            let sender = sender.clone();
+            scope.spawn(move || {
+                futures::executor::block_on(async {
+                    let base = producer * messages_per_producer;
+                    for offset in 0..messages_per_producer {
+                        sender
+                            .send(Message::Retain((base + offset) as u64))
+                            .await
+                            .unwrap();
+                    }
+                });
+            });
+        }
+
+        handle.join().unwrap();
+    });
+}
+
+fn bench_try_send_matrix(c: &mut Criterion) {
+    let mut group = c.benchmark_group(module_path!());
+
+    for &capacity in MATRIX_CAPACITIES {
+        for &producers in MATRIX_PRODUCERS {
+            let total = producers * MATRIX_MESSAGES_PER_PRODUCER;
+            group.throughput(Throughput::Elements(total as u64));
+
+            group.bench_function(
+                format!(
+                    "operation=try_send_matrix impl=actor producers={producers} capacity={capacity}"
+                ),
+                |b| {
+                    b.iter(|| {
+                        run_actor_try_send_contended(
+                            producers,
+                            MATRIX_MESSAGES_PER_PRODUCER,
+                            capacity,
+                        );
+                    });
+                },
+            );
+
+            group.bench_function(
+                format!(
+                    "operation=try_send_matrix impl=tokio_mpsc producers={producers} capacity={capacity}"
+                ),
+                |b| {
+                    b.iter(|| {
+                        run_tokio_try_send_contended(
+                            producers,
+                            MATRIX_MESSAGES_PER_PRODUCER,
+                            capacity,
+                        );
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_tokio_style(c: &mut Criterion) {
+    let mut group = c.benchmark_group(module_path!());
+    group.throughput(Throughput::Elements(TOKIO_STYLE_MESSAGES as u64));
+
+    for capacity in [1_000_000, 100] {
+        group.bench_function(
+            format!("operation=tokio_style_contention impl=actor capacity={capacity}"),
+            |b| {
+                b.iter(|| {
+                    run_actor_retain_contended(
+                        TOKIO_STYLE_PRODUCERS,
+                        TOKIO_STYLE_MESSAGES_PER_PRODUCER,
+                        capacity,
+                    );
+                });
+            },
+        );
+
+        group.bench_function(
+            format!("operation=tokio_style_contention impl=tokio_mpsc capacity={capacity}"),
+            |b| {
+                b.iter(|| {
+                    run_tokio_send_contended(
+                        TOKIO_STYLE_PRODUCERS,
+                        TOKIO_STYLE_MESSAGES_PER_PRODUCER,
+                        capacity,
+                    );
+                });
+            },
+        );
+    }
+
+    group.bench_function("operation=tokio_style_uncontented impl=actor", |b| {
+        b.iter(|| {
+            let (sender, mut receiver) = actor::channel::<Message>(1_000_000);
+            for i in 0..TOKIO_STYLE_MESSAGES as u64 {
+                assert_eq!(sender.enqueue(Message::Reject(i)), Enqueue::Queued);
+            }
+            futures::executor::block_on(async {
+                for _ in 0..TOKIO_STYLE_MESSAGES {
+                    black_box(receiver.recv().await.unwrap());
+                }
+            });
+        });
+    });
+
+    group.bench_function("operation=tokio_style_uncontented impl=tokio_mpsc", |b| {
+        b.iter(|| {
+            let (sender, mut receiver) = mpsc::channel::<Message>(1_000_000);
+            futures::executor::block_on(async {
+                for i in 0..TOKIO_STYLE_MESSAGES as u64 {
+                    sender.send(Message::Reject(i)).await.unwrap();
+                }
+                for _ in 0..TOKIO_STYLE_MESSAGES {
+                    black_box(receiver.recv().await.unwrap());
+                }
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_enqueue_ready, bench_recv_ready, bench_round_trip_ready, bench_recv_waiting, bench_full_queue, bench_spsc_contended, bench_concurrent_enqueue,
+    targets = bench_enqueue_ready, bench_recv_ready, bench_round_trip_ready, bench_recv_waiting, bench_full_queue, bench_spsc_contended, bench_concurrent_enqueue, bench_try_send_matrix, bench_tokio_style,
 }
