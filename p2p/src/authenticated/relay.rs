@@ -1,5 +1,8 @@
 use commonware_macros::select;
-use commonware_utils::channel::mpsc::{self, error::TrySendError};
+use commonware_utils::channel::{
+    actor::{ActorInbox, MessagePolicy},
+    mpsc::{self, error::TrySendError},
+};
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
@@ -33,9 +36,9 @@ pub enum Prioritized<C, D> {
     Closed,
 }
 
-/// Awaits a message from control, high, or low priority receivers.
-pub async fn recv_prioritized<C, D>(
-    control: &mut mpsc::Receiver<C>,
+/// Awaits a message from an actor control inbox, high, or low priority receivers.
+pub async fn recv_actor_prioritized<C: MessagePolicy, D>(
+    control: &mut ActorInbox<C>,
     high: &mut mpsc::Receiver<D>,
     low: &mut mpsc::Receiver<D>,
 ) -> Prioritized<C, D> {

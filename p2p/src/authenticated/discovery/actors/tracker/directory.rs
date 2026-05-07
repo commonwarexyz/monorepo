@@ -557,7 +557,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
+    use crate::authenticated::{discovery::types, Mailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
     use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_utils::{
@@ -596,7 +596,7 @@ mod tests {
         let signer = PrivateKey::from_seed(0);
         let my_pk = signer.public_key();
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -642,7 +642,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let config = Config {
             allow_private_ips: false,
@@ -694,7 +694,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let config = Config {
             allow_private_ips: false,
@@ -744,7 +744,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let config = Config {
             allow_private_ips: false,
@@ -823,7 +823,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let config = Config {
             allow_private_ips: false,
@@ -878,7 +878,7 @@ mod tests {
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let unknown_pk = PrivateKey::from_seed(99).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -962,7 +962,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let config = Config {
             allow_private_ips: false,
@@ -1015,7 +1015,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let unknown_pk = PrivateKey::from_seed(99).public_key();
         let registered_pk = PrivateKey::from_seed(50).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1092,7 +1092,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1164,7 +1164,7 @@ mod tests {
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_pk = PrivateKey::from_seed(1).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1245,7 +1245,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let pk_1 = PrivateKey::from_seed(1).public_key();
         let pk_2 = PrivateKey::from_seed(2).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1331,7 +1331,7 @@ mod tests {
         let pk_1 = PrivateKey::from_seed(1).public_key();
         let pk_2 = PrivateKey::from_seed(2).public_key();
         let pk_3 = PrivateKey::from_seed(3).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1390,7 +1390,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1453,7 +1453,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1515,7 +1515,7 @@ mod tests {
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_pk = PrivateKey::from_seed(1).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1574,7 +1574,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1648,7 +1648,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let bootstrapper_pk = PrivateKey::from_seed(1).public_key();
         let bootstrapper_ingress = Ingress::Socket(SocketAddr::from(([1, 2, 3, 4], 8080)));
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1714,7 +1714,7 @@ mod tests {
         let peer_pk_1 = peer_signer_1.public_key();
         let peer_signer_2 = PrivateKey::from_seed(2);
         let peer_pk_2 = peer_signer_2.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1799,7 +1799,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let cooldown = Duration::from_secs(1);
         let config = Config {
@@ -1857,7 +1857,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let cooldown = Duration::from_secs(1);
         let config = Config {
@@ -1905,7 +1905,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let config = Config {
             allow_private_ips: true,
@@ -1938,7 +1938,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(3600);
         let config = Config {
@@ -1981,7 +1981,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(1);
         let config = Config {
@@ -2038,7 +2038,7 @@ mod tests {
         let my_info = create_myself_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = Releaser::new(tx);
         let block_duration = Duration::from_secs(1);
         let config = Config {

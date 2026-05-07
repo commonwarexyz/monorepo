@@ -61,6 +61,19 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     }
 }
 
+impl<P: PublicKey> crate::MailboxSender for InertSender<P> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        _: Recipients<Self::PublicKey>,
+        _: impl Into<IoBufs> + Send,
+        _: bool,
+    ) -> commonware_utils::channel::actor::Enqueue {
+        commonware_utils::channel::actor::Enqueue::Queued
+    }
+}
+
 impl<P: PublicKey> Receiver for InertReceiver<P> {
     type Error = Infallible;
     type PublicKey = P;

@@ -17,7 +17,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::mpsc,
+        channel::{actor::Enqueue, mpsc},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -202,6 +202,23 @@ stability_scope!(BETA {
 
     // Blanket implementation of `Sender` for all `LimitedSender`s.
     impl<S: LimitedSender> Sender for S {}
+
+    /// Interface for enqueueing messages to a set of recipients without waiting on p2p delivery.
+    pub trait MailboxSender: Clone + Send + Sync + 'static {
+        /// Public key type used to identify recipients.
+        type PublicKey: PublicKey;
+
+        /// Enqueue a message to a set of recipients.
+        ///
+        /// This method only reports whether the p2p actor accepted the work. It
+        /// does not report which peers eventually received the message.
+        fn send(
+            &self,
+            recipients: Recipients<Self::PublicKey>,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> Enqueue;
+    }
 
     /// Interface for receiving messages from arbitrary recipients.
     pub trait Receiver: Debug + Send + 'static {
@@ -400,7 +417,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
-        fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
+        fn block(&mut self, peer: Self::PublicKey) -> Enqueue;
     }
 });
 
@@ -429,7 +446,7 @@ macro_rules! block {
         let peer = $peer;
         tracing::warn!(peer = ?peer, $($arg)+);
         #[allow(clippy::disallowed_methods)]
-        $blocker.block(peer).await;
+        let _ = $blocker.block(peer);
     };
 }
 
@@ -439,6 +456,6 @@ macro_rules! block {
     reason = "test helper that bypasses the block! macro"
 )]
 #[cfg(test)]
-pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
-    blocker.block(peer).await;
+pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Enqueue {
+    blocker.block(peer)
 }

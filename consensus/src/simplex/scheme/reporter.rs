@@ -24,7 +24,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate, Digest};
 use commonware_parallel::Strategy;
-use commonware_utils::sync::Mutex;
+use commonware_utils::{channel::actor::Enqueue, sync::Mutex};
 use rand_core::CryptoRngCore;
 use std::sync::Arc;
 
@@ -101,14 +101,14 @@ impl<
 {
     type Activity = Activity<S, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
         // Verify peer activities if verification is enabled
         if self.verify
             && !activity.verified()
             && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
         {
             // Drop unverified peer activity
-            return;
+            return Enqueue::Dropped;
         }
 
         // Filter based on scheme attributability
@@ -121,7 +121,7 @@ impl<
                 | Activity::ConflictingFinalize(_)
                 | Activity::NullifyFinalize(_) => {
                     // Drop per-validator peer activity for non-attributable scheme
-                    return;
+                    return Enqueue::Dropped;
                 }
                 Activity::Notarization(_)
                 | Activity::Certification(_)
@@ -132,7 +132,7 @@ impl<
             }
         }
 
-        self.reporter.report(activity).await;
+        self.reporter.report(activity)
     }
 }
 
@@ -155,7 +155,6 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::{sync::Mutex, test_rng, N3f1};
-    use futures::executor::block_on;
     use std::sync::Arc;
 
     const NAMESPACE: &[u8] = b"test-reporter";
@@ -184,8 +183,9 @@ mod tests {
     impl<S: certificate::Scheme, D: Digest> Reporter for MockReporter<S, D> {
         type Activity = Activity<S, D>;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> Enqueue {
             self.activities.lock().push(activity);
+            Enqueue::Queued
         }
     }
 
@@ -230,7 +230,7 @@ mod tests {
         };
 
         // Report it
-        block_on(reporter.report(Activity::Notarize(notarize)));
+        reporter.report(Activity::Notarize(notarize));
 
         // Should be dropped
         assert_eq!(mock.count(), 0);
@@ -275,7 +275,7 @@ mod tests {
         };
 
         // Report it
-        block_on(reporter.report(Activity::Notarize(notarize)));
+        reporter.report(Activity::Notarize(notarize));
 
         // Should be reported even though it's invalid
         assert_eq!(mock.count(), 1);
@@ -322,7 +322,7 @@ mod tests {
         };
 
         // Report it
-        block_on(reporter.report(Activity::Notarization(notarization)));
+        reporter.report(Activity::Notarization(notarization));
 
         // Should be reported even though scheme is non-attributable (certificates are quorum proofs)
         assert_eq!(mock.count(), 1);
@@ -360,7 +360,7 @@ mod tests {
         };
 
         // Report peer per-validator activity
-        block_on(reporter.report(Activity::Notarize(notarize)));
+        reporter.report(Activity::Notarize(notarize));
 
         // Must be filtered
         assert_eq!(mock.count(), 0);
@@ -396,7 +396,7 @@ mod tests {
         };
 
         // Report the peer per-validator activity
-        block_on(reporter.report(Activity::Notarize(notarize)));
+        reporter.report(Activity::Notarize(notarize));
 
         // Should be reported since scheme is attributable
         assert_eq!(mock.count(), 1);

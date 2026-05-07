@@ -65,7 +65,7 @@ stability_scope!(BETA {
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
     use commonware_cryptography::{Digest, PublicKey};
-    use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+    use commonware_utils::channel::{actor::Enqueue, fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
     pub mod marshal;
@@ -213,7 +213,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Activity;
 
         /// Report some activity observed by the consensus implementation.
-        fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
+        fn report(&mut self, activity: Self::Activity) -> Enqueue;
     }
 
     /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.

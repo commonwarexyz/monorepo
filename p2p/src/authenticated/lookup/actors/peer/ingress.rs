@@ -1,5 +1,5 @@
 use crate::authenticated::Mailbox;
-use commonware_utils::channel::fallible::AsyncFallibleExt;
+use commonware_utils::channel::actor::{Enqueue, FullPolicy, MessagePolicy};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -8,8 +8,18 @@ pub enum Message {
     Kill,
 }
 
+impl MessagePolicy for Message {
+    fn kind(&self) -> &'static str {
+        "kill"
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+}
+
 impl Mailbox<Message> {
-    pub async fn kill(&mut self) {
-        self.0.send_lossy(Message::Kill).await;
+    pub fn kill(&mut self) -> Enqueue {
+        self.enqueue(Message::Kill)
     }
 }

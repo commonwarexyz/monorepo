@@ -7,7 +7,7 @@ use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_runtime::{iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Spawner};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc},
+    channel::{actor::Enqueue, fallible::AsyncFallibleExt, mpsc},
     futures::Pool,
 };
 use std::time::SystemTime;
@@ -34,6 +34,36 @@ pub struct WrappedSender<S: Sender, V: Codec> {
     pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
+}
+
+/// Wrapper around a [MailboxSender] that encodes messages using a [Codec].
+#[derive(Clone)]
+pub struct WrappedMailboxSender<S: crate::MailboxSender, V: Codec> {
+    pool: BufferPool,
+    sender: S,
+    _phantom_v: std::marker::PhantomData<V>,
+}
+
+impl<S: crate::MailboxSender, V: Codec> WrappedMailboxSender<S, V> {
+    /// Create a new [WrappedMailboxSender] with the given [MailboxSender] and [BufferPool].
+    pub const fn new(pool: BufferPool, sender: S) -> Self {
+        Self {
+            pool,
+            sender,
+            _phantom_v: std::marker::PhantomData,
+        }
+    }
+
+    /// Enqueue a message to a set of recipients.
+    pub fn send(
+        &self,
+        recipients: Recipients<S::PublicKey>,
+        message: V,
+        priority: bool,
+    ) -> Enqueue {
+        let encoded = message.encode_with_pool(&self.pool);
+        self.sender.send(recipients, encoded, priority)
+    }
 }
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
@@ -386,7 +416,9 @@ mod tests {
     impl crate::Blocker for NoopBlocker {
         type PublicKey = PublicKey;
 
-        async fn block(&mut self, _peer: Self::PublicKey) {}
+        fn block(&mut self, _peer: Self::PublicKey) -> Enqueue {
+            Enqueue::Dropped
+        }
     }
 
     #[test_traced]

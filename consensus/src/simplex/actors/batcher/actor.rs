@@ -25,7 +25,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc},
+    channel::actor::{self, ActorInbox},
     ordered::{Quorum, Set},
 };
 use rand_core::CryptoRngCore;
@@ -65,7 +65,7 @@ where
     forwarding: ForwardingPolicy,
     epoch: Epoch,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: ActorInbox<Message<S, D>>,
 
     added: Counter,
     verified: Counter,
@@ -113,7 +113,7 @@ where
             "certificate recover latency",
             Buckets::CRYPTOGRAPHY,
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = actor::channel(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -291,7 +291,6 @@ where
                     leader,
                     finalized: new_finalized,
                     forwardable_proposal,
-                    response,
                 } => {
                     let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
@@ -324,7 +323,9 @@ where
                     if timeout_reason.is_some() {
                         current.timed_out = true;
                     }
-                    response.send_lossy(timeout_reason);
+                    if let Some(reason) = timeout_reason {
+                        let _ = voter.timeout(current.view, reason);
+                    }
 
                     // Forward the proposal, if enabled and we have something to forward
                     if let Some((proposal, round)) = forwardable_proposal
@@ -350,8 +351,7 @@ where
                     // Add the message to the verifier
                     work.entry(view)
                         .or_insert_with(|| self.new_round())
-                        .add_constructed(message)
-                        .await;
+                        .add_constructed(message);
                     self.added.inc();
                     updated_view = view;
                 }
@@ -409,9 +409,7 @@ where
                         work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_notarization(notarization.clone());
-                        voter
-                            .recovered(Certificate::Notarization(notarization))
-                            .await;
+                        let _ = voter.recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
                         // Skip if we already have a nullification for this view
@@ -434,9 +432,7 @@ where
                         work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_nullification(nullification.clone());
-                        voter
-                            .recovered(Certificate::Nullification(nullification))
-                            .await;
+                        let _ = voter.recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
                         // Skip if we already have a finalization for this view
@@ -455,9 +451,7 @@ where
                         work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_finalization(finalization.clone());
-                        voter
-                            .recovered(Certificate::Finalization(finalization))
-                            .await;
+                        let _ = voter.recovered(Certificate::Finalization(finalization));
                     }
                 }
 
@@ -510,9 +504,7 @@ where
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
-                        voter
-                            .timeout(current.view, TimeoutReason::LeaderNullify)
-                            .await;
+                        let _ = voter.timeout(current.view, TimeoutReason::LeaderNullify);
                     }
                 }
                 updated_view = view;
@@ -527,7 +519,7 @@ where
                 if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
-                            voter.proposal(proposal).await;
+                            let _ = voter.proposal(proposal);
                         }
                     }
                 }
@@ -601,9 +593,7 @@ where
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Forward notarization to voter
-                    voter
-                        .recovered(Certificate::Notarization(notarization))
-                        .await;
+                    let _ = voter.recovered(Certificate::Notarization(notarization));
                 }
                 if let Some(nullification) = self
                     .recover_latency
@@ -612,9 +602,7 @@ where
                     })
                 {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Nullification(nullification))
-                        .await;
+                    let _ = voter.recovered(Certificate::Nullification(nullification));
                 }
                 if let Some(finalization) = self
                     .recover_latency
@@ -623,9 +611,7 @@ where
                     })
                 {
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Finalization(finalization))
-                        .await;
+                    let _ = voter.recovered(Certificate::Finalization(finalization));
                 }
 
                 // Drop any rounds that are no longer interesting

@@ -1,7 +1,7 @@
 use crate::{
     authenticated::{
         data::EncodedData,
-        discovery::{channels::Channels, types},
+        discovery::types,
         relay::Relay,
         Mailbox,
     },
@@ -11,7 +11,10 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, oneshot, ring},
+    channel::{
+        actor::{Enqueue, FullPolicy, MessagePolicy},
+        oneshot, ring,
+    },
     NZUsize,
 };
 
@@ -22,7 +25,6 @@ pub enum Message<P: PublicKey> {
     Ready {
         peer: P,
         relay: Relay<EncodedData>,
-        channels: oneshot::Sender<Channels<P>>,
     },
     /// Notify the router that a peer is no longer available.
     Release { peer: P },
@@ -31,7 +33,7 @@ pub enum Message<P: PublicKey> {
         recipients: Recipients<P>,
         encoded: EncodedData,
         priority: bool,
-        success: oneshot::Sender<Vec<P>>,
+        success: Option<oneshot::Sender<Vec<P>>>,
     },
     /// Get a subscription to peers known by the router.
     SubscribePeers {
@@ -39,26 +41,35 @@ pub enum Message<P: PublicKey> {
     },
 }
 
+impl<P: PublicKey> MessagePolicy for Message<P> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Ready { .. } => "ready",
+            Self::Release { .. } => "release",
+            Self::Content { .. } => "content",
+            Self::SubscribePeers { .. } => "subscribe_peers",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+}
+
 impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
     ///
     /// Returns `None` if the router has shut down.
-    pub async fn ready(&mut self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
-        self.0
-            .request(|channels| Message::Ready {
-                peer,
-                relay,
-                channels,
-            })
-            .await
+    pub fn ready(&mut self, peer: P, relay: Relay<EncodedData>) -> Enqueue {
+        self.enqueue(Message::Ready { peer, relay })
     }
 
     /// Notify the router that a peer is no longer available.
     ///
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
-    pub async fn release(&mut self, peer: P) {
-        self.0.send_lossy(Message::Release { peer }).await;
+    pub fn release(&mut self, peer: P) -> Enqueue {
+        self.enqueue(Message::Release { peer })
     }
 }
 
@@ -90,15 +101,33 @@ impl<P: PublicKey> Messenger<P> {
         // Build Data and encode Payload::Data once for all recipients
         let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
 
-        self.sender
-            .0
-            .request_or_default(|success| Message::Content {
+        let (success, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::Content {
                 recipients,
                 encoded,
                 priority,
-                success,
-            })
-            .await
+                success: Some(success),
+            }) {
+            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_default(),
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Vec::new(),
+        }
+    }
+
+    /// Enqueue a message to the router without waiting for delivery feedback.
+    pub fn enqueue_content(
+        &self,
+        recipients: Recipients<P>,
+        channel: Channel,
+        message: IoBufs,
+        priority: bool,
+    ) -> Enqueue {
+        let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
+        self.sender.enqueue(Message::Content {
+            recipients,
+            encoded,
+            priority,
+            success: None,
+        })
     }
 }
 
@@ -106,13 +135,16 @@ impl<P: PublicKey> Connected for Messenger<P> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        self.sender
-            .0
-            .request(|response| Message::SubscribePeers { response })
-            .await
-            .unwrap_or_else(|| {
+        let (response, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::SubscribePeers { response }) {
+            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
-            })
+            }),
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
+                let (_, rx) = ring::channel(NZUsize!(1));
+                rx
+            }
+        }
     }
 }

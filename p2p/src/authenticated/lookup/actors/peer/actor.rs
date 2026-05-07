@@ -2,7 +2,7 @@ use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
     data::EncodedData,
     lookup::{channels::Channels, metrics, types},
-    relay::{recv_prioritized, Prioritized, Relay},
+    relay::{recv_actor_prioritized, Prioritized, Relay},
     Mailbox,
 };
 use commonware_codec::Decode;
@@ -14,7 +14,10 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
-    channel::mpsc::{self, error::TrySendError},
+    channel::{
+        actor::ActorInbox,
+        mpsc::{self, error::TrySendError},
+    },
     time::SYSTEM_TIME_PRECISION,
 };
 use rand_core::CryptoRngCore;
@@ -27,7 +30,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     ping_frequency: Duration,
     send_batch_size: usize,
 
-    control: mpsc::Receiver<Message>,
+    control: ActorInbox<Message>,
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
@@ -96,7 +99,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mpsc::Receiver<Message>,
+        control: &mut ActorInbox<Message>,
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
@@ -194,7 +197,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     // Await any outbound message (control, high, or low), then
                     // drain already-queued messages into a single runtime write.
                     // Priority order: control > high > low.
-                    msg = recv_prioritized(control, high, low) => {
+                    msg = recv_actor_prioritized(control, high, low) => {
                         match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
                             Prioritized::Control(msg) => match msg {
@@ -344,7 +347,7 @@ mod tests {
         Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
+    use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
         sync::{
@@ -569,7 +572,7 @@ mod tests {
                 send_batch_size: NZUsize!(2),
                 ..default_peer_config(&context)
             };
-            let (peer_actor, peer_mailbox, relay) =
+            let (peer_actor, mut peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             let mut channels = create_channels(&context);
@@ -613,7 +616,7 @@ mod tests {
             assert_eq!(second.message, IoBuf::from(b"second"));
             assert_eq!(sends.load(Ordering::Relaxed), 1);
 
-            peer_mailbox.0.send_lossy(Message::Kill).await;
+            let _ = peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
             assert!(
                 matches!(result, Err(Error::PeerKilled(_))),

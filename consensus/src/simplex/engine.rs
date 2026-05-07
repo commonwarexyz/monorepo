@@ -10,7 +10,7 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_p2p::{Blocker, MailboxSender, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
@@ -168,15 +168,15 @@ impl<
     pub fn start(
         mut self,
         vote_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
         certificate_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
         resolver_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -189,15 +189,15 @@ impl<
     async fn run(
         self,
         vote_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
         certificate_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
         resolver_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) {

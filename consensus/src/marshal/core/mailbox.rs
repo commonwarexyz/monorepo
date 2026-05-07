@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::{actor::Enqueue, fallible::AsyncFallibleExt, mpsc, oneshot},
     vec::NonEmptyVec,
 };
 
@@ -396,15 +396,19 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
 impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     type Activity = Activity<S, V::Commitment>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
-                return;
+                return Enqueue::Dropped;
             }
         };
-        self.sender.send_lossy(message).await;
+        match self.sender.try_send(message) {
+            Ok(()) => Enqueue::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
+            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
+        }
     }
 }

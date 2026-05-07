@@ -1,8 +1,10 @@
 //! Listener
 
 use crate::authenticated::{
-    lookup::actors::{spawner, tracker},
-    mailbox::UnboundedMailbox,
+    lookup::actors::{
+        spawner,
+        tracker::{self, ListenableIps},
+    },
     Mailbox,
 };
 use commonware_cryptography::Signer;
@@ -14,10 +16,15 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
-use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
+use commonware_utils::{
+    channel::actor::{self, ActorInbox, Enqueue, FullPolicy, MessagePolicy},
+    concurrency::Limiter,
+    net::SubnetMask,
+    IpAddrExt,
+};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
 };
@@ -51,7 +58,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
     registered_ips: HashSet<IpAddr>,
-    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+    mailbox: ActorInbox<ListenableIps>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -59,7 +66,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, mailbox: ActorInbox<ListenableIps>) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -104,14 +111,30 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
         let source_ip = address.ip();
+        let (acceptable_mailbox, mut acceptable_receiver) = Mailbox::new(1);
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer, source_ip),
+            |peer| {
+                let tracker = tracker.clone();
+                let mailbox = acceptable_mailbox.clone();
+                async move {
+                    if !matches!(
+                        tracker.request_acceptable(peer, source_ip, mailbox),
+                        Enqueue::Queued | Enqueue::Replaced
+                    ) {
+                        return false;
+                    }
+                    match acceptable_receiver.recv().await {
+                        Some(Message::Acceptable(acceptable)) => acceptable,
+                        Some(Message::Listen(_)) | None => false,
+                    }
+                }
+            },
             stream_cfg,
             stream,
             sink,
@@ -127,20 +150,28 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker.listen(peer.clone()).await else {
+        let (listen_mailbox, mut listen_receiver) = Mailbox::new(1);
+        if !matches!(
+            tracker.request_listen(peer.clone(), listen_mailbox),
+            Enqueue::Queued | Enqueue::Replaced
+        ) {
+            debug!(?peer, ?address, "unable to reserve connection to peer");
+            return;
+        }
+        let Some(Message::Listen(Some(reservation))) = listen_receiver.recv().await else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
-        supervisor.spawn((send, recv), reservation).await;
+        let _ = supervisor.spawn((send, recv), reservation);
     }
 
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -149,7 +180,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Setup the rate limiters
@@ -180,7 +211,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 debug!("mailbox closed");
                 break;
             } => {
-                self.registered_ips = registered_ips;
+                self.registered_ips = registered_ips.0;
             },
             listener = listener.accept() => {
                 // Accept a new connection
@@ -272,6 +303,53 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     }
 }
 
+/// Messages sent to a listener handshaker.
+#[derive(Debug)]
+pub(crate) enum Message<C: commonware_cryptography::PublicKey> {
+    /// Response to an acceptable-peer query.
+    Acceptable(bool),
+    /// Response to a listen reservation query.
+    Listen(Option<tracker::Reservation<C>>),
+}
+
+impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Acceptable(_) => "acceptable",
+            Self::Listen(_) => "listen",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+
+    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        match message {
+            Self::Acceptable(acceptable) => actor::replace_last(
+                queue,
+                Self::Acceptable(acceptable),
+                |pending| matches!(pending, Self::Acceptable(_)),
+            ),
+            Self::Listen(reservation) => actor::replace_last(
+                queue,
+                Self::Listen(reservation),
+                |pending| matches!(pending, Self::Listen(_)),
+            ),
+        }
+    }
+}
+
+impl<C: commonware_cryptography::PublicKey> Mailbox<Message<C>> {
+    pub(crate) fn acceptable(&self, acceptable: bool) -> Enqueue {
+        self.enqueue(Message::Acceptable(acceptable))
+    }
+
+    pub(crate) fn listen(&self, reservation: Option<tracker::Reservation<C>>) -> Enqueue {
+        self.enqueue(Message::Listen(reservation))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,7 +383,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (updates_tx, updates_rx) = mpsc::channel(1);
+            let (updates_tx, updates_rx) = Mailbox::new(1);
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -322,12 +400,9 @@ mod tests {
 
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            updates_tx
-                .send(allowed)
-                .await
-                .expect("update registered ips");
+            let _ = updates_tx.enqueue(ListenableIps(allowed));
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::new(16);
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -471,7 +546,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (_updates_tx, updates_rx) = Mailbox::new(1);
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -486,7 +561,7 @@ mod tests {
                 updates_rx,
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::new(16);
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -551,7 +626,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (_updates_tx, updates_rx) = Mailbox::new(1);
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -566,7 +641,7 @@ mod tests {
                 updates_rx,
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::new(16);
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -631,7 +706,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (updates_tx, updates_rx) = mpsc::channel(1);
+            let (updates_tx, updates_rx) = Mailbox::new(1);
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -649,12 +724,9 @@ mod tests {
             // Register the IP so it would be allowed if not for the private IP check
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            updates_tx
-                .send(allowed)
-                .await
-                .expect("update registered ips");
+            let _ = updates_tx.enqueue(ListenableIps(allowed));
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::new(16);
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {

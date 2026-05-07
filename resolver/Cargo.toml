@@ -22,7 +22,7 @@ commonware-macros = { workspace = true, features = ["std"] }
 commonware-p2p.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
-commonware-utils.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 rand.workspace = true
 thiserror.workspace = true

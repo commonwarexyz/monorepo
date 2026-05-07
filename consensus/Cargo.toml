@@ -26,7 +26,7 @@ commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
-commonware-utils.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 rand.workspace = true
 rand_core.workspace = true

@@ -2439,7 +2439,7 @@ mod tests {
             oracle.track(1, peers.clone()).await;
             let _ = oracle.peer_set(0).await;
             let _ = oracle.subscribe().await;
-            crate::block_peer(&mut oracle, address.clone()).await;
+            crate::block_peer(&mut oracle, address.clone());
 
             // Sender operations should not panic even after shutdown
             let sent = sender
@@ -2518,9 +2518,7 @@ mod tests {
             let (router, mut mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
 
-            // Create channels for the router
-            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
-            let _handle = router.start(channels);
+            let _handle = router.start();
 
             // Register peer 1 with small buffer (will fill up after 10 messages)
             // Must keep receivers alive to prevent channel from closing
@@ -2528,10 +2526,11 @@ mod tests {
             let (slow_low, _slow_low_rx) = mpsc::channel(10);
             let (slow_high, _slow_high_rx) = mpsc::channel(10);
             assert!(
-                mailbox
-                    .ready(slow_peer.clone(), Relay::new(slow_low, slow_high))
-                    .await
-                    .is_some(),
+                matches!(
+                    mailbox.ready(slow_peer.clone(), Relay::new(slow_low, slow_high)),
+                    commonware_utils::channel::actor::Enqueue::Queued
+                        | commonware_utils::channel::actor::Enqueue::Replaced
+                ),
                 "Failed to register slow peer"
             );
 
@@ -2540,10 +2539,11 @@ mod tests {
             let (fast_low, mut fast_receiver) = mpsc::channel(100);
             let (fast_high, _fast_high_rx) = mpsc::channel(100);
             assert!(
-                mailbox
-                    .ready(fast_peer.clone(), Relay::new(fast_low, fast_high))
-                    .await
-                    .is_some(),
+                matches!(
+                    mailbox.ready(fast_peer.clone(), Relay::new(fast_low, fast_high)),
+                    commonware_utils::channel::actor::Enqueue::Queued
+                        | commonware_utils::channel::actor::Enqueue::Replaced
+                ),
                 "Failed to register fast peer"
             );
 

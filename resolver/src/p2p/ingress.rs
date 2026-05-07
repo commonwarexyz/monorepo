@@ -1,10 +1,11 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc},
+    channel::actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
     vec::NonEmptyVec,
     Span,
 };
+use std::collections::VecDeque;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
@@ -34,16 +35,92 @@ pub enum Message<K, P> {
     Retain { predicate: Predicate<K> },
 }
 
-/// A way to send messages to the peer actor.
-#[derive(Clone)]
-pub struct Mailbox<K, P> {
-    /// The channel that delivers messages to the peer actor.
-    sender: mpsc::Sender<Message<K, P>>,
+fn merge_targets<P: PartialEq>(
+    existing: &mut Option<NonEmptyVec<P>>,
+    incoming: Option<NonEmptyVec<P>>,
+) {
+    match (existing, incoming) {
+        (existing @ Some(_), None) => *existing = None,
+        (Some(existing), Some(incoming)) => {
+            for peer in incoming.into_vec() {
+                if !existing.contains(&peer) {
+                    existing.push(peer);
+                }
+            }
+        }
+        (None, _) => {}
+    }
 }
 
-impl<K, P> Mailbox<K, P> {
+fn merge_fetches<K: Eq, P: PartialEq>(
+    pending: &mut Vec<FetchRequest<K, P>>,
+    incoming: Vec<FetchRequest<K, P>>,
+) {
+    for request in incoming {
+        match pending.iter_mut().find(|pending| pending.key == request.key) {
+            Some(pending) => merge_targets(&mut pending.targets, request.targets),
+            None => pending.push(request),
+        }
+    }
+}
+
+impl<K: Span, P: PublicKey> MessagePolicy for Message<K, P> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Fetch(_) => "fetch",
+            Self::Cancel { .. } => "cancel",
+            Self::Clear => "clear",
+            Self::Retain { .. } => "retain",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+
+    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        match message {
+            Self::Fetch(requests) => {
+                if requests.is_empty() {
+                    return Ok(());
+                }
+                for pending in queue.iter_mut().rev() {
+                    if let Self::Fetch(existing) = pending {
+                        merge_fetches(existing, requests);
+                        return Ok(());
+                    }
+                }
+                Err(Self::Fetch(requests))
+            }
+            Self::Cancel { key } => {
+                actor::replace_last(queue, Self::Cancel { key: key.clone() }, |pending| {
+                    matches!(pending, Self::Cancel { key: pending } if pending == &key)
+                })
+            }
+            Self::Clear => {
+                queue.clear();
+                queue.push_back(Self::Clear);
+                Ok(())
+            }
+            Self::Retain { predicate } => actor::replace_last(
+                queue,
+                Self::Retain { predicate },
+                |pending| matches!(pending, Self::Retain { .. }),
+            ),
+        }
+    }
+}
+
+/// A way to send messages to the peer actor.
+#[derive(Clone)]
+pub struct Mailbox<K: Span, P: PublicKey> {
+    /// The channel that delivers messages to the peer actor.
+    sender: ActorMailbox<Message<K, P>>,
+}
+
+impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Create a new mailbox.
-    pub(super) const fn new(sender: mpsc::Sender<Message<K, P>>) -> Self {
+    pub(super) fn new(sender: ActorMailbox<Message<K, P>>) -> Self {
         Self { sender }
     }
 }
@@ -58,10 +135,11 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch(&mut self, key: Self::Key) {
-        self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest { key, targets: None }]))
-            .await;
+    fn fetch(&mut self, key: Self::Key) -> Enqueue {
+        self.sender.enqueue(Message::Fetch(vec![FetchRequest {
+            key,
+            targets: None,
+        }]))
     }
 
     /// Send a fetch request to the peer actor for a batch of keys.
@@ -70,70 +148,91 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
-        self.sender
-            .send_lossy(Message::Fetch(
-                keys.into_iter()
-                    .map(|key| FetchRequest { key, targets: None })
-                    .collect(),
-            ))
-            .await;
+    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Enqueue {
+        let requests: Vec<_> = keys
+            .into_iter()
+            .map(|key| FetchRequest { key, targets: None })
+            .collect();
+        if requests.is_empty() {
+            return Enqueue::Dropped;
+        }
+        self.sender.enqueue(Message::Fetch(requests))
     }
 
     /// Send a targeted fetch request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
-        self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest {
-                key,
-                targets: Some(targets),
-            }]))
-            .await;
+    fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Enqueue {
+        self.sender.enqueue(Message::Fetch(vec![FetchRequest {
+            key,
+            targets: Some(targets),
+        }]))
     }
 
     /// Send targeted fetch requests to the peer actor for a batch of keys.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all_targeted(
+    fn fetch_all_targeted(
         &mut self,
         requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-    ) {
-        self.sender
-            .send_lossy(Message::Fetch(
-                requests
-                    .into_iter()
-                    .map(|(key, targets)| FetchRequest {
-                        key,
-                        targets: Some(targets),
-                    })
-                    .collect(),
-            ))
-            .await;
+    ) -> Enqueue {
+        let requests: Vec<_> = requests
+            .into_iter()
+            .map(|(key, targets)| FetchRequest {
+                key,
+                targets: Some(targets),
+            })
+            .collect();
+        if requests.is_empty() {
+            return Enqueue::Dropped;
+        }
+        self.sender.enqueue(Message::Fetch(requests))
     }
 
     /// Send a cancel request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn cancel(&mut self, key: Self::Key) {
-        self.sender.send_lossy(Message::Cancel { key }).await;
+    fn cancel(&mut self, key: Self::Key) -> Enqueue {
+        self.sender.enqueue(Message::Cancel { key })
     }
 
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
-        self.sender
-            .send_lossy(Message::Retain {
-                predicate: Box::new(predicate),
-            })
-            .await;
+    fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue {
+        self.sender.enqueue(Message::Retain {
+            predicate: Box::new(predicate),
+        })
     }
 
     /// Send a clear request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn clear(&mut self) {
-        self.sender.send_lossy(Message::Clear).await;
+    fn clear(&mut self) -> Enqueue {
+        self.sender.enqueue(Message::Clear)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::ed25519::PublicKey;
+
+    #[commonware_macros::test_async]
+    async fn full_mailbox_merges_fetch_requests() {
+        let (sender, mut receiver) = actor::channel(1);
+        let mut mailbox = Mailbox::<u64, PublicKey>::new(sender);
+
+        assert_eq!(mailbox.fetch(1), Enqueue::Queued);
+        assert_eq!(mailbox.fetch(2), Enqueue::Replaced);
+
+        let Some(Message::Fetch(requests)) = receiver.recv().await else {
+            panic!("expected fetch message");
+        };
+        let keys = requests
+            .into_iter()
+            .map(|request| request.key)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec![1, 2]);
     }
 }

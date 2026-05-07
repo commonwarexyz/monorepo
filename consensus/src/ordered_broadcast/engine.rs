@@ -539,8 +539,7 @@ impl<
             .report(Activity::Tip(Proposal::new(
                 tip.chunk.clone(),
                 tip.signature.clone(),
-            )))
-            .await;
+            )));
 
         // Get the validator scheme for the current epoch
         let Some(scheme) = self.validators_provider.scoped(self.epoch) else {
@@ -611,8 +610,7 @@ impl<
 
         // Emit the activity
         self.reporter
-            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)))
-            .await;
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)));
     }
 
     /// Handles an ack

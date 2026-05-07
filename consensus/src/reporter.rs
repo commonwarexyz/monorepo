@@ -1,7 +1,7 @@
 //! Reporter implementations for various standard types.
 
 use crate::Reporter;
-use futures::join;
+use commonware_utils::channel::actor::Enqueue;
 use std::marker::PhantomData;
 
 /// An implementation of [Reporter] for an optional [Reporter].
@@ -11,11 +11,11 @@ use std::marker::PhantomData;
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
         let Some(reporter) = self else {
-            return;
+            return Enqueue::Dropped;
         };
-        reporter.report(activity).await;
+        reporter.report(activity)
     }
 }
 
@@ -36,14 +36,24 @@ where
 {
     type Activity = A;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        // This approach avoids cloning activity, if possible.
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
         match (&mut self.r1, &mut self.r2) {
-            (Some(r1), Some(r2)) => join!(r1.report(activity.clone()), r2.report(activity)),
-            (Some(r1), None) => (r1.report(activity).await, ()),
-            (None, Some(r2)) => ((), r2.report(activity).await),
-            (None, None) => ((), ()),
-        };
+            (Some(r1), Some(r2)) => combine(r1.report(activity.clone()), r2.report(activity)),
+            (Some(r1), None) => r1.report(activity),
+            (None, Some(r2)) => r2.report(activity),
+            (None, None) => Enqueue::Dropped,
+        }
+    }
+}
+
+fn combine(left: Enqueue, right: Enqueue) -> Enqueue {
+    match (left, right) {
+        (Enqueue::Closed, _) | (_, Enqueue::Closed) => Enqueue::Closed,
+        (Enqueue::Rejected, _) | (_, Enqueue::Rejected) => Enqueue::Rejected,
+        (Enqueue::Queued | Enqueue::Replaced, _) | (_, Enqueue::Queued | Enqueue::Replaced) => {
+            Enqueue::Queued
+        }
+        (Enqueue::Dropped, Enqueue::Dropped) => Enqueue::Dropped,
     }
 }
 
@@ -100,8 +110,9 @@ mod tests {
     impl crate::Reporter for SimpleAcknowledger {
         type Activity = Exact;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> Enqueue {
             activity.acknowledge();
+            Enqueue::Queued
         }
     }
 
@@ -113,7 +124,7 @@ mod tests {
         ));
 
         let (ack, waiter) = Exact::handle();
-        reporters.report(ack).await;
+        assert_eq!(reporters.report(ack), Enqueue::Queued);
 
         assert!(
             waiter.now_or_never().unwrap().is_ok(),

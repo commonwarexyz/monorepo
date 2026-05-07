@@ -815,6 +815,16 @@ pub trait PrivateKeyExt: PrivateKey {
 - Utilize `commonware_macros::select!` for concurrent operations
 - Always add `Send + 'static` bounds for async traits
 
+### Actor Communication
+
+- Actor loops may await their own mailbox, timers, storage, network I/O, and spawned tasks. Do not await another actor's mailbox capacity or an actor-to-actor response.
+- Actor-facing mailbox sends should be bounded and non-blocking. When an inbox is full, the message type must define whether to drop, replace stale state, reject, or fail.
+- Actor-to-p2p control-plane sends follow the same rule: enqueue synchronously into a bounded p2p mailbox or sender handle. The p2p actor may await the network I/O it owns, but callers should not wait for p2p inbox capacity.
+- Do not model actor-to-actor work as request/response RPC. Send a domain message and let the receiving actor process it against its current state.
+- Responses between actors should usually be ordinary messages with enough domain context to validate them, such as view, height, round, digest, certificate kind, payload, or peer. Drop stale or duplicate responses based on actor state.
+- Actor-backed external capabilities may expose typed mailbox or result-ingress handles, for example resolver fetch completion messages. The calling actor should enqueue the request synchronously and process any completion later as a normal inbound message.
+- Use explicit correlation identifiers only when there is no natural domain key, when an external API caller is awaiting a specific result, or when attempt-specific cancellation, timeout, or accounting is required.
+
 ### Test Organization
 
 ```rust

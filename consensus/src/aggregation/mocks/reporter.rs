@@ -9,7 +9,7 @@ use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::{actor::Enqueue, mpsc, oneshot};
 use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 
@@ -173,26 +173,16 @@ where
 {
     type Activity = Activity<S, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        match activity {
-            Activity::Ack(ack) => {
-                self.sender
-                    .send(Message::Ack(ack))
-                    .await
-                    .expect("Failed to send ack");
-            }
-            Activity::Certified(certificate) => {
-                self.sender
-                    .send(Message::Certified(certificate))
-                    .await
-                    .expect("Failed to send certified signature");
-            }
-            Activity::Tip(height) => {
-                self.sender
-                    .send(Message::Tip(height))
-                    .await
-                    .expect("Failed to send tip");
-            }
+    fn report(&mut self, activity: Self::Activity) -> Enqueue {
+        let message = match activity {
+            Activity::Ack(ack) => Message::Ack(ack),
+            Activity::Certified(certificate) => Message::Certified(certificate),
+            Activity::Tip(height) => Message::Tip(height),
+        };
+        match self.sender.try_send(message) {
+            Ok(()) => Enqueue::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => Enqueue::Rejected,
+            Err(mpsc::error::TrySendError::Closed(_)) => Enqueue::Closed,
         }
     }
 }

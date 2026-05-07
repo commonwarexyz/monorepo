@@ -90,7 +90,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        channel::{fallible::OneshotExt, mpsc, oneshot},
+        channel::{actor::Enqueue, fallible::OneshotExt, mpsc, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
@@ -1703,20 +1703,32 @@ mod tests {
         type Key = handler::Request<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
-        async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
-            self.targeted.lock().push((key, targets));
+        fn fetch(&mut self, _key: Self::Key) -> Enqueue {
+            Enqueue::Queued
         }
-        async fn fetch_all_targeted(
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Enqueue {
+            Enqueue::Queued
+        }
+        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Enqueue {
+            self.targeted.lock().push((key, targets));
+            Enqueue::Queued
+        }
+        fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
+        ) -> Enqueue {
             self.targeted.lock().extend(requests);
+            Enqueue::Queued
         }
-        async fn cancel(&mut self, _key: Self::Key) {}
-        async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+        fn cancel(&mut self, _key: Self::Key) -> Enqueue {
+            Enqueue::Queued
+        }
+        fn clear(&mut self) -> Enqueue {
+            Enqueue::Queued
+        }
+        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue {
+            Enqueue::Queued
+        }
     }
 
     /// Poll `cond` on a 10ms tick until it returns true, panicking on timeout.
@@ -1761,19 +1773,17 @@ mod tests {
     impl Reporter for GatedBlockReporter {
         type Activity = Update<B>;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::actor::Enqueue {
             match activity {
                 Update::Block(block, _ack) => {
                     if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
-                    let release = self.release.lock().take();
-                    if let Some(release) = release {
-                        let _ = release.await;
-                    }
+                    let _ = self.release.lock().take();
                 }
                 Update::Tip(_, _, _) => {}
             }
+            commonware_utils::channel::actor::Enqueue::Queued
         }
     }
 

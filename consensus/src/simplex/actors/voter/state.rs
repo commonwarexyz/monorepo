@@ -445,6 +445,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .and_then(|round| round.leader().map(|leader| leader.idx))
     }
 
+    /// Returns true if the leader has been active in `view`.
+    pub fn has_leader_activity(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|round| round.proposal().is_some())
+    }
+
     /// Returns how long `view` has been live based on the clock samples stored by its round.
     pub fn elapsed_since_start(&self, view: View) -> Option<Duration> {
         let now = self.context.current();

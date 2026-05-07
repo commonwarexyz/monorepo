@@ -389,7 +389,7 @@ where
         // Get tip and send to application
         let tip = self.get_latest().await;
         if let Some((height, digest, round)) = tip {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -590,8 +590,7 @@ where
                         } else {
                             debug!(?round, "notarized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Notarized { round })
-                                .await;
+                                .fetch(Request::<V::Commitment>::Notarized { round });
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -629,8 +628,7 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Block(commitment))
-                                .await;
+                                .fetch(Request::<V::Commitment>::Block(commitment));
                         }
                     }
                     Message::GetBlock {
@@ -672,7 +670,7 @@ where
 
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
-                        resolver.fetch_targeted(request, targets).await;
+                        resolver.fetch_targeted(request, targets);
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -904,8 +902,7 @@ where
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
             resolver
-                .fetch(Request::<V::Commitment>::Notarized { round })
-                .await;
+                .fetch(Request::<V::Commitment>::Notarized { round });
         }
 
         // Register subscriber.
@@ -1292,9 +1289,7 @@ where
 
             let (height, commitment) = (block.height(), V::commitment(&block));
             let (ack, ack_waiter) = A::handle();
-            application
-                .report(Update::Block(V::into_inner(block), ack))
-                .await;
+            application.report(Update::Block(V::into_inner(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
@@ -1318,8 +1313,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .cancel(Request::<V::Commitment>::Block(commitment))
-            .await;
+            .cancel(Request::<V::Commitment>::Block(commitment));
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1338,8 +1332,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(Request::<V::Commitment>::Notarized { round }.predicate())
-                .await;
+                .retain(Request::<V::Commitment>::Notarized { round }.predicate());
         }
     }
 
@@ -1493,7 +1486,7 @@ where
 
         // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -1624,8 +1617,7 @@ where
                 } else {
                     // Request the missing block.
                     resolver
-                        .fetch(Request::<V::Commitment>::Block(commitment))
-                        .await;
+                        .fetch(Request::<V::Commitment>::Block(commitment));
                 }
             }
         }
@@ -1675,8 +1667,7 @@ where
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
                     resolver
-                        .fetch(Request::<V::Commitment>::Block(parent_commitment))
-                        .await;
+                        .fetch(Request::<V::Commitment>::Block(parent_commitment));
                     break 'cache_repair;
                 }
             }
@@ -1695,7 +1686,7 @@ where
             .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect();
         if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            resolver.fetch_all(requests);
         }
         wrote
     }
@@ -1715,8 +1706,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(Request::<V::Commitment>::Finalized { height }.predicate())
-            .await;
+            .retain(Request::<V::Commitment>::Finalized { height }.predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

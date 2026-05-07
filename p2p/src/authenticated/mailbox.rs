@@ -1,36 +1,25 @@
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::{
+    actor::{self, ActorInbox, ActorMailbox, Enqueue, MessagePolicy},
+};
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
-pub struct Mailbox<T>(pub(crate) mpsc::Sender<T>);
+pub struct Mailbox<T: MessagePolicy>(pub(crate) ActorMailbox<T>);
 
-impl<T> Mailbox<T> {
+impl<T: MessagePolicy> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
-    pub fn new(size: usize) -> (Self, mpsc::Receiver<T>) {
-        let (sender, receiver) = mpsc::channel(size);
+    pub fn new(size: usize) -> (Self, ActorInbox<T>) {
+        let (sender, receiver) = actor::channel(size);
         (Self(sender), receiver)
     }
-}
 
-impl<T> Clone for Mailbox<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+    /// Enqueue a message without waiting for inbox capacity.
+    pub fn enqueue(&self, msg: T) -> Enqueue {
+        self.0.enqueue(msg)
     }
 }
 
-/// A mailbox wraps an unbounded sender for messages of type `T`.
-#[derive(Debug)]
-pub struct UnboundedMailbox<T>(pub(crate) mpsc::UnboundedSender<T>);
-
-impl<T> UnboundedMailbox<T> {
-    /// Returns a new mailbox with the given sender.
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<T>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        (Self(sender), receiver)
-    }
-}
-
-impl<T> Clone for UnboundedMailbox<T> {
+impl<T: MessagePolicy> Clone for Mailbox<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }

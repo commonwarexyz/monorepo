@@ -6,6 +6,7 @@ mod actor;
 mod ingress;
 
 pub use actor::Actor;
+pub(crate) use ingress::Connect;
 pub use ingress::Message;
 
 /// Configuration for the spawner [Actor].

@@ -2,9 +2,9 @@ use super::{ingress::Message, Config};
 use crate::authenticated::{
     lookup::{
         actors::{peer, router, tracker},
+        channels::Channels,
         metrics,
     },
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
@@ -14,7 +14,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::actor::{ActorInbox, Enqueue};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
 use tracing::debug;
@@ -31,7 +31,7 @@ pub struct Actor<
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
 
-    receiver: mpsc::Receiver<Message<Si, St, C>>,
+    receiver: ActorInbox<Message<Si, St, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -74,16 +74,18 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
+        channels: Channels<C>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, router))
+        spawn_cell!(self.context, self.run(tracker, router, channels))
     }
 
     async fn run(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
+        channels: Channels<C>,
     ) {
         select_loop! {
             self.context,
@@ -105,8 +107,9 @@ impl<
                         let received_messages = self.received_messages.clone();
                         let dropped_messages = self.dropped_messages.clone();
                         let rate_limited = self.rate_limited.clone();
-                        let mut tracker = tracker.clone();
+                        let tracker = tracker.clone();
                         let mut router = router.clone();
+                        let channels = channels.clone();
 
                         // Spawn peer
                         self.context
@@ -127,12 +130,14 @@ impl<
                                     },
                                 );
 
-                                // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
-                                else {
+                                // Register peer with the router (may fail during shutdown).
+                                if !matches!(
+                                    router.ready(peer.clone(), messenger),
+                                    Enqueue::Queued | Enqueue::Replaced
+                                ) {
                                     debug!(?peer, "router shut down during peer setup");
                                     return;
-                                };
+                                }
 
                                 // Register peer with tracker
                                 tracker.connect(peer.clone(), peer_mailbox);
@@ -146,7 +151,7 @@ impl<
                                     Ok(()) => debug!(?peer, "peer shutdown gracefully"),
                                     Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
                                 }
-                                router.release(peer).await;
+                                let _ = router.release(peer);
                                 // Release the reservation
                                 drop(reservation)
                             });

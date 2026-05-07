@@ -7,7 +7,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
-    use commonware_utils::{vec::NonEmptyVec, Span};
+    use commonware_utils::{channel::actor::Enqueue, vec::NonEmptyVec, Span};
     use std::future::Future;
 
     pub mod p2p;
@@ -47,10 +47,10 @@ commonware_macros::stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Initiate a fetch request for a single key.
-        fn fetch(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
+        fn fetch(&mut self, key: Self::Key) -> Enqueue;
 
         /// Initiate a fetch request for a batch of keys.
-        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> impl Future<Output = ()> + Send;
+        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Enqueue;
 
         /// Initiate a fetch request restricted to specific target peers.
         ///
@@ -72,7 +72,7 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             key: Self::Key,
             targets: NonEmptyVec<Self::PublicKey>,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Enqueue;
 
         /// Initiate fetch requests for multiple keys, each with their own targets.
         ///
@@ -80,20 +80,20 @@ commonware_macros::stability_scope!(BETA {
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Enqueue;
 
         /// Cancel a fetch request.
         ///
         /// If response validation is in progress, cancellation may drop the
         /// [`Consumer::deliver`] future before it reports whether the data was
         /// valid.
-        fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
+        fn cancel(&mut self, key: Self::Key) -> Enqueue;
 
         /// Cancel all fetch requests.
         ///
         /// See [`cancel`](Self::cancel) for how cancellation affects
         /// in-progress response validation.
-        fn clear(&mut self) -> impl Future<Output = ()> + Send;
+        fn clear(&mut self) -> Enqueue;
 
         /// Retain only the fetch requests that satisfy the predicate.
         ///
@@ -102,6 +102,6 @@ commonware_macros::stability_scope!(BETA {
         fn retain(
             &mut self,
             predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Enqueue;
     }
 });

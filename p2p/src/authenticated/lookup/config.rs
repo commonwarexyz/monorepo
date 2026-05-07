@@ -46,8 +46,8 @@ pub struct Config<C: Signer> {
 
     /// Message backlog allowed for internal actors.
     ///
-    /// When there are more messages in the mailbox than this value, any actor
-    /// sending a message will be blocked until the mailbox is processed.
+    /// When there are more messages in the mailbox than this value, actors apply
+    /// the message's full-inbox policy instead of waiting for capacity.
     pub mailbox_size: usize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.

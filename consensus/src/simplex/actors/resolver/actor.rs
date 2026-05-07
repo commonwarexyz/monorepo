@@ -15,12 +15,13 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
+use commonware_p2p::{utils::StaticProvider, Blocker, MailboxSender, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc},
+    channel::actor::{self, ActorInbox},
+    channel::fallible::OneshotExt,
     ordered::Quorum,
     sequence::U64,
 };
@@ -47,7 +48,7 @@ pub struct Actor<
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<MailboxMessage<S, D>>,
+    mailbox_receiver: ActorInbox<MailboxMessage<S, D>>,
 }
 
 impl<
@@ -59,7 +60,7 @@ impl<
     > Actor<E, S, B, D, T>
 {
     pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = actor::channel(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -82,7 +83,7 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = S::PublicKey>,
+        sender: impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver))
@@ -91,7 +92,7 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = S::PublicKey>,
+        sender: impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         let participants = self.scheme.participants().clone();
@@ -101,7 +102,7 @@ impl<
             .and_then(|index| participants.key(index))
             .cloned();
 
-        let (handler_tx, mut handler_rx) = mpsc::channel(self.mailbox_size);
+        let (handler_tx, mut handler_rx) = actor::channel(self.mailbox_size);
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
@@ -134,12 +135,11 @@ impl<
                 match message {
                     MailboxMessage::Certificate(certificate) => {
                         // Certificates from mailbox have no associated request view
-                        self.state.handle(certificate, None, &mut resolver).await;
+                        self.state.handle(certificate, None, &mut resolver);
                     }
                     MailboxMessage::Certified { view, success } => {
                         self.state
-                            .handle_certified(view, success, &mut resolver)
-                            .await;
+                            .handle_certified(view, success, &mut resolver);
                     }
                 }
             },
@@ -256,10 +256,10 @@ impl<
                 response.send_lossy(true);
 
                 // Notify voter as soon as possible
-                voter.resolved(parsed.clone()).await;
+                let _ = voter.resolved(parsed.clone());
 
                 // Process message with the request view for tracking
-                self.state.handle(parsed, Some(view), resolver).await;
+                self.state.handle(parsed, Some(view), resolver);
             }
             HandlerMessage::Produce { view, response } => {
                 // Produce message for view

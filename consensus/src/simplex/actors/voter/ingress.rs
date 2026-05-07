@@ -4,9 +4,18 @@ use crate::{
         types::{Certificate, Proposal},
     },
     types::View,
+    Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
+use commonware_utils::channel::actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy};
+use std::collections::VecDeque;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CertificateKind {
+    Notarization,
+    Nullification,
+    Finalization,
+}
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -21,38 +30,111 @@ pub enum Message<S: Scheme, D: Digest> {
     Verified(Certificate<S, D>, bool),
 }
 
+fn certificate_key<S: Scheme, D: Digest>(
+    certificate: &Certificate<S, D>,
+) -> (CertificateKind, View) {
+    match certificate {
+        Certificate::Notarization(certificate) => {
+            (CertificateKind::Notarization, certificate.view())
+        }
+        Certificate::Nullification(certificate) => {
+            (CertificateKind::Nullification, certificate.view())
+        }
+        Certificate::Finalization(certificate) => {
+            (CertificateKind::Finalization, certificate.view())
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Proposal(_) => "proposal",
+            Self::Timeout(_, _) => "timeout",
+            Self::Verified(_, _) => "verified",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+
+    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        match &message {
+            Self::Proposal(proposal) => {
+                let view = proposal.view();
+                actor::replace_last(queue, message, |pending| {
+                    matches!(
+                        pending,
+                        Self::Timeout(timeout_view, TimeoutReason::Inactivity)
+                            if *timeout_view <= view
+                    )
+                })
+            }
+            Self::Timeout(view, _) => {
+                let view = *view;
+                actor::replace_last(queue, message, |pending| {
+                    matches!(pending, Self::Timeout(pending_view, _) if *pending_view == view)
+                })
+            }
+            Self::Verified(certificate, _) => {
+                let key = certificate_key(certificate);
+                let mut message = Some(message);
+                for pending in queue.iter_mut().rev() {
+                    let Self::Verified(pending_certificate, pending_resolved) = pending else {
+                        continue;
+                    };
+                    if certificate_key(pending_certificate) != key {
+                        continue;
+                    }
+                    let Some(Self::Verified(certificate, resolved)) = message.take() else {
+                        unreachable!("message is verified");
+                    };
+                    *pending_certificate = certificate;
+                    *pending_resolved |= resolved;
+                    return Ok(());
+                }
+
+                let message = message.expect("message was not replaced");
+                actor::replace_last(queue, message, |pending| {
+                    matches!(pending, Self::Timeout(view, _) if *view <= key.1)
+                })
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: ActorMailbox<Message<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
-        Self { sender }
+    pub fn new(sender: impl Into<ActorMailbox<Message<S, D>>>) -> Self {
+        Self {
+            sender: sender.into(),
+        }
     }
 
     /// Send a leader's proposal.
-    pub async fn proposal(&mut self, proposal: Proposal<D>) {
-        self.sender.send_lossy(Message::Proposal(proposal)).await;
+    pub fn proposal(&mut self, proposal: Proposal<D>) -> Enqueue {
+        self.sender.enqueue(Message::Proposal(proposal))
     }
 
     /// Signal that the current view should timeout (if not already).
-    pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
-        self.sender.send_lossy(Message::Timeout(view, reason)).await;
+    pub fn timeout(&mut self, view: View, reason: TimeoutReason) -> Enqueue {
+        self.sender.enqueue(Message::Timeout(view, reason))
     }
 
     /// Send a recovered certificate.
-    pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
-        self.sender
-            .send_lossy(Message::Verified(certificate, false))
-            .await;
+    pub fn recovered(&mut self, certificate: Certificate<S, D>) -> Enqueue {
+        self.sender.enqueue(Message::Verified(certificate, false))
     }
 
     /// Send a resolved certificate.
-    pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
-        self.sender
-            .send_lossy(Message::Verified(certificate, true))
-            .await;
+    pub fn resolved(&mut self, certificate: Certificate<S, D>) -> Enqueue {
+        self.sender.enqueue(Message::Verified(certificate, true))
     }
+
 }

@@ -1,16 +1,19 @@
 use super::{Error, Receiver, Sender};
 use crate::{
-    authenticated::UnboundedMailbox, Address, AddressableTrackedPeers, Channel,
-    PeerSetSubscription, TrackedPeers,
+    authenticated::Mailbox, Address, AddressableTrackedPeers, Channel, PeerSetSubscription,
+    TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
-    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
+    channel::{
+        actor::{self, Enqueue, FullPolicy, MessagePolicy},
+        mpsc, oneshot, ring,
+    },
     ordered::Map,
 };
 use rand_distr::Normal;
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 pub enum Message<P: PublicKey, E: Clock> {
     Register {
@@ -92,6 +95,103 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
     }
 }
 
+impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Register { .. } => "register",
+            Self::Track { .. } => "track",
+            Self::PeerSet { .. } => "peer_set",
+            Self::Subscribe { .. } => "subscribe",
+            Self::SubscribeConnected { .. } => "subscribe_connected",
+            Self::LimitBandwidth { .. } => "limit_bandwidth",
+            Self::AddLink { .. } => "add_link",
+            Self::RemoveLink { .. } => "remove_link",
+            Self::Block { .. } => "block",
+            Self::Blocked { .. } => "blocked",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+
+    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        match message {
+            Self::Track { id, peers } => actor::replace_last(
+                queue,
+                Self::Track { id, peers },
+                |pending| matches!(pending, Self::Track { id: pending, .. } if *pending == id),
+            ),
+            Self::LimitBandwidth {
+                public_key,
+                egress_cap,
+                ingress_cap,
+                result,
+            } => {
+                let expected = public_key.clone();
+                actor::replace_last(
+                    queue,
+                    Self::LimitBandwidth {
+                        public_key,
+                        egress_cap,
+                        ingress_cap,
+                        result,
+                    },
+                    |pending| matches!(pending, Self::LimitBandwidth { public_key: pending, .. } if pending == &expected),
+                )
+            }
+            Self::AddLink {
+                sender,
+                receiver,
+                sampler,
+                success_rate,
+                result,
+            } => {
+                let expected_sender = sender.clone();
+                let expected_receiver = receiver.clone();
+                actor::replace_last(
+                    queue,
+                    Self::AddLink {
+                        sender,
+                        receiver,
+                        sampler,
+                        success_rate,
+                        result,
+                    },
+                    |pending| matches!(pending, Self::AddLink { sender, receiver, .. } if sender == &expected_sender && receiver == &expected_receiver),
+                )
+            }
+            Self::RemoveLink {
+                sender,
+                receiver,
+                result,
+            } => {
+                let expected_sender = sender.clone();
+                let expected_receiver = receiver.clone();
+                actor::replace_last(
+                    queue,
+                    Self::RemoveLink {
+                        sender,
+                        receiver,
+                        result,
+                    },
+                    |pending| matches!(pending, Self::RemoveLink { sender, receiver, .. } if sender == &expected_sender && receiver == &expected_receiver),
+                )
+            }
+            Self::Block { from, to } => {
+                let expected_from = from.clone();
+                let expected_to = to.clone();
+                actor::replace_last(
+                    queue,
+                    Self::Block { from, to },
+                    |pending| matches!(pending, Self::Block { from, to } if from == &expected_from && to == &expected_to),
+                )
+            }
+            message => Err(message),
+        }
+    }
+}
+
 /// Describes a connection between two peers.
 ///
 /// Links are unidirectional (and must be set up in both directions
@@ -114,7 +214,7 @@ pub struct Link {
 /// between said peers can be modified.
 #[derive(Debug)]
 pub struct Oracle<P: PublicKey, E: Clock> {
-    sender: UnboundedMailbox<Message<P, E>>,
+    sender: Mailbox<Message<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
@@ -127,7 +227,7 @@ impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
 
 impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
-    pub(crate) const fn new(sender: UnboundedMailbox<Message<P, E>>) -> Self {
+    pub(crate) const fn new(sender: Mailbox<Message<P, E>>) -> Self {
         Self { sender }
     }
 
@@ -159,11 +259,13 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 
     /// Return a list of all blocked peers.
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
-        self.sender
-            .0
-            .request(|result| Message::Blocked { result })
-            .await
-            .ok_or(Error::NetworkClosed)?
+        let (result, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::Blocked { result }) {
+            Enqueue::Queued | Enqueue::Replaced => {
+                receiver.await.map_err(|_| Error::NetworkClosed)?
+            }
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Err(Error::NetworkClosed),
+        }
     }
 
     /// Set bandwidth limits for a peer.
@@ -178,16 +280,18 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         egress_cap: Option<usize>,
         ingress_cap: Option<usize>,
     ) -> Result<(), Error> {
-        self.sender
-            .0
-            .request(|result| Message::LimitBandwidth {
-                public_key,
-                egress_cap,
-                ingress_cap,
-                result,
-            })
-            .await
-            .ok_or(Error::NetworkClosed)
+        let (result, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::LimitBandwidth {
+            public_key,
+            egress_cap,
+            ingress_cap,
+            result,
+        }) {
+            Enqueue::Queued | Enqueue::Replaced => {
+                receiver.await.map_err(|_| Error::NetworkClosed)
+            }
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Err(Error::NetworkClosed),
+        }
     }
 
     /// Create a unidirectional link between two peers.
@@ -212,17 +316,19 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         // Create distribution
         let sampler = Normal::new(latency_ms, jitter_ms).unwrap();
 
-        self.sender
-            .0
-            .request(|result| Message::AddLink {
-                sender,
-                receiver,
-                sampler,
-                success_rate: config.success_rate,
-                result,
-            })
-            .await
-            .ok_or(Error::NetworkClosed)?
+        let (result, result_receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::AddLink {
+            sender,
+            receiver,
+            sampler,
+            success_rate: config.success_rate,
+            result,
+        }) {
+            Enqueue::Queued | Enqueue::Replaced => {
+                result_receiver.await.map_err(|_| Error::NetworkClosed)?
+            }
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Err(Error::NetworkClosed),
+        }
     }
 
     /// Remove a unidirectional link between two peers.
@@ -234,41 +340,46 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             return Err(Error::LinkingSelf);
         }
 
-        self.sender
-            .0
-            .request(|result| Message::RemoveLink {
-                sender,
-                receiver,
-                result,
-            })
-            .await
-            .ok_or(Error::NetworkClosed)?
+        let (result, result_receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::RemoveLink {
+            sender,
+            receiver,
+            result,
+        }) {
+            Enqueue::Queued | Enqueue::Replaced => {
+                result_receiver.await.map_err(|_| Error::NetworkClosed)?
+            }
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Err(Error::NetworkClosed),
+        }
     }
 
     /// Set the peers for a given id.
     fn track(&self, id: u64, peers: TrackedPeers<P>) {
-        self.sender.0.send_lossy(Message::Track { id, peers });
+        let _ = self.sender.enqueue(Message::Track { id, peers });
     }
 
     /// Get the primary and secondary peers for a given ID.
     async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
-        self.sender
-            .0
-            .request(|response| Message::PeerSet { id, response })
-            .await
-            .flatten()
+        let (response, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::PeerSet { id, response }) {
+            Enqueue::Queued | Enqueue::Replaced => receiver.await.ok().flatten(),
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => None,
+        }
     }
 
     /// Subscribe to notifications when new peer sets are added.
     async fn subscribe(&self) -> PeerSetSubscription<P> {
-        self.sender
-            .0
-            .request(|response| Message::Subscribe { response })
-            .await
-            .unwrap_or_else(|| {
+        let (response, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::Subscribe { response }) {
+            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = mpsc::unbounded_channel();
                 rx
-            })
+            }),
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
+                let (_, rx) = mpsc::unbounded_channel();
+                rx
+            }
+        }
     }
 }
 
@@ -380,7 +491,7 @@ pub struct Control<P: PublicKey, E: Clock> {
     me: P,
 
     /// Sender for messages to the oracle.
-    sender: UnboundedMailbox<Message<P, E>>,
+    sender: Mailbox<Message<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Control<P, E> {
@@ -405,26 +516,28 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
         quota: Quota,
     ) -> Result<(Sender<P, E>, Receiver<P>), Error> {
         let public_key = self.me.clone();
-        self.sender
-            .0
-            .request(|result| Message::Register {
-                channel,
-                public_key,
-                quota,
-                result,
-            })
-            .await
-            .ok_or(Error::NetworkClosed)?
+        let (result, receiver) = oneshot::channel();
+        match self.sender.enqueue(Message::Register {
+            channel,
+            public_key,
+            quota,
+            result,
+        }) {
+            Enqueue::Queued | Enqueue::Replaced => {
+                receiver.await.map_err(|_| Error::NetworkClosed)?
+            }
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => Err(Error::NetworkClosed),
+        }
     }
 }
 
 impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
     type PublicKey = P;
 
-    async fn block(&mut self, public_key: P) {
-        self.sender.0.send_lossy(Message::Block {
+    fn block(&mut self, public_key: P) -> Enqueue {
+        self.sender.enqueue(Message::Block {
             from: self.me.clone(),
             to: public_key,
-        });
+        })
     }
 }

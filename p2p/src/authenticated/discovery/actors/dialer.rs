@@ -1,6 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
+    dialing::Dialable,
     discovery::{
         actors::{
             spawner,
@@ -8,10 +9,9 @@ use crate::authenticated::{
         },
         metrics,
     },
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
-use commonware_cryptography::Signer;
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
@@ -20,9 +20,13 @@ use commonware_runtime::{
     StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
+use commonware_utils::channel::actor::{self, ActorInbox, Enqueue, FullPolicy, MessagePolicy};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    time::{Duration, SystemTime},
+};
 use tracing::debug;
 
 // Mailbox for the spawner actor.
@@ -38,6 +42,9 @@ pub struct Config<C: Signer> {
     /// which we attempt to dial peers in general.
     pub dial_frequency: Duration,
 
+    /// The size of the dialer mailbox.
+    pub mailbox_size: usize,
+
     /// The maximum interval between tracker queries when the queue is empty. This tracks the
     /// configured peer connection cooldown, since that is the soonest any peer could become
     /// reservable again.
@@ -51,9 +58,16 @@ pub struct Config<C: Signer> {
 pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
 
+    // ---------- Message-Passing ----------
+    mailbox: Mailbox<Message<C::PublicKey>>,
+    receiver: ActorInbox<Message<C::PublicKey>>,
+
     // ---------- State ----------
     /// The list of peers to dial.
     queue: Vec<C::PublicKey>,
+    awaiting_dialable: bool,
+    awaiting_dial: bool,
+    next_query_at: Option<SystemTime>,
 
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
@@ -73,15 +87,54 @@ impl<
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
+        let (mailbox, receiver) = Mailbox::new(cfg.mailbox_size);
         Self {
             context: ContextCell::new(context),
+            mailbox,
+            receiver,
             queue: Vec::new(),
+            awaiting_dialable: false,
+            awaiting_dial: false,
+            next_query_at: None,
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
+    }
+
+    fn next_empty_deadline(&self, now: SystemTime) -> SystemTime {
+        let min = now + self.dial_frequency;
+        let max = (now + self.peer_connection_cooldown).max(min);
+        self.next_query_at.unwrap_or(max).clamp(min, max)
+    }
+
+    fn request_dialable(&mut self, tracker: &Mailbox<tracker::Message<C::PublicKey>>) {
+        if self.awaiting_dialable {
+            return;
+        }
+        self.awaiting_dialable = matches!(
+            tracker.request_dialable(self.mailbox.clone()),
+            Enqueue::Queued | Enqueue::Replaced
+        );
+    }
+
+    fn request_next_dial(&mut self, tracker: &Mailbox<tracker::Message<C::PublicKey>>) -> bool {
+        if self.awaiting_dial {
+            return true;
+        }
+        let Some(peer) = self.queue.pop() else {
+            return false;
+        };
+        self.awaiting_dial = matches!(
+            tracker.request_dial(peer.clone(), self.mailbox.clone()),
+            Enqueue::Queued | Enqueue::Replaced
+        );
+        if !self.awaiting_dial {
+            self.queue.push(peer);
+        }
+        self.awaiting_dial
     }
 
     /// Dial a peer for which we have a reservation.
@@ -136,7 +189,7 @@ impl<
                 debug!(?peer, ?ingress, "upgraded connection");
 
                 // Start peer to handle messages
-                supervisor.spawn(instance, reservation).await;
+                let _ = supervisor.spawn(instance, reservation);
             }
         });
     }
@@ -144,7 +197,7 @@ impl<
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
         supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -152,7 +205,7 @@ impl<
 
     async fn run(
         mut self,
-        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
@@ -161,35 +214,109 @@ impl<
             on_stopped => {
                 debug!("context shutdown, stopping dialer");
             },
+            Some(msg) = self.receiver.recv() else {
+                debug!("mailbox closed, stopping dialer");
+                break;
+            } => {
+                let now = self.context.current();
+                match msg {
+                    Message::Dialable(dialable) => {
+                        self.awaiting_dialable = false;
+                        self.queue = dialable.peers;
+                        self.queue.shuffle(self.context.as_mut());
+                        self.next_query_at = dialable.next_query_at;
+
+                        dial_deadline = if self.request_next_dial(&tracker) {
+                            now + self.dial_frequency
+                        } else {
+                            self.next_empty_deadline(now)
+                        };
+                    }
+                    Message::Dial {
+                        public_key,
+                        reservation,
+                    } => {
+                        self.awaiting_dial = false;
+                        if let Some(reservation) = reservation {
+                            self.dial_peer(reservation, &mut supervisor);
+                            dial_deadline = now + self.dial_frequency;
+                        } else if self.request_next_dial(&tracker) {
+                            dial_deadline = now + self.dial_frequency;
+                        } else if self.queue.is_empty() {
+                            dial_deadline = self.next_empty_deadline(now);
+                        } else {
+                            debug!(?public_key, "dial reservation unavailable");
+                            dial_deadline = now + self.dial_frequency;
+                        }
+                    }
+                }
+            },
             _ = self.context.sleep_until(dial_deadline) => {
                 // Refill the queue if empty.
                 let now = self.context.current();
-                let mut next_query_at = None;
                 if self.queue.is_empty() {
-                    let dialable = tracker.dialable().await;
-                    self.queue = dialable.peers;
-                    self.queue.shuffle(self.context.as_mut());
-                    next_query_at = dialable.next_query_at;
+                    self.request_dialable(&tracker);
                 }
 
                 // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
-                    let min = now + self.dial_frequency;
-                    let max = (now + self.peer_connection_cooldown).max(min);
-                    next_query_at.unwrap_or(max).clamp(min, max)
+                    self.next_empty_deadline(now)
                 } else {
                     now + self.dial_frequency
                 };
 
-                // Pop through peers until we can reserve and dial one.
-                while let Some(peer) = self.queue.pop() {
-                    if let Some(reservation) = tracker.dial(peer).await {
-                        self.dial_peer(reservation, &mut supervisor);
-                        break;
-                    }
-                }
+                let _ = self.request_next_dial(&tracker);
             },
         }
+    }
+}
+
+/// Messages sent to the dialer actor.
+#[derive(Debug)]
+pub(crate) enum Message<C: PublicKey> {
+    /// A refreshed set of dialable peers.
+    Dialable(Dialable<C>),
+    /// Response to a dial reservation request.
+    Dial {
+        public_key: C,
+        reservation: Option<Reservation<C>>,
+    },
+}
+
+impl<C: PublicKey> MessagePolicy for Message<C> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Dialable(_) => "dialable",
+            Self::Dial { .. } => "dial",
+        }
+    }
+
+    fn full_policy(&self) -> FullPolicy {
+        FullPolicy::Replace
+    }
+
+    fn replace(queue: &mut VecDeque<Self>, message: Self) -> Result<(), Self> {
+        match message {
+            Self::Dialable(dialable) => actor::replace_last(
+                queue,
+                Self::Dialable(dialable),
+                |pending| matches!(pending, Self::Dialable(_)),
+            ),
+            message => Err(message),
+        }
+    }
+}
+
+impl<C: PublicKey> Mailbox<Message<C>> {
+    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Enqueue {
+        self.enqueue(Message::Dialable(dialable))
+    }
+
+    pub(crate) fn dial(&self, public_key: C, reservation: Option<Reservation<C>>) -> Enqueue {
+        self.enqueue(Message::Dial {
+            public_key,
+            reservation,
+        })
     }
 }
 
@@ -233,6 +360,7 @@ mod tests {
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
                 dial_frequency,
+                mailbox_size: 16,
                 peer_connection_cooldown: Duration::from_secs(60),
                 allow_private_ips: true,
             };
@@ -240,11 +368,11 @@ mod tests {
             let dialer = Actor::new(context.child("dialer"), dialer_cfg);
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                Mailbox::<tracker::Message<PublicKey>>::new(16);
 
             // Create a releaser for reservations
             let (releaser_mailbox, _releaser_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                Mailbox::<tracker::Message<PublicKey>>::new(16);
             let releaser = Releaser::new(releaser_mailbox);
 
             // Generate 10 peers
@@ -268,22 +396,22 @@ mod tests {
             loop {
                 select! {
                     msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(Dialable {
+                        Some(tracker::Message::DialableForDialer { dialer }) => {
+                            let _ = dialer.dialable(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: Some(context.current()),
                             });
                         }
-                        Some(tracker::Message::Dial {
+                        Some(tracker::Message::DialForDialer {
                             public_key,
-                            reservation,
+                            dialer,
                         }) => {
                             dial_count += 1;
                             let ingress: Ingress =
                                 SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let metadata = Metadata::Dialer(public_key, ingress);
+                            let metadata = Metadata::Dialer(public_key.clone(), ingress);
                             let res = tracker::Reservation::new(metadata, releaser.clone());
-                            let _ = reservation.send(Some(res));
+                            let _ = dialer.dial(public_key, Some(res));
                         }
                         _ => {}
                     },
@@ -312,13 +440,14 @@ mod tests {
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
+                mailbox_size: 16,
                     peer_connection_cooldown: dial_frequency,
                     allow_private_ips: true,
                 },
             );
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                Mailbox::<tracker::Message<PublicKey>>::new(16);
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
@@ -335,9 +464,9 @@ mod tests {
             loop {
                 select! {
                     msg = tracker_rx.recv() => {
-                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                        if let Some(tracker::Message::DialableForDialer { dialer }) = msg {
                             refresh_count += 1;
-                            let _ = responder.send(Dialable {
+                            let _ = dialer.dialable(Dialable {
                                 peers: Vec::new(),
                                 next_query_at: Some(context.current() + Duration::from_millis(100)),
                             });
@@ -367,16 +496,17 @@ mod tests {
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
+                mailbox_size: 16,
                     peer_connection_cooldown: Duration::from_secs(60),
                     allow_private_ips: true,
                 },
             );
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                Mailbox::<tracker::Message<PublicKey>>::new(16);
 
             let (releaser_mailbox, _releaser_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                Mailbox::<tracker::Message<PublicKey>>::new(16);
             let releaser = Releaser::new(releaser_mailbox);
 
             let peers: Vec<PublicKey> = (0..3)
@@ -396,22 +526,22 @@ mod tests {
             loop {
                 select! {
                     msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(Dialable {
+                        Some(tracker::Message::DialableForDialer { dialer }) => {
+                            let _ = dialer.dialable(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: None,
                             });
                         }
-                        Some(tracker::Message::Dial {
+                        Some(tracker::Message::DialForDialer {
                             public_key,
-                            reservation,
+                            dialer,
                         }) => {
                             dial_count += 1;
                             let ingress: Ingress =
                                 SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let metadata = Metadata::Dialer(public_key, ingress);
+                            let metadata = Metadata::Dialer(public_key.clone(), ingress);
                             let res = tracker::Reservation::new(metadata, releaser.clone());
-                            let _ = reservation.send(Some(res));
+                            let _ = dialer.dial(public_key, Some(res));
                         }
                         _ => {}
                     },
@@ -439,13 +569,14 @@ mod tests {
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
+                mailbox_size: 16,
                     peer_connection_cooldown: Duration::from_millis(50),
                     allow_private_ips: true,
                 },
             );
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                Mailbox::<tracker::Message<PublicKey>>::new(16);
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
@@ -459,9 +590,9 @@ mod tests {
             loop {
                 select! {
                     msg = tracker_rx.recv() => {
-                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                        if let Some(tracker::Message::DialableForDialer { dialer }) = msg {
                             refresh_count += 1;
-                            let _ = responder.send(Dialable {
+                            let _ = dialer.dialable(Dialable {
                                 peers: Vec::new(),
                                 next_query_at: None,
                             });

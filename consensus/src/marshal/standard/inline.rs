@@ -576,13 +576,13 @@ where
     type Activity = A::Activity;
 
     /// Forwards consensus activity to the wrapped application reporter.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> commonware_utils::channel::actor::Enqueue {
         if let Update::Tip(tip_round, _, _) = &update {
             self.available_blocks
                 .lock()
                 .retain(|(round, _)| round > tip_round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 

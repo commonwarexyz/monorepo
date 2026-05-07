@@ -511,7 +511,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
+        authenticated::{lookup::actors::tracker::directory::Directory, Mailbox},
         types::Address,
         AddressableTrackedPeers, Ingress,
     };
@@ -549,7 +549,7 @@ mod tests {
     fn test_track_return_value() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -627,7 +627,7 @@ mod tests {
     fn test_secondary_sets_remain_until_eviction() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -695,7 +695,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -817,7 +817,7 @@ mod tests {
     fn test_track_updates_metric_for_secondary_address_change() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -878,7 +878,7 @@ mod tests {
     fn test_track_primary_secondary_overlap_deduplicates() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -933,7 +933,7 @@ mod tests {
     fn test_demotion_from_primary_to_secondary() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -1024,7 +1024,7 @@ mod tests {
     fn test_track_primary_wins_conflicting_overlap_when_updating_existing_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -1082,7 +1082,7 @@ mod tests {
     fn test_all_cross_index_primary_wins_for_overlap_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -1156,7 +1156,7 @@ mod tests {
     fn test_connected_metric_tracks_active_peers() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -1206,7 +1206,7 @@ mod tests {
     fn test_blocked_peer_remains_blocked_on_update() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -1282,7 +1282,7 @@ mod tests {
     fn test_asymmetric_addresses() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -1382,7 +1382,7 @@ mod tests {
     fn test_dns_addresses_registered_but_not_dialable_when_disabled() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
 
         // DNS is disabled
@@ -1450,7 +1450,7 @@ mod tests {
     fn test_private_egress_ip_in_peer_set_but_not_dialable_or_tracked() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
 
         // Private IPs are NOT allowed
@@ -1520,7 +1520,7 @@ mod tests {
     fn test_listenable_ip_collision_eligible_wins() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -1585,7 +1585,7 @@ mod tests {
     fn test_unblock_expired() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -1668,7 +1668,7 @@ mod tests {
     fn test_unblock_expired_peer_removed_and_readded() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -1756,7 +1756,7 @@ mod tests {
     fn test_blocked_metric_multiple_peers() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -1821,7 +1821,7 @@ mod tests {
     fn test_block_myself_no_panic_on_expiry() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -1863,7 +1863,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let unknown_pk = ed25519::PrivateKey::from_seed(99).public_key();
         let unknown_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -1950,7 +1950,7 @@ mod tests {
         let unknown_pk = ed25519::PrivateKey::from_seed(99).public_key();
         let registered_pk = ed25519::PrivateKey::from_seed(50).public_key();
         let registered_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5050);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -2026,7 +2026,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -2081,7 +2081,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_secs(1);
         let config = super::Config {
@@ -2134,7 +2134,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_secs(1);
         let config = super::Config {
@@ -2174,7 +2174,7 @@ mod tests {
     fn test_dialable_empty() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_millis(200);
         let config = super::Config {
@@ -2201,7 +2201,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_millis(200);
         let config = super::Config {
@@ -2240,7 +2240,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(1);
         let config = super::Config {
@@ -2290,7 +2290,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(1);
         let config = super::Config {
@@ -2335,7 +2335,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -2390,7 +2390,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -2445,7 +2445,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -2498,7 +2498,7 @@ mod tests {
     fn test_overwrite_basic() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -2539,7 +2539,7 @@ mod tests {
     fn test_overwrite_untracked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -2565,7 +2565,7 @@ mod tests {
     fn test_overwrite_peer_not_in_set() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -2603,7 +2603,7 @@ mod tests {
     fn test_overwrite_blocked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
@@ -2651,7 +2651,7 @@ mod tests {
     fn test_overwrite_myself() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
@@ -2676,7 +2676,7 @@ mod tests {
     fn test_overwrite_same_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
+        let (tx, _rx) = Mailbox::new(16);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,

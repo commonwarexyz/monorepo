@@ -5,10 +5,10 @@ use crate::authenticated::{
             peer, router,
             tracker::{self, Metadata},
         },
+        channels::Channels,
         metrics,
         types::InfoVerifier,
     },
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
@@ -18,7 +18,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::actor::{ActorInbox, Enqueue};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
@@ -38,7 +38,7 @@ pub struct Actor<
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
-    receiver: mpsc::Receiver<Message<O, I, C>>,
+    receiver: ActorInbox<Message<O, I, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -85,16 +85,18 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
+        channels: Channels<C>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, router))
+        spawn_cell!(self.context, self.run(tracker, router, channels))
     }
 
     async fn run(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
+        channels: Channels<C>,
     ) {
         select_loop! {
             self.context,
@@ -117,13 +119,28 @@ impl<
                             let received_messages = self.received_messages.clone();
                             let dropped_messages = self.dropped_messages.clone();
                             let rate_limited = self.rate_limited.clone();
-                            let mut tracker = tracker.clone();
+                            let tracker = tracker.clone();
                             let mut router = router.clone();
+                            let channels = channels.clone();
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
                                 // Get greeting from tracker (returns None if not eligible)
-                                let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
+                                let (connect_mailbox, mut connect_receiver) = Mailbox::new(1);
+                                if !matches!(
+                                    tracker.request_connect(
+                                        peer.clone(),
+                                        is_dialer,
+                                        connect_mailbox
+                                    ),
+                                    Enqueue::Queued | Enqueue::Replaced
+                                ) {
+                                    debug!(?peer, "peer not eligible");
+                                    drop(reservation);
+                                    return;
+                                }
+                                let Some(super::Connect::Connected(Some(greeting))) =
+                                    connect_receiver.recv().await
                                 else {
                                     debug!(?peer, "peer not eligible");
                                     drop(reservation);
@@ -148,12 +165,14 @@ impl<
                                     },
                                 );
 
-                                // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
-                                else {
+                                // Register peer with the router (may fail during shutdown).
+                                if !matches!(
+                                    router.ready(peer.clone(), messenger),
+                                    Enqueue::Queued | Enqueue::Replaced
+                                ) {
                                     debug!(?peer, "router shut down during peer setup");
                                     return;
-                                };
+                                }
 
                                 // Run peer (greeting is sent first before main loop)
                                 let result = peer_actor
@@ -165,7 +184,7 @@ impl<
                                     Ok(()) => debug!(?peer, "peer shutdown gracefully"),
                                     Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
                                 }
-                                router.release(peer).await;
+                                let _ = router.release(peer);
                                 // Release the reservation
                                 drop(reservation);
                             }

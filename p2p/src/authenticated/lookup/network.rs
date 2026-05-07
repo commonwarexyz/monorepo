@@ -6,10 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{
-    authenticated::{mailbox::UnboundedMailbox, Mailbox},
-    Channel,
-};
+use crate::{authenticated::Mailbox, Channel};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -17,9 +14,8 @@ use commonware_runtime::{
     Resolver, Spawner,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
-use commonware_utils::{channel::mpsc, union};
+use commonware_utils::{channel::actor::ActorInbox, union};
 use rand_core::CryptoRngCore;
-use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
@@ -35,10 +31,10 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: Mailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
-    listener: mpsc::Receiver<HashSet<IpAddr>>,
+    listener: ActorInbox<tracker::ListenableIps>,
 }
 
 impl<
@@ -57,12 +53,13 @@ impl<
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_mailbox, listener) = Mailbox::new(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
+                mailbox_size: cfg.mailbox_size,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
@@ -137,7 +134,7 @@ impl<
         let mut tracker_task = self.tracker.start();
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = self.router.start();
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -148,8 +145,11 @@ impl<
                 ping_frequency: self.cfg.ping_frequency,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let mut spawner_task = spawner.start(
+            self.tracker_mailbox.clone(),
+            self.router_mailbox.clone(),
+            self.channels,
+        );
 
         // Start listener
         let stream_cfg = StreamConfig {
@@ -185,6 +185,7 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
+                mailbox_size: self.cfg.mailbox_size,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,
             },

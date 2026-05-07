@@ -7,7 +7,7 @@ use super::{
     Error,
 };
 use crate::{
-    authenticated::UnboundedMailbox,
+    authenticated::Mailbox,
     utils::{
         limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
         PeerSetsAtIndex as PeerSetsAtIndexBase,
@@ -25,12 +25,16 @@ use commonware_runtime::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
+    channel::{
+        actor::{ActorInbox, Enqueue},
+        fallible::FallibleExt,
+        mpsc, oneshot, ring,
+    },
     ordered::Set,
     NZUsize, TryCollect,
 };
 use either::Either;
-use futures::{future, SinkExt};
+use futures::{future, Sink};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -38,6 +42,7 @@ use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
+    pin::Pin,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -46,7 +51,15 @@ use tracing::{debug, error, trace, warn};
 type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 
 /// Task type representing a message to be sent within the network.
-type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
+type Task<P> = (
+    Channel,
+    P,
+    Recipients<P>,
+    IoBuf,
+    Option<oneshot::Sender<Vec<P>>>,
+);
+
+const ORACLE_MAILBOX_SIZE: usize = 1024;
 
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,10 +146,10 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     next_addr: SocketAddr,
 
     // Channel to receive messages from the oracle
-    ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
+    ingress: ActorInbox<ingress::Message<P, E>>,
 
     // Mailbox for the oracle channel (passed to Senders for PeerSource subscriptions)
-    oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
+    oracle_mailbox: Mailbox<ingress::Message<P, E>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -183,7 +196,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
+        let (oracle_mailbox, oracle_receiver) = Mailbox::new(ORACLE_MAILBOX_SIZE);
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
 
@@ -411,7 +424,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
                 // Broadcast updated tracked membership to SubscribeConnected subscribers
-                self.broadcast_peer_list().await;
+                self.broadcast_peer_list();
             }
             ingress::Message::Register {
                 channel,
@@ -476,7 +489,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Send current peer list immediately
                 let peer_list = self.all_connected_peers();
-                let _ = sender.send(peer_list).await;
+                let _ = Pin::new(&mut sender).start_send(peer_list);
 
                 // Store sender for future broadcasts
                 self.peer_subscribers.push(sender);
@@ -584,11 +597,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
-    async fn broadcast_peer_list(&mut self) {
+    fn broadcast_peer_list(&mut self) {
         let peer_list = self.all_connected_peers();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for mut subscriber in self.peer_subscribers.drain(..) {
-            if subscriber.send(peer_list.clone()).await.is_ok() {
+            if Pin::new(&mut subscriber)
+                .start_send(peer_list.clone())
+                .is_ok()
+            {
                 live_subscribers.push(subscriber);
             }
         }
@@ -687,8 +703,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 reason = "not primary or secondary",
                 "dropping message"
             );
-            if let Err(err) = reply.send(Vec::new()) {
-                error!(?err, "failed to send ack");
+            if let Some(reply) = reply {
+                if let Err(err) = reply.send(Vec::new()) {
+                    error!(?err, "failed to send ack");
+                }
             }
             return;
         }
@@ -767,8 +785,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         // Alert application of sent messages
-        if let Err(err) = reply.send(sent) {
-            error!(?err, "failed to send ack");
+        if let Some(reply) = reply {
+            if let Err(err) = reply.send(sent) {
+                error!(?err, "failed to send ack");
+            }
         }
     }
 
@@ -810,7 +830,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 /// Implements [`crate::utils::limited::Connected`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
-    mailbox: UnboundedMailbox<ingress::Message<P, E>>,
+    mailbox: Mailbox<ingress::Message<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
@@ -822,7 +842,7 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    const fn new(mailbox: UnboundedMailbox<ingress::Message<P, E>>) -> Self {
+    fn new(mailbox: Mailbox<ingress::Message<P, E>>) -> Self {
         Self { mailbox }
     }
 }
@@ -831,14 +851,20 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        self.mailbox
-            .0
-            .request(|response| ingress::Message::SubscribeConnected { response })
-            .await
-            .unwrap_or_else(|| {
+        let (response, receiver) = oneshot::channel();
+        match self
+            .mailbox
+            .enqueue(ingress::Message::SubscribeConnected { response })
+        {
+            Enqueue::Queued | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
-            })
+            }),
+            Enqueue::Dropped | Enqueue::Rejected | Enqueue::Closed => {
+                let (_sender, receiver) = ring::channel(NZUsize!(1));
+                receiver
+            }
+        }
     }
 }
 
@@ -875,12 +901,44 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         if channel
-            .send((self.channel, self.me.clone(), recipients, message, sender))
+            .send((
+                self.channel,
+                self.me.clone(),
+                recipients,
+                message,
+                Some(sender),
+            ))
             .is_err()
         {
             return Ok(Vec::new());
         }
         Ok(receiver.await.unwrap_or_default())
+    }
+}
+
+impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<P>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Enqueue {
+        let message = message.into().coalesce();
+
+        if message.len() > self.max_size as usize {
+            return Enqueue::Rejected;
+        }
+
+        let channel = if priority { &self.high } else { &self.low };
+        if channel
+            .send((self.channel, self.me.clone(), recipients, message, None))
+            .is_err()
+        {
+            return Enqueue::Closed;
+        }
+        Enqueue::Queued
     }
 }
 
@@ -890,12 +948,14 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 /// before sending messages.
 pub struct Sender<P: PublicKey, E: Clock> {
     limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
+    mailbox_sender: UnlimitedSender<P>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
     fn clone(&self) -> Self {
         Self {
             limited_sender: self.limited_sender.clone(),
+            mailbox_sender: self.mailbox_sender.clone(),
         }
     }
 }
@@ -914,7 +974,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         channel: Channel,
         max_size: u32,
         sender: mpsc::UnboundedSender<Task<P>>,
-        oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
+        oracle_mailbox: Mailbox<ingress::Message<P, E>>,
         clock: E,
         quota: Quota,
     ) -> (Self, Handle<()>) {
@@ -955,9 +1015,15 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             low,
         };
         let peer_source = ConnectedPeerProvider::new(oracle_mailbox);
-        let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
+        let limited_sender = LimitedSender::new(unlimited_sender.clone(), quota, clock, peer_source);
 
-        (Self { limited_sender }, processor)
+        (
+            Self {
+                limited_sender,
+                mailbox_sender: unlimited_sender,
+            },
+            processor,
+        )
     }
 
     /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
@@ -976,6 +1042,24 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
                 inner: self,
                 forwarder,
             },
+        )
+    }
+}
+
+impl<P: PublicKey, E: Clock + Send + 'static> crate::MailboxSender for Sender<P, E> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Enqueue {
+        <UnlimitedSender<P> as crate::MailboxSender>::send(
+            &self.mailbox_sender,
+            recipients,
+            message,
+            priority,
         )
     }
 }
@@ -1039,6 +1123,28 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 
             _phantom: std::marker::PhantomData,
         })
+    }
+}
+
+impl<P, E, F> crate::MailboxSender for SplitSender<P, E, F>
+where
+    P: PublicKey,
+    E: Clock + Send + 'static,
+    F: SplitForwarder<P>,
+{
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Enqueue {
+        let message = message.into().coalesce();
+        let Some(recipients) = (self.forwarder)(self.replica, &recipients, &message) else {
+            return Enqueue::Dropped;
+        };
+        <Sender<P, E> as crate::MailboxSender>::send(&self.inner, recipients, message, priority)
     }
 }
 

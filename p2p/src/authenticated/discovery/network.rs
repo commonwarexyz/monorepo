@@ -6,10 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{
-    authenticated::{discovery::types::InfoVerifier, mailbox::UnboundedMailbox, Mailbox},
-    Channel,
-};
+use crate::{authenticated::{discovery::types::InfoVerifier, Mailbox}, Channel};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -37,7 +34,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: Mailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
     info_verifier: InfoVerifier<C::PublicKey>,
@@ -70,6 +67,7 @@ impl<
                 allow_dns: cfg.allow_dns,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
+                mailbox_size: cfg.mailbox_size,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
@@ -143,7 +141,7 @@ impl<
         let mut tracker_task = self.tracker.start();
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = self.router.start();
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -157,8 +155,11 @@ impl<
                 info_verifier: self.info_verifier,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let mut spawner_task = spawner.start(
+            self.tracker_mailbox.clone(),
+            self.router_mailbox.clone(),
+            self.channels,
+        );
 
         // Start listener
         let stream_cfg = StreamConfig {
@@ -192,6 +193,7 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
+                mailbox_size: self.cfg.mailbox_size,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,
             },
