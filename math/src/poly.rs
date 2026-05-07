@@ -777,6 +777,25 @@ mod test {
         }
     }
 
+    #[test]
+    fn interpolation_plans_cover_large_test_field() {
+        let poly = Poly {
+            coeffs: [3u8, 5, 7, 11]
+                .into_iter()
+                .map(F::from)
+                .try_collect()
+                .unwrap(),
+        };
+        let mut u = Unstructured::new(&[]);
+        for make_plan in [
+            Plan::Interpolate as fn(Poly<F>) -> Plan,
+            Plan::InterpolateWithZeroPoint,
+            Plan::InterpolateWithZeroPointMiddle,
+        ] {
+            make_plan(poly.clone()).run(&mut u).unwrap();
+        }
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

@@ -551,6 +551,34 @@ pub mod fuzz {
             Ok(())
         }
     }
+
+    #[test]
+    fn prover_tweaks_cover_noops_and_failures() {
+        let setup = test_setup();
+
+        let mut honest = Prover::new(setup, F::from(3u64), F::from(5u64));
+        honest.tweak_plain_claim(F::zero());
+        honest.tweak_pedersen_claim(F::zero(), F::zero());
+        honest.tweak_mask(true, G::zero());
+        honest.tweak_response(false, F::zero());
+        assert!(honest.honest());
+        assert!(honest.verify(&mut test_rng()));
+
+        type Tweak = Box<dyn FnOnce(&mut Prover<'static>)>;
+        let failures: [Tweak; 5] = [
+            Box::new(|p| p.tweak_plain_claim(F::from(1u64))),
+            Box::new(|p| p.tweak_pedersen_claim(F::from(1u64), F::from(1u64))),
+            Box::new(|p| p.tweak_mask(false, G::generator())),
+            Box::new(|p| p.tweak_response(true, F::from(1u64))),
+            Box::new(|p| p.bad_namespace()),
+        ];
+        for tweak in failures {
+            let mut prover = Prover::new(setup, F::from(3u64), F::from(5u64));
+            tweak(&mut prover);
+            assert!(!prover.honest());
+            assert!(!prover.verify(&mut test_rng()));
+        }
+    }
 }
 
 #[cfg(test)]

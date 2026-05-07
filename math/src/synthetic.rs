@@ -352,3 +352,35 @@ pub mod fuzz {
         commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{
+        algebra::CryptoGroup,
+        test::{F, G},
+    };
+
+    #[test]
+    fn generators_array_tracks_indices() {
+        let empty = Synthetic::<F, G>::zero();
+        assert_eq!(empty.max_free_index(), None);
+
+        let [g0, g1, g2] = Synthetic::<F, G>::generators_array();
+        assert_eq!(g0.max_free_index(), Some(0));
+        assert_eq!(g1.max_free_index(), Some(1));
+        assert_eq!(g2.max_free_index(), Some(2));
+    }
+
+    #[test]
+    fn equality_handles_zero_free_weights_and_concrete_terms() {
+        let [g0] = Synthetic::<F, G>::generators_array();
+        let zero_weight = g0 * &F::zero();
+        assert_eq!(Synthetic::<F, G>::zero(), zero_weight);
+
+        let point = G::generator();
+        let concrete = Synthetic::concrete([(F::from(3u64), point)]);
+        assert_eq!(concrete.clone(), concrete);
+        assert_ne!(concrete, Synthetic::zero());
+    }
+}

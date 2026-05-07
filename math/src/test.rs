@@ -307,6 +307,21 @@ commonware_macros::stability_scope!(ALPHA {
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod test {
+    use super::*;
+    use commonware_codec::Encode;
+    use commonware_utils::test_rng;
+
+    #[test]
+    fn test_field_and_group_guards() {
+        let mut rng = test_rng();
+        let random = F::random(&mut rng);
+        assert!(random == F::zero() || random.inv() * &random == F::one());
+
+        assert!(F::read(&mut P.encode().as_ref()).is_err());
+        assert!(G::read(&mut Q.encode().as_ref()).is_err());
+        assert!(G::read(&mut 0u64.encode().as_ref()).is_err());
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::super::*;

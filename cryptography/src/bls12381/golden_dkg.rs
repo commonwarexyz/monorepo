@@ -1714,6 +1714,70 @@ mod tests {
         let decoded: Output<PublicKey> = Read::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
 
         assert_eq!(output, decoded);
+        assert_eq!(output.public(), decoded.public());
+        assert_eq!(output.dealers(), decoded.dealers());
+        assert_eq!(output.players(), decoded.players());
+    }
+
+    #[test]
+    fn unsupported_num_players_is_reported() {
+        let mut rng = commonware_utils::test_rng();
+        let small_setup = Setup::new(NonZeroU32::new(3).unwrap());
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let dealer_set: Set<PublicKey> = dealer_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = player_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let info = Info::new(0, None, dealer_set, player_set);
+
+        let deal_result = deal::<N3f1>(
+            &mut rng,
+            &small_setup,
+            &info,
+            &dealer_keys[0],
+            None,
+            &Sequential,
+        );
+        assert!(matches!(
+            deal_result,
+            Err(Error::UnsupportedNumPlayers {
+                max: 3,
+                num_players: 4
+            })
+        ));
+
+        let observe_result =
+            observe::<N3f1>(&mut rng, &small_setup, &info, BTreeMap::new(), &Sequential);
+        assert!(matches!(
+            observe_result,
+            Err(Error::UnsupportedNumPlayers {
+                max: 3,
+                num_players: 4
+            })
+        ));
+
+        let play_result = play::<N3f1>(
+            &mut rng,
+            &small_setup,
+            &info,
+            BTreeMap::new(),
+            &dealer_keys[0],
+            &Sequential,
+        );
+        assert!(matches!(
+            play_result,
+            Err(Error::UnsupportedNumPlayers {
+                max: 3,
+                num_players: 4
+            })
+        ));
     }
 
     #[test_group("slow")]
