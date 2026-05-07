@@ -173,6 +173,14 @@ struct BlockSubscription<V: Variant> {
     _aborter: Aborter,
 }
 
+/// A local request to subscribe to a block.
+struct BlockSubscriptionRequest<V: Variant> {
+    round: Option<Round>,
+    height: Option<Height>,
+    key: BlockSubscriptionKeyFor<V>,
+    response: oneshot::Sender<V::Block>,
+}
+
 /// The key used to track block subscriptions.
 ///
 /// Digest-scoped and commitment-scoped subscriptions are intentionally distinct
@@ -642,7 +650,7 @@ where
                         response,
                     } => match identifier {
                         BlockID::Digest(digest) => {
-                            let result = self.find_block_by_digest(&mut buffer, digest).await;
+                            let result = self.find_block_by_digest(&buffer, digest).await;
                             response.send_lossy(result);
                         }
                         BlockID::Height(height) => {
@@ -651,9 +659,7 @@ where
                         }
                         BlockID::Latest => {
                             let block = match self.get_latest().await {
-                                Some((_, digest, _)) => {
-                                    self.find_block_by_digest(&mut buffer, digest).await
-                                }
+                                Some((_, digest, _)) => self.find_block_by_digest(&buffer, digest).await,
                                 None => None,
                             };
                             response.send_lossy(block);
@@ -683,11 +689,14 @@ where
                         digest,
                         response,
                     } => {
-                        self.handle_subscribe(
+                        let subscription = BlockSubscriptionRequest {
                             round,
-                            None,
-                            BlockSubscriptionKey::Digest(digest),
+                            height: None,
+                            key: BlockSubscriptionKey::Digest(digest),
                             response,
+                        };
+                        self.handle_subscribe(
+                            subscription,
                             &mut resolver,
                             &mut waiters,
                             &mut buffer,
@@ -704,11 +713,14 @@ where
                             CommitmentRequest::FetchByRound { round } => (Some(round), None),
                             CommitmentRequest::FetchByCommitment { height } => (None, Some(height)),
                         };
-                        self.handle_subscribe(
+                        let subscription = BlockSubscriptionRequest {
                             round,
                             height,
-                            BlockSubscriptionKey::Commitment(commitment),
+                            key: BlockSubscriptionKey::Commitment(commitment),
                             response,
+                        };
+                        self.handle_subscribe(
+                            subscription,
                             &mut resolver,
                             &mut waiters,
                             &mut buffer,
@@ -875,14 +887,17 @@ where
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
-        round: Option<Round>,
-        height: Option<Height>,
-        key: BlockSubscriptionKeyFor<V>,
-        response: oneshot::Sender<V::Block>,
+        subscription: BlockSubscriptionRequest<V>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
+        let BlockSubscriptionRequest {
+            round,
+            height,
+            key,
+            response,
+        } = subscription;
         let digest = match key {
             BlockSubscriptionKey::Digest(digest) => digest,
             BlockSubscriptionKey::Commitment(commitment) => V::commitment_to_inner(commitment),

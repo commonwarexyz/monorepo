@@ -1115,10 +1115,9 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        let request = match parent_round {
-            Some(round) => core::CommitmentRequest::FetchByRound { round },
-            None => core::CommitmentRequest::Wait,
-        };
+        let request = parent_round.map_or(core::CommitmentRequest::Wait, |round| {
+            core::CommitmentRequest::FetchByRound { round }
+        });
         Either::Right(
             marshal
                 .subscribe_by_commitment(parent_commitment, request)
