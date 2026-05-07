@@ -5,7 +5,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::actor::{Enqueue, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{Enqueue, MessagePolicy};
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<O: Sink, I: Stream, P: PublicKey> {
@@ -20,15 +20,7 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
     },
 }
 
-impl<P: PublicKey, O: Sink, I: Stream> MessagePolicy for Message<O, I, P> {
-    fn kind(&self) -> &'static str {
-        "spawn"
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-}
+impl<P: PublicKey, O: Sink, I: Stream> MessagePolicy for Message<O, I, P> {}
 
 impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
@@ -55,15 +47,7 @@ pub(crate) enum Connect<P: PublicKey> {
     Connected(Option<types::Info<P>>),
 }
 
-impl<P: PublicKey> MessagePolicy for Connect<P> {
-    fn kind(&self) -> &'static str {
-        "connect"
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-}
+impl<P: PublicKey> MessagePolicy for Connect<P> {}
 
 impl<P: PublicKey> Mailbox<Connect<P>> {
     pub(crate) fn connected(&self, info: Option<types::Info<P>>) -> Enqueue<Connect<P>> {

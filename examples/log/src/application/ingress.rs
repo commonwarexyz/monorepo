@@ -5,7 +5,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::{
-    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    actor::{ActorMailbox, MessagePolicy},
     oneshot,
 };
 
@@ -22,19 +22,7 @@ pub enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> MessagePolicy for Message<D> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Genesis { .. } => "genesis",
-            Self::Propose { .. } => "propose",
-            Self::Verify { .. } => "verify",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Retain
-    }
-}
+impl<D: Digest> MessagePolicy for Message<D> {}
 
 /// Mailbox for the application.
 #[derive(Clone)]

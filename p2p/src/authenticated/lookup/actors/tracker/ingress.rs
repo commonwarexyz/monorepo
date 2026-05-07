@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, Backpressure, Enqueue, MessagePolicy},
         ring, oneshot,
     },
     ordered::Map,
@@ -152,35 +152,10 @@ pub(crate) enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Register { .. } => "register",
-            Self::Overwrite { .. } => "overwrite",
-            Self::PeerSet { .. } => "peer_set",
-            Self::Subscribe { .. } => "subscribe",
-            Self::Block { .. } => "block",
-            Self::Connect { .. } => "connect",
-            Self::DialableForDialer { .. } => "dialable_for_dialer",
-            Self::Dialable { .. } => "dialable",
-            Self::DialForDialer { .. } => "dial_for_dialer",
-            Self::AcceptableForListener { .. } => "acceptable_for_listener",
-            Self::Dial { .. } => "dial",
-            Self::ListenForListener { .. } => "listen_for_listener",
-            Self::Acceptable { .. } => "acceptable",
-            Self::Listen { .. } => "listen",
-            Self::Release { .. } => "release",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match message {
             Self::Register { index, peers } => actor::replace_last(
                 queue,
-                protected,
                 Self::Register { index, peers },
                 |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
             ),
@@ -188,19 +163,17 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
                 let expected = public_key.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
                 )
             }
             Self::DialableForDialer { dialer } => actor::replace_last(
                 queue,
-                protected,
                 Self::DialableForDialer { dialer },
                 |pending| matches!(pending, Self::DialableForDialer { .. }),
             ),
             message => Err(message),
-        }
+        }, queue)
     }
 }
 

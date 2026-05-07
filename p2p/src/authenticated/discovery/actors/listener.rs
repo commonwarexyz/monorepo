@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
-    channel::actor::{self, Enqueue, FullPolicy, MessagePolicy},
+    channel::actor::{self, Backpressure, Enqueue, MessagePolicy},
     concurrency::Limiter,
     net::SubnetMask,
     IpAddrExt,
@@ -286,31 +286,18 @@ pub(crate) enum Message<C: commonware_cryptography::PublicKey> {
 }
 
 impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Acceptable(_) => "acceptable",
-            Self::Listen(_) => "listen",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
-            Self::Acceptable(acceptable) => actor::replace_last(
+            Self::Acceptable(acceptable) => Backpressure::replace_or_queue(actor::replace_last(
                 queue,
-                protected,
                 Self::Acceptable(acceptable),
                 |pending| matches!(pending, Self::Acceptable(_)),
-            ),
-            Self::Listen(reservation) => actor::replace_last(
+            ), queue),
+            Self::Listen(reservation) => Backpressure::replace_or_queue(actor::replace_last(
                 queue,
-                protected,
                 Self::Listen(reservation),
                 |pending| matches!(pending, Self::Listen(_)),
-            ),
+            ), queue),
         }
     }
 }

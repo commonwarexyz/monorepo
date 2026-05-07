@@ -11,11 +11,12 @@ use commonware_cryptography::{
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{
-        actor::{ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+        actor::{ActorMailbox, Backpressure, Enqueue, MessagePolicy},
         oneshot,
     },
     Acknowledgement,
 };
+use std::collections::VecDeque;
 use tracing::error;
 
 /// A message that can be sent to the [Actor].
@@ -47,17 +48,10 @@ where
     V: Variant,
     A: Acknowledgement,
 {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Act { .. } => "act",
-            Self::Finalized { .. } => "finalized",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        match self {
-            Self::Act { .. } => FullPolicy::Reject,
-            Self::Finalized { .. } => FullPolicy::Retain,
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        match message {
+            Self::Act { .. } => Backpressure::Skip(message),
+            Self::Finalized { .. } => Backpressure::queue(queue, message),
         }
     }
 }
@@ -126,9 +120,11 @@ where
             // We ignore any other updates sent by marshal.
             return Enqueue::Rejected(());
         };
-        self.sender.enqueue(Message::Finalized {
-            block,
-            response: ack_tx,
-        })
+        self.sender
+            .enqueue(Message::Finalized {
+                block,
+                response: ack_tx,
+            })
+            .discard()
     }
 }

@@ -3,7 +3,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::{
-    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    actor::{ActorMailbox, MessagePolicy},
     oneshot,
 };
 
@@ -35,19 +35,7 @@ pub enum Message<P: PublicKey, M: Digestible> {
     },
 }
 
-impl<P: PublicKey, M: Digestible + Codec> MessagePolicy for Message<P, M> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Broadcast { .. } => "broadcast",
-            Self::Subscribe { .. } => "subscribe",
-            Self::Get { .. } => "get",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Retain
-    }
-}
+impl<P: PublicKey, M: Digestible + Codec> MessagePolicy for Message<P, M> {}
 
 /// Ingress mailbox for [super::Engine].
 #[derive(Clone)]

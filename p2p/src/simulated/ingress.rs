@@ -7,7 +7,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{
-        actor::{self, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, Backpressure, Enqueue, MessagePolicy},
         oneshot, ring,
     },
     ordered::Map,
@@ -97,30 +97,10 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Register { .. } => "register",
-            Self::Track { .. } => "track",
-            Self::PeerSet { .. } => "peer_set",
-            Self::Subscribe { .. } => "subscribe",
-            Self::SubscribeConnected { .. } => "subscribe_connected",
-            Self::LimitBandwidth { .. } => "limit_bandwidth",
-            Self::AddLink { .. } => "add_link",
-            Self::RemoveLink { .. } => "remove_link",
-            Self::Block { .. } => "block",
-            Self::Blocked { .. } => "blocked",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match message {
             Self::Track { id, peers } => actor::replace_last(
                 queue,
-                protected,
                 Self::Track { id, peers },
                 |pending| matches!(pending, Self::Track { id: pending, .. } if *pending == id),
             ),
@@ -133,7 +113,6 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected = public_key.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::LimitBandwidth {
                         public_key,
                         egress_cap,
@@ -154,7 +133,6 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected_receiver = receiver.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::AddLink {
                         sender,
                         receiver,
@@ -174,7 +152,6 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected_receiver = receiver.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::RemoveLink {
                         sender,
                         receiver,
@@ -188,13 +165,12 @@ impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
                 let expected_to = to.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::Block { from, to },
                     |pending| matches!(pending, Self::Block { from, to } if from == &expected_from && to == &expected_to),
                 )
             }
             message => Err(message),
-        }
+        }, queue)
     }
 }
 

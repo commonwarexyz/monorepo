@@ -5,7 +5,7 @@ use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{ActorMailbox, FullPolicy, MessagePolicy},
+        actor::{ActorMailbox, MessagePolicy},
         oneshot,
     },
     Span,
@@ -42,18 +42,7 @@ pub enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> MessagePolicy for Message<D> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Deliver { .. } => "deliver",
-            Self::Produce { .. } => "produce",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Retain
-    }
-}
+impl<D: Digest> MessagePolicy for Message<D> {}
 
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///

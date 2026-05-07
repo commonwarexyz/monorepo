@@ -35,6 +35,21 @@ impl<T> Enqueue<T> {
     pub const fn accepted(&self) -> bool {
         matches!(self, Self::Queued | Self::Replaced)
     }
+
+    /// Map the payload returned with rejected or closed messages.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Enqueue<U> {
+        match self {
+            Self::Queued => Enqueue::Queued,
+            Self::Replaced => Enqueue::Replaced,
+            Self::Rejected(message) => Enqueue::Rejected(f(message)),
+            Self::Closed(message) => Enqueue::Closed(f(message)),
+        }
+    }
+
+    /// Drop the payload returned with rejected or closed messages.
+    pub fn discard(self) -> Enqueue<()> {
+        self.map(|_| ())
+    }
 }
 
 impl<T> fmt::Debug for Enqueue<T> {
@@ -48,32 +63,49 @@ impl<T> fmt::Debug for Enqueue<T> {
     }
 }
 
-/// Behavior to apply when an actor inbox is full.
+/// Result of applying backpressure to a full actor inbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FullPolicy {
-    /// Reject the incoming message.
-    Reject,
-    /// Queue the incoming message, even if this exceeds the configured capacity.
-    Retain,
-    /// Try to replace a stale overflow message, queueing the message if nothing was replaced.
-    Replace,
+pub enum Backpressure<T> {
+    /// The incoming message was queued behind the bounded ready queue.
+    Queued,
+    /// The incoming message replaced stale overflow work.
+    Replaced,
+    /// Skip the incoming message.
+    Skip(T),
+}
+
+impl<T> Backpressure<T> {
+    /// Queue `message` behind the bounded ready queue.
+    pub fn queue(queue: &mut VecDeque<T>, message: T) -> Self {
+        queue.push_back(message);
+        Self::Queued
+    }
+
+    /// Queue the message if it could not replace existing work.
+    pub fn replace_or_queue(result: Result<(), T>, queue: &mut VecDeque<T>) -> Self {
+        match result {
+            Ok(()) => Self::Replaced,
+            Err(message) => Self::queue(queue, message),
+        }
+    }
+
+    /// Skip the message if it could not replace existing work.
+    pub fn replace_or_skip(result: Result<(), T>) -> Self {
+        match result {
+            Ok(()) => Self::Replaced,
+            Err(message) => Self::Skip(message),
+        }
+    }
 }
 
 /// Policy for actor messages when an inbox is full.
 pub trait MessagePolicy: Sized {
-    /// Stable message kind for logging and metrics.
-    fn kind(&self) -> &'static str;
-
-    /// Full-inbox behavior for this message.
-    fn full_policy(&self) -> FullPolicy;
-
-    /// Try to replace a stale overflow message with `message`.
+    /// Apply backpressure to `message` when the bounded ready queue is full.
     ///
-    /// This is only called when [`Self::full_policy`] returns [`FullPolicy::Replace`] and the
-    /// bounded ready queue is full. Messages already in the ready queue are not provided here;
-    /// replacement only applies to overflow retained behind the ready queue.
-    fn replace(_queue: &mut VecDeque<Self>, _protected: usize, message: Self) -> Result<(), Self> {
-        Err(message)
+    /// Messages already in the ready queue are not provided here; replacement only applies to
+    /// overflow retained behind the ready queue.
+    fn backpressure(_queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::queue(_queue, message)
     }
 }
 
@@ -144,7 +176,6 @@ impl<T: MessagePolicy> ActorMailbox<T> {
             Ok(send) => send,
             Err(message) => return Enqueue::Closed(message),
         };
-        let policy = message.full_policy();
 
         let message = if self.shared.overflowing.load(Ordering::Acquire) {
             message
@@ -158,21 +189,7 @@ impl<T: MessagePolicy> ActorMailbox<T> {
             }
         };
 
-        if matches!(policy, FullPolicy::Retain | FullPolicy::Replace) {
-            self.shared.overflowing.store(true, Ordering::Release);
-        }
-
-        match policy {
-            FullPolicy::Reject => {
-                if self.shared.closed.load(Ordering::Acquire) {
-                    Enqueue::Closed(message)
-                } else {
-                    Enqueue::Rejected(message)
-                }
-            }
-            FullPolicy::Retain => self.retain_overflow(message),
-            FullPolicy::Replace => self.replace_overflow(message),
-        }
+        self.backpressure_overflow(message)
     }
 
     fn acquire_send(&self, message: T) -> Result<(SendPermit<'_, T>, T), T> {
@@ -198,52 +215,47 @@ impl<T: MessagePolicy> ActorMailbox<T> {
         self.shared.ready.len() + self.shared.overflow_len.load(Ordering::Acquire)
     }
 
-    fn retain_overflow(&self, message: T) -> Enqueue<T> {
+    fn backpressure_overflow(&self, message: T) -> Enqueue<T> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Enqueue::Closed(message);
         }
-        self.shared.overflowing.store(true, Ordering::Release);
 
         let mut overflow = self.shared.overflow.lock();
         if self.shared.closed.load(Ordering::Acquire) {
             return Enqueue::Closed(message);
         }
 
-        overflow.queue.push_back(message);
-        self.shared.overflow_len.fetch_add(1, Ordering::Release);
-        drop(overflow);
-
-        self.shared.receiver_waker.wake();
-        Enqueue::Queued
-    }
-
-    fn replace_overflow(&self, message: T) -> Enqueue<T> {
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Enqueue::Closed(message);
-        }
-        self.shared.overflowing.store(true, Ordering::Release);
-
-        let mut overflow = self.shared.overflow.lock();
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Enqueue::Closed(message);
-        }
-
-        match T::replace(&mut overflow.queue, 0, message) {
-            Ok(()) => {
-                if overflow.queue.is_empty() {
-                    self.shared.overflowing.store(false, Ordering::Release);
-                }
-                Enqueue::Replaced
-            }
-            Err(message) => {
-                overflow.queue.push_back(message);
-                self.shared.overflow_len.fetch_add(1, Ordering::Release);
+        let old_len = overflow.queue.len();
+        match T::backpressure(&mut overflow.queue, message) {
+            Backpressure::Queued => {
+                self.sync_overflow_state(overflow.queue.len());
                 drop(overflow);
 
                 self.shared.receiver_waker.wake();
                 Enqueue::Queued
             }
+            Backpressure::Replaced => {
+                let new_len = overflow.queue.len();
+                self.sync_overflow_state(new_len);
+                if old_len == 0 && new_len > 0 {
+                    self.shared.receiver_waker.wake();
+                }
+                Enqueue::Replaced
+            }
+            Backpressure::Skip(message) => {
+                self.sync_overflow_state(overflow.queue.len());
+                if self.shared.closed.load(Ordering::Acquire) {
+                    Enqueue::Closed(message)
+                } else {
+                    Enqueue::Rejected(message)
+                }
+            }
         }
+    }
+
+    fn sync_overflow_state(&self, len: usize) {
+        self.shared.overflow_len.store(len, Ordering::Release);
+        self.shared.overflowing.store(len > 0, Ordering::Release);
     }
 }
 
@@ -311,18 +323,16 @@ impl<T> ActorInbox<T> {
         let mut overflow = self.shared.overflow.lock();
         while let Some(message) = overflow.queue.pop_front() {
             match self.shared.ready.push(message) {
-                Ok(()) => {
-                    self.shared.overflow_len.fetch_sub(1, Ordering::AcqRel);
-                }
+                Ok(()) => {}
                 Err(message) => {
                     overflow.queue.push_front(message);
                     break;
                 }
             }
         }
-        if overflow.queue.is_empty() {
-            self.shared.overflowing.store(false, Ordering::Release);
-        }
+        let len = overflow.queue.len();
+        self.shared.overflow_len.store(len, Ordering::Release);
+        self.shared.overflowing.store(len > 0, Ordering::Release);
     }
 
     fn is_disconnected(&self) -> bool {
@@ -369,14 +379,13 @@ pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbo
     )
 }
 
-/// Replace the newest matching queued message after the protected prefix.
+/// Replace the newest matching queued message.
 pub fn replace_last<T>(
     queue: &mut VecDeque<T>,
-    protected: usize,
     message: T,
     is_stale: impl FnMut(&T) -> bool,
 ) -> Result<(), T> {
-    if let Some(queued) = find_last_mut(queue, protected, is_stale) {
+    if let Some(queued) = find_last_mut(queue, is_stale) {
         *queued = message;
         Ok(())
     } else {
@@ -384,13 +393,12 @@ pub fn replace_last<T>(
     }
 }
 
-/// Find the newest matching queued message after the protected prefix.
+/// Find the newest matching queued message.
 pub fn find_last_mut<T>(
     queue: &mut VecDeque<T>,
-    protected: usize,
     mut is_match: impl FnMut(&T) -> bool,
 ) -> Option<&mut T> {
-    let index = (protected..queue.len())
+    let index = (0..queue.len())
         .rev()
         .find(|&index| is_match(queue.get(index).expect("index is in bounds")))?;
     queue.get_mut(index)
@@ -411,32 +419,22 @@ mod tests {
     }
 
     impl MessagePolicy for Message {
-        fn kind(&self) -> &'static str {
-            match self {
-                Self::Update(_) => "update",
-                Self::Vote(_) => "vote",
-                Self::Required(_) => "required",
-                Self::Buffered(_) => "buffered",
-                Self::Hint(_) => "hint",
-            }
-        }
-
-        fn full_policy(&self) -> FullPolicy {
-            match self {
-                Self::Update(_) => FullPolicy::Replace,
-                Self::Vote(_) => FullPolicy::Reject,
-                Self::Required(_) => FullPolicy::Replace,
-                Self::Buffered(_) => FullPolicy::Retain,
-                Self::Hint(_) => FullPolicy::Reject,
-            }
-        }
-
-        fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+        fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
             match message {
-                Self::Update(value) => replace_last(queue, protected, Self::Update(value), |pending| {
-                    matches!(pending, Self::Update(_))
-                }),
-                message => Err(message),
+                Self::Update(value) => Backpressure::replace_or_queue(
+                    replace_last(queue, Self::Update(value), |pending| {
+                        matches!(pending, Self::Update(_))
+                    }),
+                    queue,
+                ),
+                Self::Required(_) => Backpressure::queue(queue, message),
+                Self::Buffered(_) => Backpressure::queue(queue, message),
+                Self::Hint(value) => Backpressure::replace_or_skip(replace_last(
+                    queue,
+                    Self::Hint(value),
+                    |pending| matches!(pending, Self::Update(_)),
+                )),
+                Self::Vote(_) => Backpressure::Skip(message),
             }
         }
     }
@@ -532,6 +530,17 @@ mod tests {
         );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
+    }
+
+    #[commonware_macros::test_async]
+    async fn full_inbox_can_replace_or_skip_by_message() {
+        let (sender, mut receiver) = channel(1);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Update(2)), Enqueue::Queued);
+        assert_eq!(sender.enqueue(Message::Hint(3)), Enqueue::Replaced);
+
+        assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
+        assert_eq!(receiver.recv().await, Some(Message::Hint(3)));
     }
 
     #[commonware_macros::test_async]

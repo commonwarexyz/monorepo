@@ -1,5 +1,5 @@
 use commonware_utils::channel::{
-    actor::{self, Enqueue, FullPolicy, MessagePolicy},
+    actor::{self, Backpressure, Enqueue, MessagePolicy},
     mpsc,
 };
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
@@ -35,28 +35,16 @@ enum Message {
 }
 
 impl MessagePolicy for Message {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Reject(_) => "reject",
-            Self::Retain(_) => "retain",
-            Self::Replace(_) => "replace",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        match self {
-            Self::Reject(_) => FullPolicy::Reject,
-            Self::Retain(_) => FullPolicy::Retain,
-            Self::Replace(_) => FullPolicy::Replace,
-        }
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
-            Self::Replace(_) => actor::replace_last(queue, protected, message, |pending| {
-                matches!(pending, Self::Replace(_))
-            }),
-            message => Err(message),
+            Self::Reject(_) => Backpressure::Skip(message),
+            Self::Retain(_) => Backpressure::queue(queue, message),
+            Self::Replace(_) => Backpressure::replace_or_queue(
+                actor::replace_last(queue, message, |pending| {
+                    matches!(pending, Self::Replace(_))
+                }),
+                queue,
+            ),
         }
     }
 }

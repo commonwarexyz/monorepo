@@ -12,7 +12,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
         oneshot,
     },
     vec::NonEmptyVec,
@@ -168,34 +168,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 }
 
 impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::GetInfo { .. } => "get_info",
-            Self::GetBlock { .. } => "get_block",
-            Self::GetFinalization { .. } => "get_finalization",
-            Self::HintFinalized { .. } => "hint_finalized",
-            Self::SubscribeByDigest { .. } => "subscribe_by_digest",
-            Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
-            Self::GetVerified { .. } => "get_verified",
-            Self::Forward { .. } => "forward",
-            Self::Proposed { .. } => "proposed",
-            Self::Verified { .. } => "verified",
-            Self::Certified { .. } => "certified",
-            Self::SetFloor { .. } => "set_floor",
-            Self::Prune { .. } => "prune",
-            Self::Notarization { .. } => "notarization",
-            Self::Finalization { .. } => "finalization",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        match self {
-            Self::HintFinalized { .. } => FullPolicy::Replace,
-            _ => FullPolicy::Retain,
-        }
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
             Self::HintFinalized {
                 height,
@@ -204,7 +177,7 @@ impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
                 if let Some(Self::HintFinalized {
                     targets: pending_targets,
                     ..
-                }) = actor::find_last_mut(queue, protected, |pending| {
+                }) = actor::find_last_mut(queue, |pending| {
                     matches!(
                         pending,
                         Self::HintFinalized {
@@ -214,11 +187,12 @@ impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
                     )
                 }) {
                     pending_targets.extend(targets);
-                    return Ok(());
+                    Backpressure::Replaced
+                } else {
+                    Backpressure::queue(queue, Self::HintFinalized { height, targets })
                 }
-                Err(Self::HintFinalized { height, targets })
             }
-            message => Err(message),
+            message => Backpressure::queue(queue, message),
         }
     }
 }

@@ -8,7 +8,7 @@ use crate::{
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::{
-    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    actor::{ActorMailbox, MessagePolicy},
     oneshot,
 };
 
@@ -98,22 +98,6 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Proposed { .. } => "proposed",
-            Self::Discovered { .. } => "discovered",
-            Self::GetByCommitment { .. } => "get_by_commitment",
-            Self::GetByDigest { .. } => "get_by_digest",
-            Self::SubscribeAssignedShardVerified { .. } => "subscribe_assigned_shard_verified",
-            Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
-            Self::SubscribeByDigest { .. } => "subscribe_by_digest",
-            Self::Prune { .. } => "prune",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Retain
-    }
 }
 
 /// A mailbox for sending messages to the [`Engine`].

@@ -4,7 +4,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,27 +36,16 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View, Partici
 }
 
 impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Update { .. } => "update",
-            Self::Constructed(_) => "constructed",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match &message {
-            Self::Update { .. } => actor::replace_last(queue, protected, message, |pending| {
+            Self::Update { .. } => Backpressure::replace_or_queue(actor::replace_last(queue, message, |pending| {
                 matches!(pending, Self::Update { .. })
-            }),
+            }), queue),
             Self::Constructed(vote) => {
                 let key = vote_key(vote);
-                actor::replace_last(queue, protected, message, |pending| {
+                Backpressure::replace_or_queue(actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Constructed(pending) if vote_key(pending) == key)
-                })
+                }), queue)
             }
         }
     }

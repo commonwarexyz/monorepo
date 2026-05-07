@@ -20,7 +20,7 @@ use commonware_runtime::{
     StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::channel::actor::{self, ActorInbox, Enqueue, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{self, ActorInbox, Backpressure, Enqueue, MessagePolicy};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::{
@@ -284,27 +284,15 @@ pub(crate) enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Dialable(_) => "dialable",
-            Self::Dial { .. } => "dial",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match message {
             Self::Dialable(dialable) => actor::replace_last(
                 queue,
-                protected,
                 Self::Dialable(dialable),
                 |pending| matches!(pending, Self::Dialable(_)),
             ),
             message => Err(message),
-        }
+        }, queue)
     }
 }
 

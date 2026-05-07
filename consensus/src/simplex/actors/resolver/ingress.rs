@@ -8,7 +8,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
         oneshot,
     },
     sequence::U64,
@@ -47,22 +47,11 @@ fn certificate_key<S: Scheme, D: Digest>(
 }
 
 impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Certificate(_) => "certificate",
-            Self::Certified { .. } => "certified",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match &message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
-                actor::replace_last(queue, protected, message, |pending| {
+                actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Certificate(pending) if certificate_key(pending) == key)
                 })
             }
@@ -72,15 +61,16 @@ impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
                 if let Some(Self::Certified {
                     success: pending_success,
                     ..
-                }) = actor::find_last_mut(queue, protected, |pending| {
+                }) = actor::find_last_mut(queue, |pending| {
                     matches!(pending, Self::Certified { view: pending_view, .. } if *pending_view == view)
                 }) {
                     *pending_success |= success;
-                    return Ok(());
+                    Ok(())
+                } else {
+                    Err(message)
                 }
-                Err(message)
             }
-        }
+        }, queue)
     }
 }
 
@@ -134,29 +124,18 @@ impl Handler {
 }
 
 impl MessagePolicy for HandlerMessage {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Deliver { .. } => "deliver",
-            Self::Produce { .. } => "produce",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match &message {
-            Self::Deliver { .. } => actor::replace_last(queue, protected, message, |pending| {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match &message {
+            Self::Deliver { .. } => actor::replace_last(queue, message, |pending| {
                 matches!(pending, Self::Produce { .. })
             }),
             Self::Produce { view, .. } => {
                 let view = *view;
-                actor::replace_last(queue, protected, message, |pending| {
+                actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Produce { view: pending, .. } if *pending == view)
                 })
             }
-        }
+        }, queue)
     }
 }
 

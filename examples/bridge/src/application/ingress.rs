@@ -9,7 +9,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::{
-    actor::{ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+    actor::{ActorMailbox, Enqueue, MessagePolicy},
     oneshot,
 };
 
@@ -32,20 +32,7 @@ pub enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> MessagePolicy for Message<D> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Genesis { .. } => "genesis",
-            Self::Propose { .. } => "propose",
-            Self::Verify { .. } => "verify",
-            Self::Report { .. } => "report",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Retain
-    }
-}
+impl<D: Digest> MessagePolicy for Message<D> {}
 
 /// Mailbox for the application.
 #[derive(Clone)]
@@ -132,6 +119,6 @@ impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<Scheme, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
-        self.sender.enqueue(Message::Report { activity })
+        self.sender.enqueue(Message::Report { activity }).discard()
     }
 }

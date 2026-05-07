@@ -2,12 +2,12 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use commonware_utils::channel::actor::{find_last_mut, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{find_last_mut, Backpressure, MessagePolicy};
 use std::{
     collections::{HashSet, VecDeque},
-    ops::Deref,
     net::IpAddr,
     num::NonZeroUsize,
+    ops::Deref,
     time::Duration,
 };
 
@@ -37,20 +37,12 @@ impl Deref for ListenableIps {
 }
 
 impl MessagePolicy for ListenableIps {
-    fn kind(&self) -> &'static str {
-        "listenable_ips"
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        if let Some(pending) = find_last_mut(queue, protected, |_| true) {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        if let Some(pending) = find_last_mut(queue, |_| true) {
             *pending = message;
-            Ok(())
+            Backpressure::Replaced
         } else {
-            Err(message)
+            Backpressure::queue(queue, message)
         }
     }
 }

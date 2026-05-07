@@ -1,5 +1,5 @@
 use crate::authenticated::Mailbox;
-use commonware_utils::channel::actor::{Enqueue, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{Enqueue, MessagePolicy};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -8,15 +8,7 @@ pub enum Message {
     Kill,
 }
 
-impl MessagePolicy for Message {
-    fn kind(&self) -> &'static str {
-        "kill"
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-}
+impl MessagePolicy for Message {}
 
 impl Mailbox<Message> {
     pub fn kill(&mut self) -> Enqueue<Message> {

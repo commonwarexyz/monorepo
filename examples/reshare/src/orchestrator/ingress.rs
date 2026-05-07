@@ -6,7 +6,7 @@ use commonware_cryptography::{
     PublicKey,
 };
 use commonware_utils::{
-    channel::actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+    channel::actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
     ordered::Set,
 };
 use std::collections::VecDeque;
@@ -27,22 +27,12 @@ impl<V: Variant, P: PublicKey> Message<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> MessagePolicy for Message<V, P> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Enter(_) => "enter",
-            Self::Exit(_) => "exit",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         let epoch = message.epoch();
-        actor::replace_last(queue, protected, message, |pending| {
-            pending.epoch() == epoch
-        })
+        Backpressure::replace_or_queue(
+            actor::replace_last(queue, message, |pending| pending.epoch() == epoch),
+            queue,
+        )
     }
 }
 
@@ -71,10 +61,10 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
     }
 
     pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Enqueue<()> {
-        self.sender.enqueue(Message::Enter(transition))
+        self.sender.enqueue(Message::Enter(transition)).discard()
     }
 
     pub fn exit(&mut self, epoch: Epoch) -> Enqueue<()> {
-        self.sender.enqueue(Message::Exit(epoch))
+        self.sender.enqueue(Message::Exit(epoch)).discard()
     }
 }

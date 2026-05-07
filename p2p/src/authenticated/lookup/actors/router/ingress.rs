@@ -12,7 +12,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     channel::{
-        actor::{self, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, Backpressure, Enqueue, MessagePolicy},
         oneshot, ring,
     },
     NZUsize,
@@ -43,44 +43,28 @@ pub enum Message<P: PublicKey> {
 }
 
 impl<P: PublicKey> MessagePolicy for Message<P> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Ready { .. } => "ready",
-            Self::Release { .. } => "release",
-            Self::Content { .. } => "content",
-            Self::SubscribePeers { .. } => "subscribe_peers",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        match self {
-            Self::Ready { .. } | Self::Release { .. } => FullPolicy::Replace,
-            Self::Content { .. } => FullPolicy::Retain,
-            Self::SubscribePeers { .. } => FullPolicy::Reject,
-        }
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
-                actor::replace_last(queue, protected, Self::Ready { peer, relay }, |pending| {
+                Backpressure::replace_or_queue(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
-                })
+                }), queue)
             }
             Self::Release { peer } => {
                 let key = peer.clone();
-                actor::replace_last(queue, protected, Self::Release { peer }, |pending| {
+                Backpressure::replace_or_queue(actor::replace_last(queue, Self::Release { peer }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
-                })
+                }), queue)
             }
-            message => Err(message),
+            Self::Content { .. } => Backpressure::queue(queue, message),
+            Self::SubscribePeers { .. } => Backpressure::Skip(message),
         }
     }
 }

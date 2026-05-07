@@ -1,6 +1,6 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::actor::{self, Enqueue, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{self, Backpressure, Enqueue, MessagePolicy};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the peer [super::Actor].
@@ -17,32 +17,20 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::BitVec(_) => "bit_vec",
-            Self::Peers(_) => "peers",
-            Self::Kill => "kill",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
         match message {
-            Self::BitVec(bit_vec) => actor::replace_last(queue, protected, Self::BitVec(bit_vec), |pending| {
+            Self::BitVec(bit_vec) => Backpressure::replace_or_queue(actor::replace_last(queue, Self::BitVec(bit_vec), |pending| {
                 matches!(pending, Self::BitVec(_))
-            }),
-            Self::Peers(peers) => actor::replace_last(queue, protected, Self::Peers(peers), |pending| {
+            }), queue),
+            Self::Peers(peers) => Backpressure::replace_or_queue(actor::replace_last(queue, Self::Peers(peers), |pending| {
                 matches!(pending, Self::Peers(_))
-            }),
+            }), queue),
             Self::Kill => {
                 if let Some(pending) = queue.back_mut() {
                     *pending = Self::Kill;
-                    Ok(())
+                    Backpressure::Replaced
                 } else {
-                    Err(Self::Kill)
+                    Backpressure::queue(queue, Self::Kill)
                 }
             }
         }

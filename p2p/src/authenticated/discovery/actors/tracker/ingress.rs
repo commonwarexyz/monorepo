@@ -13,7 +13,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, Enqueue, FullPolicy, MessagePolicy},
+        actor::{self, Backpressure, Enqueue, MessagePolicy},
         ring, oneshot,
     },
     NZUsize,
@@ -189,38 +189,10 @@ pub(crate) enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Register { .. } => "register",
-            Self::PeerSet { .. } => "peer_set",
-            Self::Subscribe { .. } => "subscribe",
-            Self::Block { .. } => "block",
-            Self::ConnectForSpawner { .. } => "connect_for_spawner",
-            Self::Connect { .. } => "connect",
-            Self::Construct { .. } => "construct",
-            Self::BitVec { .. } => "bit_vec",
-            Self::Peers { .. } => "peers",
-            Self::DialableForDialer { .. } => "dialable_for_dialer",
-            Self::Dialable { .. } => "dialable",
-            Self::DialForDialer { .. } => "dial_for_dialer",
-            Self::Dial { .. } => "dial",
-            Self::AcceptableForListener { .. } => "acceptable_for_listener",
-            Self::Acceptable { .. } => "acceptable",
-            Self::ListenForListener { .. } => "listen_for_listener",
-            Self::Listen { .. } => "listen",
-            Self::Release { .. } => "release",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match message {
             Self::Register { index, peers } => actor::replace_last(
                 queue,
-                protected,
                 Self::Register { index, peers },
                 |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
             ),
@@ -228,7 +200,6 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
                 let expected = public_key.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
                 )
@@ -237,26 +208,22 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
                 let expected = public_key.clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::Construct { public_key, peer },
                     |pending| matches!(pending, Self::Construct { public_key: pending, .. } if pending == &expected),
                 )
             }
             Self::BitVec { bit_vec, peer } => actor::replace_last(
                 queue,
-                protected,
                 Self::BitVec { bit_vec, peer },
                 |pending| matches!(pending, Self::BitVec { .. }),
             ),
             Self::Peers { peers } => actor::replace_last(
                 queue,
-                protected,
                 Self::Peers { peers },
                 |pending| matches!(pending, Self::Peers { .. }),
             ),
             Self::DialableForDialer { dialer } => actor::replace_last(
                 queue,
-                protected,
                 Self::DialableForDialer { dialer },
                 |pending| matches!(pending, Self::DialableForDialer { .. }),
             ),
@@ -264,13 +231,12 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
                 let expected = metadata.public_key().clone();
                 actor::replace_last(
                     queue,
-                    protected,
                     Self::Release { metadata },
                     |pending| matches!(pending, Self::Release { metadata } if metadata.public_key() == &expected),
                 )
             }
             message => Err(message),
-        }
+        }, queue)
     }
 }
 

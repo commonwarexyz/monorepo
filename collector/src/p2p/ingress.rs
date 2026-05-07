@@ -3,7 +3,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::{
-    actor::{ActorMailbox, FullPolicy, MessagePolicy},
+    actor::{ActorMailbox, MessagePolicy},
     oneshot,
 };
 
@@ -24,19 +24,7 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
     },
 }
 
-impl<P: PublicKey, R: Committable + Digestible + Codec> MessagePolicy for Message<P, R> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Send { .. } => "send",
-            Self::Sent { .. } => "sent",
-            Self::Cancel { .. } => "cancel",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Retain
-    }
-}
+impl<P: PublicKey, R: Committable + Digestible + Codec> MessagePolicy for Message<P, R> {}
 
 /// A mailbox that can be used to send and receive [Message]s.
 #[derive(Clone)]

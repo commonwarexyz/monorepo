@@ -7,7 +7,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy};
+use commonware_utils::channel::actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,25 +66,11 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View) {
 }
 
 impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Proposal(_) => "proposal",
-            Self::Timeout(_, _) => "timeout",
-            Self::Verified(_, _) => "verified",
-            Self::RetryVote(_) => "retry_vote",
-            Self::RetryCertificate(_) => "retry_certificate",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match &message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match &message {
             Self::Proposal(proposal) => {
                 let view = proposal.view();
-                actor::replace_last(queue, protected, message, |pending| {
+                actor::replace_last(queue, message, |pending| {
                     matches!(
                         pending,
                         Self::Timeout(timeout_view, TimeoutReason::Inactivity)
@@ -94,7 +80,7 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
             }
             Self::Timeout(view, _) => {
                 let view = *view;
-                actor::replace_last(queue, protected, message, |pending| {
+                actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Timeout(pending_view, _) if *pending_view == view)
                 })
             }
@@ -102,7 +88,7 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
                 let key = certificate_key(certificate);
                 let mut message = Some(message);
                 if let Some(Self::Verified(pending_certificate, pending_resolved)) =
-                    actor::find_last_mut(queue, protected, |pending| {
+                    actor::find_last_mut(queue, |pending| {
                         matches!(
                             pending,
                             Self::Verified(pending_certificate, _)
@@ -115,30 +101,30 @@ impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
                     };
                     *pending_certificate = certificate;
                     *pending_resolved |= resolved;
-                    return Ok(());
+                    Ok(())
+                } else {
+                    let message = message.expect("message was not replaced");
+                    actor::replace_last(queue, message, |pending| {
+                        matches!(pending, Self::Timeout(view, _) if *view <= key.1)
+                    })
                 }
-
-                let message = message.expect("message was not replaced");
-                actor::replace_last(queue, protected, message, |pending| {
-                    matches!(pending, Self::Timeout(view, _) if *view <= key.1)
-                })
             }
             Self::RetryVote(vote) => {
                 let key = vote_key(vote);
-                actor::replace_last(queue, protected, message, |pending| {
+                actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::RetryVote(vote) if vote_key(vote) == key)
                 })
             }
             Self::RetryCertificate(certificate) => {
                 let key = certificate_key(certificate);
-                actor::replace_last(queue, protected, message, |pending| {
+                actor::replace_last(queue, message, |pending| {
                     matches!(
                         pending,
                         Self::RetryCertificate(certificate) if certificate_key(certificate) == key
                     )
                 })
             }
-        }
+        }, queue)
     }
 }
 

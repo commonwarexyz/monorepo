@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::actor::{self, ActorMailbox, Enqueue, FullPolicy, MessagePolicy},
+    channel::actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
     vec::NonEmptyVec,
     Span,
 };
@@ -65,52 +65,36 @@ fn merge_fetches<K: Eq, P: PartialEq>(
 }
 
 impl<K: Span, P: PublicKey> MessagePolicy for Message<K, P> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Fetch(_) => "fetch",
-            Self::Cancel { .. } => "cancel",
-            Self::Clear => "clear",
-            Self::Retain { .. } => "retain",
-        }
-    }
-
-    fn full_policy(&self) -> FullPolicy {
-        FullPolicy::Replace
-    }
-
-    fn replace(queue: &mut VecDeque<Self>, protected: usize, message: Self) -> Result<(), Self> {
-        match message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::replace_or_queue(match message {
             Self::Fetch(requests) => {
                 if requests.is_empty() {
-                    return Ok(());
-                }
-                if let Some(Self::Fetch(existing)) = actor::find_last_mut(
-                    queue,
-                    protected,
-                    |pending| matches!(pending, Self::Fetch(_)),
-                ) {
+                    Ok(())
+                } else if let Some(Self::Fetch(existing)) =
+                    actor::find_last_mut(queue, |pending| matches!(pending, Self::Fetch(_)))
+                {
                     merge_fetches(existing, requests);
-                    return Ok(());
+                    Ok(())
+                } else {
+                    Err(Self::Fetch(requests))
                 }
-                Err(Self::Fetch(requests))
             }
             Self::Cancel { key } => {
-                actor::replace_last(queue, protected, Self::Cancel { key: key.clone() }, |pending| {
+                actor::replace_last(queue, Self::Cancel { key: key.clone() }, |pending| {
                     matches!(pending, Self::Cancel { key: pending } if pending == &key)
                 })
             }
             Self::Clear => {
-                queue.truncate(protected);
+                queue.clear();
                 queue.push_back(Self::Clear);
                 Ok(())
             }
             Self::Retain { predicate } => actor::replace_last(
                 queue,
-                protected,
                 Self::Retain { predicate },
                 |pending| matches!(pending, Self::Retain { .. }),
             ),
-        }
+        }, queue)
     }
 }
 
