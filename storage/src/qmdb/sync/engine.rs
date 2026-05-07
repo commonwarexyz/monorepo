@@ -319,7 +319,8 @@ where
         )
         .await?;
 
-        let progress_metrics = ProgressMetrics::new(&config.context.child("sync"));
+        let sync_context = config.context.child("sync");
+        let progress_metrics = ProgressMetrics::new(&sync_context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
