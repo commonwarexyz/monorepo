@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location, Proof},
+    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location, Proof},
     qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;
@@ -24,6 +24,7 @@ struct OperationInput {
 #[derive(Debug)]
 struct FuzzInput<F: MerkleFamily> {
     proof_leaves: Location<F>,
+    inactive_peaks: usize,
     digests: Vec<[u8; 32]>,
     operations: Vec<OperationInput>,
     root: [u8; 32],
@@ -33,6 +34,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             proof_leaves: u.arbitrary()?,
+            inactive_peaks: u.arbitrary()?,
             digests: u.arbitrary()?,
             operations: u.arbitrary()?,
             root: u.arbitrary()?,
@@ -41,7 +43,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
 
     let digests: Vec<Digest> = input
         .digests
@@ -53,6 +55,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
 
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
+        inactive_peaks: input.inactive_peaks,
         digests,
     };
 

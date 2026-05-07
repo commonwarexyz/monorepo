@@ -22,8 +22,10 @@
 //!
 //! The _height_ of a node is 0 for a leaf, 1 for the parent of 2 leaves, and so on.
 //!
-//! The _root digest_ (or just _root_) of an MMR is computed as `Hash(leaves || fold(peaks))`,
-//! where `fold` left-folds peak digests in decreasing order of height using `Hash(acc || peak)`.
+//! The _root digest_ (or just _root_) of an MMR is computed by _bagging_ peaks according to a
+//! specification provided by the user. For example, if "full forward" is specified, the root digest
+//! is computed as `Hash(leaves || fold(peaks))`, where `fold` left-folds peak digests in decreasing
+//! order of height.
 //!
 //! # Examples
 //!
@@ -47,7 +49,8 @@
 //! Location 0   1 2   3  4   5  6   7  8   9 10
 //! ```
 //!
-//! The root hash in this example is computed as `Hash(11 || fold(peak1, peak2, peak3))`:
+//! The full-forward bagged root hash in this example is computed as `Hash(11 || fold(peak1, peak2,
+//! peak3))`:
 //!
 //! ```text
 //! peak1 = Hash(14,                                            // tallest peak
@@ -60,9 +63,8 @@
 //! peak2 = Hash(17, Hash(15, element_8), Hash(16, element_9))  // middle peak
 //! peak3 = Hash(18, element_10)                                // shortest peak
 //!
-//! acc   = fold(peak1, peak2, peak3)
-//!       = Hash(Hash(peak1 || peak2) || peak3)
-//! root  = Hash(11 || acc)                                     // 11 = leaf count
+//! fold  = Hash(Hash(peak1 || peak2) || peak3)
+//! root  = Hash(11 || fold)                                    // 11 = leaf count
 //! ```
 
 pub mod batch;
@@ -262,6 +264,7 @@ impl Graftable for Family {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::Bagging::ForwardFold;
     use commonware_cryptography::Sha256;
 
     const MAX_NODES: Position = <Family as crate::merkle::Family>::MAX_NODES;
@@ -395,8 +398,8 @@ mod tests {
     #[test]
     fn test_is_valid_size() {
         let mut size_to_check = Position::new(0);
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = mem::Mmr::new(&hasher);
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut mmr = mem::Mmr::new();
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {
@@ -708,8 +711,8 @@ mod tests {
 
     #[test]
     fn test_chunk_peaks() {
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = mem::Mmr::new(&hasher);
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut mmr = mem::Mmr::new();
         let digest = [1u8; 32];
 
         // Build an MMR with 200 leaves.
@@ -782,8 +785,8 @@ mod tests {
     fn test_leftmost_leaf() {
         // Verify leftmost_leaf is consistent with subtree_root_position:
         // `subtree_root_position(leftmost_leaf(pos, h), h) == pos`.
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = mem::Mmr::new(&hasher);
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut mmr = mem::Mmr::new();
         let digest = [1u8; 32];
         for _ in 0..200 {
             let merkleized = mmr
@@ -800,5 +803,26 @@ mod tests {
                 "roundtrip failed for pos={peak_pos} height={peak_height}"
             );
         }
+    }
+
+    #[test]
+    fn test_inactive_peaks() {
+        let size = Family::location_to_position(Location::new(11));
+
+        // At 11 leaves, MMR has 3 peaks:
+        // - Height 3 covering leaves 0..8 (capacity 8)
+        // - Height 1 covering leaves 8..10 (capacity 2)
+        // - Height 0 covering leaves 10..11 (capacity 1)
+
+        // Inactivity floor = 0 -> 0 inactive peaks
+        assert_eq!(Family::inactive_peaks(size, Location::new(0)), 0);
+        // Inactivity floor = 7 -> 0 inactive peaks (peak 1 rightmost is 8)
+        assert_eq!(Family::inactive_peaks(size, Location::new(7)), 0);
+        // Inactivity floor = 8 -> 1 inactive peak
+        assert_eq!(Family::inactive_peaks(size, Location::new(8)), 1);
+        // Inactivity floor = 9 -> 1 inactive peak
+        assert_eq!(Family::inactive_peaks(size, Location::new(9)), 1);
+        // Inactivity floor = 10 -> 2 inactive peaks
+        assert_eq!(Family::inactive_peaks(size, Location::new(10)), 2);
     }
 }

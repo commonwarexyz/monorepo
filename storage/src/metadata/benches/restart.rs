@@ -2,7 +2,7 @@ use super::utils::{get_random_kvs, init};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
+    Runner, Supervisor as _,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -33,7 +33,7 @@ fn bench_restart(c: &mut Criterion) {
                 for _ in 0..iters {
                     let start = Instant::now();
                     // This is the benchmarked operation
-                    let _metadata = init(ctx.clone()).await;
+                    let _metadata = init(ctx.child("storage")).await;
                     total += start.elapsed();
                 }
                 total

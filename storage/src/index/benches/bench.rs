@@ -1,7 +1,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     telemetry::metrics::{Metric, Registered, Registration},
-    Metrics,
+    Metrics, Name, Supervisor,
 };
 use criterion::criterion_main;
 
@@ -17,23 +17,21 @@ pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 #[derive(Clone)]
 pub(crate) struct DummyMetrics;
 
+impl Supervisor for DummyMetrics {
+    fn child(&self, _: &'static str) -> Self {
+        Self
+    }
+
+    fn with_attribute(self, _: &'static str, _: impl std::fmt::Display) -> Self {
+        Self
+    }
+
+    fn name(&self) -> Name {
+        Name::default()
+    }
+}
+
 impl Metrics for DummyMetrics {
-    fn label(&self) -> String {
-        "".into()
-    }
-
-    fn with_label(&self, _: &str) -> Self {
-        Self
-    }
-
-    fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
-        Self
-    }
-
-    fn with_span(&self) -> Self {
-        Self
-    }
-
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
         _: N,

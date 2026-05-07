@@ -23,12 +23,6 @@ where
 }
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
-///
-/// The `pinned_nodes` are the pruning-boundary peaks at `start_loc` (as returned by
-/// `nodes_to_pin`). When the larger tree has merged smaller subtrees into a bigger parent, the
-/// pins sit below the prefix subtrees authenticated by the proof; the verifier hashes pairs of
-/// pins up to each authenticated subtree's root and compares. When `start_loc` is 0,
-/// `pinned_nodes` must be empty.
 pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
@@ -86,9 +80,13 @@ where
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
 ///
-/// `peaks` must contain any peak digests that fall in the fold prefix of the original proof
-/// (peaks entirely before the original range's start location). If the original range started
-/// at location 0, pass an empty slice.
+/// `peaks` must contain any peak digests the source proof did not preserve individually:
+///
+/// - Fold-prefix peaks (peaks entirely before the original range's start location), when the
+///   original range did not start at 0.
+/// - For backward-folded proofs, the active suffix peaks that were collapsed into the source
+///   proof's synthetic accumulator. Use [`ProofStore::suffix_peak_positions`] to enumerate
+///   them; missing entries surface as [`Error::CompressedDigest`].
 pub fn create_multi_proof<F, D>(
     proof_store: &ProofStore<F, D>,
     locations: &[Location<F>],
@@ -125,26 +123,44 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{mem::Mem, LocationRangeExt as _},
+        merkle::{build_range_proof, mem::Mem, Bagging::ForwardFold, LocationRangeExt as _},
         mmb, mmr,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+    use core::ops::Range;
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[v])
     }
 
     fn test_hasher() -> Standard<Sha256> {
-        Standard::new()
+        Standard::new(ForwardFold)
+    }
+
+    fn qmdb_range_proof<F: Family>(
+        hasher: &Standard<Sha256>,
+        merkle: &Mem<F, Digest>,
+        inactive_peaks: usize,
+        range: Range<Location<F>>,
+    ) -> Proof<F, Digest> {
+        build_range_proof(
+            hasher,
+            merkle.leaves(),
+            inactive_peaks,
+            range,
+            |pos| merkle.get_node(pos),
+            crate::merkle::Error::ElementPruned,
+        )
+        .unwrap()
     }
 
     // ---- Generic inner functions for tests that work on both MMR and MMB ----
 
     fn verify_proof_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add some operations to the merkle structure
         let operations = vec![1, 2, 3];
@@ -157,12 +173,15 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Generate proof for all operations
-        let proof = merkle
-            .range_proof(&hasher, Location::<F>::new(0)..Location::<F>::new(3))
-            .unwrap();
+        let proof = qmdb_range_proof(
+            &hasher,
+            &merkle,
+            0,
+            Location::<F>::new(0)..Location::<F>::new(3),
+        );
 
         // Verify the proof
         assert!(verify_proof(
@@ -170,7 +189,7 @@ mod tests {
             &proof,
             Location::<F>::new(0), // start_loc
             &operations,
-            root,
+            &root
         ));
 
         // Verify the proof with the wrong root
@@ -180,7 +199,7 @@ mod tests {
             &proof,
             Location::<F>::new(0),
             &operations,
-            &wrong_root,
+            &wrong_root
         ));
 
         // Verify the proof with the wrong operations
@@ -190,7 +209,7 @@ mod tests {
             &proof,
             Location::<F>::new(0),
             &wrong_operations,
-            root,
+            &root
         ));
     }
 
@@ -208,7 +227,7 @@ mod tests {
 
     fn verify_proof_with_offset_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         let operations = vec![10, 11, 12];
         {
@@ -227,13 +246,16 @@ mod tests {
             merkle.apply_batch(&batch).unwrap();
         }
         let start_loc = Location::<F>::new(5u64);
-        let root = merkle.root();
-        let proof = merkle
-            .range_proof(&hasher, Location::<F>::new(5)..Location::<F>::new(8))
-            .unwrap();
+        let root = merkle.root(&hasher, 0).unwrap();
+        let proof = qmdb_range_proof(
+            &hasher,
+            &merkle,
+            0,
+            Location::<F>::new(5)..Location::<F>::new(8),
+        );
 
         // Verify with correct start location
-        assert!(verify_proof(&hasher, &proof, start_loc, &operations, root,));
+        assert!(verify_proof(&hasher, &proof, start_loc, &operations, &root));
 
         // Verify fails with wrong start location
         assert!(!verify_proof(
@@ -241,7 +263,7 @@ mod tests {
             &proof,
             Location::<F>::new(0), // wrong start_loc
             &operations,
-            root,
+            &root
         ));
     }
 
@@ -259,7 +281,7 @@ mod tests {
 
     fn verify_proof_and_extract_digests_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add some operations to the merkle structure
         let operations = vec![1, 2, 3, 4];
@@ -272,9 +294,9 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let root = merkle.root(&hasher, 0).unwrap();
         let range = Location::<F>::new(1)..Location::<F>::new(4);
-        let proof = merkle.range_proof(&hasher, range.clone()).unwrap();
+        let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
         // Verify and extract digests for subset of operations
         let result = verify_proof_and_extract_digests(
@@ -282,7 +304,7 @@ mod tests {
             &proof,
             Location::<F>::new(1), // start_loc
             &operations[range.to_usize_range()],
-            root,
+            &root,
         );
         assert!(result.is_ok());
         let digests = result.unwrap();
@@ -295,7 +317,7 @@ mod tests {
             &proof,
             Location::<F>::new(1),
             &operations[range.to_usize_range()],
-            &wrong_root,
+            &wrong_root
         )
         .is_err());
     }
@@ -314,7 +336,7 @@ mod tests {
 
     fn create_proof_store_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add some operations to the merkle structure
         let op_count = 15;
@@ -328,9 +350,9 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let root = merkle.root(&hasher, 0).unwrap();
         let range = Location::<F>::new(0)..Location::<F>::new(3);
-        let proof = merkle.range_proof(&hasher, range.clone()).unwrap();
+        let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
         // Create proof store
         let result = create_proof_store(
@@ -338,7 +360,7 @@ mod tests {
             &proof,
             range.start,                         // start_loc
             &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
-            root,
+            &root,
         );
         assert!(result.is_ok());
         let proof_store = result.unwrap();
@@ -353,7 +375,7 @@ mod tests {
             &sub_proof,
             range.start,
             &operations[range.to_usize_range()],
-            root,
+            &root
         ));
     }
 
@@ -371,7 +393,7 @@ mod tests {
 
     fn create_proof_store_invalid_proof_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add some operations to the merkle structure
         let operations = vec![1, 2, 3];
@@ -385,7 +407,7 @@ mod tests {
             merkle.apply_batch(&batch).unwrap();
         }
         let range = Location::<F>::new(0)..Location::<F>::new(2);
-        let proof = merkle.range_proof(&hasher, range).unwrap();
+        let proof = qmdb_range_proof(&hasher, &merkle, 0, range);
 
         // Should fail with invalid root
         let wrong_root = test_digest(99);
@@ -394,7 +416,7 @@ mod tests {
             &proof,
             Location::<F>::new(0),
             &operations,
-            &wrong_root,
+            &wrong_root
         )
         .is_err());
     }
@@ -413,7 +435,7 @@ mod tests {
 
     fn create_multi_proof_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add operations to the merkle structure
         let operations: Vec<u64> = (0..20).collect();
@@ -426,16 +448,19 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Create proof for full range
-        let proof = merkle
-            .range_proof(&hasher, Location::<F>::new(0)..Location::<F>::new(20))
-            .unwrap();
+        let proof = qmdb_range_proof(
+            &hasher,
+            &merkle,
+            0,
+            Location::<F>::new(0)..Location::<F>::new(20),
+        );
 
         // Create proof store
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, root).unwrap();
+            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
 
         // Generate multi-proof for specific locations
         let target_locations = vec![
@@ -458,7 +483,7 @@ mod tests {
             &hasher,
             &multi_proof,
             &selected_ops,
-            root,
+            &root
         ));
     }
 
@@ -476,7 +501,7 @@ mod tests {
 
     fn create_multi_proof_with_fold_prefix_peaks_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Build a merkle structure with peaks covering locations 0-31, 32-47, and 48.
         let operations: Vec<u64> = (0..49).collect();
@@ -488,19 +513,57 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let inactive_peaks = 1;
+        let root = merkle.root(&hasher, inactive_peaks).unwrap();
 
         // Proof store starts at 32, so the first peak is folded into the proof prefix.
         let range = Location::<F>::new(32)..Location::<F>::new(49);
-        let proof = merkle.range_proof(&hasher, range.clone()).unwrap();
+        let proof = qmdb_range_proof(&hasher, &merkle, inactive_peaks, range.clone());
         let proof_store = create_proof_store(
             &hasher,
             &proof,
             range.start,
             &operations[range.to_usize_range()],
-            root,
+            &root,
         )
         .unwrap();
+        assert_eq!(proof.inactive_peaks, inactive_peaks);
+
+        let mut tampered = proof.clone();
+        tampered.inactive_peaks = 0;
+        assert!(!verify_proof(
+            &hasher,
+            &tampered,
+            range.start,
+            &operations[range.to_usize_range()],
+            &root
+        ));
+        assert!(create_proof_store(
+            &hasher,
+            &tampered,
+            range.start,
+            &operations[range.to_usize_range()],
+            &root
+        )
+        .is_err());
+
+        let mut tampered = proof;
+        tampered.inactive_peaks = inactive_peaks + 1;
+        assert!(!verify_proof(
+            &hasher,
+            &tampered,
+            range.start,
+            &operations[range.to_usize_range()],
+            &root
+        ));
+        assert!(create_proof_store(
+            &hasher,
+            &tampered,
+            range.start,
+            &operations[range.to_usize_range()],
+            &root
+        )
+        .is_err());
 
         let target_locations = vec![Location::<F>::new(33), Location::<F>::new(48)];
 
@@ -537,7 +600,16 @@ mod tests {
             &hasher,
             &multi_proof,
             &selected_ops,
-            root,
+            &root
+        ));
+
+        let mut tampered = multi_proof;
+        tampered.inactive_peaks = 0;
+        assert!(!verify_multi_proof(
+            &hasher,
+            &tampered,
+            &selected_ops,
+            &root
         ));
     }
 
@@ -559,7 +631,7 @@ mod tests {
 
     fn verify_multi_proof_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add operations to the merkle structure
         let operations: Vec<u64> = (0..10).collect();
@@ -572,7 +644,7 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Generate multi-proof via range proof -> proof store -> multi-proof
         let target_locations = vec![
@@ -580,11 +652,9 @@ mod tests {
             Location::<F>::new(4),
             Location::<F>::new(7),
         ];
-        let proof = merkle
-            .range_proof(&hasher, Location::<F>::new(0)..merkle.leaves())
-            .unwrap();
+        let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, root).unwrap();
+            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
         let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
         // Verify with correct operations
@@ -597,7 +667,7 @@ mod tests {
             &hasher,
             &multi_proof,
             &selected_ops,
-            root,
+            &root
         ));
 
         // Verify fails with wrong operations
@@ -606,7 +676,12 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(!verify_multi_proof(&hasher, &multi_proof, &wrong_ops, root,));
+        assert!(!verify_multi_proof(
+            &hasher,
+            &multi_proof,
+            &wrong_ops,
+            &root
+        ));
 
         // Verify fails with wrong locations
         let wrong_locations = vec![
@@ -618,7 +693,7 @@ mod tests {
             &hasher,
             &multi_proof,
             &wrong_locations,
-            root,
+            &root
         ));
     }
 
@@ -636,8 +711,8 @@ mod tests {
 
     fn multi_proof_empty_inner<F: Family>() {
         let hasher = test_hasher();
-        let empty_merkle = Mem::<F, Digest>::new(&hasher);
-        let empty_root = empty_merkle.root();
+        let empty_merkle = Mem::<F, Digest>::new();
+        let empty_root = empty_merkle.root(&hasher, 0).unwrap();
 
         // Empty proof should verify against an empty merkle structure.
         let empty_proof = Proof::default();
@@ -645,11 +720,11 @@ mod tests {
             &hasher,
             &empty_proof,
             &[] as &[(Location<F>, u64)],
-            empty_root,
+            &empty_root
         ));
 
         // Proofs over empty locations should otherwise not be allowed.
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
         let operations: Vec<u64> = (0..5).collect();
         {
             let mut batch = merkle.new_batch();
@@ -659,12 +734,10 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
-        let proof = merkle
-            .range_proof(&hasher, Location::<F>::new(0)..merkle.leaves())
-            .unwrap();
+        let root = merkle.root(&hasher, 0).unwrap();
+        let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, root).unwrap();
+            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
         assert!(matches!(
             create_multi_proof(&proof_store, &[], &[]),
             Err(crate::merkle::Error::Empty)
@@ -685,7 +758,7 @@ mod tests {
 
     fn multi_proof_single_element_inner<F: Family>() {
         let hasher = test_hasher();
-        let mut merkle = Mem::<F, Digest>::new(&hasher);
+        let mut merkle = Mem::<F, Digest>::new();
 
         // Add operations to the merkle structure
         let operations = vec![1, 2, 3];
@@ -698,14 +771,17 @@ mod tests {
             let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
-        let root = merkle.root();
+        let root = merkle.root(&hasher, 0).unwrap();
 
         // Create proof store for all elements
-        let proof = merkle
-            .range_proof(&hasher, Location::<F>::new(0)..Location::<F>::new(3))
-            .unwrap();
+        let proof = qmdb_range_proof(
+            &hasher,
+            &merkle,
+            0,
+            Location::<F>::new(0)..Location::<F>::new(3),
+        );
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, root).unwrap();
+            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
 
         // Generate multi-proof for single element
         let multi_proof = create_multi_proof(&proof_store, &[Location::<F>::new(1)], &[]).unwrap();
@@ -715,7 +791,7 @@ mod tests {
             &hasher,
             &multi_proof,
             &[(Location::<F>::new(1), operations[1])],
-            root,
+            &root
         ));
     }
 

@@ -47,7 +47,7 @@
 //! with `DataCorrupted` rather than silently serving or restoring mismatched state.
 
 use crate::{
-    merkle::{hasher::Standard as StandardHasher, Family, Location, Proof},
+    merkle::{Family, Location, Proof},
     qmdb::{
         self,
         any::{value::ValueEncoding, FixedValue, VariableValue},
@@ -324,7 +324,7 @@ where
         }));
     }
 
-    let hasher = StandardHasher::<DB::Hasher>::new();
+    let hasher = qmdb::hasher::<DB::Hasher>();
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     if !verify_proof(
         &hasher,

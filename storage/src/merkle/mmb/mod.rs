@@ -1,8 +1,11 @@
 //! A Merkle Mountain Belt (MMB) is an append-only data structure that allows for efficient
 //! verification of the inclusion of an element in a list. Like the [MMR](crate::mmr), it stores
 //! elements in a forest of perfect binary trees. Unlike the MMR, the trees are not required to have
-//! strictly decreasing heights. (This module technically implements the _F-MMB_ from
-//! <https://arxiv.org/abs/2511.13582>, which bags peaks using a left-deep merkle tree.)
+//! strictly decreasing heights.
+//!
+//! This module technically implements the _F-MMB_ from <https://arxiv.org/abs/2511.13582>, which
+//! bags peaks using a left-deep merkle tree, and the _P-MMB_, which bags peaks using a pyramid
+//! structure that is left-deep over inactive peaks and right-deep over active ones.
 //!
 //! # Terminology
 //!
@@ -33,8 +36,8 @@
 //! - Node 5 (a height-1 parent) has a birth leaf of 3 (it is appended immediately after Leaf 3).
 //! - Node 7 (a height-2 parent) has a birth leaf of 4 (it is appended immediately after Leaf 4).
 //!
-//! The _root digest_ (or just _root_) is computed as `Hash(leaves || fold(peaks))`, where `fold`
-//! left-folds peak digests from oldest to newest using `Hash(acc || peak)`.
+//! The _root digest_ (or just _root_) is computed by _bagging_ the peaks using a policy provided by
+//! the user.
 //!
 //! # Construction
 //!
@@ -100,7 +103,7 @@
 //!  7    .. same prefix ..                L6  L7  P7    [(7,  h2), (9,  h1), (12, h1)]
 //! ```
 //!
-//! The root hash is computed as `Hash(8 || fold(peak1, peak2, peak3))`:
+//! The forward-bagged root hash is computed as `Hash(8 || fold(peak1, peak2, peak3))`:
 //!
 //! ```text
 //! peak1 = Hash(7,                                             // oldest peak (height 2)
@@ -389,7 +392,7 @@ impl Graftable for Family {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmb::mem::Mmb;
+    use crate::{merkle::Bagging::ForwardFold, mmb::mem::Mmb};
     use commonware_cryptography::Sha256;
 
     /// Verify the MMB merge schedule via `Family::parent_heights`.
@@ -452,8 +455,8 @@ mod tests {
     fn test_leftmost_leaf() {
         // Verify leftmost_leaf is consistent with subtree_root_position:
         // subtree_root_position(leftmost_leaf(pos, h), h) == pos.
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut mmb = Mmb::new(&hasher);
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut mmb = Mmb::new();
         let digest = [1u8; 32];
         for _ in 0..200 {
             let merkleized = mmb
@@ -494,8 +497,8 @@ mod tests {
 
     #[test]
     fn test_chunk_peaks() {
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut mmb = Mmb::new(&hasher);
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut mmb = Mmb::new();
         let digest = [1u8; 32];
 
         // Build an MMB with 200 leaves.
@@ -600,5 +603,28 @@ mod tests {
                 next_pos += 1;
             }
         }
+    }
+
+    #[test]
+    fn test_inactive_peaks() {
+        let size = Family::location_to_position(Location::new(8));
+
+        // At 8 leaves (size 13 nodes), MMB has 3 peaks:
+        // - Height 2 covering leaves 0..4 (capacity 4)
+        // - Height 1 covering leaves 4..6 (capacity 2)
+        // - Height 1 covering leaves 6..8 (capacity 2)
+
+        // Inactivity floor = 0 -> 0 inactive peaks
+        assert_eq!(Family::inactive_peaks(size, Location::new(0)), 0);
+        // Inactivity floor = 3 -> 0 inactive peaks (peak 1 rightmost is 4)
+        assert_eq!(Family::inactive_peaks(size, Location::new(3)), 0);
+        // Inactivity floor = 4 -> 1 inactive peak (peak 1 rightmost is 4)
+        assert_eq!(Family::inactive_peaks(size, Location::new(4)), 1);
+        // Inactivity floor = 5 -> 1 inactive peak
+        assert_eq!(Family::inactive_peaks(size, Location::new(5)), 1);
+        // Inactivity floor = 6 -> 2 inactive peaks
+        assert_eq!(Family::inactive_peaks(size, Location::new(6)), 2);
+        // Inactivity floor = 8 -> 3 inactive peaks
+        assert_eq!(Family::inactive_peaks(size, Location::new(8)), 3);
     }
 }

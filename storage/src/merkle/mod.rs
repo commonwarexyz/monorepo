@@ -30,14 +30,28 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
+#[cfg(test)]
+pub(crate) use proof::build_range_proof;
 pub use proof::Proof;
+#[cfg(feature = "std")]
+pub(crate) use proof::{build_range_collection_proof, range_collection_nodes};
 pub use read::Readable;
 use thiserror::Error;
+
+/// Defines the strategy used to fold peaks into the final root digest.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Bagging {
+    /// Peaks are bagged forward from oldest to newest, placing the smallest peak at the top.
+    ForwardFold,
+    /// Peaks are bagged backward from newest to oldest, placing the largest peak at the top.
+    BackwardFold,
+}
 
 /// Marker trait for Merkle-family data structures.
 ///
 /// Provides the per-family constants and conversion functions that differentiate
-/// MMR from MMB (or other future Merkle structures).
+/// MMR from MMB (or other future Merkle structures). Families capture structural topology
+/// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
 pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
@@ -70,6 +84,27 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// in canonical oldest-to-newest order (suitable for
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
     fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
+
+    /// Count the number of oldest peaks that are entirely inactive.
+    ///
+    /// A peak is considered entirely inactive if all of its leaves strictly precede the
+    /// `inactivity_floor`. These peaks can be safely bagged forward into the `grafted_root`.
+    fn inactive_peaks(size: Position<Self>, inactivity_floor: Location<Self>) -> usize {
+        let mut inactive_count = 0;
+        let mut leaf_capacity_sum = 0u64;
+        for (_, height) in Self::peaks(size) {
+            let capacity = 1u64.checked_shl(height).expect("height excessively large");
+            leaf_capacity_sum = leaf_capacity_sum
+                .checked_add(capacity)
+                .expect("capacity overflow");
+            if leaf_capacity_sum <= *inactivity_floor {
+                inactive_count += 1;
+            } else {
+                break;
+            }
+        }
+        inactive_count
+    }
 
     /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
     ///
@@ -219,6 +254,13 @@ pub enum Error<F: Family> {
     #[error("element pruned: {0}")]
     ElementPruned(Position<F>),
 
+    /// A required digest was compressed into a synthetic accumulator (e.g. a backward-fold
+    /// suffix accumulator) when the source proof was constructed, so it is not individually
+    /// available. Unlike [`Error::ElementPruned`], the digest still exists in the source
+    /// structure; the caller can recover by supplying it through an explicit witness slice.
+    #[error("digest hidden behind synthetic accumulator: {0}")]
+    CompressedDigest(Position<F>),
+
     /// The provided pinned node list does not match the expected pruning boundary.
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
@@ -245,6 +287,15 @@ pub enum Error<F: Family> {
     /// The proof is invalid.
     #[error("invalid proof")]
     InvalidProof,
+
+    /// The requested inactive peak count cannot be represented by the current peak list.
+    #[error("inactive peak count {requested} exceeds peak count {peaks}")]
+    InvalidInactivePeaks {
+        /// Requested inactive peak count.
+        requested: usize,
+        /// Number of available peaks.
+        peaks: usize,
+    },
 
     /// The root does not match the computed root.
     #[error("root mismatch")]

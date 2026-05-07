@@ -2,7 +2,7 @@
 //!
 //! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
 //! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **ops root** (via
+//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
 //! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
 //! returned by `Db::root()`.
 //!
@@ -21,7 +21,7 @@ use crate::qmdb::{
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
 use commonware_runtime::{
-    deterministic, deterministic::Context, BufferPooler, Metrics as _, Runner as _,
+    deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::non_empty_range;
 use rand::RngCore as _;
@@ -479,9 +479,9 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         const COMMITS: u64 = 100;
 
         let target_suffix = context.next_u64().to_string();
-        let target_context = context.with_label("target");
+        let target_context = context.child("target");
         let mut target_db: Db = Db::init(
-            target_context.clone(),
+            target_context.child("target"),
             variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
         )
         .await
@@ -520,7 +520,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         // runs: this is the success-path coverage for the overlay-state authentication
         // anchor. A bad-root rejection path test belongs with the focused sync tests.
         let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
             target: crate::qmdb::sync::Target {
@@ -545,7 +545,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 
         drop(synced_db);
 
-        let reopened: Db = Db::init(context.with_label("reopened"), client_config)
+        let reopened: Db = Db::init(context.child("reopened"), client_config)
             .await
             .unwrap();
         assert_eq!(SyncDatabase::root(&reopened), sync_root);
@@ -578,9 +578,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
     executor.start(|mut context: Context| async move {
         let suffix = context.next_u64().to_string();
         let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
-        let mut db: Db = Db::init(context.with_label("db"), config.clone())
-            .await
-            .unwrap();
+        let mut db: Db = Db::init(context.child("db"), config.clone()).await.unwrap();
 
         let key = Digest::from([9u8; 32]);
         for round in 0..300u64 {
@@ -610,7 +608,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         };
         assert!(
             !<Db as SyncDatabase>::has_local_target_state(
-                context.with_label("probe_stale"),
+                context.child("probe_stale"),
                 &config,
                 &stale_target,
             )
@@ -623,7 +621,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         };
         assert!(
             <Db as SyncDatabase>::has_local_target_state(
-                context.with_label("probe_matching"),
+                context.child("probe_matching"),
                 &config,
                 &matching_target,
             )

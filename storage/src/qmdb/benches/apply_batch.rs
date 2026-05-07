@@ -5,6 +5,7 @@ use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
+    Supervisor,
 };
 use commonware_storage::{merkle::mmb::Family as Mmb, qmdb::any::traits::BatchableDb};
 use criterion::{criterion_group, Criterion};
@@ -30,7 +31,7 @@ fn write_updates(
 }
 
 async fn open_db(ctx: &Context) -> Db {
-    Db::init(ctx.clone(), any_fix_cfg(ctx)).await.unwrap()
+    Db::init(ctx.child("storage"), any_fix_cfg(ctx)).await.unwrap()
 }
 
 async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {

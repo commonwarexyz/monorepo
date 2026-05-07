@@ -3,11 +3,11 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location, Proof},
+    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location, Proof},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
@@ -103,7 +103,7 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let hasher = Standard::<Sha256>::new();
+    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {
@@ -133,7 +133,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             };
 
             let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.clone(), cfg)
+                commonware_storage::qmdb::any::init(context.child("storage"), cfg)
                     .await
                     .expect("init qmdb");
 
@@ -204,8 +204,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                     &proof,
                                     adjusted_start,
                                     &log,
-                                    &current_root
-                                ),
+                                    &current_root),
                                 "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                             );
                         }
@@ -220,6 +219,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
                         let proof = Proof {
                             leaves: Location::<F>::new(*proof_leaves),
+                            inactive_peaks: 0,
                             digests: digests.iter().map(|d| Digest::from(*d)).collect(),
                         };
 
@@ -235,8 +235,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                         &proof,
                                         adjusted_start,
                                         &res.1,
-                                        &current_root
-                                    );
+                                        &current_root);
 
                             }
                         }

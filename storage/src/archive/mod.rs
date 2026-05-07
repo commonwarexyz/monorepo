@@ -172,9 +172,15 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Metrics, Runner,
+        telemetry::metrics::has_metric_value,
+        Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use rand::Rng;
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -183,11 +189,6 @@ mod tests {
         buf[..key.len()].copy_from_slice(key);
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
-    use rand::Rng;
-    use std::{
-        collections::BTreeMap,
-        num::{NonZeroU16, NonZeroUsize},
-    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -526,7 +527,7 @@ mod tests {
     {
         // Create and populate archive
         {
-            let mut archive = creator(context.with_label("first"), compression).await;
+            let mut archive = creator(context.child("first"), compression).await;
 
             // Insert multiple keys
             let keys = vec![
@@ -548,7 +549,7 @@ mod tests {
 
         // Reopen and verify data
         {
-            let archive = creator(context.with_label("second"), compression).await;
+            let archive = creator(context.child("second"), compression).await;
 
             // Verify all keys are still present
             let keys = vec![
@@ -615,7 +616,7 @@ mod tests {
     {
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.with_label("first"), compression).await;
+            let mut archive = creator(context.child("first"), compression).await;
 
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
@@ -644,7 +645,7 @@ mod tests {
         }
 
         {
-            let archive = creator(context.with_label("second"), compression).await;
+            let archive = creator(context.child("second"), compression).await;
             let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
 
             // Check gap before the first element
@@ -739,7 +740,7 @@ mod tests {
         // Insert many keys
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.with_label("first"), compression).await;
+            let mut archive = creator(context.child("first"), compression).await;
             while keys.len() < num {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
@@ -779,7 +780,7 @@ mod tests {
 
         // Reinitialize and verify
         {
-            let archive = creator(context.with_label("second"), compression).await;
+            let archive = creator(context.child("second"), compression).await;
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -807,12 +808,12 @@ mod tests {
     {
         let executor = deterministic::Runner::default();
         let state1 = executor.start(|context| async move {
-            test_many_keys_impl(context.clone(), creator, compression, num).await;
+            test_many_keys_impl(context.child("storage"), creator, compression, num).await;
             context.auditor().state()
         });
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|context| async move {
-            test_many_keys_impl(context.clone(), creator, compression, num).await;
+            test_many_keys_impl(context.child("storage"), creator, compression, num).await;
             context.auditor().state()
         });
         assert_eq!(state1, state2);
@@ -893,14 +894,14 @@ mod tests {
 
         // items_tracked reflects unique indices, not total items
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 1"));
+        assert!(has_metric_value(&buffer, "items_tracked", 1));
     }
 
     #[test_traced]
     fn test_put_multi_and_get_prunable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context.clone(), None).await;
+            let archive = create_prunable(context.child("storage"), None).await;
             test_put_multi_and_get_impl(context, archive).await;
         });
     }
@@ -926,14 +927,14 @@ mod tests {
         ));
 
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 2"));
+        assert!(has_metric_value(&buffer, "items_tracked", 2));
     }
 
     #[test_traced]
     fn test_put_multi_duplicate_key_prunable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context.clone(), None).await;
+            let archive = create_prunable(context.child("storage"), None).await;
             test_put_multi_duplicate_key_impl(context, archive).await;
         });
     }
@@ -1043,7 +1044,11 @@ mod tests {
     {
         // Write multi-items, sync, and drop
         {
-            let mut archive = creator(context.with_label("init1"), compression).await;
+            let mut archive = creator(
+                context.child("init").with_attribute("index", 1),
+                compression,
+            )
+            .await;
             archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
             archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
             archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
@@ -1051,7 +1056,11 @@ mod tests {
         }
 
         // Reinitialize and verify
-        let archive = creator(context.with_label("init2"), compression).await;
+        let archive = creator(
+            context.child("init").with_attribute("index", 2),
+            compression,
+        )
+        .await;
 
         assert_eq!(
             archive
@@ -1077,7 +1086,7 @@ mod tests {
 
         // items_tracked reflects two unique indices after restart
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 2"));
+        assert!(has_metric_value(&buffer, "items_tracked", 2));
     }
 
     #[test_traced]
@@ -1146,14 +1155,14 @@ mod tests {
         assert!(next.is_none());
 
         let buffer = context.encode();
-        assert!(buffer.contains("items_tracked 3"));
+        assert!(has_metric_value(&buffer, "items_tracked", 3));
     }
 
     #[test_traced]
     fn test_put_multi_mixed_indices_prunable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context.clone(), None).await;
+            let archive = create_prunable(context.child("storage"), None).await;
             test_put_multi_mixed_indices_impl(context, archive).await;
         });
     }

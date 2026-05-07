@@ -48,7 +48,7 @@ async fn run_loop<E, Si, St, M>(
     mut request_rx: mpsc::Receiver<Request<M>>,
     mut pending_requests: HashMap<RequestId, oneshot::Sender<Result<M, Error>>>,
 ) where
-    E: Spawner + Clone,
+    E: Spawner,
     Si: Sink,
     St: Stream,
     M: Message,
@@ -57,7 +57,7 @@ async fn run_loop<E, Si, St, M>(
 
     // Spawn dedicated recv task so recv_frame is never cancelled.
     let recv_handle = context
-        .clone()
+        .child("recv")
         .spawn(move |_| recv_loop(stream, response_tx));
 
     select_loop! {

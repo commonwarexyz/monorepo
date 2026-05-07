@@ -1,14 +1,16 @@
 //! Shared synchronization logic for [crate::qmdb::any] databases.
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
+//!
+//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
 
 use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable},
+        contiguous::{fixed, variable, Mutable, Reader as _},
     },
-    merkle::{self, full, hasher::Standard as StandardHasher, Location},
+    merkle::{self, full, Location},
     qmdb::{
         self,
         any::{
@@ -60,6 +62,7 @@ pub async fn has_local_target_state<F, E, H, S>(
     context: E,
     merkle_config: full::Config<S>,
     target: &qmdb::sync::Target<F, H::Digest>,
+    inactive_peaks: usize,
 ) -> bool
 where
     F: merkle::Family,
@@ -67,11 +70,12 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     let peek = full::Merkle::<F, _, _, S>::peek_root(
-        context.with_label("local_target_probe"),
+        context.child("local_target_probe"),
         merkle_config,
         &hasher,
+        inactive_peaks,
     )
     .await;
     // Size + root identify a unique state, so if they match the target's we can reuse
@@ -84,6 +88,7 @@ where
 }
 
 /// Shared helper to build a [Db] from sync components.
+#[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, T, S>(
     context: E,
     merkle_config: full::Config<S>,
@@ -104,20 +109,19 @@ where
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
 
     let merkle = full::Merkle::<F, _, _, S>::init_sync(
-        context.with_label("merkle"),
+        context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
             pinned_nodes,
         },
-        &hasher,
     )
     .await?;
 
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
@@ -182,16 +186,33 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
+                let Ok(journal) = <$journal>::init(
+                    context.child("local_target_journal_probe"),
+                    config.journal_config.clone(),
+                )
+                .await
+                else {
+                    return false;
+                };
+                if Location::new(journal.reader().await.bounds().start) > target.range.start() {
+                    return false;
+                }
+
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    target.range.start(),
+                );
                 qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context,
+                    context.child("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
+                    inactive_peaks,
                 )
                 .await
             }
 
             fn root(&self) -> Self::Digest {
-                self.log.root()
+                crate::qmdb::any::db::Db::root(self)
             }
         }
     };

@@ -21,14 +21,14 @@ use crate::{
     },
     Context,
 };
+use ahash::AHashSet;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::{iter, ops::Range};
-use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::BTreeMap,
     sync::{Arc, Weak},
 };
 use tracing::debug;
@@ -214,6 +214,9 @@ pub struct MerkleizedBatch<
 {
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
     pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>, S>>,
+
+    /// Cached operations root after applying this batch.
+    pub(crate) root: D,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -557,21 +560,37 @@ where
             .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
             .collect();
 
-        // Batch-read disk misses concurrently.
-        let disk_results = try_join_all(
-            locations
-                .iter()
-                .zip(results.iter())
-                .filter(|(_, cached)| cached.is_none())
-                .map(|(loc, _)| reader.read(**loc)),
-        )
-        .await?;
+        // Batch-read disk misses. Reader::read_many requires sorted, unique positions, while this
+        // helper preserves the caller's order and permits duplicates.
+        let misses: Vec<(usize, u64)> = locations
+            .iter()
+            .zip(results.iter())
+            .enumerate()
+            .filter_map(|(idx, (loc, cached))| cached.is_none().then_some((idx, **loc)))
+            .collect();
+        if misses.is_empty() {
+            return Ok(results.into_iter().map(Option::unwrap).collect());
+        }
+
+        let mut miss_positions: Vec<u64> = misses.iter().map(|(_, loc)| *loc).collect();
+        miss_positions.sort_unstable();
+        miss_positions.dedup();
+
+        let disk_results = reader.read_many(&miss_positions).await?;
 
         // Merge disk results back in order.
-        let mut disk_iter = disk_results.into_iter();
+        let mut results = results;
+        for (idx, loc) in misses {
+            // `miss_positions` is sorted and deduped, and `loc` came from it before deduping, so
+            // binary search must find the matching read_many result.
+            let result_idx = miss_positions
+                .binary_search(&loc)
+                .expect("disk result missing for requested location");
+            results[idx] = Some(disk_results[result_idx].clone());
+        }
         Ok(results
             .into_iter()
-            .map(|r| r.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch")))
+            .map(|r| r.expect("operation should be resolved"))
             .collect())
     }
 
@@ -803,9 +822,14 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let ops = Arc::new(ops);
+        let leaves = Location::new(self.base_size + ops.len() as u64);
+        let inactive_peaks = db.inactive_peaks(leaves, floor);
         let journal = db
             .log
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
+        let root = db
+            .log
+            .with_mem(|base| journal.root(base, &db.log.hasher, inactive_peaks))?;
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestor_diff_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
@@ -813,6 +837,7 @@ where
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
+            root,
             diff: Arc::new(diff),
             parent: self.ancestors.first().map(Arc::downgrade),
             new_inactivity_floor_loc: floor,
@@ -1281,15 +1306,21 @@ where
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
         // but are invisible to the base-DB-only `prev_translated_key` lookup above.
         //
-        // Walk ancestors closest-first; a BTreeSet tracks keys already seen so each key is
-        // processed only once (closest-ancestor's entry wins). BTreeSet is faster than HashMap
-        // for 32-byte Digest keys because Digest cmp (~5ns, SIMD) is cheaper than SipHash
-        // (~200ns) per op at the sizes involved.
+        // Walk ancestors closest-first; a set tracks keys already seen so each key is processed
+        // only once (closest-ancestor's entry wins). We use AHashSet (keyed per-process via
+        // runtime-rng) instead of std's default SipHash: ahash is DoS-resistant for adversarial
+        // inputs but several times faster on 32-byte Digest keys, where SipHash dominates over
+        // the actual probe.
         //
-        // Depth-1 chains skip the BTreeSet entirely — a single ancestor can't shadow itself,
+        // Depth-1 chains skip the set entirely — a single ancestor can't shadow itself,
         // and each diff's keys are unique by construction.
         let track_shadow = m.ancestors.len() > 1;
-        let mut seen: BTreeSet<&K> = BTreeSet::new();
+        let seen_cap = if track_shadow {
+            m.ancestors.iter().map(|a| a.diff.len()).sum()
+        } else {
+            0
+        };
+        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         let mut ancestor_deleted: Vec<K> = Vec::new();
         for batch in m.ancestors.iter() {
             for (key, entry) in batch.diff.iter() {
@@ -1418,7 +1449,7 @@ where
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
             // Safe to use a HashSet here since we don't rely on iteration order.
-            let mut rewritten_predecessors = HashSet::new();
+            let mut rewritten_predecessors = AHashSet::with_capacity(created.len() + deleted.len());
             for key in created
                 .iter()
                 .map(|(k, _, _)| k)
@@ -1486,8 +1517,8 @@ where
     Operation<F, U>: Send + Sync,
 {
     /// Return the speculative root.
-    pub fn root(&self) -> D {
-        self.journal_batch.root()
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
@@ -1722,6 +1753,7 @@ where
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.last_commit_loc = batch.new_last_commit_loc;
+        self.root = batch.root;
 
         // Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
@@ -1747,6 +1779,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             journal_batch: self.log.to_merkleized_batch(),
+            root: self.root,
             diff: Arc::new(Vec::new()),
             parent: None,
             new_inactivity_floor_loc: self.inactivity_floor_loc,
@@ -2173,11 +2206,12 @@ mod tests {
                 value_current,
             ))];
 
-            // read_ops should resolve all three sources correctly.
+            // read_ops should resolve all three sources correctly while preserving order and
+            // duplicates across the disk-backed subset.
             let reader = db.log.reader().await;
             let ops = merkleizer
                 .read_ops(
-                    &[committed_loc, parent_loc, current_loc],
+                    &[current_loc, committed_loc, parent_loc, committed_loc],
                     &batch_ops,
                     &reader,
                 )
@@ -2188,9 +2222,10 @@ mod tests {
             assert_eq!(
                 ops,
                 vec![
+                    Operation::Update(update::Unordered(key_current, value_current)),
                     Operation::Update(update::Unordered(key_db, value_db)),
                     Operation::Update(update::Unordered(key_parent, value_parent)),
-                    Operation::Update(update::Unordered(key_current, value_current)),
+                    Operation::Update(update::Unordered(key_db, value_db)),
                 ]
             );
 

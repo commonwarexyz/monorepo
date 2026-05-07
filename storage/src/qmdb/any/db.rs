@@ -76,6 +76,9 @@ pub struct Db<
     /// - There is always at least one commit operation in the log.
     pub(crate) log: AuthenticatedLog<F, E, C, H, S>,
 
+    /// Cached operations root for this database.
+    pub(crate) root: H::Digest,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location<F>,
@@ -149,8 +152,18 @@ where
         }
     }
 
-    pub fn root(&self) -> H::Digest {
-        self.log.root()
+    /// Return the canonical QMDB operations root.
+    pub const fn root(&self) -> H::Digest {
+        self.root
+    }
+
+    /// Return the inactive_peaks count for the given leaf count and inactivity floor.
+    pub(crate) fn inactive_peaks(
+        &self,
+        leaves: Location<F>,
+        inactivity_floor: Location<F>,
+    ) -> usize {
+        F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
     }
 
     /// Return a reference to the merkleization strategy.
@@ -312,14 +325,41 @@ where
         Ok(())
     }
 
+    /// Returns a historical proof for `historical_size` operations, anchored at `start_loc`
+    /// and bounded by `max_ops`.
+    ///
+    /// # Contract
+    ///
+    /// `historical_size` must be a commit-boundary size: the operation at `historical_size - 1`
+    /// must itself be a commit op declaring the governing inactivity floor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
+    /// but is not a commit op, either because the caller passed a non-commit-boundary size or
+    /// because pruning removed the commit that would have governed it.
     pub async fn historical_proof(
         &self,
         historical_size: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
+        if historical_size > self.log.size().await {
+            return Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(historical_size),
+            ));
+        }
+
+        let inactivity_floor = {
+            let reader = self.log.reader().await;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&reader, historical_size, |op| {
+                op.has_floor()
+            })
+            .await?
+        };
+        let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
-            .historical_proof(historical_size, start_loc, max_ops)
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await
             .map_err(Into::into)
     }
@@ -494,6 +534,9 @@ where
             ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
+        self.root = self
+            .log
+            .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
 
         Ok(())
     }
@@ -527,9 +570,18 @@ where
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
             let bounds = reader.bounds();
-            let last_commit_loc = bounds.end.checked_sub(1).expect("commit should exist");
-            let last_commit = reader.read(last_commit_loc).await?;
-            let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
+            let last_commit_loc = Location::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+            );
+            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
+                &reader,
+                Location::new(bounds.end),
+                |op| op.has_floor(),
+            )
+            .await?;
 
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
             // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
@@ -581,12 +633,7 @@ where
             // last_commit_loc)` for each CommitFloor op, so the per-op push above already
             // encodes this.
 
-            (
-                Location::new(last_commit_loc),
-                inactivity_floor_loc,
-                active_keys,
-                bitmap,
-            )
+            (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
 
         // The bitmap must have exactly one bit per retained log location.
@@ -596,8 +643,15 @@ where
             ));
         }
 
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(log.merkle.leaves()),
+            inactivity_floor_loc,
+        );
+        let root = log.root(inactive_peaks)?;
+
         Ok(Self {
             log,
+            root,
             inactivity_floor_loc,
             snapshot: index,
             last_commit_loc,

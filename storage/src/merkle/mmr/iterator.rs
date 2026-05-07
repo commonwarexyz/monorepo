@@ -132,15 +132,18 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{mem::Mmr, Location, StandardHasher as Standard};
+    use crate::merkle::{
+        mmr::{mem::Mmr, Location, StandardHasher as Standard},
+        Bagging::ForwardFold,
+    };
     use commonware_cryptography::Sha256;
 
     #[test]
     fn test_leaf_loc_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
-        let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let mut mmr = Mmr::new();
         let digest = [1u8; 32];
         let (batch, loc_to_pos) = {
             let mut batch = mmr.new_batch();
@@ -176,8 +179,8 @@ mod tests {
     #[test]
     fn test_to_nearest_size() {
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
-        let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let mut mmr = Mmr::new();
         let digest = [1u8; 32];
 
         for _ in 0..1000 {

@@ -50,7 +50,7 @@ use std::{
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};
+/// use commonware_runtime::{Clock, Spawner, Runner, Supervisor, deterministic, Metrics, signal::Signaler};
 /// use commonware_utils::channel::oneshot;
 /// use std::time::Duration;
 ///
@@ -61,7 +61,7 @@ use std::{
 ///
 ///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
-///     context.with_label("waiter").spawn(|context| async move {
+///     context.child("waiter").spawn(|context| async move {
 ///         // Wait for signal or sleep
 ///         loop {
 ///             select! {

@@ -74,6 +74,7 @@ use crate::{
         any::operation::{Operation, Update},
         bitmap::Shared,
         operation::Committable,
+        ROOT_BAGGING,
     },
     translator::Translator,
     Context,
@@ -154,10 +155,11 @@ where
     Operation<F, U>: Committable + CodecShared,
 {
     let mut log = J::init::<F, H, S>(
-        context.with_label("log"),
+        context.child("log"),
         cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
+        ROOT_BAGGING,
     )
     .await?;
 
@@ -168,7 +170,7 @@ where
         log.sync().await?;
     }
 
-    let index = I::new(context.with_label("index"), cfg.translator);
+    let index = I::new(context.child("index"), cfg.translator);
     db::Db::init_from_log(index, log, bitmap).await
 }
 
@@ -178,13 +180,16 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
+        qmdb::{
+            self,
+            any::{FixedConfig, MerkleConfig, VariableConfig},
+        },
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -318,7 +323,7 @@ pub(crate) mod test {
         let op_count = db.size().await;
         let inactivity_floor_loc = db.inactivity_floor_loc().await;
 
-        let db = reopen_db(context.with_label("reopen1")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -333,7 +338,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let db = reopen_db(context.with_label("reopen2")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -348,7 +353,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let db = reopen_db(context.with_label("reopen3")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.root(), root);
 
@@ -362,7 +367,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let mut db = reopen_db(context.with_label("reopen4")).await;
+        let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
         assert_eq!(db.size().await, op_count);
         assert_eq!(db.root(), root);
 
@@ -378,7 +383,7 @@ pub(crate) mod test {
             db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
-        let db = reopen_db(context.with_label("reopen5")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size().await > op_count);
         assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_ne!(db.root(), root);
@@ -397,7 +402,7 @@ pub(crate) mod test {
     {
         let root = db.root();
 
-        let db = reopen_db(context.with_label("reopen1")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -411,7 +416,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
-        let db = reopen_db(context.with_label("reopen2")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -426,7 +431,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         drop(db);
-        let db = reopen_db(context.with_label("reopen3")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -441,7 +446,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         drop(db);
-        let mut db = reopen_db(context.with_label("reopen4")).await;
+        let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
         assert_eq!(db.size().await, 1);
         assert_eq!(db.root(), root);
 
@@ -458,7 +463,7 @@ pub(crate) mod test {
         }
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen_db(context.with_label("reopen5")).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size().await > 1);
         assert_ne!(db.root(), root);
 
@@ -558,7 +563,7 @@ pub(crate) mod test {
 
         db.commit().await.unwrap();
         drop(db);
-        let mut db = reopen_db(context.with_label("reopen_after_rewind")).await;
+        let mut db = reopen_db(context.child("reopen_after_rewind")).await;
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size().await, size_a);
         assert_eq!(db.inactivity_floor_loc().await, floor_a);
@@ -585,7 +590,7 @@ pub(crate) mod test {
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d.clone()));
 
         drop(db);
-        let mut db = reopen_db(context.with_label("reopen_after_rewind_new_writes")).await;
+        let mut db = reopen_db(context.child("reopen_after_rewind_new_writes")).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
@@ -603,7 +608,7 @@ pub(crate) mod test {
 
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen_db(context.with_label("reopen_initial_boundary")).await;
+        let db = reopen_db(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size().await, initial_size);
         assert_eq!(db.inactivity_floor_loc().await, initial_floor);
@@ -626,7 +631,7 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
 
         const ELEMENTS: u64 = 1000;
 
@@ -672,7 +677,7 @@ pub(crate) mod test {
         let root = db.root();
         db.sync().await.unwrap();
         drop(db);
-        let db = reopen_db(context.with_label("reopened")).await;
+        let db = reopen_db(context.child("reopened")).await;
         assert_eq!(root, db.root());
 
         // State matches reference map.
@@ -688,7 +693,7 @@ pub(crate) mod test {
             }
         }
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = qmdb::hasher::<Sha256>();
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
@@ -732,7 +737,7 @@ pub(crate) mod test {
 
         // Reopen and verify the state is preserved correctly.
         drop(db);
-        let db = reopen_db(context.with_label("reopened")).await;
+        let db = reopen_db(context.child("reopened")).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.get(&k).await.unwrap(), last_value);
 
@@ -748,7 +753,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -778,13 +783,13 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = qmdb::hasher::<Sha256>();
         assert!(verify_proof(
             &hasher,
             &historical_proof,
             start_loc,
             &historical_ops,
-            &root_hash
+            &root_hash,
         ));
 
         // Add more operations to the database
@@ -812,7 +817,7 @@ pub(crate) mod test {
             &historical_proof2,
             start_loc,
             &historical_ops2,
-            &root_hash
+            &root_hash,
         ));
 
         db.destroy().await.unwrap();
@@ -827,30 +832,37 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
-        // Add some operations
-        {
-            let mut batch = db.new_batch();
-            for i in 0u64..10 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value(i * 1000);
-                batch = batch.write(k, Some(v));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+        // Apply two single-write batches and capture the commit-boundary size after the
+        // first batch. `historical_proof` requires the historical size to land on a commit
+        // boundary when the db commits to an inactive peak boundary.
+        let mut historical_op_count = Location::new(0);
+        for i in 0u64..2 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            let merkleized = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            if i == 0 {
+                historical_op_count = db.bounds().await.end;
+            }
         }
 
-        let historical_op_count = Location::new(5);
+        let expected_ops_len = (*historical_op_count - 1) as usize;
         let (proof, ops) = db
             .historical_proof(historical_op_count, Location::new(1), NZU64!(10))
             .await
             .unwrap();
         assert_eq!(proof.leaves, historical_op_count);
-        assert_eq!(ops.len(), 4);
+        assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = qmdb::hasher::<Sha256>();
 
         // Changing the proof digests should cause verification to fail
         {
@@ -862,7 +874,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -876,7 +888,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -892,7 +904,7 @@ pub(crate) mod test {
                     &proof,
                     Location::new(1),
                     &tampered_ops,
-                    &root_hash
+                    &root_hash,
                 ));
             }
         }
@@ -907,7 +919,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &tampered_ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -919,7 +931,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(2),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -931,7 +943,7 @@ pub(crate) mod test {
                 &proof,
                 Location::new(1),
                 &ops,
-                &invalid_root
+                &invalid_root,
             ));
         }
 
@@ -945,7 +957,7 @@ pub(crate) mod test {
                 &tampered_proof,
                 Location::new(1),
                 &ops,
-                &root_hash
+                &root_hash,
             ));
         }
 
@@ -963,40 +975,59 @@ pub(crate) mod test {
     {
         use commonware_utils::NZU64;
 
-        // Add 50 operations
-        {
-            let mut batch = db.new_batch();
-            for i in 0u64..50 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value(i * 1000);
-                batch = batch.write(k, Some(v));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+        // Apply a sequence of single-write batches and record the commit-boundary size
+        // reached after each. `historical_proof` requires the historical size to be a
+        // commit boundary when the db commits to an inactive peak boundary, so we anchor each test on
+        // one of the boundaries we recorded here rather than hardcoding sizes that depend
+        // on internal floor-raising behavior.
+        let initial_size = db.bounds().await.end;
+        let mut boundaries = vec![initial_size];
+        for i in 0u64..5 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            let merkleized = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            boundaries.push(db.bounds().await.end);
         }
 
-        // Test singleton database (historical size = 2 means 1 op after initial commit)
+        // Singleton historical state: only the initial CommitFloor is visible.
+        let singleton_size = boundaries[0];
         let (single_proof, single_ops) = db
-            .historical_proof(Location::new(2), Location::new(1), NZU64!(1))
+            .historical_proof(singleton_size, Location::new(0), NZU64!(1))
             .await
             .unwrap();
-        assert_eq!(single_proof.leaves, Location::new(2));
+        assert_eq!(single_proof.leaves, singleton_size);
         assert_eq!(single_ops.len(), 1);
 
-        // Test requesting more operations than available in historical position
+        // max_ops exceeds the ops remaining at this historical size, so the returned count
+        // is capped at `historical_size - start_loc`. Anchor at the earliest post-batch
+        // boundary that has at least 3 ops past `boundaries[1]`.
+        let limited_size = boundaries[2];
+        let limited_start = boundaries[1];
+        let expected_limited = (*limited_size - *limited_start) as usize;
+        assert!(expected_limited > 0);
         let (_limited_proof, limited_ops) = db
-            .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
+            .historical_proof(limited_size, limited_start, NZU64!(20))
             .await
             .unwrap();
-        assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+        assert_eq!(limited_ops.len(), expected_limited);
 
-        // Test proof at minimum historical position
+        // Standard historical proof anchored at an early commit boundary, requesting a
+        // bounded number of ops within the historical range.
+        let min_size = boundaries[2];
+        let max_ops = NZU64!(3);
+        let expected_min = core::cmp::min(max_ops.get(), *min_size - 1) as usize;
         let (min_proof, min_ops) = db
-            .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+            .historical_proof(min_size, Location::new(1), max_ops)
             .await
             .unwrap();
-        assert_eq!(min_proof.leaves, Location::new(4));
-        assert_eq!(min_ops.len(), 3);
+        assert_eq!(min_proof.leaves, min_size);
+        assert_eq!(min_ops.len(), expected_min);
 
         db.destroy().await.unwrap();
     }
@@ -1046,7 +1077,7 @@ pub(crate) mod test {
 
         let root = db.root();
         drop(db);
-        let db = reopen_db(context.with_label("reopened")).await;
+        let db = reopen_db(context.child("reopened")).await;
         assert_eq!(root, db.root());
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
@@ -1171,51 +1202,51 @@ pub(crate) mod test {
     // Defines MMR-only variants (for tests that require mmr::Family, e.g. proof verification).
     macro_rules! with_mmr_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
+            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
         };
     }
 
-    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $config) for each.
+    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $family, $config) for each.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
-            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, fixed_db_config);
-            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, variable_db_config);
-            $cb!($($args)*, "of_mmb", MmbOrderedFixed, fixed_db_config);
-            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, variable_db_config);
+            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, mmb::Family, variable_db_config);
+            $cb!($($args)*, "of_mmb", MmbOrderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, mmb::Family, variable_db_config);
         };
     }
 
-    // Runner macros - each receives common args followed by (label, type, config) from with_all_variants.
+    // Runner macros - each receives common args followed by (label, type, family, config) from with_all_variants.
     // Uses Box::pin to move futures to the heap and avoid stack overflow.
     macro_rules! test_with_reopen {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
-                let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                let ctx = $ctx.child($l);
+                let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(
@@ -1223,7 +1254,7 @@ pub(crate) mod test {
                     db,
                     |ctx| {
                         Box::pin(async move {
-                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                            <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                                 .await
                                 .unwrap()
                         })
@@ -1237,11 +1268,11 @@ pub(crate) mod test {
     }
 
     macro_rules! test_with_make_value {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
-                let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                let ctx = $ctx.child($l);
+                let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;
@@ -1381,11 +1412,13 @@ pub(crate) mod test {
     fn test_any_batch_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("e", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("e", &ctx),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             let batch = db.new_batch();
@@ -1408,11 +1441,13 @@ pub(crate) mod test {
     fn test_any_batch_metadata() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("m", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("m", &ctx),
+            )
+            .await
+            .unwrap();
 
             let metadata = val(42);
 
@@ -1436,11 +1471,13 @@ pub(crate) mod test {
     fn test_any_batch_get_read_through() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("g", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("g", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with key A.
             let ka = key(0);
@@ -1481,11 +1518,13 @@ pub(crate) mod test {
     fn test_any_batch_get_on_merkleized() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("mg", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("mg", &ctx),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -1518,11 +1557,13 @@ pub(crate) mod test {
     fn test_any_batch_stacked_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("sg", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("sg", &ctx),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -1557,11 +1598,13 @@ pub(crate) mod test {
     fn test_any_batch_stacked_delete_recreate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("dr", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("dr", &ctx),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
 
@@ -1594,11 +1637,13 @@ pub(crate) mod test {
     fn test_any_batch_floor_raise() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("fr", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("fr", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with 100 keys.
             let init: Vec<_> = (0..100).map(|i| (key(i), Some(val(i)))).collect();
@@ -1638,11 +1683,13 @@ pub(crate) mod test {
     fn test_any_batch_apply_returns_range() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ar", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("ar", &ctx),
+            )
+            .await
+            .unwrap();
 
             // First batch: 5 keys.
             let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1667,11 +1714,13 @@ pub(crate) mod test {
     fn test_any_batch_deep_chain() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("dc", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("dc", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with keys 0..5.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1728,21 +1777,21 @@ pub(crate) mod test {
     fn test_any_batch_chain_matches_sequential() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
+            let ctx = context.child("db");
 
             // DB A: sequential apply.
-            let ctx_a = ctx.with_label("a");
+            let ctx_a = ctx.child("a");
             let mut db_a: UnorderedVariable = UnorderedVariableDb::init(
-                ctx_a.clone(),
+                ctx_a.child("db"),
                 variable_db_config::<OneCap>("cms-a", &ctx_a),
             )
             .await
             .unwrap();
 
             // DB B: chained batch.
-            let ctx_b = ctx.with_label("b");
+            let ctx_b = ctx.child("b");
             let mut db_b: UnorderedVariable = UnorderedVariableDb::init(
-                ctx_b.clone(),
+                ctx_b.child("db"),
                 variable_db_config::<OneCap>("cms-b", &ctx_b),
             )
             .await
@@ -1796,11 +1845,13 @@ pub(crate) mod test {
     fn test_any_batch_create_then_delete_same_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("cd", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("cd", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate key A.
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1827,11 +1878,13 @@ pub(crate) mod test {
     fn test_any_batch_delete_all_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("da", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("da", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate 5 keys.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1858,11 +1911,13 @@ pub(crate) mod test {
     fn test_any_batch_parallel_forks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("pf", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pf", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate.
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1909,11 +1964,13 @@ pub(crate) mod test {
     fn test_any_batch_floor_raise_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("frc", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("frc", &ctx),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with 50 keys.
             let init: Vec<_> = (0..50).map(|i| (key(i), Some(val(i)))).collect();
@@ -1963,11 +2020,13 @@ pub(crate) mod test {
     fn test_any_batch_abandoned() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ab", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("ab", &ctx),
+            )
+            .await
+            .unwrap();
 
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
@@ -1996,9 +2055,9 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "apply_requires_commit";
-            let ctx = context.with_label("db");
+            let ctx = context.child("db");
             let mut db: UnorderedVariable = UnorderedVariableDb::init(
-                ctx.clone(),
+                ctx.child("storage"),
                 variable_db_config::<OneCap>(partition, &ctx),
             )
             .await
@@ -2019,7 +2078,7 @@ pub(crate) mod test {
             drop(db);
 
             let reopened: UnorderedVariable = UnorderedVariableDb::init(
-                context.with_label("reopen"),
+                context.child("reopen"),
                 variable_db_config::<OneCap>(partition, &context),
             )
             .await
@@ -2038,11 +2097,13 @@ pub(crate) mod test {
         executor.start(|context| async move {
             const KEYS: u64 = 64;
 
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rp", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("rp", &ctx),
+            )
+            .await
+            .unwrap();
 
             let initial: Vec<_> = (0..KEYS).map(|i| (key(i), Some(val(i)))).collect();
             let first_range = commit_writes(&mut db, initial, None).await;
@@ -2095,11 +2156,13 @@ pub(crate) mod test {
     fn test_any_rewind_invalid_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ri", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("ri", &ctx),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             let size_before = db.size().await;
@@ -2143,9 +2206,9 @@ pub(crate) mod test {
         executor.start(|context| async move {
             const KEYS: u64 = 64;
 
-            let ctx = context.with_label("db");
+            let ctx = context.child("db");
             let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rf", &ctx))
+                UnorderedVariableDb::init(ctx.child("storage"), variable_db_config::<OneCap>("rf", &ctx))
                     .await
                     .unwrap();
 
@@ -2223,12 +2286,12 @@ pub(crate) mod test {
             const ITEMS_PER_SECTION: u64 = 2048;
             const { assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS) };
 
-            let ctx = context.with_label("db");
+            let ctx = context.child("db");
             let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
             cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
 
             let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), cfg).await.unwrap();
+                UnorderedVariableDb::init(ctx.child("storage"), cfg).await.unwrap();
 
             commit_writes(&mut db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
             let rewind_target = db.size().await;
@@ -2339,7 +2402,7 @@ pub(crate) mod test {
     fn test_mmb_batch_crud() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "crud").await;
+            let mut db = open_mmb_db(context.child("db"), "crud").await;
 
             // Insert and read back.
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -2371,7 +2434,7 @@ pub(crate) mod test {
     fn test_mmb_batch_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "empty").await;
+            let mut db = open_mmb_db(context.child("db"), "empty").await;
             let root_before = db.root();
 
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
@@ -2389,7 +2452,7 @@ pub(crate) mod test {
     fn test_mmb_batch_metadata() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "meta").await;
+            let mut db = open_mmb_db(context.child("db"), "meta").await;
 
             let metadata = val(42);
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
@@ -2407,7 +2470,8 @@ pub(crate) mod test {
     fn test_mmb_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db0"), "recovery").await;
+            let mut db =
+                open_mmb_db(context.child("db").with_attribute("index", 0), "recovery").await;
 
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(val(99))).await;
             commit_writes_mmb(&mut db, [(key(1), Some(val(1)))], None).await;
@@ -2418,7 +2482,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen and verify state.
-            let db = open_mmb_db(context.with_label("db1"), "recovery").await;
+            let db = open_mmb_db(context.child("db").with_attribute("index", 1), "recovery").await;
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await, bounds);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -2433,7 +2497,7 @@ pub(crate) mod test {
     fn test_mmb_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "prune").await;
+            let mut db = open_mmb_db(context.child("db"), "prune").await;
 
             for i in 0u64..20 {
                 commit_writes_mmb(&mut db, [(key(i), Some(val(i)))], None).await;
@@ -2456,11 +2520,13 @@ pub(crate) mod test {
     fn test_any_batch_single_stage_pipeline() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("pipe", &ctx))
-                    .await
-                    .unwrap();
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pipe", &ctx),
+            )
+            .await
+            .unwrap();
 
             {
                 let mut batch = db.new_batch();
@@ -2504,7 +2570,7 @@ mod bitmap_tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics, Runner as _,
+        Runner as _, Supervisor as _,
     };
     use commonware_utils::bitmap::Readable as _;
 
@@ -2531,7 +2597,7 @@ mod bitmap_tests {
         db.commit().await.unwrap();
         drop(db);
 
-        let db = open_db(context.with_label(label)).await;
+        let db = open_db(context.child("reopen").with_attribute("case", label)).await;
 
         assert_eq!(
             db.bitmap.pruned_bits(),
@@ -2555,7 +2621,7 @@ mod bitmap_tests {
     #[test_traced]
     fn current_commit_floor_bit_is_one_others_zero() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             // Apply three single-write batches; each produces one CommitFloor op.
             let mut commit_locs = Vec::new();
@@ -2602,7 +2668,7 @@ mod bitmap_tests {
     #[test_traced]
     fn rewind_restores_bitmap_to_target_commit() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
             let k1 = Sha256::hash(&[1]);
             let k2 = Sha256::hash(&[2]);
 
@@ -2664,7 +2730,7 @@ mod bitmap_tests {
     #[test_traced]
     fn floor_scan_falls_through_to_uncommitted_tail() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
             let anchor = Sha256::hash(&[0xAA]);
 
             // Commit one key.

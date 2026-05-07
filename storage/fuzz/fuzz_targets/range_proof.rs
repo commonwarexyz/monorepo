@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::merkle::{
     hasher::Standard,
     mem::{Config, Mem},
-    mmb, mmr, Family as MerkleFamily, Location,
+    mmb, mmr, Bagging, Family as MerkleFamily, Location,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -16,6 +16,24 @@ struct FuzzInput {
     pruned_to: u64,
     nodes: Vec<[u8; 32]>,
     pinned_nodes: Vec<[u8; 32]>,
+    range_start: u64,
+}
+
+/// All `(bagging, inactive_peaks)` shapes a range proof may legitimately be requested for: both
+/// baggings plus every count from 0 up to the number of peaks.
+fn supported_root_specs<F: MerkleFamily>(merkle: &Mem<F, Digest>) -> Vec<(Bagging, usize)> {
+    let peak_count = F::peaks(merkle.size()).count();
+    let mut specs = Vec::with_capacity(2 * (peak_count + 1));
+    let mut push_unique = |spec| {
+        if !specs.contains(&spec) {
+            specs.push(spec);
+        }
+    };
+    for inactive_peaks in 0..=peak_count {
+        push_unique((Bagging::ForwardFold, inactive_peaks));
+        push_unique((Bagging::BackwardFold, inactive_peaks));
+    }
+    specs
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
@@ -33,8 +51,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
         pinned_nodes,
     };
 
-    let hasher = Standard::<Sha256>::new();
-    let Ok(merkle) = Mem::<F, Digest>::init(config, &hasher) else {
+    let Ok(merkle) = Mem::<F, Digest>::init(config) else {
         return;
     };
 
@@ -43,8 +60,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     }
 
     let leaves = merkle.leaves();
-    if leaves > 0 {
-        let _ = merkle.range_proof(&hasher, Location::<F>::new(0)..leaves);
+    if leaves == 0 {
+        return;
+    }
+    let start = Location::<F>::new(input.range_start % *leaves);
+    for (bagging, inactive_peaks) in supported_root_specs::<F>(&merkle) {
+        let hasher = Standard::<Sha256>::new(bagging);
+        let _ = merkle.range_proof(&hasher, start..leaves, inactive_peaks);
     }
 }
 

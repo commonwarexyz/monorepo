@@ -18,7 +18,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
-    Metrics as _,
+    Supervisor as _,
 };
 use commonware_utils::{
     channel::{
@@ -300,7 +300,7 @@ where
         // any engine-owned handles.
         let local_target_state_available = if config.target.range.start() > Location::new(0) {
             DB::has_local_target_state(
-                config.context.with_label("local_target_probe"),
+                config.context.child("local_target_probe"),
                 &config.db_config,
                 &config.target,
             )
@@ -311,7 +311,7 @@ where
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
-            config.context.with_label("journal"),
+            config.context.child("journal"),
             config.db_config.journal_config(),
             config.target.range.clone(),
         )
@@ -332,7 +332,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::new(),
+            hasher: qmdb::hasher::<DB::Hasher>(),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
@@ -702,18 +702,18 @@ where
             && self.pinned_nodes.is_none()
             && !self.local_target_state_available
             && start_loc == self.target.range.start();
+        let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
-            qmdb::verify_proof_and_pinned_nodes(
+            proof.verify_proof_and_pinned_nodes(
                 &self.hasher,
-                &proof,
+                &elements,
                 start_loc,
-                &operations,
                 nodes,
                 target_root,
             )
         } else {
-            qmdb::verify_proof(&self.hasher, &proof, start_loc, &operations, target_root)
+            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
         };
 
         // Report success or failure to the resolver.
@@ -870,6 +870,7 @@ mod tests {
                 result: Ok(FetchResult {
                     proof: Proof {
                         leaves: Location::new(0),
+                        inactive_peaks: 0,
                         digests: vec![],
                     },
                     operations: vec![],

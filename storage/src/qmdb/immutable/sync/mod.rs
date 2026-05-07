@@ -10,6 +10,7 @@ use crate::{
         Family, Location,
     },
     qmdb::{
+        self,
         any::ValueEncoding,
         build_snapshot_from_log, compact_witness,
         immutable::{self, CompactDb, Operation},
@@ -24,8 +25,6 @@ use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
-
-type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
@@ -74,17 +73,16 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
-        let hasher = StandardHasher::new();
+        let hasher = qmdb::hasher::<H>();
 
         // Initialize Merkle structure for sync
         let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
-                range,
+                range: range.clone(),
                 pinned_nodes,
             },
-            &hasher,
         )
         .await?;
 
@@ -97,19 +95,23 @@ where
         .await?;
 
         let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+            Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let last_commit_loc =
-                Location::<F>::new(bounds.end.checked_sub(1).expect("commit should exist"));
-
-            // Read the floor from the last commit operation.
-            let last_op = reader.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
+            let last_commit_loc = Location::<F>::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+            );
+            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
+                &reader,
+                Location::new(bounds.end),
+                |op| op.has_floor(),
+            )
+            .await?;
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
@@ -122,9 +124,15 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(*last_commit_loc + 1)),
+            inactivity_floor_loc,
+        );
+        let root = journal.root(inactive_peaks)?;
 
         let db = Self {
             journal,
+            root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
@@ -178,19 +186,25 @@ where
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
+        let hasher = qmdb::hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.with_label("merkle"),
-            &StandardHasher::<H>::new(),
+            context.child("merkle"),
             config.merkle,
             leaf_count,
             pinned_nodes.clone(),
         )
         .await?;
+        let inactive_peaks =
+            F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+        let root = merkle
+            .root(&hasher, inactive_peaks)
+            .map_err(|_| Error::DataCorrupted("failed to compute compact state root"))?;
         Self::init_from_verified_state(
             merkle,
             commit_codec_config,
             last_commit_metadata,
             inactivity_floor_loc,
+            root,
             commit_op_bytes,
             last_commit_proof,
             pinned_nodes,

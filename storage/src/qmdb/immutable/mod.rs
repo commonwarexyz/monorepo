@@ -150,6 +150,9 @@ pub struct Immutable<
     /// Authenticated journal of operations.
     pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
 
+    /// Cached canonical operations root.
+    pub(crate) root: H::Digest,
+
     /// A map from each active key to the location of the operation that set its value.
     ///
     /// # Invariant
@@ -195,7 +198,7 @@ where
             journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.with_label("snapshot"), translator);
+        let mut snapshot = Index::new(context.child("snapshot"), translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
@@ -208,6 +211,9 @@ where
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
+            if inactivity_floor_loc > last_commit_loc {
+                return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
+            }
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
@@ -220,9 +226,15 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
+        let inactive_peaks = F::inactive_peaks(
+            F::location_to_position(Location::new(*last_commit_loc + 1)),
+            inactivity_floor_loc,
+        );
+        let root = journal.root(inactive_peaks)?;
 
         Ok(Self {
             journal,
+            root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
@@ -370,6 +382,12 @@ where
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
     /// operations.
     ///
+    /// # Contract
+    ///
+    /// `op_count` must be a commit-boundary size: the operation at `op_count - 1` must
+    /// itself be a commit op. Non-commit-boundary sizes are not supported because the
+    /// inactivity floor governing them is not directly retrievable.
+    ///
     /// # Errors
     ///
     /// Returns [crate::merkle::Error::LocationOverflow] if `op_count` or `start_loc` >
@@ -377,15 +395,26 @@ where
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
+    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
+    /// because pruning removed the commit that would have governed `op_count`.
     pub async fn historical_proof(
         &self,
         op_count: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
+        if op_count > self.journal.size().await {
+            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        }
+
+        let reader = self.journal.reader().await;
+        let inactive_peaks =
+            crate::qmdb::inactive_peaks_at::<F, _>(&reader, op_count, |op| op.has_floor()).await?;
+
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops)
+            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
@@ -518,13 +547,15 @@ where
 
         self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
+        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
+        self.root = self.journal.root(inactive_peaks)?;
 
         Ok(())
     }
 
-    /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
-        self.journal.root()
+    /// Return the canonical QMDB root of the db.
+    pub const fn root(&self) -> H::Digest {
+        self.root
     }
 
     /// Return a reference to the merkleization strategy.
@@ -653,6 +684,7 @@ where
         // Update state.
         self.last_commit_loc = Location::new(batch.total_size - 1);
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
+        self.root = batch.root;
         Ok(start_loc..Location::new(batch.total_size))
     }
 }
@@ -662,17 +694,15 @@ pub(super) mod test {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::verify_proof,
+        qmdb::{self, verify_proof},
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic, Metrics};
+    use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
     use std::ops::Range;
-
-    type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 
     const ITEMS_PER_SECTION: u64 = 5;
 
@@ -688,7 +718,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.with_label("first")).await;
+        let db = open_db(context.child("first")).await;
         let bounds = db.bounds().await;
         assert_eq!(bounds.end, 1);
         assert_eq!(bounds.start, Location::new(0));
@@ -704,7 +734,7 @@ pub(super) mod test {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let mut db = open_db(context.with_label("second")).await;
+        let mut db = open_db(context.child("second")).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.bounds().await.end, 1);
 
@@ -717,7 +747,7 @@ pub(super) mod test {
         let root = db.root();
         drop(db);
 
-        let db = open_db(context.with_label("third")).await;
+        let db = open_db(context.child("third")).await;
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -734,7 +764,7 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         // Build a db with 2 keys.
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -786,7 +816,7 @@ pub(super) mod test {
 
         // Reopen, make sure state is restored to last commit point.
         drop(db); // Simulate failed commit
-        let db = open_db(context.with_label("second")).await;
+        let db = open_db(context.child("second")).await;
         assert!(db.get(&k3).await.unwrap().is_none());
         assert_eq!(db.root(), root);
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
@@ -808,7 +838,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(10u8);
@@ -823,7 +853,7 @@ pub(super) mod test {
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = qmdb::hasher::<Sha256>();
         assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         db.destroy().await.unwrap();
@@ -839,7 +869,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         for i in 0..20u8 {
             let key = Sha256::fill(i);
@@ -881,7 +911,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -933,8 +963,8 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut db = open_db(context.with_label("first")).await;
+        let hasher = qmdb::hasher::<Sha256>();
+        let mut db = open_db(context.child("first")).await;
 
         let mut batch = db.new_batch();
         for i in 0u64..2_000 {
@@ -951,7 +981,7 @@ pub(super) mod test {
         let root = db.root();
         drop(db);
 
-        let db = open_db(context.with_label("second")).await;
+        let db = open_db(context.child("second")).await;
         assert_eq!(root, db.root());
         assert_eq!(db.bounds().await.end, 2_000 + 2);
         for i in 0u64..2_000 {
@@ -983,7 +1013,7 @@ pub(super) mod test {
     {
         // Insert 1000 keys then sync.
         const ELEMENTS: u64 = 1000;
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         let mut batch = db.new_batch();
         for i in 0u64..ELEMENTS {
@@ -1012,14 +1042,14 @@ pub(super) mod test {
 
         // Recovery should replay the log to regenerate the merkle structure.
         // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
-        let db = open_db(context.with_label("second")).await;
+        let db = open_db(context.child("second")).await;
         assert_eq!(db.bounds().await.end, 2003);
         let root = db.root();
         assert_ne!(root, halfway_root);
 
         // Drop & reopen could preserve the final commit.
         drop(db);
-        let db = open_db(context.with_label("third")).await;
+        let db = open_db(context.child("third")).await;
         assert_eq!(db.bounds().await.end, 2003);
         assert_eq!(db.root(), root);
 
@@ -1036,7 +1066,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         // Insert a single key and then commit to create a first commit point.
         let k1 = Sha256::fill(1u8);
@@ -1056,7 +1086,7 @@ pub(super) mod test {
         drop(db);
 
         // Recovery should back up to previous commit point.
-        let db = open_db(context.with_label("second")).await;
+        let db = open_db(context.child("second")).await;
         assert_eq!(db.bounds().await.end, 3);
         let root = db.root();
         assert_eq!(root, first_commit_root);
@@ -1076,7 +1106,7 @@ pub(super) mod test {
     {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
         const ELEMENTS: u64 = 2_000;
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         // Batch writes keys in BTreeMap-sorted order, so build the sorted key
         // list to map between journal locations and keys.
@@ -1124,7 +1154,7 @@ pub(super) mod test {
         db.sync().await.unwrap();
         drop(db);
 
-        let mut db = open_db(context.with_label("second")).await;
+        let mut db = open_db(context.child("second")).await;
         assert_eq!(root, db.root());
         let bounds = db.bounds().await;
         assert_eq!(bounds.end, ELEMENTS + 2);
@@ -1144,7 +1174,7 @@ pub(super) mod test {
         // Confirm boundary persists across restart.
         db.sync().await.unwrap();
         drop(db);
-        let db = open_db(context.with_label("third")).await;
+        let db = open_db(context.child("third")).await;
         let oldest_retained_loc = db.bounds().await.start;
         assert_eq!(
             oldest_retained_loc,
@@ -1182,7 +1212,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // Test pruning empty database (floor=0, so prune(1) fails)
         let result = db.prune(Location::new(1)).await;
@@ -1281,7 +1311,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&1u64.to_be_bytes());
         let key2 = Sha256::hash(&2u64.to_be_bytes());
@@ -1322,7 +1352,7 @@ pub(super) mod test {
 
         db.commit().await.unwrap();
         drop(db);
-        let db = open_db(context.with_label("reopen")).await;
+        let db = open_db(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().await.end, size_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
@@ -1348,7 +1378,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Two keys sharing the first two bytes collide under TwoCap.
         let mut k1_bytes = [0u8; 32];
@@ -1391,7 +1421,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_small_sections_db(context.with_label("db")).await;
+        let mut db = open_small_sections_db(context.child("db")).await;
 
         let first_range = commit_sets(
             &mut db,
@@ -1458,7 +1488,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Pre-populate with key A.
         let key_a = Sha256::hash(&0u64.to_be_bytes());
@@ -1499,7 +1529,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.with_label("db")).await;
+        let db = open_db(context.child("db")).await;
 
         // Parent batch: set A.
         let key_a = Sha256::hash(&0u64.to_be_bytes());
@@ -1535,7 +1565,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Sort keys so operations are in BTreeMap order (same as merkleize writes).
         let mut kvs_first: Vec<(Digest, Digest)> = (0u64..5)
@@ -1585,7 +1615,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let mut batch = db.new_batch();
         for i in 0u8..10 {
@@ -1622,7 +1652,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Pre-populate base DB.
         let key_a = Sha256::hash(&0u64.to_be_bytes());
@@ -1667,7 +1697,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key_a = Sha256::hash(&0u64.to_be_bytes());
         let val_a = Sha256::fill(1u8);
@@ -1708,8 +1738,8 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
-        let hasher = StandardHasher::<Sha256>::new();
+        let mut db = open_db(context.child("db")).await;
+        let hasher = qmdb::hasher::<Sha256>();
 
         const BATCHES: u64 = 20;
         const KEYS_PER_BATCH: u64 = 5;
@@ -1757,7 +1787,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Apply a non-empty batch first.
         let k = Sha256::hash(&[1u8]);
@@ -1796,7 +1826,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Pre-populate base DB.
         let key_a = Sha256::hash(&0u64.to_be_bytes());
@@ -1851,8 +1881,8 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
-        let hasher = StandardHasher::<Sha256>::new();
+        let mut db = open_db(context.child("db")).await;
+        let hasher = qmdb::hasher::<Sha256>();
 
         const N: u64 = 500;
         let mut kvs: Vec<(Digest, Digest)> = Vec::new();
@@ -1894,7 +1924,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key = Sha256::hash(&0u64.to_be_bytes());
         let val_parent = Sha256::fill(1u8);
@@ -1942,7 +1972,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db_small_sections(context.with_label("db")).await;
+        let mut db = open_db_small_sections(context.child("db")).await;
 
         let key = Sha256::hash(&0u64.to_be_bytes());
         let v1 = Sha256::fill(1u8);
@@ -1992,7 +2022,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Batch with metadata.
         let metadata = Sha256::fill(42u8);
@@ -2025,7 +2055,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2075,7 +2105,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2120,7 +2150,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2167,7 +2197,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2208,7 +2238,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2248,7 +2278,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2290,7 +2320,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         // Populate.
         let key1 = Sha256::hash(&[1]);
@@ -2335,7 +2365,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
@@ -2385,7 +2415,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // Empty DB has floor=0.
         assert_eq!(db.inactivity_floor_loc(), Location::new(0));
@@ -2418,7 +2448,7 @@ pub(super) mod test {
         db.commit().await.unwrap();
         db.sync().await.unwrap();
         drop(db);
-        let db = open_db(context.with_label("reopen")).await;
+        let db = open_db(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
 
         db.destroy().await.unwrap();
@@ -2436,7 +2466,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // DB starts with 1 op (initial commit).
         // First batch: 1 set + 1 commit = total_size 3. Use floor=2 (the commit loc).
@@ -2489,7 +2519,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // Apply first batch with floor=2.
         let k1 = Sha256::fill(1u8);
@@ -2537,7 +2567,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // DB starts with 1 op. First batch: 1 set + 1 commit = total_size 3. floor=2.
         let k1 = Sha256::fill(1u8);
@@ -2578,7 +2608,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // DB has 1 op (initial commit). A batch with 1 set + 1 commit = total_size 3.
         // Setting floor=100 exceeds total_size.
@@ -2636,7 +2666,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // Live floor is 0 (from the seeded initial commit).
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
@@ -2690,7 +2720,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // a: 1 set + commit at loc 2; declare floor=3 (one past the commit -- invalid).
         // b: tip valid on its own (floor=0 <= b's commit_loc), but a's floor is bad.
@@ -2739,7 +2769,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -2765,7 +2795,7 @@ pub(super) mod test {
 
         // Reopen: snapshot rebuilt from floor=first_size, batch A keys excluded.
         drop(db);
-        let mut db = open_db(context.with_label("second")).await;
+        let mut db = open_db(context.child("second")).await;
 
         // Verify batch A keys are NOT in the reopened snapshot (expected).
         assert!(db.get(&k1).await.unwrap().is_none());
@@ -2799,7 +2829,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("first")).await;
+        let mut db = open_db(context.child("first")).await;
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(11u8);
@@ -2824,7 +2854,7 @@ pub(super) mod test {
 
         // Reopen: snapshot rebuilt from floor=second_size. Only k3 is in snapshot.
         drop(db);
-        let mut db = open_db(context.with_label("second")).await;
+        let mut db = open_db(context.child("second")).await;
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
@@ -2866,7 +2896,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("test")).await;
+        let mut db = open_db(context.child("test")).await;
 
         // Initial commit is at loc 0. 3 sets + 1 commit → commit lands at loc 4.
         // Declare floor = 4 (= commit_loc), the tight maximum.
@@ -2925,7 +2955,7 @@ pub(super) mod test {
         // contributes no keys — so the rebuilt snapshot is empty.
         db.sync().await.unwrap();
         drop(db);
-        let mut db = open_db(context.with_label("reopened")).await;
+        let mut db = open_db(context.child("reopened")).await;
         assert_eq!(db.last_commit_loc, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
@@ -2977,7 +3007,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -3039,7 +3069,7 @@ pub(super) mod test {
         C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.with_label("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key = Sha256::fill(1u8);
         let value = Sha256::fill(11u8);

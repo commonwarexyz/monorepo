@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
@@ -183,7 +183,7 @@ fn fuzz(input: FuzzInput) {
 
         // Create network
         let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
-            context.with_label("network"),
+            context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
@@ -215,7 +215,7 @@ fn fuzz(input: FuzzInput) {
             };
 
             // Create engine
-            let engine_context = context.with_label("peer").with_attribute("index", i);
+            let engine_context = context.child("peer").with_attribute("index", i);
             let (engine, mailbox) =
                 Engine::<_, PublicKey, FuzzMessage, _>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);

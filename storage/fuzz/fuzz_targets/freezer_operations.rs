@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -65,9 +65,10 @@ fn fuzz(input: FuzzInput) {
             table_replay_buffer: NZUsize!(64 * 1024),
             codec_config: (),
         };
-        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let mut freezer =
+            Freezer::<_, FixedBytes<32>, i32>::init(context.child("storage"), cfg.clone())
+                .await
+                .unwrap();
 
         let mut expected_state: HashMap<FixedBytes<32>, i32> = HashMap::new();
 

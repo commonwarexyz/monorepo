@@ -9,7 +9,7 @@
 //! - Queue state is consistent after recovery
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     queue::{Config, Queue},
     Persistable,
@@ -477,7 +477,7 @@ fn fuzz(input: FuzzInput) {
                 write_buffer,
             };
 
-            let mut queue = Queue::<_, Vec<u8>>::init(ctx.clone(), queue_cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
                 .await
                 .unwrap();
 
@@ -509,7 +509,7 @@ fn fuzz(input: FuzzInput) {
             write_buffer,
         };
 
-        let mut queue = Queue::<_, Vec<u8>>::init(ctx.clone(), queue_cfg)
+        let mut queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
             .await
             .expect("Queue recovery should succeed");
 

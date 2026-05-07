@@ -5,7 +5,10 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Family},
+        merkle::{
+            hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Bagging, Bagging::ForwardFold,
+            Family,
+        },
         mmb::Location,
     };
     use commonware_cryptography::Sha256;
@@ -15,8 +18,8 @@ mod tests {
 
     /// Build an in-memory MMB with `n` elements (element i = i.to_be_bytes()).
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
-        let hasher = H::new();
-        let mut mmb = Mmb::new(&hasher);
+        let hasher = H::new(ForwardFold);
+        let mut mmb = Mmb::new();
         let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
@@ -34,7 +37,7 @@ mod tests {
     #[test]
     fn test_verify_proof_and_pinned_nodes_recursive_fold_prefix_regression() {
         let (hasher, mmb) = make_mmb(5);
-        let root = *mmb.root();
+        let root = mmb.root(&hasher, 0).unwrap();
         let start = 4;
 
         let pinned: Vec<D> = crate::merkle::mmb::Family::nodes_to_pin(Location::new(start))
@@ -42,7 +45,7 @@ mod tests {
             .collect();
 
         let proof = mmb
-            .range_proof(&hasher, Location::new(start)..Location::new(start + 1))
+            .range_proof(&hasher, Location::new(start)..Location::new(start + 1), 0)
             .unwrap();
 
         assert!(proof.verify_proof_and_pinned_nodes(
@@ -50,7 +53,7 @@ mod tests {
             &[start.to_be_bytes()],
             Location::new(start),
             &pinned,
-            &root,
+            &root
         ));
     }
 
@@ -58,16 +61,24 @@ mod tests {
     fn test_last_element_proof_size_is_two() {
         // An MMB property is that the most recent item always has a small proof
         // (at most 2 digests). Verify this holds as the tree grows.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let (_, mut mmb) = make_mmb(1000);
         let mut n = 1000u64;
 
         while n <= 5000 {
             let leaves = mmb.leaves();
-            let root = *mmb.root();
+            let root = mmb.root(&hasher, 0).unwrap();
 
             let loc = n - 1;
-            let bp = Blueprint::new(leaves, Location::new(loc)..Location::new(n)).unwrap();
+            let inactive_peaks =
+                crate::merkle::mmb::Family::inactive_peaks(mmb.size(), Location::new(0));
+            let bp = Blueprint::new(
+                leaves,
+                inactive_peaks,
+                Bagging::ForwardFold,
+                Location::new(loc)..Location::new(n),
+            )
+            .unwrap();
 
             let total_digests = usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
             assert!(
@@ -79,13 +90,13 @@ mod tests {
             );
 
             // Verify the proof actually works.
-            let proof = mmb.proof(&hasher, Location::new(loc)).unwrap();
+            let proof = mmb.proof(&hasher, Location::new(loc), 0).unwrap();
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
                     &loc.to_be_bytes(),
                     Location::new(loc),
-                    &root,
+                    &root
                 ),
                 "n={n}: verification failed"
             );

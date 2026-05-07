@@ -6,10 +6,11 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, hasher::Standard as StandardHasher, storage::Storage as MerkleStorage, Graftable,
-        Location, Position, Readable,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
+        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
+        self,
         any::{
             self,
             batch::{lookup_sorted, DiffEntry},
@@ -198,13 +199,13 @@ impl<
     }
 }
 
-/// Layers a [`merkle::batch::MerkleizedBatch`] over a [`merkle::mem::Mem`] for node resolution.
+/// Layers a [`GenericMerkleizedBatch`] over a [`Mem`] for node resolution.
 ///
-/// [`merkle::batch::MerkleizedBatch::get_node`] only covers the batch chain; committed positions
+/// [`GenericMerkleizedBatch::get_node`] only covers the batch chain; committed positions
 /// return `None`. This adapter falls through to the committed Mem for those positions.
 struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy = Sequential> {
-    batch: &'a merkle::batch::MerkleizedBatch<F, D, S>,
-    mem: &'a merkle::mem::Mem<F, D>,
+    batch: &'a GenericMerkleizedBatch<F, D, S>,
+    mem: &'a Mem<F, D>,
 }
 
 impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S> {
@@ -223,28 +224,8 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
         self.mem.get_node(pos)
     }
 
-    fn root(&self) -> D {
-        self.batch.root()
-    }
-
     fn pruning_boundary(&self) -> Location<F> {
         self.batch.pruning_boundary()
-    }
-
-    fn proof(
-        &self,
-        _hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
-        _loc: Location<F>,
-    ) -> Result<crate::merkle::Proof<F, D>, merkle::Error<F>> {
-        unreachable!("proof not used in compute_current_layer")
-    }
-
-    fn range_proof(
-        &self,
-        _hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
-        _range: core::ops::Range<Location<F>>,
-    ) -> Result<crate::merkle::Proof<F, D>, merkle::Error<F>> {
-        unreachable!("range_proof not used in compute_current_layer")
     }
 }
 
@@ -629,7 +610,7 @@ where
         (idx, chunk)
     });
 
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
         &hasher,
         &ops_tree_adapter,
@@ -689,6 +670,7 @@ where
         &bitmap_batch,
         &grafted_storage,
         partial,
+        inner.new_inactivity_floor_loc,
         &ops_root,
     )
     .await?;
@@ -822,7 +804,7 @@ where
         self.canonical_root
     }
 
-    /// Return the ops-only MMR root.
+    /// Return the QMDB ops-only root.
     pub fn ops_root(&self) -> D {
         self.inner.root()
     }
@@ -957,12 +939,12 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        fn merkleize(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(db, metadata)
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            self.merkleize(db, metadata).await
         }
     }
 
@@ -991,12 +973,12 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        fn merkleize(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(db, metadata)
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            self.merkleize(db, metadata).await
         }
     }
 

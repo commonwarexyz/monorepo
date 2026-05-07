@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     archive::{
         prunable::{Archive, Config},
@@ -64,7 +64,7 @@ fn fuzz(data: FuzzInput) {
             codec_config: (),
         };
 
-        let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");
+        let mut archive = Archive::<_, _, Key, Value>::init(context.child("storage"), cfg.clone()).await.expect("init failed");
 
         // Keep a map of inserted items for verification
         let mut items = Vec::new();

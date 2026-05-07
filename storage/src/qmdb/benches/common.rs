@@ -68,6 +68,7 @@ pub type CurOVarVecDb<F> =
 
 pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256, Rayon>;
 
+/// Open a keyless benchmark database using the shared benchmark configuration.
 pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
     let cfg = keyless_cfg(&ctx);
     KeylessDb::<F>::init(ctx, cfg).await.unwrap()
@@ -236,7 +237,7 @@ macro_rules! define_db_variants {
                             let ctx = $ctx_expr;
                             let cfg = $cfg(&ctx);
                             #[allow(unused_mut)]
-                            let mut $db_name = <$db>::init(ctx.clone(), cfg).await.unwrap();
+                            let mut $db_name = <$db>::init(ctx.child("storage"), cfg).await.unwrap();
                             $body
                         }
                     )+
@@ -256,7 +257,7 @@ macro_rules! define_db_variants {
                             for _ in 0..$iters {
                                 #[allow(unused_mut)]
                                 let mut $db_name =
-                                    <$db>::init(ctx.clone(), cfg.clone()).await.unwrap();
+                                    <$db>::init(ctx.child("storage"), cfg.clone()).await.unwrap();
                                 $body
                             }
                             start.elapsed()

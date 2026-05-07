@@ -4,14 +4,19 @@ use super::{fixed, variable};
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered::variable::Operation as VariableOperation, FixedValue, VariableValue},
+        any::{
+            ordered::{
+                fixed::Operation as FixedOperation, variable::Operation as VariableOperation,
+            },
+            FixedValue, VariableValue,
+        },
         current::BitmapPrunedBits,
         operation::Key,
     },
     translator::Translator,
     Context,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
@@ -30,6 +35,7 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
         S: Strategy,
+        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -122,6 +128,7 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
         S: Strategy,
+        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }

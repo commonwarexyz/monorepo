@@ -3,10 +3,14 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{full::Config as MerkleConfig, hasher::Standard, mmb, mmr, Family, Location},
+    merkle::{
+        self, full::Config as MerkleConfig, mmb, mmr, Bagging::BackwardFold, Family, Location,
+    },
     qmdb::{
         keyless::variable::{Config, Db as Keyless},
         verify_proof, Error,
@@ -216,9 +220,9 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = Standard::<Sha256>::new();
+        let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
         let cfg = test_config(suffix, &context);
-        let mut db: Db<F> = Db::init(context.clone(), cfg)
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;
@@ -420,7 +424,12 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof(&hasher, &proof, start_loc, &ops, &root),
+                                verify_proof(
+                                    &hasher,
+                                    &proof,
+                                    start_loc,
+                                    &ops,
+                                    &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
@@ -454,7 +463,12 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof(&hasher, &proof, start_loc, &ops, &root),
+                                verify_proof(
+                                    &hasher,
+                                    &proof,
+                                    start_loc,
+                                    &ops,
+                                    &root),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
@@ -466,7 +480,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
 
                     let cfg = test_config(suffix, &context);
                     db = Db::init(
-                        context.with_label("db").with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await

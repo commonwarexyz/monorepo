@@ -13,7 +13,7 @@ mod tests {
     use super::*;
     use crate::{
         deterministic, Blob as _, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Spawner, Storage,
+        Spawner, Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -959,13 +959,13 @@ mod tests {
 
             // This read is entirely in persisted blob bytes (no buffered tip overlap).
             let read_task = context
-                .clone()
+                .child("read")
                 .spawn(move |_| async move { reader.read_at(0, 4).await.expect("read failed") });
 
             // Wait until read_at reached underlying blob I/O while holding the tip lock.
             read_started_rx.await.expect("read start signal missing");
 
-            let write_task = context.clone().spawn(move |_| async move {
+            let write_task = context.child("write").spawn(move |_| async move {
                 writer.write_at(0, b"WXYZ").await.expect("write failed");
             });
             pin_mut!(write_task);
@@ -1005,13 +1005,13 @@ mod tests {
             // This reads overlaps blob and tip buffer.
             let reader = writer.clone();
             let read_task = context
-                .clone()
+                .child("read")
                 .spawn(move |_| async move { reader.read_at(8, 5).await.expect("read failed") });
 
             // Wait until overlap read reaches persisted blob I/O while holding the tip lock.
             read_started_rx.await.expect("read start signal missing");
 
-            let write_task = context.clone().spawn(move |_| async move {
+            let write_task = context.child("write").spawn(move |_| async move {
                 writer.write_at(10, b"UVW").await.expect("write failed");
             });
             pin_mut!(write_task);
