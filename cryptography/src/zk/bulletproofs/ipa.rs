@@ -1053,52 +1053,88 @@ pub mod fuzz {
     }
 
     #[cfg(test)]
-    fn assert_setup_roundtrip(setup: &Setup<G>) {
-        let encoded = setup.encode();
-        let decoded: Setup<G> = Setup::decode_cfg(encoded.clone(), &(setup.g.len(), ()))
-            .expect("setup should decode with its own length bound");
-        assert_eq!(setup, &decoded);
-        assert_eq!(decoded.encode(), encoded);
-    }
+    mod test {
+        use super::*;
 
-    #[cfg(test)]
-    fn assert_claim_roundtrip(claim: &Claim<F, G>) {
-        let encoded = claim.encode();
-        let decoded: Claim<F, G> = Claim::decode_cfg(encoded.clone(), &((), ()))
-            .expect("claim should decode with unit cfg");
-        assert_eq!(claim, &decoded);
-        assert_eq!(decoded.encode(), encoded);
-    }
+        fn assert_setup_roundtrip(setup: &Setup<G>) {
+            let encoded = setup.encode();
+            let decoded: Setup<G> = Setup::decode_cfg(encoded.clone(), &(setup.g.len(), ()))
+                .expect("setup should decode with its own length bound");
+            assert_eq!(setup, &decoded);
+            assert_eq!(decoded.encode(), encoded);
+        }
 
-    #[cfg(test)]
-    fn assert_proof_roundtrip(proof: &Proof<F, G>) {
-        let max_len = if proof.l_r_coms.is_empty() {
-            0
-        } else {
-            1usize
-                .checked_shl(proof.l_r_coms.len() as u32)
-                .expect("proof arbitrary bounds rounds to fit in usize")
-        };
-        let encoded = proof.encode();
-        let decoded: Proof<F, G> = Proof::decode_cfg(encoded.clone(), &(max_len, ((), ())))
-            .expect("proof should decode with a matching round bound");
-        assert_eq!(proof, &decoded);
-        assert_eq!(decoded.encode(), encoded);
-    }
+        fn assert_claim_roundtrip(claim: &Claim<F, G>) {
+            let encoded = claim.encode();
+            let decoded: Claim<F, G> = Claim::decode_cfg(encoded.clone(), &((), ()))
+                .expect("claim should decode with unit cfg");
+            assert_eq!(claim, &decoded);
+            assert_eq!(decoded.encode(), encoded);
+        }
 
-    #[cfg(test)]
-    #[test]
-    fn test_codec_roundtrip() {
-        commonware_invariants::minifuzz::test(|u| {
-            assert_setup_roundtrip(&u.arbitrary::<Setup<G>>()?);
-            assert_claim_roundtrip(&u.arbitrary::<Claim<F, G>>()?);
-            assert_proof_roundtrip(&u.arbitrary::<Proof<F, G>>()?);
-            Ok(())
-        });
-    }
+        fn assert_proof_roundtrip(proof: &Proof<F, G>) {
+            let max_len = if proof.l_r_coms.is_empty() {
+                0
+            } else {
+                1usize
+                    .checked_shl(proof.l_r_coms.len() as u32)
+                    .expect("proof arbitrary bounds rounds to fit in usize")
+            };
+            let encoded = proof.encode();
+            let decoded: Proof<F, G> = Proof::decode_cfg(encoded.clone(), &(max_len, ((), ())))
+                .expect("proof should decode with a matching round bound");
+            assert_eq!(proof, &decoded);
+            assert_eq!(decoded.encode(), encoded);
+        }
 
-    #[test]
-    fn test_fuzz() {
-        commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+        #[test]
+        fn test_codec_roundtrip() {
+            commonware_invariants::minifuzz::test(|u| {
+                assert_setup_roundtrip(&u.arbitrary::<Setup<G>>()?);
+                assert_claim_roundtrip(&u.arbitrary::<Claim<F, G>>()?);
+                assert_proof_roundtrip(&u.arbitrary::<Proof<F, G>>()?);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn test_fuzz() {
+            commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+        }
+
+        #[test]
+        fn prover_tweaks_cover_edge_paths() {
+            let setup = test_setup();
+
+            let mut honest = Prover::new(setup, F::from(1u8), &[F::from(3u8)], &[F::from(4u8)]);
+            honest.tweak_product(F::zero());
+            honest
+                .tweak_l_r_coms(&mut Unstructured::new(&[]))
+                .expect("single-round proof should no-op before reading fuzz input");
+            assert!(honest.honest());
+            assert!(honest.verify());
+
+            type Tweak = Box<dyn FnOnce(&mut Prover<'static>)>;
+            let failures: [Tweak; 4] = [
+                Box::new(|p| p.tweak_product(F::from(1u8))),
+                Box::new(|p| p.increase_length()),
+                Box::new(|p| {
+                    p.tweak_l_r_coms(&mut Unstructured::new(&[1, 1, 0, 0, 0, 0, 0, 0, 0]))
+                        .expect("structured fuzz input should mutate a proof round");
+                }),
+                Box::new(|p| p.bad_namespace()),
+            ];
+            for tweak in failures {
+                let mut prover = Prover::new(
+                    setup,
+                    F::from(1u8),
+                    &[F::from(3u8), F::from(5u8)],
+                    &[F::from(4u8), F::from(6u8)],
+                );
+                tweak(&mut prover);
+                assert!(!prover.honest());
+                assert!(!prover.verify());
+            }
+        }
     }
 }
