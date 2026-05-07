@@ -1597,6 +1597,8 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
+        let _timer = self.metrics.operations.apply_batch_timer();
+        self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
         // Valid db_size values: batch.db_size (nothing committed), batch.base_size
         // (all ancestors committed), or any ancestor_diff_ends[i] (partial commit).
@@ -1685,7 +1687,8 @@ where
             }
 
             // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-            // set the new; earlier ancestor commits between them are already 0 from `extend_to`.
+            // set the new; earlier ancestor commits between them are already 0 from
+            // `extend_to`.
             bitmap.set_bit(*self.last_commit_loc, false);
             bitmap.set_bit(*batch.new_last_commit_loc, true);
         }
@@ -1698,7 +1701,13 @@ where
 
         // Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
-        Ok(start_loc..end_loc)
+        let range = start_loc..end_loc;
+        self.update_metrics().await;
+        self.metrics
+            .operations
+            .operations_applied
+            .inc_by(*range.end - *range.start);
+        Ok(range)
     }
 }
 

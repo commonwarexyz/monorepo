@@ -171,7 +171,8 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap).await
+    let metrics = db::Metrics::new(context);
+    db::Db::init_from_log(index, log, bitmap, metrics).await
 }
 
 #[cfg(test)]
@@ -1239,8 +1240,8 @@ pub(crate) mod test {
         };
     }
 
-    // Runner macros - each receives common args followed by (label, type, family, config) from with_all_variants.
-    // Uses Box::pin to move futures to the heap and avoid stack overflow.
+    // Runner macros - each receives common args followed by (label, type, family, config)
+    // from with_all_variants.
     macro_rules! test_with_reopen {
         ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
@@ -1334,7 +1335,11 @@ pub(crate) mod test {
     fn test_all_variants_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_mmr_variants!(context, "hpi", with_make_value: test_any_db_historical_proof_invalid);
+            for_mmr_variants!(
+                context,
+                "hpi",
+                with_make_value: test_any_db_historical_proof_invalid
+            );
         });
     }
 
@@ -1343,7 +1348,11 @@ pub(crate) mod test {
     fn test_all_variants_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_mmr_variants!(context, "hpec", with_make_value: test_any_db_historical_proof_edge_cases);
+            for_mmr_variants!(
+                context,
+                "hpec",
+                with_make_value: test_any_db_historical_proof_edge_cases
+            );
         });
     }
 
@@ -1352,7 +1361,11 @@ pub(crate) mod test {
     fn test_all_variants_multiple_commits_delete_replayed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_all_variants!(context, "mcdr", with_reopen: test_any_db_multiple_commits_delete_replayed);
+            for_all_variants!(
+                context,
+                "mcdr",
+                with_reopen: test_any_db_multiple_commits_delete_replayed
+            );
         });
     }
 

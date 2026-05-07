@@ -13,6 +13,7 @@ use crate::{
         Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
+    metrics::{duration_histogram, timer, Timed, Timer},
     qmdb::{
         self,
         any::{
@@ -32,6 +33,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::{Sequential, Strategy};
+use commonware_runtime::telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _};
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
@@ -47,6 +49,79 @@ const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
+
+/// Metrics for the Current layer.
+pub(crate) struct Metrics<E: Context> {
+    /// Clock used for duration timers.
+    clock: Arc<E>,
+    /// Pruned bitmap chunks.
+    pruned_chunks: Gauge,
+    /// Most recent safe sync/prune boundary location.
+    sync_boundary: Gauge,
+    /// Current-layer apply-batch calls.
+    pub apply_batch_calls: Counter,
+    /// Duration of Current-layer apply-batch calls.
+    apply_batch_duration: Timed,
+    /// Current-layer sync calls.
+    pub sync_calls: Counter,
+    /// Duration of Current-layer sync calls.
+    sync_duration: Timed,
+    /// Current-layer prune calls.
+    pub prune_calls: Counter,
+    /// Duration of Current-layer prune calls.
+    prune_duration: Timed,
+}
+
+impl<E: Context> Metrics<E> {
+    /// Create and register metrics.
+    pub fn new(context: E) -> Self {
+        let pruned_chunks = context.gauge("pruned_chunks", "Number of pruned bitmap chunks");
+        let sync_boundary =
+            context.gauge("sync_boundary", "Most recent safe sync boundary location");
+        let apply_batch_calls = context.counter("apply_batch_calls", "Number of apply-batch calls");
+        let apply_batch_duration = duration_histogram(
+            &context,
+            "apply_batch_duration",
+            "Duration of apply-batch calls",
+        );
+        let sync_calls = context.counter("sync_calls", "Number of sync calls");
+        let sync_duration = duration_histogram(&context, "sync_duration", "Duration of sync calls");
+        let prune_calls = context.counter("prune_calls", "Number of prune calls");
+        let prune_duration =
+            duration_histogram(&context, "prune_duration", "Duration of prune calls");
+        let clock = Arc::new(context);
+
+        Self {
+            clock,
+            pruned_chunks,
+            sync_boundary,
+            apply_batch_calls,
+            apply_batch_duration: Timed::new(apply_batch_duration),
+            sync_calls,
+            sync_duration: Timed::new(sync_duration),
+            prune_calls,
+            prune_duration: Timed::new(prune_duration),
+        }
+    }
+
+    pub fn apply_batch_timer(&self) -> Timer<E> {
+        timer(&self.apply_batch_duration, &self.clock)
+    }
+
+    pub fn sync_timer(&self) -> Timer<E> {
+        timer(&self.sync_duration, &self.clock)
+    }
+
+    pub fn prune_timer(&self) -> Timer<E> {
+        timer(&self.prune_duration, &self.clock)
+    }
+
+    /// Update Current-specific state gauges.
+    pub fn update(&self, pruned_chunks: u64, sync_boundary: u64) {
+        let _ = self.pruned_chunks.try_set(pruned_chunks);
+        let _ = self.sync_boundary.try_set(sync_boundary);
+    }
+}
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
@@ -83,6 +158,9 @@ pub struct Db<
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
+
+    /// Metrics for the Current layer.
+    pub(super) metrics: Metrics<E>,
 }
 
 // Shared read-only functionality.
@@ -363,6 +441,14 @@ where
         Location::new(pruned_chunks * chunk_bits)
     }
 
+    /// Update Current-specific state gauges.
+    pub(super) fn update_metrics(&self) {
+        self.metrics.update(
+            self.any.bitmap.pruned_chunks() as u64,
+            *self.sync_boundary(),
+        );
+    }
+
     /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
     /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
     /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
@@ -457,6 +543,8 @@ where
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         let sync_boundary = self.sync_boundary();
         if prune_loc > sync_boundary {
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
@@ -474,6 +562,8 @@ where
         self.sync_metadata().await?;
 
         self.any.prune_log(prune_loc).await?;
+        self.any.update_metrics().await;
+        self.update_metrics();
         Ok(())
     }
 
@@ -591,6 +681,7 @@ where
 
         self.grafted_tree = grafted_tree;
         self.root = root;
+        self.update_metrics();
 
         Ok(())
     }
@@ -644,11 +735,15 @@ where
 
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.sync_metadata().await
+        self.sync_metadata().await?;
+        self.update_metrics();
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.
@@ -682,9 +777,12 @@ where
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         self.grafted_tree.apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
+        self.update_metrics();
         Ok(range)
     }
 }

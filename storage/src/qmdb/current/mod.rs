@@ -280,6 +280,8 @@ pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
 
+use self::db::Metrics;
+
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy = Sequential> {
@@ -388,13 +390,17 @@ where
     )
     .await?;
 
-    Ok(db::Db {
+    let metrics = Metrics::new(context);
+    let db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
-    })
+        metrics,
+    };
+    db.update_metrics();
+    Ok(db)
 }
 
 /// Extension trait for Current QMDB types that exposes bitmap information for testing.

@@ -1014,8 +1014,8 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     target: &Target<F, Digest>,
 ) {
     let target_end = *target.range.end();
-    let journal_size = format!("client_journal_size {target_end}");
-    let target_end = format!("client_target_end {target_end}");
+    let journal_size = format!("client_sync_journal_size {target_end}");
+    let target_end = format!("client_sync_target_end {target_end}");
     loop {
         let metrics = context.encode();
         if metrics.contains(&journal_size) && metrics.contains(&target_end) {

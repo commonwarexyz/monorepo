@@ -184,7 +184,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Read multiple items from the same section into a caller buffer.
     ///
     /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
-    /// sorted in ascending order, non-overlapping, and within the section's bounds.
+    /// strictly increasing and within the section's bounds.
     pub async fn get_many(
         &self,
         section: u64,
