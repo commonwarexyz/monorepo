@@ -1708,9 +1708,8 @@ where
             }
         } else {
             // Partition ancestor diffs into committed (already applied to the DB; provide
-            // `base_old_loc` fixups) and uncommitted (still to be applied; merged with the
-            // child). Both streams are walked via parallel cursors -- no HashMap, no HashSet.
-            let mut committed = Vec::new();
+            // `base_old_loc` fixups) and uncommitted (still to be applied; merged with the child).
+            let mut committed = Vec::with_capacity(batch.ancestor_diffs.len());
             let mut uncommitted = Vec::with_capacity(batch.ancestor_diffs.len());
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.ancestor_diff_ends[i] <= db_size {
