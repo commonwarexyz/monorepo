@@ -315,7 +315,7 @@ impl Strategy for ByzzFuzzMutator {
                     rng,
                     proposal.parent.get(),
                     last_finalized_view,
-                    last_notarized_view,g
+                    last_notarized_view,
                     last_nullified_view,
                 )),
                 proposal.payload,
