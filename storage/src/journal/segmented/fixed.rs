@@ -434,7 +434,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
@@ -460,7 +460,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -506,7 +506,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -526,7 +526,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -569,7 +569,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -590,7 +590,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -689,7 +689,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -721,7 +721,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -767,7 +767,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -826,7 +826,7 @@ mod tests {
             let cfg = test_cfg(&context);
 
             // Create sections 1-5
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
             for section in 1u64..=5 {
@@ -844,7 +844,7 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -875,7 +875,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -895,7 +895,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -926,7 +926,7 @@ mod tests {
             let cfg = test_cfg(&context);
 
             // Create and populate journal
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -940,7 +940,7 @@ mod tests {
             drop(journal);
 
             // Reopen and verify data persisted
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg)
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
                 .await
                 .expect("failed to re-init");
 
@@ -958,7 +958,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -985,7 +985,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1022,7 +1022,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1076,7 +1076,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1112,7 +1112,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1177,7 +1177,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1208,7 +1208,7 @@ mod tests {
 
             // Reopen journal - should recover by truncating last page due to failed checksum, and
             // end up with a correct blob size due to partial-item trimming.
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1248,7 +1248,7 @@ mod tests {
             };
 
             let mut journal: Journal<_, Digest> =
-                Journal::init(context.with_label("journal"), cfg.clone())
+                Journal::init(context.child("journal"), cfg.clone())
                     .await
                     .expect("Failed to initialize journal");
 
@@ -1305,7 +1305,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1327,7 +1327,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1349,7 +1349,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1374,7 +1374,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
             journal.append(0, &test_digest(0)).await.unwrap();
             assert_eq!(journal.section_len(0).await.unwrap(), 1);
 
@@ -1391,7 +1391,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0..5 {
                 journal.append(0, &test_digest(i)).await.unwrap();
@@ -1420,7 +1420,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0..10 {
                 journal.append(0, &test_digest(i)).await.unwrap();
@@ -1445,7 +1445,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg)
+            let journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1463,7 +1463,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0..8 {
                 journal.append(0, &test_digest(i)).await.unwrap();

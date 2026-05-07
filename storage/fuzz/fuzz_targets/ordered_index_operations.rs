@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     index::{ordered::Index, Cursor as _, Unordered as _},
     translator::TwoCap,
@@ -72,7 +72,7 @@ struct FuzzInput {
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        let mut index = Index::new(context.clone(), TwoCap);
+        let mut index = Index::new(context.child("storage"), TwoCap);
 
         for op in input.operations.iter() {
             match op {

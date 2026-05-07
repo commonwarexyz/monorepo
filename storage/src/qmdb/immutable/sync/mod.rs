@@ -77,7 +77,7 @@ where
 
         // Initialize Merkle structure for sync
         let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
                 range: range.clone(),
@@ -95,7 +95,7 @@ where
         .await?;
 
         let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+            Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
@@ -188,7 +188,7 @@ where
                 .to_vec();
         let hasher = qmdb::hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.with_label("merkle"),
+            context.child("merkle"),
             config.merkle,
             leaf_count,
             pinned_nodes.clone(),

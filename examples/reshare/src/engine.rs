@@ -144,7 +144,7 @@ where
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
         let (dkg, dkg_mailbox) = dkg::Actor::new(
-            context.with_label("dkg"),
+            context.child("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
                 signer: config.signer.clone(),
@@ -156,7 +156,7 @@ where
         );
 
         let (buffer, buffered_mailbox) = buffered::Engine::new(
-            context.with_label("buffer"),
+            context.child("buffer"),
             buffered::Config {
                 public_key: config.signer.public_key(),
                 mailbox_size: MAILBOX_SIZE,
@@ -170,7 +170,7 @@ where
         // Initialize finalizations by height
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
+            context.child("finalizations_by_height"),
             immutable::Config {
                 metadata_partition: format!(
                     "{}-finalizations-by-height-metadata",
@@ -213,7 +213,7 @@ where
         // Initialize finalized blocks archive
         let start = Instant::now();
         let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
+            context.child("finalized_blocks"),
             immutable::Config {
                 metadata_partition: format!(
                     "{}-finalized_blocks-metadata",
@@ -261,7 +261,7 @@ where
             certificate_verifier,
         );
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
-            context.with_label("marshal"),
+            context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
@@ -288,14 +288,14 @@ where
         .await;
 
         let application = Deferred::new(
-            context.with_label("application"),
+            context.child("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
-            context.with_label("orchestrator"),
+            context.child("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
                 application,

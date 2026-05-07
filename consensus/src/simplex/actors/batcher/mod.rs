@@ -72,7 +72,7 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, ordered::Set, sync::Mutex, NZUsize};
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
@@ -119,7 +119,7 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
     {
         let (network, oracle) = Network::new_with_peers(
-            context.with_label("network"),
+            context.child("network"),
             NConfig {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -213,8 +213,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -226,7 +225,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor
             let me = participants[0].clone();
@@ -242,7 +241,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -385,8 +384,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -398,7 +396,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor.
             let me = participants[0].clone();
@@ -414,7 +412,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to.
             let (voter_sender, mut voter_receiver) =
@@ -549,8 +547,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -562,7 +559,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
@@ -579,7 +576,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -703,7 +700,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -711,8 +709,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
@@ -729,7 +726,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox
             let (voter_sender, mut voter_receiver) =
@@ -888,15 +885,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -912,7 +909,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentLeader,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -1130,15 +1127,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1154,7 +1151,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -1359,15 +1356,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1383,7 +1380,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -1539,15 +1536,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1563,7 +1560,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -1769,15 +1766,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1793,7 +1790,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -1974,8 +1971,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -1987,7 +1983,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
@@ -2003,7 +1999,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -2173,8 +2169,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2186,7 +2181,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Set up batcher as participant 0
             let me = participants[0].clone();
@@ -2202,7 +2197,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -2383,8 +2378,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2396,7 +2390,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor as participant 0
             let me = participants[0].clone();
@@ -2412,7 +2406,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -2510,8 +2504,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2523,7 +2516,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor as participant 0
             let me = participants[0].clone();
@@ -2539,7 +2532,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -2640,8 +2633,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2653,7 +2645,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor
             let me = participants[0].clone();
@@ -2669,7 +2661,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, _voter_receiver) =
@@ -2797,15 +2789,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -2820,7 +2812,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -2922,8 +2914,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2934,7 +2925,7 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -2949,7 +2940,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -3067,15 +3058,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3090,7 +3081,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -3196,15 +3187,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3219,7 +3210,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, mut voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -3324,7 +3315,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -3332,8 +3324,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
@@ -3349,7 +3340,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
@@ -3518,8 +3509,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -3531,11 +3521,11 @@ mod tests {
                 elector: <RoundRobin>::default(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
-            let batcher_context = context.with_label("batcher");
+            let batcher_context = context.child("batcher");
             let batcher_cfg = Config {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
@@ -3548,10 +3538,10 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(batcher_context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(batcher_context, batcher_cfg);
 
             // Verify all participants are initialized to view 0 in the metric
-            let buffer = batcher_context.encode();
+            let buffer = context.encode();
             for participant in &participants {
                 let expected = format!("latest_vote{{peer=\"{}\"}} 0", participant);
                 assert!(
@@ -3672,7 +3662,7 @@ mod tests {
             }
 
             // Verify votes were tracked for participants who voted
-            let buffer = batcher_context.encode();
+            let buffer = context.encode();
             for (i, participant) in participants.iter().enumerate().take(quorum_size).skip(1) {
                 let expected = format!("latest_vote{{peer=\"{}\"}} 5", participant);
                 assert!(
@@ -3702,7 +3692,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Verify the late vote was still tracked
-            let buffer = batcher_context.encode();
+            let buffer = context.encode();
             let expected_late = format!("latest_vote{{peer=\"{}\"}} 5", participants[late_voter]);
             assert!(
                 buffer.contains(&expected_late),
@@ -3731,7 +3721,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Verify participant 1 STILL has latest_vote = 5 (not decreased to 3)
-            let buffer = batcher_context.encode();
+            let buffer = context.encode();
             let expected_v5 = format!("latest_vote{{peer=\"{}\"}} 5", participants[1]);
             assert!(
                 buffer.contains(&expected_v5),
@@ -3771,15 +3761,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3794,7 +3784,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
@@ -3983,15 +3973,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -4006,7 +3996,7 @@ mod tests {
                 mailbox_size: 128,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             let (voter_sender, _voter_receiver) =
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);

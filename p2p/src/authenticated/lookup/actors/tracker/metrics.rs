@@ -29,7 +29,7 @@ pub struct Metrics<P: PublicKey> {
 
 impl<P: PublicKey> Metrics<P> {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init<E: RuntimeMetrics>(context: E) -> Self {
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         Self {
             tracked: context.gauge(
                 "tracked",

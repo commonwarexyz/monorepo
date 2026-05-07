@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
-use commonware_runtime::{deterministic, mocks, Runner, Spawner};
+use commonware_runtime::{deterministic, mocks, Runner, Spawner, Supervisor as _};
 use commonware_stream::encrypted::{dial, listen, Config, Receiver, Sender};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -45,7 +45,7 @@ thread_local! {
             };
 
 
-        let listener_handle = context.clone().spawn(move |context| async move {
+        let listener_handle = context.child("listener").spawn(move |context| async move {
             listen(
                 context,
                 |_| async { true },
@@ -56,7 +56,7 @@ thread_local! {
         });
 
         let (dialer_sender, _) = dial(
-            context.clone(),
+            context.child("dialer"),
             dialer_config,
             listener_crypto.public_key(),
             dialer_stream,

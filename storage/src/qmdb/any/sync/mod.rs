@@ -72,7 +72,7 @@ where
 {
     let hasher = qmdb::hasher::<H>();
     let peek = full::Merkle::<F, _, _, S>::peek_root(
-        context.with_label("local_target_probe"),
+        context.child("local_target_probe"),
         merkle_config,
         &hasher,
         inactive_peaks,
@@ -112,7 +112,7 @@ where
     let hasher = qmdb::hasher::<H>();
 
     let merkle = full::Merkle::<F, _, _, S>::init_sync(
-        context.with_label("merkle"),
+        context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
@@ -121,7 +121,7 @@ where
     )
     .await?;
 
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
@@ -187,7 +187,7 @@ macro_rules! impl_sync_database {
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
                 let Ok(journal) = <$journal>::init(
-                    context.with_label("local_target_journal_probe"),
+                    context.child("local_target_journal_probe"),
                     config.journal_config.clone(),
                 )
                 .await
@@ -203,7 +203,7 @@ macro_rules! impl_sync_database {
                     target.range.start(),
                 );
                 qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context.with_label("local_target_merkle_probe"),
+                    context.child("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,
                     inactive_peaks,

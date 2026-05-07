@@ -120,7 +120,7 @@ where
     ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
-            context.with_label("metadata"),
+            context.child("metadata"),
             metadata::Config {
                 partition: format!("{}-metadata", cfg.partition_prefix),
                 codec_config: ((), ()),
@@ -197,10 +197,7 @@ where
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let context = self
-            .context
-            .with_label("cache")
-            .with_attribute("epoch", epoch);
+        let context = self.context.child("cache").with_attribute("epoch", epoch);
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
                 &context,
@@ -248,7 +245,7 @@ where
         ctx: &R,
         cfg: &Config,
         epoch: Epoch,
-        name: &str,
+        name: &'static str,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
         let start = ctx.current();
@@ -264,7 +261,7 @@ where
             key_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
+        let archive = prunable::Archive::init(ctx.child(name), archive_cfg)
             .await
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?ctx.current().duration_since(start).unwrap_or(Duration::ZERO), "restored {name} archive");

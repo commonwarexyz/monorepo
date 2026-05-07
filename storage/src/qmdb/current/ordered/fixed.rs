@@ -112,7 +112,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::{
         bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
@@ -145,7 +145,7 @@ pub mod test {
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
             let mut hasher = Sha256::new();
-            let mut db = open_db(context.with_label("db"), partition).await;
+            let mut db = open_db(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
 

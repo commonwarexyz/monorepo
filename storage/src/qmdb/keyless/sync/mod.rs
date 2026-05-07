@@ -69,7 +69,7 @@ where
         let hasher = qmdb::hasher::<H>();
 
         let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             full::SyncConfig {
                 config: config.merkle.clone(),
                 range: range.clone(),
@@ -164,7 +164,7 @@ where
                 .to_vec();
         let hasher = qmdb::hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.with_label("merkle"),
+            context.child("merkle"),
             config.merkle,
             leaf_count,
             pinned_nodes.clone(),
