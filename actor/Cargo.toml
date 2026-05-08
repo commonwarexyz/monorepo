@@ -23,6 +23,7 @@ parking_lot.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+commonware-utils.workspace = true
 criterion.workspace = true
 
 [features]

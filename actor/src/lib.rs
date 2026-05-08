@@ -11,6 +11,7 @@ use std::{
     future::poll_fn,
     fmt,
     marker::PhantomData,
+    num::NonZeroUsize,
     task::{Context, Poll},
 };
 use tokio::sync::mpsc;
@@ -417,7 +418,7 @@ impl<T: MessagePolicy> Clone for Sender<T> {
 impl<T: MessagePolicy> Drop for Sender<T> {
     fn drop(&mut self) {
         let previous = self.shared.senders.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0);
+        assert!(previous > 0);
         if previous == 1 {
             self.shared.receiver_waker.wake();
         }
@@ -590,11 +591,9 @@ pub struct Mailbox<T: MessagePolicy> {
 
 impl<T: MessagePolicy> Mailbox<T> {
     /// Create a mailbox with a bounded ready queue and policy-managed overflow.
-    pub fn new(capacity: usize) -> (Sender<T>, Receiver<T>) {
-        assert!(capacity > 0, "mailbox capacity must be greater than zero");
-
+    pub fn new(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         let shared = Arc::new(Shared {
-            ready: ReadyQueue::new(capacity),
+            ready: ReadyQueue::new(capacity.get()),
             overflow: OverflowState::new(),
             lifecycle: AtomicUsize::new(0),
             senders: AtomicUsize::new(1),
@@ -613,6 +612,7 @@ impl<T: MessagePolicy> Mailbox<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::NZUsize;
     use futures::{pin_mut, FutureExt};
 
     #[derive(Debug, PartialEq, Eq)]
@@ -648,7 +648,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_replaces_stale_overflow_message() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Update(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
@@ -659,7 +659,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_rejects_non_replaceable_message() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Dropped);
 
@@ -668,7 +668,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_retains_required_message() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
         assert_eq!(sender.len(), 2);
@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn try_recv_refills_from_overflow() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
 
@@ -689,7 +689,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_retains_unmatched_replaceable_message() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
         assert_eq!(sender.len(), 2);
@@ -700,7 +700,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_replaces_stale_overflow_after_ready_fills() {
-        let (sender, mut receiver) = Mailbox::new(2);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(2));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
@@ -713,7 +713,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn mailbox_capacity_is_soft_limit_for_required_messages() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
@@ -726,7 +726,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_rejects_hint() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Dropped);
 
@@ -735,7 +735,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn full_inbox_can_replace_or_drop_by_message() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Hint(3)), Feedback::Backoff);
@@ -746,7 +746,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn empty_inbox_wakes_on_enqueue() {
-        let (sender, mut receiver) = Mailbox::new(1);
+        let (sender, mut receiver) = Mailbox::new(NZUsize!(1));
 
         let next = receiver.recv();
         pin_mut!(next);
@@ -758,7 +758,7 @@ mod tests {
 
     #[commonware_macros::test_async]
     async fn empty_inbox_closes_when_senders_drop() {
-        let (sender, mut receiver) = Mailbox::<Message>::new(1);
+        let (sender, mut receiver) = Mailbox::<Message>::new(NZUsize!(1));
         drop(sender);
 
         assert_eq!(
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn enqueue_after_receiver_drop_returns_closed() {
-        let (sender, receiver) = Mailbox::new(1);
+        let (sender, receiver) = Mailbox::new(NZUsize!(1));
         drop(receiver);
 
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
@@ -780,6 +780,7 @@ mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
+    use commonware_utils::NZUsize;
     use loom::{
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -825,7 +826,7 @@ mod loom_tests {
     #[test]
     fn close_waits_for_inflight_ready_enqueue() {
         loom::model(|| {
-            let (sender, receiver) = Mailbox::<Message>::new(1);
+            let (sender, receiver) = Mailbox::<Message>::new(NZUsize!(1));
 
             let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
@@ -846,7 +847,7 @@ mod loom_tests {
     #[test]
     fn close_waits_for_inflight_overflow_enqueue() {
         loom::model(|| {
-            let (sender, receiver) = Mailbox::<Message>::new(1);
+            let (sender, receiver) = Mailbox::<Message>::new(NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
 
             let enqueue_sender = sender.clone();
@@ -868,7 +869,7 @@ mod loom_tests {
     #[test]
     fn concurrent_spill_and_refill_preserves_messages() {
         loom::model(|| {
-            let (sender, mut receiver) = Mailbox::<Message>::new(1);
+            let (sender, mut receiver) = Mailbox::<Message>::new(NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
             let seen = Arc::new(AtomicUsize::new(0));

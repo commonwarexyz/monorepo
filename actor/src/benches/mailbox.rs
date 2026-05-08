@@ -1,4 +1,5 @@
 use commonware_actor::{self as actor, Backpressure, Feedback, MessagePolicy};
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
 use std::{
@@ -53,7 +54,7 @@ fn bench_enqueue_ready(c: &mut Criterion) {
         format!("operation=enqueue_ready impl=actor capacity={CAPACITY}"),
         |b| {
             b.iter_batched(
-                || actor::Mailbox::<Message>::new(CAPACITY),
+                || actor::Mailbox::<Message>::new(NZUsize!(CAPACITY)),
                 |(sender, _receiver)| {
                     for i in 0..MESSAGES as u64 {
                         black_box(sender.enqueue(black_box(Message::Reject(i))));
@@ -91,7 +92,7 @@ fn bench_recv_ready(c: &mut Criterion) {
         |b| {
             b.iter_batched(
                 || {
-                    let (sender, receiver) = actor::Mailbox::<Message>::new(CAPACITY);
+                    let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(CAPACITY));
                     for i in 0..MESSAGES as u64 {
                         assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
                     }
@@ -139,7 +140,7 @@ fn bench_round_trip_ready(c: &mut Criterion) {
         format!("operation=round_trip_ready impl=actor capacity={CAPACITY}"),
         |b| {
             b.iter_batched(
-                || actor::Mailbox::<Message>::new(CAPACITY),
+                || actor::Mailbox::<Message>::new(NZUsize!(CAPACITY)),
                 |(sender, mut receiver)| {
                     for i in 0..MESSAGES as u64 {
                         black_box(sender.enqueue(black_box(Message::Reject(i))));
@@ -178,7 +179,7 @@ fn bench_recv_waiting(c: &mut Criterion) {
         format!("operation=recv_waiting impl=actor capacity={CAPACITY}"),
         |b| {
             b.iter_batched(
-                || actor::Mailbox::<Message>::new(CAPACITY),
+                || actor::Mailbox::<Message>::new(NZUsize!(CAPACITY)),
                 |(sender, mut receiver)| {
                     futures::executor::block_on(async {
                         for i in 0..MESSAGES as u64 {
@@ -236,7 +237,7 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_reject impl=actor capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::Mailbox::<Message>::new(1);
+                let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::Reject(0)), Feedback::Ok);
                 (sender, receiver)
             },
@@ -268,7 +269,7 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_retain impl=actor capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::Mailbox::<Message>::new(1);
+                let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::Reject(0)), Feedback::Ok);
                 (sender, receiver)
             },
@@ -284,7 +285,7 @@ fn bench_full_queue(c: &mut Criterion) {
     group.bench_function("operation=full_replace impl=actor capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::Mailbox::<Message>::new(1);
+                let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::Reject(0)), Feedback::Ok);
                 assert_eq!(sender.enqueue(Message::Replace(0)), Feedback::Backoff);
                 (sender, receiver)
@@ -305,7 +306,7 @@ fn fill_replace_queue(
     capacity: usize,
     newest: bool,
 ) -> (actor::Sender<Message>, actor::Receiver<Message>) {
-    let (sender, receiver) = actor::Mailbox::<Message>::new(capacity);
+    let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(capacity));
     for i in 0..capacity {
         assert_eq!(sender.enqueue(Message::Reject(i as u64)), Feedback::Ok);
     }
@@ -369,7 +370,8 @@ fn bench_spsc_contended(c: &mut Criterion) {
         format!("operation=spsc_contended impl=actor capacity={CONTENDED_MESSAGES}"),
         |b| {
             b.iter(|| {
-                let (sender, mut receiver) = actor::Mailbox::<Message>::new(CONTENDED_MESSAGES);
+                let (sender, mut receiver) =
+                    actor::Mailbox::<Message>::new(NZUsize!(CONTENDED_MESSAGES));
                 std::thread::scope(|scope| {
                     let handle = scope.spawn(move || {
                         let mut received = 0;
@@ -427,7 +429,7 @@ fn bench_spsc_contended(c: &mut Criterion) {
 }
 
 fn run_actor_spsc_overlap(messages: usize, capacity: usize) {
-    let (sender, mut receiver) = actor::Mailbox::<Message>::new(capacity);
+    let (sender, mut receiver) = actor::Mailbox::<Message>::new(NZUsize!(capacity));
     let start = Barrier::new(3);
 
     std::thread::scope(|scope| {
@@ -527,7 +529,8 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
         ),
         |b| {
             b.iter(|| {
-                let (sender, _receiver) = actor::Mailbox::<Message>::new(CONTENDED_MESSAGES);
+                let (sender, _receiver) =
+                    actor::Mailbox::<Message>::new(NZUsize!(CONTENDED_MESSAGES));
                 std::thread::scope(|scope| {
                     for producer in 0..PRODUCERS {
                         let sender = sender.clone();
@@ -577,7 +580,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
 
 fn run_actor_try_send_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
     let total = producers * messages_per_producer;
-    let (sender, mut receiver) = actor::Mailbox::<Message>::new(capacity);
+    let (sender, mut receiver) = actor::Mailbox::<Message>::new(NZUsize!(capacity));
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(move || {
@@ -657,7 +660,7 @@ fn run_tokio_try_send_contended(producers: usize, messages_per_producer: usize, 
 
 fn run_actor_retain_contended(producers: usize, messages_per_producer: usize, capacity: usize) {
     let total = producers * messages_per_producer;
-    let (sender, mut receiver) = actor::Mailbox::<Message>::new(capacity);
+    let (sender, mut receiver) = actor::Mailbox::<Message>::new(NZUsize!(capacity));
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(move || {
@@ -793,7 +796,7 @@ fn bench_tokio_style(c: &mut Criterion) {
 
     group.bench_function("operation=tokio_style_uncontented impl=actor", |b| {
         b.iter(|| {
-            let (sender, mut receiver) = actor::Mailbox::<Message>::new(1_000_000);
+            let (sender, mut receiver) = actor::Mailbox::<Message>::new(NZUsize!(1_000_000));
             for i in 0..TOKIO_STYLE_MESSAGES as u64 {
                 assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
             }
