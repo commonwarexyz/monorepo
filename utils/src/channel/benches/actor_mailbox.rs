@@ -5,7 +5,6 @@ use commonware_utils::channel::{
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
 use std::{
-    collections::VecDeque,
     future::{poll_fn, Future},
     hint::black_box,
     sync::Barrier,
@@ -35,16 +34,15 @@ enum Message {
 }
 
 impl Backpressure for Message {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match message {
             Self::Reject(_) => Feedback::Dropped,
-            Self::Retain(_) => actor::retain(queue, message),
-            Self::Replace(_) => actor::replace_or_retain(
-                actor::replace_last(queue, message, |pending| {
-                    matches!(pending, Self::Replace(_))
-                }),
-                queue,
-            ),
+            Self::Retain(_) => overflow.spill(message),
+            Self::Replace(_) => {
+                let result =
+                    overflow.replace_last(message, |pending| matches!(pending, Self::Replace(_)));
+                overflow.replace_or_spill(result)
+            }
         }
     }
 }

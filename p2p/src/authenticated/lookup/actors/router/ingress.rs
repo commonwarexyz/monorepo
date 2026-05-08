@@ -17,7 +17,6 @@ use commonware_utils::{
     },
     NZUsize,
 };
-use std::collections::VecDeque;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]
@@ -43,27 +42,29 @@ pub enum Message<P: PublicKey> {
 }
 
 impl<P: PublicKey> Backpressure for Message<P> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
-                actor::replace_or_retain(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
+                let result = overflow.replace_last(Self::Ready { peer, relay }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
-                }), queue)
+                });
+                overflow.replace_or_spill(result)
             }
             Self::Release { peer } => {
                 let key = peer.clone();
-                actor::replace_or_retain(actor::replace_last(queue, Self::Release { peer }, |pending| {
+                let result = overflow.replace_last(Self::Release { peer }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
-                }), queue)
+                });
+                overflow.replace_or_spill(result)
             }
-            Self::Content { .. } => actor::retain(queue, message),
+            Self::Content { .. } => overflow.spill(message),
             Self::SubscribePeers { .. } => Feedback::Dropped,
         }
     }

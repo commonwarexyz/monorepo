@@ -11,7 +11,6 @@ use commonware_utils::channel::{
     actor::{self, ActorMailbox, Backpressure},
     oneshot, Feedback,
 };
-use std::collections::VecDeque;
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -99,8 +98,8 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

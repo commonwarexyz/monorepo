@@ -6,7 +6,6 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::channel::{actor::{self, Backpressure}, Feedback};
-use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<O: Sink, I: Stream, P: PublicKey> {
@@ -22,8 +21,8 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
 }
 
 impl<P: PublicKey, O: Sink, I: Stream> Backpressure for Message<O, I, P> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 
@@ -53,8 +52,8 @@ pub(crate) enum Connect<P: PublicKey> {
 }
 
 impl<P: PublicKey> Backpressure for Connect<P> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

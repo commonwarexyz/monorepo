@@ -12,7 +12,6 @@ use commonware_utils::{
     },
     ordered::Set,
 };
-use std::collections::VecDeque;
 
 /// Messages that can be sent to the orchestrator.
 pub enum Message<V: Variant, P: PublicKey> {
@@ -30,12 +29,10 @@ impl<V: Variant, P: PublicKey> Message<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Backpressure for Message<V, P> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         let epoch = message.epoch();
-        actor::replace_or_retain(
-            actor::replace_last(queue, message, |pending| pending.epoch() == epoch),
-            queue,
-        )
+        let result = overflow.replace_last(message, |pending| pending.epoch() == epoch);
+        overflow.replace_or_spill(result)
     }
 }
 

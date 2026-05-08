@@ -5,7 +5,6 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure}, Feedback};
-use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoteKind {
@@ -36,16 +35,20 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View, Partici
 }
 
 impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match &message {
-            Self::Update { .. } => actor::replace_or_retain(actor::replace_last(queue, message, |pending| {
-                matches!(pending, Self::Update { .. })
-            }), queue),
+            Self::Update { .. } => {
+                let result = overflow.replace_last(message, |pending| {
+                    matches!(pending, Self::Update { .. })
+                });
+                overflow.replace_or_spill(result)
+            }
             Self::Constructed(vote) => {
                 let key = vote_key(vote);
-                actor::replace_or_retain(actor::replace_last(queue, message, |pending| {
+                let result = overflow.replace_last(message, |pending| {
                     matches!(pending, Self::Constructed(pending) if vote_key(pending) == key)
-                }), queue)
+                });
+                overflow.replace_or_spill(result)
             }
         }
     }

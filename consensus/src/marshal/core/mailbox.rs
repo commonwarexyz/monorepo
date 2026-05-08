@@ -17,7 +17,6 @@ use commonware_utils::{
     },
     vec::NonEmptyVec,
 };
-use std::collections::VecDeque;
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -168,7 +167,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 }
 
 impl<S: Scheme, V: Variant> Backpressure for Message<S, V> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match message {
             Self::HintFinalized {
                 height,
@@ -177,7 +176,7 @@ impl<S: Scheme, V: Variant> Backpressure for Message<S, V> {
                 if let Some(Self::HintFinalized {
                     targets: pending_targets,
                     ..
-                }) = actor::find_last_mut(queue, |pending| {
+                }) = overflow.find_last_mut(|pending| {
                     matches!(
                         pending,
                         Self::HintFinalized {
@@ -189,10 +188,10 @@ impl<S: Scheme, V: Variant> Backpressure for Message<S, V> {
                     pending_targets.extend(targets);
                     Feedback::Backoff
                 } else {
-                    actor::retain(queue, Self::HintFinalized { height, targets })
+                    overflow.spill(Self::HintFinalized { height, targets })
                 }
             }
-            message => actor::retain(queue, message),
+            message => overflow.spill(message),
         }
     }
 }

@@ -24,7 +24,7 @@ use commonware_utils::{
 };
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
 };
@@ -313,18 +313,20 @@ pub(crate) enum Message<C: commonware_cryptography::PublicKey> {
 }
 
 impl<C: commonware_cryptography::PublicKey> Backpressure for Message<C> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match message {
-            Self::Acceptable(acceptable) => actor::replace_or_retain(actor::replace_last(
-                queue,
-                Self::Acceptable(acceptable),
-                |pending| matches!(pending, Self::Acceptable(_)),
-            ), queue),
-            Self::Listen(reservation) => actor::replace_or_retain(actor::replace_last(
-                queue,
-                Self::Listen(reservation),
-                |pending| matches!(pending, Self::Listen(_)),
-            ), queue),
+            Self::Acceptable(acceptable) => {
+                let result = overflow.replace_last(Self::Acceptable(acceptable), |pending| {
+                    matches!(pending, Self::Acceptable(_))
+                });
+                overflow.replace_or_spill(result)
+            }
+            Self::Listen(reservation) => {
+                let result = overflow.replace_last(Self::Listen(reservation), |pending| {
+                    matches!(pending, Self::Listen(_))
+                });
+                overflow.replace_or_spill(result)
+            }
         }
     }
 }

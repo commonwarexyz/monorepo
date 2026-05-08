@@ -18,7 +18,6 @@ use commonware_utils::{
     },
     NZUsize,
 };
-use std::collections::VecDeque;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -189,54 +188,48 @@ pub(crate) enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match message {
-            Self::Register { index, peers } => actor::replace_last(
-                queue,
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match message {
+            Self::Register { index, peers } => overflow.replace_last(
                 Self::Register { index, peers },
                 |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
             ),
             Self::Block { public_key } => {
                 let expected = public_key.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
                 )
             }
             Self::Construct { public_key, peer } => {
                 let expected = public_key.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::Construct { public_key, peer },
                     |pending| matches!(pending, Self::Construct { public_key: pending, .. } if pending == &expected),
                 )
             }
-            Self::BitVec { bit_vec, peer } => actor::replace_last(
-                queue,
+            Self::BitVec { bit_vec, peer } => overflow.replace_last(
                 Self::BitVec { bit_vec, peer },
                 |pending| matches!(pending, Self::BitVec { .. }),
             ),
-            Self::Peers { peers } => actor::replace_last(
-                queue,
+            Self::Peers { peers } => overflow.replace_last(
                 Self::Peers { peers },
                 |pending| matches!(pending, Self::Peers { .. }),
             ),
-            Self::DialableForDialer { dialer } => actor::replace_last(
-                queue,
+            Self::DialableForDialer { dialer } => overflow.replace_last(
                 Self::DialableForDialer { dialer },
                 |pending| matches!(pending, Self::DialableForDialer { .. }),
             ),
             Self::Release { metadata } => {
                 let expected = metadata.public_key().clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::Release { metadata },
                     |pending| matches!(pending, Self::Release { metadata } if metadata.public_key() == &expected),
                 )
             }
             message => Err(message),
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 

@@ -13,7 +13,6 @@ use commonware_utils::{
     },
     sequence::U64,
 };
-use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CertificateKind {
@@ -47,11 +46,11 @@ fn certificate_key<S: Scheme, D: Digest>(
 }
 
 impl<S: Scheme, D: Digest> Backpressure for MailboxMessage<S, D> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match &message {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
-                actor::replace_last(queue, message, |pending| {
+                overflow.replace_last(message, |pending| {
                     matches!(pending, Self::Certificate(pending) if certificate_key(pending) == key)
                 })
             }
@@ -61,7 +60,7 @@ impl<S: Scheme, D: Digest> Backpressure for MailboxMessage<S, D> {
                 if let Some(Self::Certified {
                     success: pending_success,
                     ..
-                }) = actor::find_last_mut(queue, |pending| {
+                }) = overflow.find_last_mut(|pending| {
                     matches!(pending, Self::Certified { view: pending_view, .. } if *pending_view == view)
                 }) {
                     *pending_success |= success;
@@ -70,7 +69,8 @@ impl<S: Scheme, D: Digest> Backpressure for MailboxMessage<S, D> {
                     Err(message)
                 }
             }
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 
@@ -124,18 +124,19 @@ impl Handler {
 }
 
 impl Backpressure for HandlerMessage {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match &message {
-            Self::Deliver { .. } => actor::replace_last(queue, message, |pending| {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match &message {
+            Self::Deliver { .. } => overflow.replace_last(message, |pending| {
                 matches!(pending, Self::Produce { .. })
             }),
             Self::Produce { view, .. } => {
                 let view = *view;
-                actor::replace_last(queue, message, |pending| {
+                overflow.replace_last(message, |pending| {
                     matches!(pending, Self::Produce { view: pending, .. } if *pending == view)
                 })
             }
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 

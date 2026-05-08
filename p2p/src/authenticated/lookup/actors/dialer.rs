@@ -29,9 +29,7 @@ use commonware_utils::channel::{
 };
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
-use std::{
-    collections::VecDeque,
-    time::{Duration, SystemTime},
+use std::{    time::{Duration, SystemTime},
 };
 use tracing::debug;
 
@@ -294,15 +292,15 @@ pub(crate) enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match message {
-            Self::Dialable(dialable) => actor::replace_last(
-                queue,
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match message {
+            Self::Dialable(dialable) => overflow.replace_last(
                 Self::Dialable(dialable),
                 |pending| matches!(pending, Self::Dialable(_)),
             ),
             message => Err(message),
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 

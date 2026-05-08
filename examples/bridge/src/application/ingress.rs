@@ -12,7 +12,6 @@ use commonware_utils::channel::{
     actor::{self, ActorMailbox, Backpressure},
     oneshot, Feedback,
 };
-use std::collections::VecDeque;
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
@@ -34,8 +33,8 @@ pub enum Message<D: Digest> {
 }
 
 impl<D: Digest> Backpressure for Message<D> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

@@ -48,13 +48,12 @@ pub async fn recv_actor_prioritized<C: Backpressure, D: Backpressure>(
 mod tests {
     use super::*;
     use commonware_utils::channel::actor;
-    use std::collections::VecDeque;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Data(u32);
 
     impl Backpressure for Data {
-        fn handle(_: &mut VecDeque<Self>, _: Self) -> Feedback {
+        fn handle(_: &mut actor::Overflow<'_, Self>, _: Self) -> Feedback {
             Feedback::Dropped
         }
     }

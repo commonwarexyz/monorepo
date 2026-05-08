@@ -6,7 +6,6 @@ use commonware_utils::channel::{
     actor::{self, ActorMailbox, Backpressure},
     oneshot, Feedback,
 };
-use std::collections::VecDeque;
 
 /// Messages that can be sent to a [Mailbox].
 pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
@@ -26,8 +25,8 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
 }
 
 impl<P: PublicKey, R: Committable + Digestible + Codec> Backpressure for Message<P, R> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

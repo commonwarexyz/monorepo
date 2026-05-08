@@ -16,7 +16,6 @@ use commonware_utils::{
     },
     Acknowledgement,
 };
-use std::collections::VecDeque;
 use tracing::error;
 
 /// A message that can be sent to the [Actor].
@@ -48,10 +47,10 @@ where
     V: Variant,
     A: Acknowledgement,
 {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match message {
             Self::Act { .. } => Feedback::Dropped,
-            Self::Finalized { .. } => actor::retain(queue, message),
+            Self::Finalized { .. } => overflow.spill(message),
         }
     }
 }

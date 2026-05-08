@@ -17,7 +17,7 @@ use commonware_utils::{
     ordered::Map,
     NZUsize,
 };
-use std::{collections::VecDeque, net::IpAddr};
+use std::net::IpAddr;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -152,28 +152,26 @@ pub(crate) enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match message {
-            Self::Register { index, peers } => actor::replace_last(
-                queue,
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match message {
+            Self::Register { index, peers } => overflow.replace_last(
                 Self::Register { index, peers },
                 |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
             ),
             Self::Block { public_key } => {
                 let expected = public_key.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
                 )
             }
-            Self::DialableForDialer { dialer } => actor::replace_last(
-                queue,
+            Self::DialableForDialer { dialer } => overflow.replace_last(
                 Self::DialableForDialer { dialer },
                 |pending| matches!(pending, Self::DialableForDialer { .. }),
             ),
             message => Err(message),
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 

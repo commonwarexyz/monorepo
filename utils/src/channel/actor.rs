@@ -15,21 +15,80 @@ use std::{
     task::{Context, Poll},
 };
 
+/// Policy-managed overflow behind the bounded ready queue.
+pub struct Overflow<'a, T> {
+    queue: &'a mut VecDeque<T>,
+}
+
+impl<T> Overflow<'_, T> {
+    /// Spill `message` into overflow after capacity is exceeded.
+    pub fn spill(&mut self, message: T) -> Feedback {
+        self.queue.push_back(message);
+        Feedback::Backoff
+    }
+
+    /// Spill the message into overflow if it could not replace existing overflow work.
+    pub fn replace_or_spill(&mut self, result: Result<(), T>) -> Feedback {
+        match result {
+            Ok(()) => Feedback::Backoff,
+            Err(message) => self.spill(message),
+        }
+    }
+
+    /// Drop the message if it could not replace existing overflow work.
+    pub fn replace_or_drop(&mut self, result: Result<(), T>) -> Feedback {
+        match result {
+            Ok(()) => Feedback::Backoff,
+            Err(_) => Feedback::Dropped,
+        }
+    }
+
+    /// Replace the newest matching overflow message.
+    pub fn replace_last(
+        &mut self,
+        message: T,
+        is_stale: impl FnMut(&T) -> bool,
+    ) -> Result<(), T> {
+        if let Some(pending) = self.find_last_mut(is_stale) {
+            *pending = message;
+            Ok(())
+        } else {
+            Err(message)
+        }
+    }
+
+    /// Find the newest matching overflow message.
+    pub fn find_last_mut(&mut self, mut is_match: impl FnMut(&T) -> bool) -> Option<&mut T> {
+        self.queue.iter_mut().rev().find(|message| is_match(message))
+    }
+
+    /// Remove all overflow messages.
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
+
+    /// Replace overflow with a single spilled `message`.
+    pub fn replace_all(&mut self, message: T) -> Feedback {
+        self.clear();
+        self.spill(message)
+    }
+}
+
 /// Backpressure behavior for actor messages when an inbox is full.
 pub trait Backpressure: Sized {
     /// Handle `message` when the bounded ready queue is full.
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
-    /// overflow retained behind the ready queue.
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback;
+    /// overflow spilled beyond ready capacity.
+    fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback;
 }
 
-struct Overflow<T> {
+struct OverflowState<T> {
     queue: Mutex<VecDeque<T>>,
     len: AtomicUsize,
 }
 
-impl<T> Overflow<T> {
+impl<T> OverflowState<T> {
     fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
@@ -54,7 +113,10 @@ impl<T> Overflow<T> {
             return Feedback::Closed;
         }
 
-        let feedback = T::handle(&mut queue, message);
+        let feedback = {
+            let mut overflow = Overflow { queue: &mut queue };
+            T::handle(&mut overflow, message)
+        };
         self.len.store(queue.len(), Ordering::Release);
         feedback
     }
@@ -82,7 +144,7 @@ impl<T> Overflow<T> {
 
 struct Shared<T> {
     ready: ArrayQueue<T>,
-    overflow: Overflow<T>,
+    overflow: OverflowState<T>,
     closed: AtomicBool,
     inflight: AtomicUsize,
     senders: AtomicUsize,
@@ -278,7 +340,7 @@ pub fn channel<T: Backpressure>(capacity: usize) -> (ActorMailbox<T>, ActorInbox
 
     let shared = Arc::new(Shared {
         ready: ArrayQueue::new(capacity),
-        overflow: Overflow::new(),
+        overflow: OverflowState::new(),
         closed: AtomicBool::new(false),
         inflight: AtomicUsize::new(0),
         senders: AtomicUsize::new(1),
@@ -290,50 +352,6 @@ pub fn channel<T: Backpressure>(capacity: usize) -> (ActorMailbox<T>, ActorInbox
         },
         ActorInbox { shared },
     )
-}
-
-/// Retain `message` in overflow.
-pub fn retain<T>(queue: &mut VecDeque<T>, message: T) -> Feedback {
-    queue.push_back(message);
-    Feedback::Backoff
-}
-
-/// Retain the message in overflow if it could not replace existing overflow work.
-pub fn replace_or_retain<T>(result: Result<(), T>, queue: &mut VecDeque<T>) -> Feedback {
-    match result {
-        Ok(()) => Feedback::Backoff,
-        Err(message) => retain(queue, message),
-    }
-}
-
-/// Drop the message if it could not replace existing overflow work.
-pub fn replace_or_drop<T>(result: Result<(), T>) -> Feedback {
-    match result {
-        Ok(()) => Feedback::Backoff,
-        Err(_) => Feedback::Dropped,
-    }
-}
-
-/// Replace the newest matching overflow message.
-pub fn replace_last<T>(
-    queue: &mut VecDeque<T>,
-    message: T,
-    is_stale: impl FnMut(&T) -> bool,
-) -> Result<(), T> {
-    if let Some(pending) = find_last_mut(queue, is_stale) {
-        *pending = message;
-        Ok(())
-    } else {
-        Err(message)
-    }
-}
-
-/// Find the newest matching overflow message.
-pub fn find_last_mut<T>(
-    queue: &mut VecDeque<T>,
-    mut is_match: impl FnMut(&T) -> bool,
-) -> Option<&mut T> {
-    queue.iter_mut().rev().find(|message| is_match(message))
 }
 
 #[cfg(test)]
@@ -351,21 +369,22 @@ mod tests {
     }
 
     impl Backpressure for Message {
-        fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback {
             match message {
-                Self::Update(value) => replace_or_retain(
-                    replace_last(queue, Self::Update(value), |pending| {
+                Self::Update(value) => {
+                    let result = overflow.replace_last(Self::Update(value), |pending| {
                         matches!(pending, Self::Update(_))
-                    }),
-                    queue,
-                ),
-                Self::Required(_) => retain(queue, message),
-                Self::Buffered(_) => retain(queue, message),
-                Self::Hint(value) => replace_or_drop(replace_last(
-                    queue,
-                    Self::Hint(value),
-                    |pending| matches!(pending, Self::Update(_)),
-                )),
+                    });
+                    overflow.replace_or_spill(result)
+                }
+                Self::Required(_) => overflow.spill(message),
+                Self::Buffered(_) => overflow.spill(message),
+                Self::Hint(value) => {
+                    let result = overflow.replace_last(Self::Hint(value), |pending| {
+                        matches!(pending, Self::Update(_))
+                    });
+                    overflow.replace_or_drop(result)
+                }
                 Self::Vote(_) => Feedback::Dropped,
             }
         }

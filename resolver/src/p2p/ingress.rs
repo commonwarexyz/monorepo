@@ -5,7 +5,6 @@ use commonware_utils::{
     vec::NonEmptyVec,
     Span,
 };
-use std::collections::VecDeque;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
@@ -65,13 +64,13 @@ fn merge_fetches<K: Eq, P: PartialEq>(
 }
 
 impl<K: Span, P: PublicKey> Backpressure for Message<K, P> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match message {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match message {
             Self::Fetch(requests) => {
                 if requests.is_empty() {
                     Ok(())
                 } else if let Some(Self::Fetch(existing)) =
-                    actor::find_last_mut(queue, |pending| matches!(pending, Self::Fetch(_)))
+                    overflow.find_last_mut(|pending| matches!(pending, Self::Fetch(_)))
                 {
                     merge_fetches(existing, requests);
                     Ok(())
@@ -79,22 +78,16 @@ impl<K: Span, P: PublicKey> Backpressure for Message<K, P> {
                     Err(Self::Fetch(requests))
                 }
             }
-            Self::Cancel { key } => {
-                actor::replace_last(queue, Self::Cancel { key: key.clone() }, |pending| {
-                    matches!(pending, Self::Cancel { key: pending } if pending == &key)
-                })
-            }
-            Self::Clear => {
-                queue.clear();
-                queue.push_back(Self::Clear);
-                Ok(())
-            }
-            Self::Retain { predicate } => actor::replace_last(
-                queue,
+            Self::Cancel { key } => overflow.replace_last(Self::Cancel { key: key.clone() }, |pending| {
+                matches!(pending, Self::Cancel { key: pending } if pending == &key)
+            }),
+            Self::Clear => return overflow.replace_all(Self::Clear),
+            Self::Retain { predicate } => overflow.replace_last(
                 Self::Retain { predicate },
                 |pending| matches!(pending, Self::Retain { .. }),
             ),
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 

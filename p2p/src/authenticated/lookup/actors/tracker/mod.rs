@@ -3,11 +3,11 @@
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_utils::channel::{
-    actor::{find_last_mut, retain, Backpressure},
+    actor::{Backpressure, Overflow as ActorOverflow},
     Feedback,
 };
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     net::IpAddr,
     num::NonZeroUsize,
     ops::Deref,
@@ -40,12 +40,12 @@ impl Deref for ListenableIps {
 }
 
 impl Backpressure for ListenableIps {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        if let Some(pending) = find_last_mut(queue, |_| true) {
+    fn handle(overflow: &mut ActorOverflow<'_, Self>, message: Self) -> Feedback {
+        if let Some(pending) = overflow.find_last_mut(|_| true) {
             *pending = message;
             Feedback::Backoff
         } else {
-            retain(queue, message)
+            overflow.spill(message)
         }
     }
 }

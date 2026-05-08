@@ -2,7 +2,7 @@ use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
 use commonware_utils::channel::{actor::{self, Backpressure}, Feedback};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,8 +54,8 @@ pub struct EncodedData {
 }
 
 impl Backpressure for EncodedData {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

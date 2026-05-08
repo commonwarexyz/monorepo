@@ -10,9 +10,7 @@ use commonware_utils::{
     },
     Span,
 };
-use std::{
-    collections::VecDeque,
-    fmt::{Debug, Display},
+use std::{    fmt::{Debug, Display},
     hash::{Hash, Hasher},
 };
 use tracing::error;
@@ -44,8 +42,8 @@ pub enum Message<D: Digest> {
 }
 
 impl<D: Digest> Backpressure for Message<D> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

@@ -1,7 +1,9 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::{actor::{self, Backpressure}, Feedback};
-use std::collections::VecDeque;
+use commonware_utils::channel::{
+    actor::{self, Backpressure},
+    Feedback,
+};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -17,20 +19,26 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
         match message {
-            Self::BitVec(bit_vec) => actor::replace_or_retain(actor::replace_last(queue, Self::BitVec(bit_vec), |pending| {
-                matches!(pending, Self::BitVec(_))
-            }), queue),
-            Self::Peers(peers) => actor::replace_or_retain(actor::replace_last(queue, Self::Peers(peers), |pending| {
-                matches!(pending, Self::Peers(_))
-            }), queue),
+            Self::BitVec(bit_vec) => {
+                let result = overflow.replace_last(Self::BitVec(bit_vec), |pending| {
+                    matches!(pending, Self::BitVec(_))
+                });
+                overflow.replace_or_spill(result)
+            }
+            Self::Peers(peers) => {
+                let result = overflow.replace_last(Self::Peers(peers), |pending| {
+                    matches!(pending, Self::Peers(_))
+                });
+                overflow.replace_or_spill(result)
+            }
             Self::Kill => {
-                if let Some(pending) = queue.back_mut() {
+                if let Some(pending) = overflow.find_last_mut(|_| true) {
                     *pending = Self::Kill;
                     Feedback::Backoff
                 } else {
-                    actor::retain(queue, Self::Kill)
+                    overflow.spill(Self::Kill)
                 }
             }
         }

@@ -1,6 +1,5 @@
 use crate::authenticated::Mailbox;
 use commonware_utils::channel::{actor::{self, Backpressure}, Feedback};
-use std::collections::VecDeque;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -10,8 +9,8 @@ pub enum Message {
 }
 
 impl Backpressure for Message {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::retain(queue, message)
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        overflow.spill(message)
     }
 }
 

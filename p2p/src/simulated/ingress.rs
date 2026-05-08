@@ -14,7 +14,7 @@ use commonware_utils::{
     NZUsize,
 };
 use rand_distr::Normal;
-use std::{collections::VecDeque, time::Duration};
+use std::time::Duration;
 
 pub enum Message<P: PublicKey, E: Clock> {
     Register {
@@ -97,10 +97,9 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match message {
-            Self::Track { id, peers } => actor::replace_last(
-                queue,
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match message {
+            Self::Track { id, peers } => overflow.replace_last(
                 Self::Track { id, peers },
                 |pending| matches!(pending, Self::Track { id: pending, .. } if *pending == id),
             ),
@@ -111,8 +110,7 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
                 result,
             } => {
                 let expected = public_key.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::LimitBandwidth {
                         public_key,
                         egress_cap,
@@ -131,8 +129,7 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
             } => {
                 let expected_sender = sender.clone();
                 let expected_receiver = receiver.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::AddLink {
                         sender,
                         receiver,
@@ -150,8 +147,7 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
             } => {
                 let expected_sender = sender.clone();
                 let expected_receiver = receiver.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::RemoveLink {
                         sender,
                         receiver,
@@ -163,14 +159,14 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
             Self::Block { from, to } => {
                 let expected_from = from.clone();
                 let expected_to = to.clone();
-                actor::replace_last(
-                    queue,
+                overflow.replace_last(
                     Self::Block { from, to },
                     |pending| matches!(pending, Self::Block { from, to } if from == &expected_from && to == &expected_to),
                 )
             }
             message => Err(message),
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 

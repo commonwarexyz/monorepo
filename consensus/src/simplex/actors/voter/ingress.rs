@@ -8,7 +8,6 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure}, Feedback};
-use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CertificateKind {
@@ -66,11 +65,11 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View) {
 }
 
 impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
-    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        actor::replace_or_retain(match &message {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+        let result = match &message {
             Self::Proposal(proposal) => {
                 let view = proposal.view();
-                actor::replace_last(queue, message, |pending| {
+                overflow.replace_last(message, |pending| {
                     matches!(
                         pending,
                         Self::Timeout(timeout_view, TimeoutReason::Inactivity)
@@ -80,7 +79,7 @@ impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
             }
             Self::Timeout(view, _) => {
                 let view = *view;
-                actor::replace_last(queue, message, |pending| {
+                overflow.replace_last(message, |pending| {
                     matches!(pending, Self::Timeout(pending_view, _) if *pending_view == view)
                 })
             }
@@ -88,7 +87,7 @@ impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
                 let key = certificate_key(certificate);
                 let mut message = Some(message);
                 if let Some(Self::Verified(pending_certificate, pending_resolved)) =
-                    actor::find_last_mut(queue, |pending| {
+                    overflow.find_last_mut(|pending| {
                         matches!(
                             pending,
                             Self::Verified(pending_certificate, _)
@@ -104,27 +103,28 @@ impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
                     Ok(())
                 } else {
                     let message = message.expect("message was not replaced");
-                    actor::replace_last(queue, message, |pending| {
+                    overflow.replace_last(message, |pending| {
                         matches!(pending, Self::Timeout(view, _) if *view <= key.1)
                     })
                 }
             }
             Self::RetryVote(vote) => {
                 let key = vote_key(vote);
-                actor::replace_last(queue, message, |pending| {
+                overflow.replace_last(message, |pending| {
                     matches!(pending, Self::RetryVote(vote) if vote_key(vote) == key)
                 })
             }
             Self::RetryCertificate(certificate) => {
                 let key = certificate_key(certificate);
-                actor::replace_last(queue, message, |pending| {
+                overflow.replace_last(message, |pending| {
                     matches!(
                         pending,
                         Self::RetryCertificate(certificate) if certificate_key(certificate) == key
                     )
                 })
             }
-        }, queue)
+        };
+        overflow.replace_or_spill(result)
     }
 }
 
