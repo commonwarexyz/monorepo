@@ -2,17 +2,6 @@ name: Benchmark
 
 on:
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Generate synthetic benchmark output instead of running cargo bench"
-        required: false
-        default: true
-        type: boolean
-      publish:
-        description: "Publish results to the benchmarks repository"
-        required: false
-        default: false
-        type: boolean
   schedule:
     - cron: '0 10 * * *' # Run at 10:00 UTC every day
 
@@ -30,7 +19,6 @@ jobs:
           fetch-depth: 1
 
       - name: Exit early if no new commits
-        if: github.event_name == 'schedule'
         id: check-commits
         run: |
           count=$(git log --oneline --since '24 hours ago' | wc -l)
@@ -73,12 +61,10 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Compile benchmarks
-        if: github.event_name == 'schedule' || !inputs.dry_run || inputs.publish
         env:
           RUSTFLAGS: "--cfg full_bench"
         run: cargo bench ${{ matrix.cargo_flags }} --benches -p ${{ matrix.package }} --no-run
       - name: Run benchmarks
-        if: github.event_name == 'schedule' || !inputs.dry_run || inputs.publish
         env:
           RUSTFLAGS: "--cfg full_bench"
         run: |
@@ -86,11 +72,6 @@ jobs:
             --benches -p ${{ matrix.package }} \
             -- --output-format bencher \
             | tee "${{ matrix.benchmark_name }}.txt"
-      - name: Generate dry-run benchmark result
-        if: github.event_name == 'workflow_dispatch' && inputs.dry_run && !inputs.publish
-        run: |
-          output="${{ matrix.benchmark_name }}.txt"
-          printf 'test dry_run::mechanics ... bench:           1 ns/iter (+/- 0)\n' | tee "$output"
       - name: Upload benchmark result
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -125,13 +106,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: benchmark-${{ matrix.benchmark_name }}
-      - name: Validate benchmark result
-        run: |
-          output="${{ matrix.benchmark_name }}.txt"
-          test -s "$output"
-          grep -Eq '^test .+ \.\.\. bench:' "$output"
       - name: Publish benchmark result
-        if: github.event_name == 'schedule' || inputs.publish
         uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: ${{ matrix.benchmark_name }}
