@@ -1,0 +1,37 @@
+[package]
+name = "commonware-actor"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Send actor messages through bounded mailboxes with explicit backpressure."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/actor"
+documentation = "https://docs.rs/commonware-actor"
+
+[lints]
+workspace = true
+
+[dependencies]
+cfg-if.workspace = true
+commonware-macros.workspace = true
+crossbeam-queue.workspace = true
+futures.workspace = true
+loom = { workspace = true, optional = true }
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[features]
+loom = ["dep:loom"]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "mailbox"
+harness = false
+path = "src/benches/bench.rs"

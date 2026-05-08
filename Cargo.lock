@@ -1005,6 +1005,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-actor"
+version = "2026.4.0"
+dependencies = [
+ "cfg-if",
+ "commonware-macros",
+ "criterion",
+ "crossbeam-queue",
+ "futures",
+ "loom",
+ "parking_lot",
+ "tokio",
+]
+
+[[package]]
 name = "commonware-bridge"
 version = "2026.4.0"
 dependencies = [
