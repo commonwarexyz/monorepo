@@ -201,22 +201,6 @@ pub enum ServeError<F: Family, D: Digest> {
     },
 }
 
-fn state_for_matching_witness<F: Family, Op, D: Digest>(
-    requested: Target<F, D>,
-    witness_target: Target<F, D>,
-    state: State<F, Op, D>,
-) -> Result<State<F, Op, D>, ServeError<F, D>> {
-    // Compact DBs can only serve their current witness, so the resolver rejects stale requests
-    // before returning that witness-backed state.
-    if requested.root != witness_target.root || requested.leaf_count != witness_target.leaf_count {
-        return Err(ServeError::StaleTarget {
-            requested,
-            current: witness_target,
-        });
-    }
-    Ok(state)
-}
-
 /// Trait for compact sync fetches from a source database.
 #[allow(clippy::type_complexity)]
 pub trait Resolver: Send + Sync + Clone + 'static {
@@ -684,9 +668,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let (witness_target, state) =
-                    self.current_witness_state().map_err(ServeError::Database)?;
-                state_for_matching_witness(target, witness_target, state)
+                self.compact_state(target)
             }
         }
 
@@ -709,9 +691,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                let (witness_target, state) =
-                    db.current_witness_state().map_err(ServeError::Database)?;
-                state_for_matching_witness(target, witness_target, state)
+                db.compact_state(target)
             }
         }
 
@@ -735,9 +715,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                let (witness_target, state) =
-                    db.current_witness_state().map_err(ServeError::Database)?;
-                state_for_matching_witness(target, witness_target, state)
+                db.compact_state(target)
             }
         }
     };
@@ -766,9 +744,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let (witness_target, state) =
-                    self.current_witness_state().map_err(ServeError::Database)?;
-                state_for_matching_witness(target, witness_target, state)
+                self.compact_state(target)
             }
         }
 
@@ -792,9 +768,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                let (witness_target, state) =
-                    db.current_witness_state().map_err(ServeError::Database)?;
-                state_for_matching_witness(target, witness_target, state)
+                db.compact_state(target)
             }
         }
 
@@ -819,9 +793,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                let (witness_target, state) =
-                    db.current_witness_state().map_err(ServeError::Database)?;
-                state_for_matching_witness(target, witness_target, state)
+                db.compact_state(target)
             }
         }
     };

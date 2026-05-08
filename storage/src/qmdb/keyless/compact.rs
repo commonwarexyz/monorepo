@@ -36,7 +36,7 @@ use crate::{
     },
     Context,
 };
-use commonware_codec::{Encode, EncodeShared, Read};
+use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use std::sync::{Arc, Weak};
@@ -75,13 +75,8 @@ where
     witness: witness::Cache<F, H::Digest>,
 }
 
-type WitnessStateResult<F, V, D> = Result<
-    (
-        compact_sync::Target<F, D>,
-        compact_sync::State<F, Operation<F, V>, D>,
-    ),
-    Error<F>,
->;
+type CompactStateResult<F, V, D> =
+    Result<compact_sync::State<F, Operation<F, V>, D>, compact_sync::ServeError<F, D>>;
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
@@ -394,17 +389,47 @@ where
         self.witness.with(ServeState::target)
     }
 
-    /// Return the compact-sync state and target derived from one witness snapshot.
-    pub(crate) fn current_witness_state(&self) -> WitnessStateResult<F, V, H::Digest>
+    /// Return the compact-sync state for `target`, or a stale-target error if the source's
+    /// current witness no longer matches.
+    ///
+    /// The witness lock is held only long enough to verify the requested target and snapshot
+    /// the bytes, proof, and pinned nodes needed for [`compact_sync::State`]. Decoding the
+    /// commit operation runs outside the lock so concurrent readers do not contend on it.
+    pub(crate) fn compact_state(
+        &self,
+        target: compact_sync::Target<F, H::Digest>,
+    ) -> CompactStateResult<F, V, H::Digest>
     where
         Operation<F, V>: Read<Cfg = C>,
     {
-        self.witness.with(|witness| {
-            let target = witness.target();
-            let state = witness.to_state(&self.commit_codec_config, |op| {
-                matches!(op, Operation::Commit(_, _))
+        let (op_bytes, last_commit_proof, pinned_nodes, leaf_count) = self.witness.with(|w| {
+            if target.root != w.root || target.leaf_count != w.leaf_count {
+                return Err(compact_sync::ServeError::StaleTarget {
+                    requested: target.clone(),
+                    current: w.target(),
+                });
+            }
+            Ok((
+                w.last_commit_op_bytes.clone(),
+                w.last_commit_proof.clone(),
+                w.pinned_nodes.clone(),
+                w.leaf_count,
+            ))
+        })?;
+        let op = Operation::<F, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
+            .map_err(|_| {
+                compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
-            Ok((target, state))
+        if !matches!(&op, Operation::Commit(_, _)) {
+            return Err(compact_sync::ServeError::Database(Error::DataCorrupted(
+                "last operation was not a commit",
+            )));
+        }
+        Ok(compact_sync::State {
+            leaf_count,
+            pinned_nodes,
+            last_commit_op: op,
+            last_commit_proof,
         })
     }
 
@@ -1149,12 +1174,15 @@ mod tests {
     fn test_witness_state_reports_cached_commit_corruption() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-serve-corruption").await;
+            let target = db.current_target();
             db.witness
                 .mutate(|witness| witness.last_commit_op_bytes.clear());
 
             assert!(matches!(
-                db.current_witness_state(),
-                Err(Error::DataCorrupted("invalid commit operation"))
+                db.compact_state(target),
+                Err(compact_sync::ServeError::Database(Error::DataCorrupted(
+                    "invalid commit operation"
+                )))
             ));
 
             db.destroy().await.unwrap();

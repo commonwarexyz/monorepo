@@ -25,11 +25,7 @@
 use crate::{
     merkle::{compact, Family, Location, Proof},
     metadata::Metadata,
-    qmdb::{
-        self,
-        sync::compact::{State, Target},
-        Error,
-    },
+    qmdb::{self, sync::compact::Target, Error},
     Context,
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize, Read};
@@ -107,29 +103,6 @@ impl<F: Family, D: Digest> ServeState<F, D> {
             root: self.root,
             leaf_count: self.leaf_count,
         }
-    }
-
-    /// Convert the witness into compact-sync protocol state.
-    pub(crate) fn to_state<Op, C>(
-        &self,
-        codec_config: &C,
-        is_commit: impl FnOnce(&Op) -> bool,
-    ) -> Result<State<F, Op, D>, Error<F>>
-    where
-        Op: Read<Cfg = C>,
-    {
-        let op = Op::decode_cfg(self.last_commit_op_bytes.as_ref(), codec_config)
-            .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-        if !is_commit(&op) {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        }
-
-        Ok(State {
-            leaf_count: self.leaf_count,
-            pinned_nodes: self.pinned_nodes.clone(),
-            last_commit_op: op,
-            last_commit_proof: self.last_commit_proof.clone(),
-        })
     }
 }
 
