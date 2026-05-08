@@ -106,9 +106,7 @@ pub trait MessagePolicy: Sized {
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
     /// overflow retained behind the ready queue.
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::retain(queue, message)
-    }
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self>;
 }
 
 struct Overflow<T> {

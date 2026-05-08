@@ -5,12 +5,13 @@ use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{ActorMailbox, MessagePolicy},
+        actor::{ActorMailbox, Backpressure, MessagePolicy},
         oneshot,
     },
     Span,
 };
 use std::{
+    collections::VecDeque,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
 };
@@ -42,7 +43,11 @@ pub enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> MessagePolicy for Message<D> {}
+impl<D: Digest> MessagePolicy for Message<D> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
+    }
+}
 
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///

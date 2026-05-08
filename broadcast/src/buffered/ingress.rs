@@ -3,9 +3,10 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::{
-    actor::{ActorMailbox, MessagePolicy},
+    actor::{ActorMailbox, Backpressure, MessagePolicy},
     oneshot,
 };
+use std::collections::VecDeque;
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: PublicKey, M: Digestible> {
@@ -35,7 +36,11 @@ pub enum Message<P: PublicKey, M: Digestible> {
     },
 }
 
-impl<P: PublicKey, M: Digestible + Codec> MessagePolicy for Message<P, M> {}
+impl<P: PublicKey, M: Digestible + Codec> MessagePolicy for Message<P, M> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
+    }
+}
 
 /// Ingress mailbox for [super::Engine].
 #[derive(Clone)]

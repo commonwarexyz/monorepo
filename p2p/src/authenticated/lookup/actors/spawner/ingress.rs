@@ -2,7 +2,8 @@ use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::actor::{Enqueue, MessagePolicy};
+use commonware_utils::channel::actor::{Backpressure, Enqueue, MessagePolicy};
+use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
@@ -17,7 +18,11 @@ pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
     },
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> MessagePolicy for Message<Si, St, P> {}
+impl<Si: Sink, St: Stream, P: PublicKey> MessagePolicy for Message<Si, St, P> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
+    }
+}
 
 impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.

@@ -3,9 +3,10 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::{
-    actor::{ActorMailbox, MessagePolicy},
+    actor::{ActorMailbox, Backpressure, MessagePolicy},
     oneshot,
 };
+use std::collections::VecDeque;
 
 /// Messages that can be sent to a [Mailbox].
 pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
@@ -24,7 +25,11 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
     },
 }
 
-impl<P: PublicKey, R: Committable + Digestible + Codec> MessagePolicy for Message<P, R> {}
+impl<P: PublicKey, R: Committable + Digestible + Codec> MessagePolicy for Message<P, R> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
+    }
+}
 
 /// A mailbox that can be used to send and receive [Message]s.
 #[derive(Clone)]

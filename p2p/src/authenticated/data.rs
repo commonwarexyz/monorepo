@@ -1,8 +1,8 @@
 use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
-use commonware_utils::channel::actor::MessagePolicy;
-use std::collections::HashMap;
+use commonware_utils::channel::actor::{Backpressure, MessagePolicy};
+use std::collections::{HashMap, VecDeque};
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +53,11 @@ pub struct EncodedData {
     pub payload: IoBufs,
 }
 
-impl MessagePolicy for EncodedData {}
+impl MessagePolicy for EncodedData {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
+    }
+}
 
 impl EncodedData {
     /// Assert the outbound message's `channel` is registered.

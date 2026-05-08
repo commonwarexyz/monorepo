@@ -9,9 +9,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::{
-    actor::{ActorMailbox, Enqueue, MessagePolicy},
+    actor::{ActorMailbox, Backpressure, Enqueue, MessagePolicy},
     oneshot,
 };
+use std::collections::VecDeque;
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
@@ -32,7 +33,11 @@ pub enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> MessagePolicy for Message<D> {}
+impl<D: Digest> MessagePolicy for Message<D> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        Backpressure::retain(queue, message)
+    }
+}
 
 /// Mailbox for the application.
 #[derive(Clone)]
