@@ -1,7 +1,4 @@
-use commonware_actor::{
-    mailbox::{self as actor, Policy as MailboxPolicy},
-    Feedback,
-};
+use commonware_actor::{mailbox, Feedback};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
@@ -49,8 +46,8 @@ impl Message {
     }
 }
 
-impl MailboxPolicy for Message {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> bool {
+impl mailbox::Policy for Message {
+    fn handle(overflow: &mut mailbox::Overflow<'_, Self>, message: Self) -> bool {
         match message.policy {
             Policy::Drop => false,
             Policy::Spill => overflow.spill(message),
@@ -69,7 +66,7 @@ fn bench_enqueue_ready(c: &mut Criterion) {
 
     group.bench_function(format!("capacity={CAPACITY}"), |b| {
         b.iter_batched(
-            || actor::new::<Message>(NZUsize!(CAPACITY)),
+            || mailbox::new::<Message>(NZUsize!(CAPACITY)),
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow()));
@@ -91,7 +88,7 @@ fn bench_try_recv_ready(c: &mut Criterion) {
     group.bench_function(format!("capacity={CAPACITY}"), |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::new::<Message>(NZUsize!(CAPACITY));
+                let (sender, receiver) = mailbox::new::<Message>(NZUsize!(CAPACITY));
                 for _ in 0..MESSAGES {
                     assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
                 }
@@ -115,7 +112,7 @@ fn bench_round_trip_ready(c: &mut Criterion) {
 
     group.bench_function(format!("capacity={CAPACITY}"), |b| {
         b.iter_batched(
-            || actor::new::<Message>(NZUsize!(CAPACITY)),
+            || mailbox::new::<Message>(NZUsize!(CAPACITY)),
             |(sender, mut receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow()));
@@ -137,7 +134,7 @@ fn bench_recv_waiting(c: &mut Criterion) {
 
     group.bench_function("capacity=1", |b| {
         b.iter_batched(
-            || actor::new::<Message>(NZUsize!(1)),
+            || mailbox::new::<Message>(NZUsize!(1)),
             |(sender, mut receiver)| {
                 futures::executor::block_on(async {
                     for _ in 0..MESSAGES {
@@ -171,7 +168,7 @@ fn bench_overflow_drop(c: &mut Criterion) {
     group.bench_function("capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::new::<Message>(NZUsize!(1));
+                let (sender, receiver) = mailbox::new::<Message>(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
                 (sender, receiver)
             },
@@ -196,7 +193,7 @@ fn bench_overflow_spill(c: &mut Criterion) {
     group.bench_function("capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::new::<Message>(NZUsize!(1));
+                let (sender, receiver) = mailbox::new::<Message>(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
                 (sender, receiver)
             },
@@ -214,8 +211,8 @@ fn bench_overflow_spill(c: &mut Criterion) {
     group.finish();
 }
 
-fn replace_queue(newest: bool) -> (actor::Sender<Message>, actor::Receiver<Message>) {
-    let (sender, receiver) = actor::new::<Message>(NZUsize!(REPLACE_CAPACITY));
+fn replace_queue(newest: bool) -> (mailbox::Sender<Message>, mailbox::Receiver<Message>) {
+    let (sender, receiver) = mailbox::new::<Message>(NZUsize!(REPLACE_CAPACITY));
 
     for _ in 0..REPLACE_CAPACITY {
         assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
@@ -264,7 +261,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
 
     group.bench_function(format!("producers={PRODUCERS} capacity={total}"), |b| {
         b.iter(|| {
-            let (sender, _receiver) = actor::new::<Message>(NZUsize!(total));
+            let (sender, _receiver) = mailbox::new::<Message>(NZUsize!(total));
 
             std::thread::scope(|scope| {
                 for _ in 0..PRODUCERS {
