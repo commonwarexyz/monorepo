@@ -319,7 +319,10 @@ pub struct Sender<T: Policy> {
 
 impl<T: Policy> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        Self::from_state(&self.state)
+        self.state.senders.fetch_add(1, Ordering::Relaxed);
+        Self {
+            state: self.state.clone(),
+        }
     }
 }
 
@@ -344,13 +347,6 @@ impl<T: Policy> fmt::Debug for Sender<T> {
 }
 
 impl<T: Policy> Sender<T> {
-    fn from_state(state: &Arc<State<T>>) -> Self {
-        state.senders.fetch_add(1, Ordering::Relaxed);
-        Self {
-            state: state.clone(),
-        }
-    }
-
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Feedback {
@@ -460,10 +456,15 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         ready: ReadyQueue::new(capacity.get()),
         overflow: OverflowState::new(),
         closed: AtomicBool::new(false),
-        senders: AtomicUsize::new(0),
+        senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
     });
-    (Sender::from_state(&state), Receiver { state })
+    (
+        Sender {
+            state: state.clone(),
+        },
+        Receiver { state },
+    )
 }
 
 #[cfg(all(test, not(feature = "loom")))]
