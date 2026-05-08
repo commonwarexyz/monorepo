@@ -1568,7 +1568,7 @@ mod tests {
                 &root,
             ));
 
-            let mut tampered = proof.clone();
+            let mut tampered = proof;
             assert!(!tampered.proof.digests.is_empty());
             tampered.proof.digests[0] = hasher.digest(b"fake generic sibling");
             assert!(!tampered.verify(

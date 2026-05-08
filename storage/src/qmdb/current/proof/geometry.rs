@@ -22,7 +22,10 @@ use core::ops::Range;
 
 /// A contiguous segment of ops-tree peaks, along with the first leaf covered by the segment.
 pub(super) struct PeakSegment<F: Family> {
+    /// Ops-tree peaks in oldest-to-youngest order, stored as `(position, height)`.
     peaks: Vec<(Position<F>, u32)>,
+
+    /// Leaf index covered by the first peak in `peaks`.
     start_leaf: u64,
 }
 
@@ -35,10 +38,15 @@ impl<F: Family> PeakSegment<F> {
         self.start_leaf
     }
 
+    /// Return the ops-tree positions in this segment.
     pub(super) fn positions(&self) -> impl Iterator<Item = Position<F>> + '_ {
         self.peaks.iter().map(|&(pos, _height)| pos)
     }
 
+    /// Pair each peak height with the corresponding digest from `digests`.
+    ///
+    /// The caller is responsible for passing digests in the same order as this segment's peaks.
+    /// Extra digests are ignored and missing digests truncate the iterator.
     pub(super) fn heights_with_digests<'a, D: Copy>(
         &'a self,
         digests: &'a [D],
@@ -49,6 +57,7 @@ impl<F: Family> PeakSegment<F> {
             .zip(digests.iter().copied())
     }
 
+    /// Return each peak's starting leaf and height.
     fn peak_starts_with_heights(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
         let mut leaf_cursor = self.start_leaf;
         self.peaks.iter().map(move |(_pos, height)| {
@@ -68,15 +77,34 @@ fn covered_leaves<F: Family>(peaks: &[(Position<F>, u32)]) -> u64 {
 
 /// Grafting-aware geometry for building or verifying a current range proof.
 pub(super) struct RangeProofGeometry<F: Graftable> {
+    /// Total number of ops-tree leaves committed by the proof.
     leaves: Location<F>,
+
+    /// Requested operation range, in leaf locations.
     range: Range<Location<F>>,
+
+    /// Peaks fully before the first bitmap chunk touched by `range`.
     pure_prefix: PeakSegment<F>,
+
+    /// Prefix peaks that may share a bitmap chunk with `range`.
     prefix_boundary: PeakSegment<F>,
+
+    /// Peaks that intersect `range`.
     range_peaks: PeakSegment<F>,
+
+    /// Suffix peaks that may share a bitmap chunk with `range`.
     suffix_boundary: PeakSegment<F>,
+
+    /// Peaks fully after the last bitmap chunk touched by `range`.
     pure_suffix: PeakSegment<F>,
+
+    /// Number of inactive peaks hidden below the proof's historical size.
     inactive_peaks: usize,
+
+    /// Height of one complete bitmap chunk in the ops tree.
     grafting_height: u32,
+
+    /// Number of complete bitmap chunks committed by the grafted bitmap root.
     complete_chunks: u64,
 }
 
