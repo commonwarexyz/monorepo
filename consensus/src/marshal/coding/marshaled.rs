@@ -62,7 +62,7 @@
 //! and the proposer went permanently offline). In this case, `certify` will wait for local block
 //! reconstruction and may result in a nullification.
 //!
-//! For this reason, it should not be expected that every notarized payload will be certifiable due
+//! For this reason, it should not be expected that every certified payload will be finalizable due
 //! to the lack of an available block. Certification waits for local availability of the candidate
 //! proposal data and does not fetch a missing candidate block. During certification, once the
 //! candidate is locally available, its parent chain may be fetched because Simplex only verifies
@@ -364,7 +364,7 @@ where
                         Ok(block) => block,
                         Err(_) => {
                             debug!(
-                                reason = "failed to fetch block",
+                                reason = "block unavailable",
                                 "skipping verification"
                             );
                             return;
@@ -890,7 +890,8 @@ where
             None => {
                 // If we are not participating, there's no shard to verify; just accept the proposal.
                 //
-                // Later, when certifying, we will wait to receive the block from the network.
+                // Later, when certifying, we will wait for shard reconstruction
+                // to make the block available locally.
                 let (tx, rx) = oneshot::channel();
                 tx.send_lossy(true);
                 rx

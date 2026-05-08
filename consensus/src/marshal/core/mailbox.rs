@@ -199,6 +199,7 @@ pub struct Mailbox<S: Scheme, V: Variant> {
     sender: mpsc::Sender<Message<S, V>>,
 }
 
+/// Provider used by [`Mailbox::ancestor_stream`] to fetch missing certified parents.
 #[derive(Clone)]
 pub(crate) struct AncestryProvider<S: Scheme, V: Variant> {
     mailbox: Mailbox<S, V>,
@@ -304,8 +305,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
     ///
-    /// If `round` is provided, marshal also asks peers for the certified parent proposal at that
-    /// round.
+    /// If `round` is provided, marshal also asks peers for the certified proposal at that round.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     async fn subscribe_by_digest(

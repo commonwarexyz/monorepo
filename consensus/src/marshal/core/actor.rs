@@ -1087,6 +1087,9 @@ where
                 }
 
                 let finalization = self.cache.get_finalization_for(digest).await;
+                // Round-bound proposal-parent fetches are `Request::Notarized`
+                // deliveries and are handled below. In this block-keyed path,
+                // `Finalized` means the fetch was triggered by a finalization.
                 let should_finalize = contexts.iter().any(|context| {
                     matches!(
                         context,
@@ -1514,7 +1517,7 @@ where
         self.last_proposed_block.take().map(|(_, _, block)| block)
     }
 
-    /// Add a notarized block to the prunable archive.
+    /// Add a certified block to the prunable archive.
     async fn cache_block(
         &mut self,
         round: Round,

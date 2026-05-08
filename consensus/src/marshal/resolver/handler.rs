@@ -177,7 +177,7 @@ impl<D: Digest> Request<D> {
 /// `Request` is the default subscriber: the resolved response is valid for the
 /// peer-visible request, but there is no extra local storage context. `Block`
 /// records why marshal asked for a block so delivery can notify local waiters,
-/// populate the verified ancestry cache, or finalize repaired data without
+/// populate the certified ancestry cache, or finalize repaired data without
 /// exposing that context to peers.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ResolverSubscriber<D: Digest> {
@@ -217,8 +217,8 @@ impl<D: Digest> ResolverSubscriber<D> {
     /// Unrelated subjects are retained. Related subjects are pruned if they are
     /// "less than or equal to" this subscriber's floor. This keeps pending
     /// candidate waits out of the resolver entirely, drops height-bound block
-    /// requests once the processed height passes them, and drops round-bound
-    /// certified-parent fetches once the processed round passes them.
+    /// requests once the processed height reaches them, and drops round-bound
+    /// certified-parent fetches once the processed round reaches them.
     pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
         let cloned = *self;
         move |s| match (&cloned, s) {

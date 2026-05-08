@@ -47,7 +47,7 @@
 //! available to the honest parties if [`CertifiableAutomaton::certify`] fails after a notarization is
 //! formed.
 //!
-//! For this reason, it should not be expected that every notarized payload will be certifiable due
+//! For this reason, it should not be expected that every certified payload will be finalizable due
 //! to the lack of an available block. Certification waits for local availability of the candidate
 //! proposal data and does not fetch a missing candidate block. During certification, once the
 //! candidate is locally available, its parent chain may be fetched because Simplex only verifies
@@ -561,7 +561,7 @@ where
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
                 //
-                // This is a critical step - the notarize quorum is guaranteed to have at least
+                // This is a critical step - the certifying quorum is guaranteed to have at least
                 // f+1 honest validators who will verify against this context, preventing a Byzantine
                 // proposer from embedding a malicious context. The other f honest validators who did
                 // not vote will later use the block-embedded context to help finalize if Byzantine
