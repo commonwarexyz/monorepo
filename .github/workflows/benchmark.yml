@@ -28,32 +28,295 @@ jobs:
           fi
 
   benchmark:
-    name: Run
+    name: Run (${{ matrix.artifact_name }})
     needs: has-new-commit # Only run if there are new commits
     runs-on: ubuntu-latest-8
     timeout-minutes: 720
     strategy:
       fail-fast: false
+      max-parallel: 8
       matrix:
         include:
           - package: commonware-cryptography
             cargo_flags: ""
+            bench_selector: "--benches"
+            bench_filter: ""
             benchmark_name: "commonware-cryptography"
-          - package: commonware-storage
-            cargo_flags: "--features test-traits"
-            benchmark_name: "commonware-storage"
-          - package: commonware-storage
-            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
-            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-cryptography"
+            artifact_name: "commonware-cryptography-all"
           - package: commonware-coding
             cargo_flags: ""
+            bench_selector: "--benches"
+            bench_filter: ""
             benchmark_name: "commonware-coding"
+            artifact_prefix: "commonware-coding"
+            artifact_name: "commonware-coding-all"
           - package: commonware-formatting
             cargo_flags: ""
+            bench_selector: "--benches"
+            bench_filter: ""
             benchmark_name: "commonware-formatting"
+            artifact_prefix: "commonware-formatting"
+            artifact_name: "commonware-formatting-all"
           - package: commonware-utils
             cargo_flags: ""
+            bench_selector: "--benches"
+            bench_filter: ""
             benchmark_name: "commonware-utils"
+            artifact_prefix: "commonware-utils"
+            artifact_name: "commonware-utils-all"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench archive"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-archive"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench bmt"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-bmt"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench freezer"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-freezer"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench index"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-index"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench journal"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-journal"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench merkle"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-merkle"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench metadata"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-metadata"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench ordinal"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-ordinal"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench rmap"
+            bench_filter: ""
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-rmap"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::chained_growth"
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-chained-growth"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::generate"
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-generate"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=100000 operations=1000000$"
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-init-100k-1m"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=100000 operations=10000000$"
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-init-100k-10m"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=1000000 operations=1000000$"
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-init-1m-1m"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=1000000 operations=10000000$"
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-init-1m-10m"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::merkleize/.*keys=10000 "
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-merkleize-10k"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::merkleize/.*keys=100000 "
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-merkleize-100k"
+          - package: commonware-storage
+            cargo_flags: "--features test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::merkleize/.*keys=1000000 "
+            benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+            artifact_name: "commonware-storage-standard-qmdb-merkleize-1m"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench archive"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-archive"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench bmt"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-bmt"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench freezer"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-freezer"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench index"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-index"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench journal"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-journal"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench merkle"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-merkle"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench metadata"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-metadata"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench ordinal"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-ordinal"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench rmap"
+            bench_filter: ""
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-rmap"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::chained_growth"
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-chained-growth"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::generate"
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-generate"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=100000 operations=1000000$"
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-init-100k-1m"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=100000 operations=10000000$"
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-init-100k-10m"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=1000000 operations=1000000$"
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-init-1m-1m"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::init/.*elements=1000000 operations=10000000$"
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-init-1m-10m"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::merkleize/.*keys=10000 "
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-merkleize-10k"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::merkleize/.*keys=100000 "
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-merkleize-100k"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
+            bench_selector: "--bench qmdb"
+            bench_filter: "qmdb::merkleize/.*keys=1000000 "
+            benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+            artifact_name: "commonware-storage-features-qmdb-merkleize-1m"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Install nightly Rust toolchain
@@ -63,24 +326,98 @@ jobs:
       - name: Compile benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
-        run: cargo bench ${{ matrix.cargo_flags }} --benches -p ${{ matrix.package }} --no-run
+        run: cargo bench ${{ matrix.cargo_flags }} ${{ matrix.bench_selector }} -p ${{ matrix.package }} --no-run
       - name: Run benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
         run: |
-          cargo bench ${{ matrix.cargo_flags }} \
-            --benches -p ${{ matrix.package }} \
-            -- --output-format bencher \
-            | tee "${{ matrix.benchmark_name }}.txt"
+          set -o pipefail
+          output="${{ matrix.artifact_name }}.txt"
+          metrics="${{ matrix.artifact_name }}-metrics.txt"
+          time_log="${{ matrix.artifact_name }}-time.txt"
+          filter="${{ matrix.bench_filter }}"
+          args=(--output-format bencher)
+          if [ -n "$filter" ]; then
+            args=("$filter" "${args[@]}")
+          fi
+
+          record_metrics() {
+            {
+              echo "benchmark_resource_sample timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              echo "system_memory:"
+              free -h || true
+              echo "cgroup_memory:"
+              for file in \
+                /sys/fs/cgroup/memory.current \
+                /sys/fs/cgroup/memory.peak \
+                /sys/fs/cgroup/memory.max \
+                /sys/fs/cgroup/memory.swap.current \
+                /sys/fs/cgroup/memory.swap.peak \
+                /sys/fs/cgroup/memory.swap.max \
+                /sys/fs/cgroup/memory.events \
+                /sys/fs/cgroup/memory.swap.events; do
+                if [ -r "$file" ]; then
+                  echo "$file:"
+                  cat "$file"
+                fi
+              done
+              echo "memory_pressure:"
+              if [ -r /proc/pressure/memory ]; then
+                cat /proc/pressure/memory
+              fi
+              echo "disk:"
+              df -h / /mnt /mnt/target 2>/dev/null || true
+              echo "top_rss_processes:"
+              ps -eo pid,ppid,comm,rss,vsz,%mem,%cpu --sort=-rss | head -n 20 || true
+              echo
+            } | tee -a "$metrics"
+          }
+
+          record_metrics
+          (
+            while true; do
+              sleep 60
+              record_metrics
+            done
+          ) &
+          sampler_pid=$!
+          trap 'kill "$sampler_pid" 2>/dev/null || true' EXIT
+
+          set +e
+          /usr/bin/time -v cargo bench ${{ matrix.cargo_flags }} \
+            ${{ matrix.bench_selector }} -p ${{ matrix.package }} \
+            -- "${args[@]}" \
+            2> >(tee "$time_log" >&2) \
+            | tee "$output"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          kill "$sampler_pid" 2>/dev/null || true
+          record_metrics
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          test -s "$output"
+          grep -Eq '^test .+ \.\.\. bench:' "$output"
       - name: Upload benchmark result
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: benchmark-${{ matrix.benchmark_name }}
-          path: "${{ matrix.benchmark_name }}.txt"
-          if-no-files-found: error
+          name: benchmark-${{ matrix.artifact_name }}
+          path: "${{ matrix.artifact_name }}.txt"
+          if-no-files-found: warn
+      - name: Upload benchmark diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-diagnostics-${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}-metrics.txt
+            ${{ matrix.artifact_name }}-time.txt
+          if-no-files-found: warn
 
   publish:
-    name: Publish
+    name: Publish (${{ matrix.benchmark_name }})
     needs: benchmark
     if: ${{ always() && needs.benchmark.result != 'skipped' }}
     runs-on: ubuntu-latest
@@ -90,30 +427,40 @@ jobs:
       max-parallel: 1 # Push benchmark results one package at a time.
       matrix:
         include:
-          - package: commonware-cryptography
-            benchmark_name: "commonware-cryptography"
-          - package: commonware-storage
-            benchmark_name: "commonware-storage"
-          - package: commonware-storage
-            benchmark_name: "commonware-storage --features"
-          - package: commonware-coding
-            benchmark_name: "commonware-coding"
-          - package: commonware-formatting
-            benchmark_name: "commonware-formatting"
-          - package: commonware-utils
-            benchmark_name: "commonware-utils"
+          - benchmark_name: "commonware-cryptography"
+            artifact_prefix: "commonware-cryptography"
+          - benchmark_name: "commonware-storage"
+            artifact_prefix: "commonware-storage-standard"
+          - benchmark_name: "commonware-storage --features"
+            artifact_prefix: "commonware-storage-features"
+          - benchmark_name: "commonware-coding"
+            artifact_prefix: "commonware-coding"
+          - benchmark_name: "commonware-formatting"
+            artifact_prefix: "commonware-formatting"
+          - benchmark_name: "commonware-utils"
+            artifact_prefix: "commonware-utils"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Download benchmark result
         continue-on-error: ${{ needs.benchmark.result != 'success' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: benchmark-${{ matrix.benchmark_name }}
+          pattern: benchmark-${{ matrix.artifact_prefix }}-*
+          path: benchmark-results
+          merge-multiple: true
       - name: Validate benchmark result
         id: result
         run: |
           output="${{ matrix.benchmark_name }}.txt"
-          if [ ! -f "$output" ]; then
+          mkdir -p benchmark-results
+          found=false
+          : > "$output"
+          while IFS= read -r -d '' file; do
+            found=true
+            cat "$file" >> "$output"
+            printf '\n' >> "$output"
+          done < <(find benchmark-results -type f -name '*.txt' -print0 | sort -z)
+          if [ "$found" = false ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "No benchmark result found for ${{ matrix.benchmark_name }}; skipping publish"
             exit 0
