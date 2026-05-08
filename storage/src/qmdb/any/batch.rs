@@ -253,7 +253,7 @@ pub struct MerkleizedBatch<
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
     /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
-    /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
+    /// `ancestor_diffs[i]`. A batch is applied when `ancestor_diff_ends[i] <= db_size`.
     pub(crate) ancestor_diff_ends: Vec<u64>,
 }
 
@@ -1677,8 +1677,8 @@ where
         let _timer = self.metrics.operations.apply_batch_timer();
         self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
-        // Valid db_size values: batch.db_size (nothing committed), batch.base_size
-        // (all ancestors committed), or any ancestor_diff_ends[i] (partial commit).
+        // Valid db_size values: batch.db_size (nothing applied), batch.base_size
+        // (all ancestors applied), or any ancestor_diff_ends[i] (partial apply).
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
             || batch.ancestor_diff_ends.contains(&db_size);
@@ -2245,7 +2245,7 @@ mod tests {
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
 
-            let committed = db
+            let applied = db
                 .new_batch()
                 .write(key_update, Some(Sha256::hash(b"committed-update")))
                 .write(key_recreate_then_delete, None)
@@ -2257,7 +2257,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let uncommitted = committed
+            let pending = applied
                 .new_batch::<Sha256>()
                 .write(key_update, Some(Sha256::hash(b"uncommitted-update")))
                 .write(
@@ -2274,7 +2274,7 @@ mod tests {
                 .unwrap();
 
             let final_update = Sha256::hash(b"child-update");
-            let child = uncommitted
+            let child = pending
                 .new_batch::<Sha256>()
                 .write(key_update, Some(final_update))
                 .write(key_recreate_then_delete, None)
@@ -2283,9 +2283,9 @@ mod tests {
                 .unwrap();
             let expected_root = child.root();
 
-            // Apply only the first ancestor. Applying the child must combine committed
-            // fixups from that ancestor with the still-uncommitted parent diff.
-            db.apply_batch(committed).await.unwrap();
+            // Apply only the first ancestor. Applying the child must combine applied
+            // fixups from that ancestor with the still-pending parent diff.
+            db.apply_batch(applied).await.unwrap();
             db.apply_batch(child).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
