@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_marshaled_certify_waits_for_digest_ancestor_without_fetch() {
+    fn test_coding_marshaled_fetches_digest_ancestor_above_tip() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -431,23 +431,14 @@ mod tests {
                 300,
                 NUM_VALIDATORS as u16,
             );
+            let round1 = Round::new(Epoch::zero(), View::new(1));
+            let round2 = Round::new(Epoch::zero(), View::new(2));
+            let round3 = Round::new(Epoch::zero(), View::new(3));
 
             for (round, parent_view, block) in [
-                (
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    block1.clone(),
-                ),
-                (
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block2.clone(),
-                ),
-                (
-                    Round::new(Epoch::zero(), View::new(3)),
-                    View::new(2),
-                    block3.clone(),
-                ),
+                (round1, View::zero(), block1.clone()),
+                (round2, View::new(1), block2.clone()),
+                (round3, View::new(2), block3.clone()),
             ] {
                 CodingHarness::propose(&mut peer_handle, round, &block).await;
                 let notarization = CodingHarness::make_notarization(
@@ -464,6 +455,9 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             setup_network_links(&mut oracle, &participants[..2], LINK).await;
 
+            let victim_mailbox = victim_setup.mailbox.clone();
+            assert!(victim_mailbox.verified(round3, block3.clone()).await);
+
             let app = AncestryVerifyingApp::<CodingB, S>::new(
                 genesis,
                 vec![Height::new(3), Height::new(2), Height::new(1)],
@@ -477,51 +471,22 @@ mod tests {
                 strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
-            let round = Round::new(Epoch::zero(), View::new(3));
             let commitment = CodingHarness::commitment(&block3);
             let _verify = marshaled.verify(block3.context(), commitment).await;
-            let certify = marshaled.certify(round, commitment).await;
-
-            select! {
-                result = certify => {
-                    panic!("coding certify should wait for local ancestry availability, got {result:?}");
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {},
-            }
+            let certify = marshaled.certify(round3, commitment).await;
+            assert!(
+                certify.await.expect("certify result missing"),
+                "coding certify should fetch certified ancestry by digest"
+            );
 
             assert!(
-                victim_setup
-                    .mailbox
-                    .get_block(&block1.digest())
-                    .await
-                    .is_none(),
-                "certify must not fetch missing ancestry by digest"
+                victim_mailbox.get_block(&block2.digest()).await.is_some(),
+                "coding certify should fetch the certified parent by digest"
             );
-
-            let finalization = CodingHarness::make_finalization(
-                Proposal {
-                    round,
-                    parent: View::new(2),
-                    payload: commitment,
-                },
-                &schemes,
-                QUORUM,
+            assert!(
+                victim_mailbox.get_block(&block1.digest()).await.is_some(),
+                "coding certify should fetch missing certified ancestry by digest"
             );
-            let mut victim_mailbox = victim_setup.mailbox.clone();
-            CodingHarness::report_finalization(&mut victim_mailbox, finalization).await;
-            select! {
-                _ = async {
-                    loop {
-                        if victim_mailbox.get_block(&block1.digest()).await.is_some() {
-                            break;
-                        }
-                        context.sleep(Duration::from_millis(10)).await;
-                    }
-                } => {},
-                _ = context.sleep(Duration::from_secs(10)) => {
-                    panic!("post-certification finalization should fetch missing ancestry by digest");
-                },
-            }
         });
     }
 

@@ -44,7 +44,7 @@ mod tests {
     use crate::{
         marshal::{
             config::Config,
-            core::{cache, Actor, Mailbox},
+            core::{cache, Actor, CommitmentRequest, Mailbox},
             mocks::{
                 application::Application,
                 harness::{
@@ -1284,7 +1284,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_deferred_certify_waits_for_digest_ancestor_without_fetch() {
+    fn test_standard_deferred_certify_fetches_digest_ancestor_above_tip() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1358,8 +1358,7 @@ mod tests {
             }
             context.sleep(Duration::from_millis(100)).await;
 
-            let mut victim_mailbox = victim_setup.mailbox.clone();
-            assert!(victim_mailbox.verified(round2, block2.clone()).await);
+            let victim_mailbox = victim_setup.mailbox.clone();
             assert!(victim_mailbox.verified(round3, block3.clone()).await);
 
             let app = AncestryVerifyingApp::<B, S>::new(
@@ -1367,6 +1366,7 @@ mod tests {
                 vec![Height::new(3), Height::new(2), Height::new(1)],
             );
             let block1_digest = block1.digest();
+            let block2_digest = block2.digest();
             let marshal = victim_setup.mailbox;
             let mut wrapper = Deferred::new(
                 context.child("deferred"),
@@ -1380,41 +1380,23 @@ mod tests {
                 "deferred verify should pass optimistic pre-checks"
             );
             let certify = wrapper.certify(round3, block3.digest()).await;
-            select! {
-                result = certify => {
-                    panic!("certify should wait for local ancestry availability, got {result:?}");
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {},
-            }
+            assert!(
+                certify.await.expect("certify result missing"),
+                "certify should fetch certified ancestry by digest"
+            );
 
             assert!(
-                victim_mailbox.get_block(&block1_digest).await.is_none(),
-                "certify must not fetch missing ancestry by digest"
+                victim_mailbox.get_block(&block2_digest).await.is_some(),
+                "certify should fetch the certified parent by digest"
+            );
+            assert!(
+                victim_mailbox.get_block(&block1_digest).await.is_some(),
+                "certify should fetch missing certified ancestry by digest"
             );
             assert!(
                 victim_mailbox.get_block(Height::new(1)).await.is_none(),
-                "certify must not store missing ancestry as finalized"
+                "certify must not store fetched ancestry as finalized"
             );
-
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round3, View::new(2), block3.digest()),
-                &schemes,
-                QUORUM,
-            );
-            StandardHarness::report_finalization(&mut victim_mailbox, finalization).await;
-            select! {
-                _ = async {
-                    loop {
-                        if victim_mailbox.get_block(&block1_digest).await.is_some() {
-                            break;
-                        }
-                        context.sleep(Duration::from_millis(10)).await;
-                    }
-                } => {},
-                _ = context.sleep(Duration::from_secs(10)) => {
-                    panic!("post-certification finalization should fetch missing ancestry by digest");
-                },
-            }
         });
     }
 
@@ -1931,14 +1913,17 @@ mod tests {
 
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
     type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
+    /// Recorded non-targeted resolver fetch.
+    type ResolverFetch = handler::Request<D>;
 
-    /// A resolver that records each `fetch_targeted` invocation; other
+    /// A resolver that records fetch invocations; cancellation and retention
     /// methods are no-ops.
     ///
     /// `_keepalive` optionally retains a resolver-message sender so the
     /// actor's corresponding receiver stays alive when nothing else owns it.
     #[derive(Clone, Default)]
     struct RecordingResolver {
+        fetches: Arc<Mutex<Vec<ResolverFetch>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
     }
@@ -1946,9 +1931,14 @@ mod tests {
     impl RecordingResolver {
         fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
             Self {
+                fetches: Arc::new(Mutex::new(Vec::new())),
                 targeted: Arc::new(Mutex::new(Vec::new())),
                 _keepalive: Some(sender),
             }
+        }
+
+        fn all_fetches_are_empty(&self) -> bool {
+            self.fetches.lock().is_empty() && self.targeted.lock().is_empty()
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -1965,15 +1955,20 @@ mod tests {
         type Subscriber = handler::ResolverSubscriber<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch<R>(&mut self, _request: R)
+        async fn fetch<R>(&mut self, request: R)
         where
             R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
+            let key = request.into().request;
+            self.fetches.lock().push(key);
         }
-        async fn fetch_all<R>(&mut self, _requests: Vec<R>)
+        async fn fetch_all<R>(&mut self, requests: Vec<R>)
         where
             R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
+            self.fetches
+                .lock()
+                .extend(requests.into_iter().map(|request| request.into().request));
         }
         async fn fetch_targeted(
             &mut self,
@@ -2162,6 +2157,71 @@ mod tests {
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_ancestry_subscription_uses_local_finalized_archive_without_fetch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("local-finalized-ancestry-{me}");
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), block.digest()),
+                &schemes,
+                QUORUM,
+            );
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                &partition_prefix,
+                &[block.clone()],
+                &[(block.height(), finalization)],
+            )
+            .await;
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                RecordingBuffer::default(),
+            )
+            .await;
+
+            assert!(
+                resolver.all_fetches_are_empty(),
+                "startup should not fetch because finalized block data is local"
+            );
+
+            let rx = mailbox
+                .subscribe_by_commitment(
+                    block.digest(),
+                    CommitmentRequest::FetchByCommitment {
+                        height: block.height(),
+                    },
+                )
+                .await;
+            let received = select! {
+                result = rx => result.expect("local finalized block subscription dropped"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("local finalized block did not satisfy ancestry subscription");
+                }
+            };
+
+            assert_eq!(received.digest(), block.digest());
+            assert_eq!(received.height(), block.height());
+            assert!(
+                resolver.all_fetches_are_empty(),
+                "locally finalized ancestry block must not trigger resolver fetch"
+            );
+        });
     }
 
     /// When the provider has no verifier for an epoch, in-flight deliveries

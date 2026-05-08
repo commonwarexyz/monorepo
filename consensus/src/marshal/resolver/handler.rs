@@ -104,15 +104,26 @@ impl<D: Digest> Producer for Handler<D> {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BlockFetchContext {
     /// A block requested only to satisfy ancestry verification.
+    ///
+    /// The expected height is known before the request from the child block.
     Ancestry { height: Height },
-    /// A block requested because its finalization is known.
+    /// A block requested from a certified round whose height is not known until
+    /// the response block is decoded.
+    ///
+    /// This covers notarized parent fetches by round and finalized-block
+    /// fetches where the finalization names a commitment but not a height.
     Finalized { round: Round },
     /// A block requested while repairing an internal finalized-chain gap.
+    ///
+    /// The expected height is known before the request from the gap boundary.
     Repair { height: Height },
 }
 
 impl BlockFetchContext {
-    /// Return the expected block height for fetch contexts that are height-bound.
+    /// Return the expected block height when it is known before the request.
+    ///
+    /// Round-bound fetches validate commitment immediately and can only learn
+    /// height from the decoded block.
     pub(crate) const fn expected_height(&self) -> Option<Height> {
         match self {
             Self::Ancestry { height } | Self::Repair { height } => Some(*height),

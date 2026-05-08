@@ -599,9 +599,11 @@ where
                             .put_notarization(round, digest, notarization.clone())
                             .await;
 
-                        // Search for block locally. Missing notarized blocks are only
-                        // fetched after certification/finalization, so before then we
-                        // just remember the certificate and wait for local availability.
+                        // Search for block locally. A notarization alone is not
+                        // enough to fetch missing proposal data, so remember the
+                        // certificate and wait for local availability. Later
+                        // finalization/repair paths may backfill data that is
+                        // already finalized.
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
@@ -928,9 +930,10 @@ where
             return;
         }
 
-        // We don't have the block locally, so fetch by round if we have one.
-        // If ancestry supplied a commitment and height, fetch the block directly
-        // with a height annotation so the request can be canceled after it goes stale.
+        // We don't have the block locally. Round-based fetching is only for
+        // certified parent lookups whose height is not known before the
+        // request. Height-based fetching is used when the caller already knows
+        // the expected height, such as ancestry from a known child block.
         if let Some(round) = round {
             if round < self.last_processed_round {
                 // At this point, we have failed to find the block locally, and
@@ -940,9 +943,10 @@ where
                 // be available.
                 return;
             }
-            // Attempt to fetch the block (with notarization) from the resolver.
-            // If this is a valid view, this request should be fine to keep open
-            // until resolution or pruning (even if the oneshot is canceled).
+            // Fetch the notarized proposal for this round. The response must
+            // include a notarization so the commitment is tied to the certified
+            // parent context. The decoded block is heightable, but that is too
+            // late to use height as the request key or stale-request bound.
             debug!(?round, ?digest, "requested block missing");
             let request = Request::Notarized { round };
             match key {

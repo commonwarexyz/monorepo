@@ -1,6 +1,5 @@
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
@@ -8,7 +7,7 @@ use crate::{
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epocher, Round},
+    types::Epocher,
     Application, Block, Epochable, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -138,14 +137,18 @@ where
     >,
     B: Block + Clone,
 {
-    let (parent_view, parent_digest) = context.parent;
+    let (_, parent_digest) = context.parent;
+    let Some(parent_height) = block.height().previous() else {
+        debug!(height = %block.height(), "block has no possible parent height");
+        return Some(false);
+    };
+    // The candidate block is already available, so the parent request can be
+    // height-bound instead of round-bound.
     let parent_request = fetch_parent(
         parent_digest,
-        // We are guaranteed that the parent round for any `context` is
-        // in the same epoch (recall, the boundary block of the previous epoch
-        // is the genesis block of the current epoch).
-        Some(Round::new(context.epoch(), parent_view)),
-        false,
+        CommitmentRequest::FetchByCommitment {
+            height: parent_height,
+        },
         application,
         marshal,
     )
@@ -186,8 +189,7 @@ where
     }
 
     // Request verification from the application over the two-block ancestry prefix.
-    let ancestry_stream =
-        AncestorStream::new(marshal.local_ancestry_provider(), [block.clone(), parent]);
+    let ancestry_stream = marshal.ancestor_stream([block.clone(), parent]);
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,
@@ -211,21 +213,24 @@ where
     Some(application_valid)
 }
 
-/// Fetches the parent block given its digest and optional round hint.
+/// Fetches the parent block given its digest and missing-block behavior.
 ///
 /// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability.
+/// to marshal for parent availability according to `request`.
 ///
-/// `parent_round` is a resolver hint. Callers should only provide a hint when the
-/// source context is trusted/validated. Untrusted paths should pass `None`.
+/// Use `FetchByCommitment` whenever the expected parent height is known before
+/// the request, such as verification/certification of a known child block. Use
+/// `FetchByRound` only when the caller knows the certified parent round and
+/// commitment but not the parent height, such as proposal construction. Do not
+/// derive that height from the finalized tip: proposals may build on a certified
+/// parent that is not finalized locally yet.
 ///
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
-    parent_round: Option<Round>,
-    fetch_missing: bool,
+    request: CommitmentRequest,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
@@ -239,27 +244,9 @@ where
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {
-        let receiver = if fetch_missing {
-            match parent_round {
-                Some(round) => {
-                    marshal
-                        .subscribe_by_commitment(
-                            parent_digest,
-                            CommitmentRequest::FetchByRound { round },
-                        )
-                        .await
-                }
-                None => {
-                    marshal
-                        .subscribe_by_commitment(parent_digest, CommitmentRequest::Wait)
-                        .await
-                }
-            }
-        } else {
-            marshal
-                .subscribe_by_commitment(parent_digest, CommitmentRequest::Wait)
-                .await
-        };
+        let receiver = marshal
+            .subscribe_by_commitment(parent_digest, request)
+            .await;
         Either::Right(receiver)
     }
 }

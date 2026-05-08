@@ -14,6 +14,7 @@ use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     vec::NonEmptyVec,
 };
+use futures::Stream;
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -165,11 +166,21 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 /// How a commitment subscription should behave when the block is missing locally.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitmentRequest {
-    /// Wait for local availability only.
+    /// Wait for local availability only. Use this for pending proposal data that
+    /// is not yet safe to fetch from peers.
     Wait,
     /// Request the notarized proposal for `round` from peers.
+    ///
+    /// Use this only for certified parent lookups where the caller knows the
+    /// parent round and commitment but not the parent height. In particular,
+    /// do not infer height from the finalized tip: proposals may build on a
+    /// certified parent that is not finalized locally yet.
     FetchByRound { round: Round },
-    /// Request the exact commitment from peers and prune the request at `height`.
+    /// Request the exact commitment from peers and prune the request at
+    /// `height`.
+    ///
+    /// Use this when the expected height is known before the request, such as
+    /// walking an already certified parent chain from a known child block.
     FetchByCommitment { height: Height },
 }
 
@@ -179,11 +190,9 @@ pub struct Mailbox<S: Scheme, V: Variant> {
     sender: mpsc::Sender<Message<S, V>>,
 }
 
-/// A block provider with explicit network-fetch behavior for missing ancestors.
 #[derive(Clone)]
-pub struct AncestryProvider<S: Scheme, V: Variant> {
+pub(crate) struct AncestryProvider<S: Scheme, V: Variant> {
     mailbox: Mailbox<S, V>,
-    fetch_missing: bool,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
@@ -192,20 +201,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         Self { sender }
     }
 
-    /// Create an ancestry provider that only listens for local block availability.
-    pub(crate) fn local_ancestry_provider(&self) -> AncestryProvider<S, V> {
-        AncestryProvider {
-            mailbox: self.clone(),
-            fetch_missing: false,
-        }
-    }
-
-    /// Create an ancestry provider that fetches missing parents by commitment.
-    pub(crate) fn fetching_ancestry_provider(&self) -> AncestryProvider<S, V> {
-        AncestryProvider {
-            mailbox: self.clone(),
-            fetch_missing: true,
-        }
+    /// Create an ancestor stream that fetches missing parents by commitment.
+    ///
+    /// The stream is for ancestry only: callers must already have the candidate
+    /// block they are verifying, certifying, building on, or repairing from.
+    /// Missing parents may be fetched because the stream only walks the
+    /// certified parent chain. Do not use this to wait for pending proposal
+    /// data.
+    pub(crate) fn ancestor_stream(
+        &self,
+        initial: impl IntoIterator<Item = V::Block>,
+    ) -> AncestorStream<AncestryProvider<S, V>> {
+        AncestorStream::new(
+            AncestryProvider {
+                mailbox: self.clone(),
+            },
+            initial,
+        )
     }
 
     /// A request to retrieve the information about the highest finalized block.
@@ -329,16 +341,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
     ///
+    /// This stream may fetch missing parents because callers should only request
+    /// ancestry for data they are already willing to build on or repair from.
+    ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(
         &self,
         (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
-    ) -> Option<AncestorStream<AncestryProvider<S, V>>> {
+    ) -> Option<impl Stream<Item = V::ApplicationBlock>> {
         let receiver = self.subscribe_by_digest(start_digest, start_round).await;
         receiver
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.fetching_ancestry_provider(), [block]))
+            .map(|block| self.ancestor_stream([block]))
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -436,12 +451,8 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
     async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
         let parent_height = block.height().previous()?;
         let commitment = V::parent_commitment(&block);
-        let request = if self.fetch_missing {
-            CommitmentRequest::FetchByCommitment {
-                height: parent_height,
-            }
-        } else {
-            CommitmentRequest::Wait
+        let request = CommitmentRequest::FetchByCommitment {
+            height: parent_height,
         };
         let subscription = self
             .mailbox

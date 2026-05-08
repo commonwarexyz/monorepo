@@ -48,8 +48,12 @@
 //! formed.
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
-//! to the lack of an available block. However, if even one honest and online party has the block,
-//! they will attempt to forward it to others via marshal's resolver.
+//! to the lack of an available block. Certification waits for local availability of the candidate
+//! proposal data and does not fetch a missing candidate block. Once the candidate is locally
+//! available, its parent chain may be fetched because Simplex only verifies and proposes against
+//! certified parents. A certification path that did not run local verification may use the block's
+//! embedded context for that fetch; this is safe because a notarization quorum contains honest
+//! validators that already checked the same block digest against the consensus context.
 //!
 //! ```text
 //!                                      ┌───────────────────────────────────────────────────┐
@@ -72,7 +76,6 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::{
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
@@ -123,9 +126,9 @@ use tracing::debug;
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
 ///
-/// Verifying only the immediate parent is sufficient since the parent itself must have
-/// been notarized by consensus, which guarantees it was verified and accepted by a quorum.
-/// This means the entire ancestry chain back to genesis is transitively validated.
+/// Verifying only the immediate parent is sufficient since Simplex only builds on
+/// certified parents. This means the entire ancestry chain back to genesis is
+/// transitively validated and safe to fetch if it is missing locally.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///
@@ -374,11 +377,12 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
-                true,
+                // Proposal context carries the certified parent view/commitment
+                // but not the parent height. Do not infer height from the
+                // finalized tip because the parent may only be certified.
+                CommitmentRequest::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
                 &mut application,
                 &mut marshal,
             )
@@ -428,8 +432,7 @@ where
                 return;
             }
 
-            let ancestor_stream =
-                AncestorStream::new(marshal.fetching_ancestry_provider(), [parent]);
+            let ancestor_stream = marshal.ancestor_stream([parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -510,7 +513,7 @@ where
                         Err(_) => {
                             debug!(
                                 ?digest,
-                                reason = "failed to fetch block for optimistic verification",
+                                reason = "block unavailable for optimistic verification",
                                 "skipping optimistic verification"
                             );
                             return;
@@ -611,7 +614,10 @@ where
         // the f+1 honest validators from the notarizing quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
-        // Subscribe to the block and verify using its embedded context once available.
+        // Wait for the candidate block locally, then verify using its embedded
+        // context. The later parent fetch is safe because this path only runs
+        // after notarization, which implies honest validators checked the same
+        // block digest against the consensus context.
         debug!(
             ?round,
             ?digest,
