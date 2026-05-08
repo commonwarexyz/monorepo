@@ -129,8 +129,10 @@ pub trait Policy: Sized {
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
-    /// overflow spilled beyond ready capacity. Return `true` to report [`Feedback::Backoff`] or
-    /// `false` to report [`Feedback::Dropped`].
+    /// overflow spilled beyond ready capacity. The returned value is feedback for this enqueue
+    /// attempt after the policy has made any overflow changes; it does not guarantee that
+    /// `message` or any existing overflow item was retained. Return `true` to report
+    /// [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
     fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool;
 }
 
