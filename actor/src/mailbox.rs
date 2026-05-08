@@ -396,60 +396,20 @@ impl<T> Channel<T> {
     }
 }
 
-struct Shared<T> {
-    channel: Arc<Channel<T>>,
-}
-
-impl<T> Clone for Shared<T> {
-    fn clone(&self) -> Self {
-        Self::new(&self.channel)
-    }
-}
-
-impl<T> Drop for Shared<T> {
-    fn drop(&mut self) {
-        self.channel.release_sender();
-    }
-}
-
-impl<T> Shared<T> {
-    fn new(channel: &Arc<Channel<T>>) -> Self {
-        channel.increment_senders();
-        Self {
-            channel: channel.clone(),
-        }
-    }
-
-    fn capacity(&self) -> usize {
-        self.channel.capacity()
-    }
-
-    fn is_closed(&self) -> bool {
-        self.channel.is_closed()
-    }
-
-    fn len(&self) -> usize {
-        self.channel.len()
-    }
-
-    fn enqueue(&self, message: T) -> Feedback
-    where
-        T: Policy,
-    {
-        self.channel.enqueue(message)
-    }
-}
-
 /// Sender half of a mailbox.
 pub struct Sender<T: Policy> {
-    shared: Shared<T>,
+    channel: Arc<Channel<T>>,
 }
 
 impl<T: Policy> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        Self {
-            shared: self.shared.clone(),
-        }
+        Self::from_channel(&self.channel)
+    }
+}
+
+impl<T: Policy> Drop for Sender<T> {
+    fn drop(&mut self) {
+        self.channel.release_sender();
     }
 }
 
@@ -457,21 +417,28 @@ impl<T: Policy> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sender")
             .field("len", &self.len())
-            .field("capacity", &self.shared.capacity())
-            .field("closed", &self.shared.is_closed())
+            .field("capacity", &self.channel.capacity())
+            .field("closed", &self.channel.is_closed())
             .finish()
     }
 }
 
 impl<T: Policy> Sender<T> {
+    fn from_channel(channel: &Arc<Channel<T>>) -> Self {
+        channel.increment_senders();
+        Self {
+            channel: channel.clone(),
+        }
+    }
+
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Feedback {
-        self.shared.enqueue(message)
+        self.channel.enqueue(message)
     }
 
     fn len(&self) -> usize {
-        self.shared.len()
+        self.channel.len()
     }
 }
 
@@ -543,12 +510,7 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         senders: AtomicUsize::new(0),
         receiver_waker: AtomicWaker::new(),
     });
-    (
-        Sender {
-            shared: Shared::new(&channel),
-        },
-        Receiver { channel },
-    )
+    (Sender::from_channel(&channel), Receiver { channel })
 }
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -781,7 +743,7 @@ mod loom_tests {
     }
 
     fn assert_closed(sender: &Sender<Message>) {
-        assert!(sender.shared.is_closed());
+        assert!(sender.channel.is_closed());
     }
 
     fn record(seen: &AtomicUsize, message: Message) {
