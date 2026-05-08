@@ -1,4 +1,4 @@
-//! Coordinate actors without blocking backpressure.
+//! Safely coordinate concurrent components.
 //!
 //! # Status
 //!

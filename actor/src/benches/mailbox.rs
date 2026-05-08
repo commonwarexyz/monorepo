@@ -50,11 +50,15 @@ impl mailbox::Policy for Message {
     fn handle(overflow: &mut mailbox::Overflow<'_, Self>, message: Self) -> bool {
         match message.policy {
             Policy::Drop => false,
-            Policy::Spill => overflow.spill(message),
+            Policy::Spill => {
+                overflow.spill(message);
+                true
+            }
             Policy::Replace => {
                 let result =
                     overflow.replace_last(message, |pending| pending.policy == Policy::Replace);
-                overflow.replace_or_spill(result)
+                overflow.replace_or_spill(result);
+                true
             }
         }
     }

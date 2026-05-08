@@ -38,24 +38,14 @@ pub struct Overflow<'a, T> {
 
 impl<T> Overflow<'_, T> {
     /// Spill `message` into overflow after ready capacity is exceeded.
-    pub fn spill(&mut self, message: T) -> bool {
+    pub fn spill(&mut self, message: T) {
         self.queue.push_back(message);
-        true
     }
 
     /// Spill the message into overflow if it could not replace existing overflow work.
-    pub fn replace_or_spill(&mut self, result: Result<(), T>) -> bool {
-        match result {
-            Ok(()) => true,
-            Err(message) => self.spill(message),
-        }
-    }
-
-    /// Drop the message if it could not replace existing overflow work.
-    pub fn replace_or_drop(&mut self, result: Result<(), T>) -> bool {
-        match result {
-            Ok(()) => true,
-            Err(_) => false,
+    pub fn replace_or_spill(&mut self, result: Result<(), T>) {
+        if let Err(message) = result {
+            self.spill(message);
         }
     }
 
@@ -75,12 +65,11 @@ impl<T> Overflow<'_, T> {
         message: T,
         is_match: impl FnMut(&T) -> bool,
         merge: impl FnOnce(&mut T, T),
-    ) -> bool {
+    ) {
         if let Some(pending) = self.find_last_mut(is_match) {
             merge(pending, message);
-            true
         } else {
-            self.spill(message)
+            self.spill(message);
         }
     }
 
@@ -91,13 +80,12 @@ impl<T> Overflow<'_, T> {
         coalesce_match: impl FnMut(&T) -> bool,
         coalesce: impl FnOnce(&mut T, T),
         replace_match: impl FnMut(&T) -> bool,
-    ) -> bool {
+    ) {
         if let Some(pending) = self.find_last_mut(coalesce_match) {
             coalesce(pending, message);
-            true
         } else {
             let result = self.replace_last(message, replace_match);
-            self.replace_or_spill(result)
+            self.replace_or_spill(result);
         }
     }
 
@@ -118,9 +106,9 @@ impl<T> Overflow<'_, T> {
     }
 
     /// Replace overflow with a single spilled `message`.
-    pub fn replace_all(&mut self, message: T) -> bool {
+    pub fn replace_all(&mut self, message: T) {
         self.clear();
-        self.spill(message)
+        self.spill(message);
     }
 }
 
@@ -268,7 +256,12 @@ impl<T> OverflowState<T> {
         self.len() > 0
     }
 
-    fn apply_policy(&self, message: T, is_closed: impl Fn() -> bool) -> Feedback
+    fn apply_policy(
+        &self,
+        ready: &ReadyQueue<T>,
+        message: T,
+        is_closed: impl Fn() -> bool,
+    ) -> Feedback
     where
         T: Policy,
     {
@@ -276,6 +269,21 @@ impl<T> OverflowState<T> {
         if is_closed() {
             return Feedback::Closed;
         }
+
+        // `len` is a hint used to keep the empty-overflow send path lock-free. If a
+        // receiver drained overflow after the sender observed that hint, retry ready
+        // before invoking the policy so a message is not dropped while capacity exists.
+        let message = if queue.is_empty() {
+            match ready.push(message) {
+                Ok(()) => {
+                    self.len.store(0, Ordering::Release);
+                    return Feedback::Ok;
+                }
+                Err(message) => message,
+            }
+        } else {
+            message
+        };
 
         let backoff = {
             let mut overflow = Overflow { queue: &mut queue };
@@ -377,8 +385,10 @@ impl<T: Policy> Sender<T> {
         let feedback = self
             .state
             .overflow
-            .apply_policy(message, || self.state.closed.load(Ordering::Acquire));
-        if feedback == Feedback::Backoff {
+            .apply_policy(&self.state.ready, message, || {
+                self.state.closed.load(Ordering::Acquire)
+            });
+        if matches!(feedback, Feedback::Ok | Feedback::Backoff) {
             self.state.waker.wake();
         }
         feedback
@@ -491,15 +501,18 @@ mod tests {
                     let result = overflow.replace_last(Self::Update(value), |pending| {
                         matches!(pending, Self::Update(_))
                     });
-                    overflow.replace_or_spill(result)
+                    overflow.replace_or_spill(result);
+                    true
                 }
-                Self::Required(_) => overflow.spill(message),
-                Self::Buffered(_) => overflow.spill(message),
+                Self::Required(_) | Self::Buffered(_) => {
+                    overflow.spill(message);
+                    true
+                }
                 Self::Hint(value) => {
                     let result = overflow.replace_last(Self::Hint(value), |pending| {
                         matches!(pending, Self::Update(_))
                     });
-                    overflow.replace_or_drop(result)
+                    result.is_ok()
                 }
                 Self::Vote(_) => false,
             }
@@ -641,9 +654,9 @@ mod tests {
 
     impl Policy for ClearingMessage {
         fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
-            let backoff = overflow.spill(message);
+            overflow.spill(message);
             overflow.clear();
-            backoff
+            true
         }
     }
 
@@ -686,7 +699,10 @@ mod loom_tests {
         fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
             match message {
                 Self::Drop(_) => false,
-                Self::Spill(_) => overflow.spill(message),
+                Self::Spill(_) => {
+                    overflow.spill(message);
+                    true
+                }
             }
         }
     }
@@ -774,6 +790,19 @@ mod loom_tests {
             assert_eq!(receiver.state.ready.len(), 0);
             assert_eq!(receiver.state.overflow.len(), 0);
             assert_eq!(seen.load(Ordering::Acquire), 0b11);
+        });
+    }
+
+    #[test]
+    fn stale_overflow_hint_retries_ready_before_policy() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+
+            // Model a sender seeing overflow as active just after another thread drained it.
+            sender.state.overflow.len.store(1, Ordering::Release);
+
+            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
+            assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
         });
     }
 }
