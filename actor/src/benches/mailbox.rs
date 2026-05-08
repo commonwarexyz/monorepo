@@ -1,4 +1,4 @@
-use commonware_actor::{self as actor, Backpressure, Feedback, MessagePolicy};
+use commonware_actor::mailbox::{self as actor, Feedback, Policy as MailboxPolicy};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
@@ -50,10 +50,10 @@ impl Message {
     }
 }
 
-impl MessagePolicy for Message {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
+impl MailboxPolicy for Message {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> bool {
         match message.policy {
-            Policy::DropOnOverflow => Backpressure::dropped(),
+            Policy::DropOnOverflow => false,
             Policy::Spill => overflow.spill(message),
             Policy::Replace => {
                 let result =
@@ -70,11 +70,11 @@ fn bench_enqueue_ready(c: &mut Criterion) {
 
     group.bench_function(format!("capacity={CAPACITY}"), |b| {
         b.iter_batched(
-            || actor::Mailbox::<Message>::new(NZUsize!(CAPACITY)),
+            || actor::new::<Message>(NZUsize!(CAPACITY)),
             |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow(i)));
-                    debug_assert_eq!(result, Feedback::Ok);
+                    assert_eq!(result, Feedback::Ok);
                     black_box(result);
                 }
             },
@@ -92,7 +92,7 @@ fn bench_try_recv_ready(c: &mut Criterion) {
     group.bench_function(format!("capacity={CAPACITY}"), |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(CAPACITY));
+                let (sender, receiver) = actor::new::<Message>(NZUsize!(CAPACITY));
                 for i in 0..MESSAGES as u64 {
                     assert_eq!(sender.enqueue(Message::drop_on_overflow(i)), Feedback::Ok);
                 }
@@ -116,11 +116,11 @@ fn bench_round_trip_ready(c: &mut Criterion) {
 
     group.bench_function(format!("capacity={CAPACITY}"), |b| {
         b.iter_batched(
-            || actor::Mailbox::<Message>::new(NZUsize!(CAPACITY)),
+            || actor::new::<Message>(NZUsize!(CAPACITY)),
             |(sender, mut receiver)| {
                 for i in 0..MESSAGES as u64 {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow(i)));
-                    debug_assert_eq!(result, Feedback::Ok);
+                    assert_eq!(result, Feedback::Ok);
                     black_box(result);
                     black_box(receiver.try_recv().unwrap());
                 }
@@ -138,7 +138,7 @@ fn bench_recv_waiting(c: &mut Criterion) {
 
     group.bench_function("capacity=1", |b| {
         b.iter_batched(
-            || actor::Mailbox::<Message>::new(NZUsize!(1)),
+            || actor::new::<Message>(NZUsize!(1)),
             |(sender, mut receiver)| {
                 futures::executor::block_on(async {
                     for i in 0..MESSAGES as u64 {
@@ -146,13 +146,13 @@ fn bench_recv_waiting(c: &mut Criterion) {
                         pin_mut!(next);
                         poll_fn(|cx| {
                             let pending = next.as_mut().poll(cx).is_pending();
-                            debug_assert!(pending);
+                            assert!(pending);
                             Poll::Ready(())
                         })
                         .await;
 
                         let result = sender.enqueue(Message::drop_on_overflow(i));
-                        debug_assert_eq!(result, Feedback::Ok);
+                        assert_eq!(result, Feedback::Ok);
                         black_box(result);
                         black_box(next.await.unwrap());
                     }
@@ -172,14 +172,14 @@ fn bench_overflow_drop(c: &mut Criterion) {
     group.bench_function("capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(1));
+                let (sender, receiver) = actor::new::<Message>(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::drop_on_overflow(0)), Feedback::Ok);
                 (sender, receiver)
             },
             |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow(i)));
-                    debug_assert_eq!(result, Feedback::Dropped);
+                    assert_eq!(result, Feedback::Dropped);
                     black_box(result);
                 }
             },
@@ -197,14 +197,14 @@ fn bench_overflow_spill(c: &mut Criterion) {
     group.bench_function("capacity=1", |b| {
         b.iter_batched(
             || {
-                let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(1));
+                let (sender, receiver) = actor::new::<Message>(NZUsize!(1));
                 assert_eq!(sender.enqueue(Message::drop_on_overflow(0)), Feedback::Ok);
                 (sender, receiver)
             },
             |(sender, _receiver)| {
                 for i in 0..MESSAGES as u64 {
                     let result = sender.enqueue(black_box(Message::spill(i)));
-                    debug_assert_eq!(result, Feedback::Backoff);
+                    assert_eq!(result, Feedback::Backoff);
                     black_box(result);
                 }
             },
@@ -216,7 +216,7 @@ fn bench_overflow_spill(c: &mut Criterion) {
 }
 
 fn replace_queue(newest: bool) -> (actor::Sender<Message>, actor::Receiver<Message>) {
-    let (sender, receiver) = actor::Mailbox::<Message>::new(NZUsize!(REPLACE_CAPACITY));
+    let (sender, receiver) = actor::new::<Message>(NZUsize!(REPLACE_CAPACITY));
 
     for i in 0..REPLACE_CAPACITY {
         assert_eq!(
@@ -248,7 +248,7 @@ fn bench_overflow_replace(c: &mut Criterion) {
                     |(sender, _receiver)| {
                         for i in 0..MESSAGES as u64 {
                             let result = sender.enqueue(black_box(Message::replace(i)));
-                            debug_assert_eq!(result, Feedback::Backoff);
+                            assert_eq!(result, Feedback::Backoff);
                             black_box(result);
                         }
                     },
@@ -268,7 +268,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
 
     group.bench_function(format!("producers={PRODUCERS} capacity={total}"), |b| {
         b.iter(|| {
-            let (sender, _receiver) = actor::Mailbox::<Message>::new(NZUsize!(total));
+            let (sender, _receiver) = actor::new::<Message>(NZUsize!(total));
 
             std::thread::scope(|scope| {
                 for producer in 0..PRODUCERS {
@@ -278,7 +278,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
                         for offset in 0..PRODUCER_MESSAGES {
                             let result =
                                 sender.enqueue(Message::drop_on_overflow((base + offset) as u64));
-                            debug_assert_eq!(result, Feedback::Ok);
+                            assert_eq!(result, Feedback::Ok);
                             black_box(result);
                         }
                     });

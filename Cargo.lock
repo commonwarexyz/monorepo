@@ -1016,7 +1016,6 @@ dependencies = [
  "futures",
  "loom",
  "parking_lot",
- "tokio",
 ]
 
 [[package]]
