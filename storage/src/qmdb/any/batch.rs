@@ -985,6 +985,16 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::any::batch::merkleize",
+        level = "info",
+        skip_all,
+        fields(
+            variant = "unordered",
+            mutations = self.mutations.len() as u64,
+        ),
+    )]
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1147,6 +1157,16 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::any::batch::merkleize",
+        level = "info",
+        skip_all,
+        fields(
+            variant = "ordered",
+            mutations = self.mutations.len() as u64,
+        ),
+    )]
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -1512,6 +1532,17 @@ where
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
+    #[tracing::instrument(
+        name = "qmdb::any::batch::new",
+        level = "info",
+        skip_all,
+        fields(
+            source = "batch",
+            base_size = self.base_size,
+            total_size = self.total_size,
+            ancestor_batches = self.ancestor_diff_ends.len() as u64,
+        ),
+    )]
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S>
     where
         H: Hasher<Digest = D>,
@@ -1620,6 +1651,17 @@ where
     Operation<F, U>: Codec,
 {
     /// Create a new speculative batch of operations with this database as its parent.
+    #[tracing::instrument(
+        name = "qmdb::any::batch::new",
+        level = "info",
+        skip_all,
+        fields(
+            source = "db",
+            base_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, S> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
@@ -1655,6 +1697,17 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
     /// guarantee durability.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::apply_batch",
+        level = "info",
+        skip_all,
+        fields(
+            batch_total_size = batch.total_size,
+            batch_base_size = batch.base_size,
+            db_size = *self.last_commit_loc + 1,
+            ancestor_batches = batch.ancestor_diff_ends.len() as u64,
+        ),
+    )]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
@@ -1746,6 +1799,16 @@ where
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     ///
     /// This is the starting point for building owned batch chains.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::to_batch",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
