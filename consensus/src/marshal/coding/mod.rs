@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_marshaled_fetches_digest_ancestor_above_tip() {
+    fn test_coding_marshaled_certify_waits_for_digest_ancestor_without_fetch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -484,14 +484,9 @@ mod tests {
 
             select! {
                 result = certify => {
-                    assert!(
-                        result.expect("certify result missing"),
-                        "coding certify should fetch the missing height-1 ancestor by digest"
-                    );
+                    panic!("coding certify should wait for local ancestry availability, got {result:?}");
                 },
-                _ = context.sleep(Duration::from_secs(10)) => {
-                    panic!("coding certify stalled fetching digest ancestor above tip");
-                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
 
             assert!(
@@ -499,9 +494,34 @@ mod tests {
                     .mailbox
                     .get_block(&block1.digest())
                     .await
-                    .is_some(),
-                "digest-fetched ancestor should be retained locally"
+                    .is_none(),
+                "certify must not fetch missing ancestry by digest"
             );
+
+            let finalization = CodingHarness::make_finalization(
+                Proposal {
+                    round,
+                    parent: View::new(2),
+                    payload: commitment,
+                },
+                &schemes,
+                QUORUM,
+            );
+            let mut victim_mailbox = victim_setup.mailbox.clone();
+            CodingHarness::report_finalization(&mut victim_mailbox, finalization).await;
+            select! {
+                _ = async {
+                    loop {
+                        if victim_mailbox.get_block(&block1.digest()).await.is_some() {
+                            break;
+                        }
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                } => {},
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("post-certification finalization should fetch missing ancestry by digest");
+                },
+            }
         });
     }
 

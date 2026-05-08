@@ -1284,7 +1284,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_deferred_certify_fetches_digest_ancestor_above_tip() {
+    fn test_standard_deferred_certify_waits_for_digest_ancestor_without_fetch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1358,7 +1358,7 @@ mod tests {
             }
             context.sleep(Duration::from_millis(100)).await;
 
-            let victim_mailbox = victim_setup.mailbox.clone();
+            let mut victim_mailbox = victim_setup.mailbox.clone();
             assert!(victim_mailbox.verified(round2, block2.clone()).await);
             assert!(victim_mailbox.verified(round3, block3.clone()).await);
 
@@ -1382,24 +1382,39 @@ mod tests {
             let certify = wrapper.certify(round3, block3.digest()).await;
             select! {
                 result = certify => {
-                    assert!(
-                        result.expect("certify result missing"),
-                        "deferred certify should fetch the missing height-1 ancestor by digest"
-                    );
+                    panic!("certify should wait for local ancestry availability, got {result:?}");
                 },
-                _ = context.sleep(Duration::from_secs(10)) => {
-                    panic!("deferred certify stalled fetching digest ancestor above tip");
-                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
 
             assert!(
-                victim_mailbox.get_block(&block1_digest).await.is_some(),
-                "digest-fetched ancestor should be retained locally"
+                victim_mailbox.get_block(&block1_digest).await.is_none(),
+                "certify must not fetch missing ancestry by digest"
             );
             assert!(
                 victim_mailbox.get_block(Height::new(1)).await.is_none(),
-                "digest-fetched ancestor should not be served as finalized by height"
+                "certify must not store missing ancestry as finalized"
             );
+
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round3, View::new(2), block3.digest()),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut victim_mailbox, finalization).await;
+            select! {
+                _ = async {
+                    loop {
+                        if victim_mailbox.get_block(&block1_digest).await.is_some() {
+                            break;
+                        }
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                } => {},
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("post-certification finalization should fetch missing ancestry by digest");
+                },
+            }
         });
     }
 

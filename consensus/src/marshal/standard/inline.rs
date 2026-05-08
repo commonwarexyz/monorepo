@@ -479,7 +479,7 @@ where
     }
 }
 
-/// Inline mode fetches block availability during certification if verify did not already run.
+/// Inline mode only waits for block availability during certification.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -514,7 +514,7 @@ where
         // Otherwise, subscribe to marshal for block availability.
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::FetchByRound { round })
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
             .await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();

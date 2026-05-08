@@ -347,7 +347,7 @@ where
                 // in the same epoch (recall, the boundary block of the previous epoch
                 // is the genesis block of the current epoch).
                 Some(Round::new(consensus_context.epoch(), parent_view)),
-                matches!(stage, Stage::Certified),
+                false,
                 &mut application,
                 &mut marshal,
                 cached_genesis,
@@ -376,11 +376,7 @@ where
                 (parent, block)
             } else {
                 // No prefetched block, fetch both parent and block
-                let request = if matches!(stage, Stage::Certified) {
-                    core::CommitmentRequest::FetchByRound { round }
-                } else {
-                    core::CommitmentRequest::Wait
-                };
+                let request = core::CommitmentRequest::Wait;
                 let block_request = marshal.subscribe_by_commitment(commitment, request).await;
                 let block_requests = try_join(parent_request, block_request);
 
@@ -429,11 +425,8 @@ where
                 return;
             }
 
-            let provider = match stage {
-                Stage::Verified => marshal.local_ancestry_provider(),
-                Stage::Certified => marshal.fetching_ancestry_provider(),
-            };
-            let ancestry_stream = AncestorStream::new(provider, [block.clone(), parent]);
+            let ancestry_stream =
+                AncestorStream::new(marshal.local_ancestry_provider(), [block.clone(), parent]);
             let validity_request = application.verify(
                 (
                     runtime_context.child("app_verify"),
@@ -915,12 +908,10 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // Reuse only completed verification work. A pending verify-stage task may be
-        // waiting for local availability only, while certification can fetch notarized data.
-        if let Some(valid) = self.verification_tasks.take_ready(round, payload) {
-            let (tx, rx) = oneshot::channel();
-            tx.send_lossy(valid);
-            return rx;
+        // First, check for an in-progress verification task from `verify()`.
+        let task = self.verification_tasks.take(round, payload);
+        if let Some(task) = task {
+            return task;
         }
 
         // No in-progress task means we never verified this proposal locally.
@@ -937,7 +928,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::CommitmentRequest::FetchByRound { round })
+            .subscribe_by_commitment(payload, core::CommitmentRequest::Wait)
             .await;
         let mut marshaled = self.clone();
         let shards = self.shards.clone();

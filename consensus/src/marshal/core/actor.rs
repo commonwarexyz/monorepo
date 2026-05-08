@@ -599,15 +599,16 @@ where
                             .put_notarization(round, digest, notarization.clone())
                             .await;
 
-                        // Search for block locally, otherwise fetch it remotely.
+                        // Search for block locally. Missing notarized blocks are only
+                        // fetched after certification/finalization, so before then we
+                        // just remember the certificate and wait for local availability.
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
                             // If found, persist the block
                             self.cache_block(round, digest, block).await;
                         } else {
-                            debug!(?round, "notarized block missing");
-                            resolver.fetch(Request::Notarized { round }).await;
+                            debug!(?round, "notarized block unavailable locally");
                         }
                     }
                     Message::Finalization { finalization } => {

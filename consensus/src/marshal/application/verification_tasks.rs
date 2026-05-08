@@ -1,6 +1,5 @@
 use crate::types::Round;
 use commonware_utils::{channel::oneshot, sync::Mutex};
-use futures::FutureExt;
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 type VerificationTaskMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
@@ -48,15 +47,9 @@ where
         self.inner.lock().insert((round, digest), task);
     }
 
-    /// Removes and returns a completed verification result for `(round, digest)`, if present.
-    ///
-    /// Pending or closed tasks are discarded and reported as absent.
-    pub(crate) fn take_ready(&self, round: Round, digest: D) -> Option<bool> {
-        self.inner
-            .lock()
-            .remove(&(round, digest))?
-            .now_or_never()?
-            .ok()
+    /// Removes and returns the verification task for `(round, digest)`, if present.
+    pub(crate) fn take(&self, round: Round, digest: D) -> Option<oneshot::Receiver<bool>> {
+        self.inner.lock().remove(&(round, digest))
     }
 
     /// Discards all tasks whose round is at or before `finalized_round`.
@@ -72,7 +65,6 @@ mod tests {
     use super::*;
     use crate::types::{Epoch, View};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
-    use commonware_utils::channel::fallible::OneshotExt;
 
     type D = Sha256Digest;
 
@@ -85,44 +77,23 @@ mod tests {
         rx
     }
 
-    fn ready_task(value: bool) -> oneshot::Receiver<bool> {
-        let (tx, rx) = oneshot::channel();
-        tx.send_lossy(value);
-        rx
-    }
-
     #[test]
-    fn test_insert_and_take_ready_returns_task() {
+    fn test_insert_and_take_returns_task() {
         let tasks = VerificationTasks::<D>::new();
         let digest = Sha256::hash(b"block");
-        tasks.insert(round(1), digest, ready_task(true));
+        tasks.insert(round(1), digest, pending_task());
 
-        assert_eq!(tasks.take_ready(round(1), digest), Some(true));
+        assert!(tasks.take(round(1), digest).is_some());
         assert!(
-            tasks.take_ready(round(1), digest).is_none(),
-            "taking a ready task twice should yield None"
+            tasks.take(round(1), digest).is_none(),
+            "taking twice should yield None"
         );
     }
 
     #[test]
     fn test_take_absent_key_is_none() {
         let tasks = VerificationTasks::<D>::new();
-        assert!(tasks
-            .take_ready(round(1), Sha256::hash(b"missing"))
-            .is_none());
-    }
-
-    #[test]
-    fn test_take_ready_discards_pending_task() {
-        let tasks = VerificationTasks::<D>::new();
-        let digest = Sha256::hash(b"block");
-        tasks.insert(round(1), digest, pending_task());
-
-        assert_eq!(tasks.take_ready(round(1), digest), None);
-        assert!(
-            tasks.take_ready(round(1), digest).is_none(),
-            "pending task should be discarded"
-        );
+        assert!(tasks.take(round(1), Sha256::hash(b"missing")).is_none());
     }
 
     #[test]
@@ -130,34 +101,37 @@ mod tests {
         let tasks = VerificationTasks::<D>::new();
         let digest_a = Sha256::hash(b"a");
         let digest_b = Sha256::hash(b"b");
-        tasks.insert(round(1), digest_a, ready_task(true));
-        tasks.insert(round(2), digest_a, ready_task(false));
-        tasks.insert(round(1), digest_b, ready_task(true));
+        tasks.insert(round(1), digest_a, pending_task());
+        tasks.insert(round(2), digest_a, pending_task());
+        tasks.insert(round(1), digest_b, pending_task());
 
-        assert_eq!(tasks.take_ready(round(1), digest_a), Some(true));
-        assert_eq!(tasks.take_ready(round(2), digest_a), Some(false));
-        assert_eq!(tasks.take_ready(round(1), digest_b), Some(true));
+        assert!(tasks.take(round(1), digest_a).is_some());
+        assert!(tasks.take(round(2), digest_a).is_some());
+        assert!(tasks.take(round(1), digest_b).is_some());
     }
 
     #[test]
     fn test_retain_after_drops_at_and_below_boundary() {
         let tasks = VerificationTasks::<D>::new();
         let digest = Sha256::hash(b"block");
-        tasks.insert(round(1), digest, ready_task(true));
-        tasks.insert(round(2), digest, ready_task(true));
-        tasks.insert(round(3), digest, ready_task(true));
+        tasks.insert(round(1), digest, pending_task());
+        tasks.insert(round(2), digest, pending_task());
+        tasks.insert(round(3), digest, pending_task());
 
         tasks.retain_after(&round(2));
 
         assert!(
-            tasks.take_ready(round(1), digest).is_none(),
+            tasks.take(round(1), digest).is_none(),
             "tasks strictly below boundary should be dropped"
         );
         assert!(
-            tasks.take_ready(round(2), digest).is_none(),
+            tasks.take(round(2), digest).is_none(),
             "tasks at boundary should be dropped"
         );
-        assert_eq!(tasks.take_ready(round(3), digest), Some(true));
+        assert!(
+            tasks.take(round(3), digest).is_some(),
+            "tasks strictly above boundary should be retained"
+        );
     }
 
     #[test]
@@ -166,30 +140,33 @@ mod tests {
         let digest = Sha256::hash(b"block");
         let early = Round::new(Epoch::zero(), View::new(100));
         let late = Round::new(Epoch::new(1), View::zero());
-        tasks.insert(early, digest, ready_task(true));
-        tasks.insert(late, digest, ready_task(true));
+        tasks.insert(early, digest, pending_task());
+        tasks.insert(late, digest, pending_task());
 
         tasks.retain_after(&early);
 
         assert!(
-            tasks.take_ready(early, digest).is_none(),
+            tasks.take(early, digest).is_none(),
             "task at boundary must be dropped"
         );
-        assert_eq!(tasks.take_ready(late, digest), Some(true));
+        assert!(
+            tasks.take(late, digest).is_some(),
+            "task in later epoch must outlive an earlier boundary"
+        );
     }
 
     #[test]
     fn test_retain_after_empty_map_is_noop() {
         let tasks = VerificationTasks::<D>::new();
         tasks.retain_after(&round(5));
-        assert!(tasks.take_ready(round(5), Sha256::hash(b"x")).is_none());
+        assert!(tasks.take(round(5), Sha256::hash(b"x")).is_none());
     }
 
     #[test]
     fn test_default_matches_new() {
         let default = <VerificationTasks<D> as Default>::default();
         let digest = Sha256::hash(b"block");
-        default.insert(round(1), digest, ready_task(true));
-        assert_eq!(default.take_ready(round(1), digest), Some(true));
+        default.insert(round(1), digest, pending_task());
+        assert!(default.take(round(1), digest).is_some());
     }
 }

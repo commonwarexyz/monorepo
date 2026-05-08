@@ -145,7 +145,7 @@ where
         // in the same epoch (recall, the boundary block of the previous epoch
         // is the genesis block of the current epoch).
         Some(Round::new(context.epoch(), parent_view)),
-        matches!(stage, Stage::Certified),
+        false,
         application,
         marshal,
     )
@@ -186,11 +186,8 @@ where
     }
 
     // Request verification from the application over the two-block ancestry prefix.
-    let provider = match stage {
-        Stage::Verified => marshal.local_ancestry_provider(),
-        Stage::Certified => marshal.fetching_ancestry_provider(),
-    };
-    let ancestry_stream = AncestorStream::new(provider, [block.clone(), parent]);
+    let ancestry_stream =
+        AncestorStream::new(marshal.local_ancestry_provider(), [block.clone(), parent]);
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,
