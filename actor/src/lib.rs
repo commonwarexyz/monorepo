@@ -306,7 +306,15 @@ struct OverflowState<T> {
 }
 
 impl<T> OverflowState<T> {
-    #[allow(clippy::missing_const_for_fn)]
+    #[cfg(not(feature = "loom"))]
+    const fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(feature = "loom")]
     fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
