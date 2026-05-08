@@ -498,22 +498,14 @@ impl<T: MessagePolicy> Sender<T> {
     }
 
     fn backpressure_overflow(&self, message: T) -> Feedback {
-        if self.shared.is_closed() {
-            return Feedback::Closed;
-        }
-
         let feedback = self
             .shared
             .overflow
             .apply_policy(message, || self.shared.is_closed());
-        match feedback {
-            Feedback::Backoff => {
-                self.shared.receiver_waker.wake();
-                Feedback::Backoff
-            }
-            Feedback::Dropped if self.shared.is_closed() => Feedback::Closed,
-            feedback => feedback,
+        if feedback == Feedback::Backoff {
+            self.shared.receiver_waker.wake();
         }
+        feedback
     }
 }
 
