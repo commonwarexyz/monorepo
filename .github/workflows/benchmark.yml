@@ -2,6 +2,12 @@ name: Benchmark
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish results to the benchmarks repository"
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '0 10 * * *' # Run at 10:00 UTC every day
 
@@ -19,6 +25,7 @@ jobs:
           fetch-depth: 1
 
       - name: Exit early if no new commits
+        if: github.event_name == 'schedule'
         id: check-commits
         run: |
           count=$(git log --oneline --since '24 hours ago' | wc -l)
@@ -106,7 +113,13 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: benchmark-${{ matrix.benchmark_name }}
+      - name: Validate benchmark result
+        run: |
+          output="${{ matrix.benchmark_name }}.txt"
+          test -s "$output"
+          grep -Eq '^test .+ \.\.\. bench:' "$output"
       - name: Publish benchmark result
+        if: github.event_name == 'schedule' || inputs.publish
         uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: ${{ matrix.benchmark_name }}
