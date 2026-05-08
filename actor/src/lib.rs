@@ -508,14 +508,7 @@ impl<T: MessagePolicy> Sender<T> {
             .apply_policy(message, || self.shared.is_closed());
         match feedback {
             Feedback::Backoff => {
-                let retained = self.shared.overflow.is_active();
-                debug_assert!(
-                    retained,
-                    "backpressure policy returned Backoff without retained overflow"
-                );
-                if retained {
-                    self.shared.receiver_waker.wake();
-                }
+                self.shared.receiver_waker.wake();
                 Feedback::Backoff
             }
             Feedback::Dropped if self.shared.is_closed() => Feedback::Closed,
