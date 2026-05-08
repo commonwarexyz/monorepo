@@ -938,10 +938,10 @@ where
         // once the caller has a child block, which makes the expected parent
         // height known before the request.
         if let Some(round) = round {
-            if round < self.last_processed_round {
+            if round <= self.last_processed_round {
                 // `last_processed_round` only advances after the application
                 // processes the corresponding finalized block. A round-bound
-                // certified-parent fetch below that floor is only
+                // certified-parent fetch at or below that floor is only
                 // proposal-construction assistance for data behind the
                 // processed chain.
                 return;
