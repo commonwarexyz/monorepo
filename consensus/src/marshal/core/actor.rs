@@ -470,8 +470,7 @@ where
                     match result {
                         Ok(()) => {
                             // Apply in-memory progress updates for this acknowledged block.
-                            self.handle_block_processed(height, commitment, &mut resolver)
-                                .await;
+                            self.handle_block_processed(height, &mut resolver).await;
                         }
                         Err(e) => {
                             // Ack failures are fatal for marshal/application coordination.
@@ -1462,17 +1461,11 @@ where
     async fn handle_block_processed(
         &mut self,
         height: Height,
-        commitment: V::Commitment,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver).await;
         self.cache.prune_by_height(height).await;
-
-        // Cancel any useless requests
-        resolver
-            .retain(ResolverSubscriber::without_block_commitment(commitment))
-            .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout

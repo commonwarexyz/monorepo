@@ -212,11 +212,6 @@ impl<D: Digest> ResolverSubscriber<D> {
         }
     }
 
-    /// A predicate that drops all block requests for `commitment`.
-    pub fn without_block_commitment(commitment: D) -> impl Fn(&Self) -> bool + Send + 'static {
-        move |request| request.block_commitment() != Some(commitment)
-    }
-
     /// The predicate to use when pruning subjects related to this subject.
     ///
     /// Unrelated subjects are retained. Related subjects are pruned if they are
