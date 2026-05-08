@@ -30,8 +30,10 @@ cfg_if::cfg_if! {
 
 /// Policy-managed overflow behind the bounded ready queue.
 ///
-/// The mailbox capacity only bounds the ready queue. Overflow is controlled by
+/// Mailbox capacity only bounds the ready queue. Overflow is controlled by
 /// policy code and can grow without bound if the policy keeps spilling messages.
+/// [`Feedback::Backoff`] is advisory and does not imply that the mailbox enforced
+/// a hard bound on retained overflow work.
 pub struct Overflow<'a, T> {
     queue: &'a mut VecDeque<T>,
 }
@@ -117,8 +119,9 @@ pub trait Policy: Sized {
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
-    /// overflow spilled beyond ready capacity. The returned value is feedback for this enqueue
-    /// attempt after the policy has made any overflow changes; it does not guarantee that
+    /// overflow spilled beyond ready capacity. Policies that retain overflow are responsible for
+    /// bounding it when a hard memory limit is required. The returned value is feedback for this
+    /// enqueue attempt after the policy has made any overflow changes; it does not guarantee that
     /// `message` or any existing overflow item was retained. Return `true` to report
     /// [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
     fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool;
