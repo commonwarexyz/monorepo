@@ -45,14 +45,14 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, V, H, S> = Journal::new(
-            context,
+            context.child("journal"),
             cfg.merkle,
             cfg.log,
             Operation::<F, V>::is_commit,
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal).await
+        Self::init_from_journal(journal, context).await
     }
 }
 
@@ -136,6 +136,53 @@ mod test {
 
     fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let value = commonware_utils::sequence::U64::new(7);
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(value.clone())
+                .merkleize(&db, None, floor);
+            let range = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
+            assert_eq!(
+                db.get_many(&[range.start]).await.unwrap(),
+                vec![Some(value)]
+            );
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+
+            let metrics = ctx.encode();
+            for expected in [
+                "db_size 3",
+                "db_pruning_boundary 0",
+                "db_retained 3",
+                "db_inactivity_floor 0",
+                "db_last_commit 2",
+                "db_get_calls_total 1",
+                "db_get_many_calls_total 1",
+                "db_locations_requested_total 2",
+                "db_apply_batch_calls_total 1",
+                "db_operations_applied_total 2",
+                "db_commit_calls_total 1",
+                "db_sync_calls_total 1",
+                "db_prune_calls_total 1",
+                "db_get_duration_count 1",
+                "db_get_many_duration_count 1",
+                "db_apply_batch_duration_count 1",
+                "db_commit_duration_count 1",
+                "db_sync_duration_count 1",
+                "db_prune_duration_count 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
     }
 
     #[test_traced("INFO")]

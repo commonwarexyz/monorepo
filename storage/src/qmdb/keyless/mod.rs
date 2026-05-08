@@ -50,7 +50,11 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, Error},
+    qmdb::{
+        any::value::ValueEncoding,
+        metrics::{LocationReadMetrics, OperationMetrics, StateMetrics},
+        Error,
+    },
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -58,6 +62,28 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::{Sequential, Strategy};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
+
+/// Metrics for Keyless QMDBs.
+pub(crate) struct Metrics<E: Context> {
+    /// State gauges.
+    pub state: StateMetrics,
+    /// Write and durability metrics.
+    pub operations: OperationMetrics<E>,
+    /// Location read metrics.
+    pub reads: LocationReadMetrics<E>,
+}
+
+impl<E: Context> Metrics<E> {
+    /// Create and register metrics.
+    pub fn new(context: E) -> Self {
+        let context = Arc::new(context);
+        Self {
+            state: StateMetrics::new(context.as_ref()),
+            operations: OperationMetrics::new(context.clone()),
+            reads: LocationReadMetrics::new(context),
+        }
+    }
+}
 
 pub mod batch;
 mod compact;
@@ -104,6 +130,9 @@ where
     /// The inactivity floor declared by the last committed batch. Operations at locations below
     /// this value are considered inactive by the application and may be pruned.
     inactivity_floor_loc: Location<F>,
+
+    /// Metrics for this database.
+    metrics: Metrics<E>,
 }
 
 impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
@@ -118,7 +147,9 @@ where
 {
     pub(crate) async fn init_from_journal(
         mut journal: authenticated::Journal<F, E, C, H, S>,
+        context: E,
     ) -> Result<Self, Error<F>> {
+        let metrics = Metrics::new(context);
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
             journal
@@ -127,17 +158,20 @@ where
             journal.sync().await?;
         }
 
-        let last_commit_loc = journal
-            .size()
-            .await
-            .checked_sub(1)
-            .expect("at least one commit should exist");
-
-        let inactivity_floor_loc = {
+        let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.reader().await;
+            let bounds = reader.bounds();
+            let last_commit_loc = Location::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .expect("at least one commit should exist"),
+            );
             let op = reader.read(*last_commit_loc).await?;
-            op.has_floor()
-                .expect("last operation should be a commit with floor")
+            let inactivity_floor_loc = op
+                .has_floor()
+                .expect("last operation should be a commit with floor");
+            (last_commit_loc, inactivity_floor_loc)
         };
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(*last_commit_loc + 1)),
@@ -145,12 +179,15 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
-        Ok(Self {
+        let db = Self {
             journal,
             root,
             last_commit_loc,
             inactivity_floor_loc,
-        })
+            metrics,
+        };
+        db.update_metrics().await;
+        Ok(db)
     }
 
     /// Get the value at location `loc` in the database.
@@ -160,6 +197,9 @@ where
     /// Returns [`Error::LocationOutOfBounds`] if `loc` >=
     /// `self.bounds().await.end`.
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
+        let _timer = self.metrics.reads.get_timer();
+        self.metrics.reads.get_calls.inc();
+        self.metrics.reads.locations_requested.inc();
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;
         if loc >= op_count {
@@ -167,12 +207,13 @@ where
         }
         let op = reader.read(*loc).await?;
 
-        Ok(op.into_value())
+        let result = op.into_value();
+        Ok(result)
     }
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be sorted in strictly ascending order (sorted and unique).
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as the input locations.
     ///
     /// # Errors
@@ -182,9 +223,16 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
+
+        let _timer = self.metrics.reads.get_many_timer();
+        self.metrics.reads.get_many_calls.inc();
+        self.metrics
+            .reads
+            .locations_requested
+            .inc_by(locs.len() as u64);
         debug_assert!(
-            locs.windows(2).all(|window| window[0] < window[1]),
-            "locations must be sorted and unique"
+            locs.windows(2).all(|w| w[0] < w[1]),
+            "locations must be strictly increasing"
         );
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;
@@ -195,7 +243,8 @@ where
         }
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = reader.read_many(&positions).await?;
-        Ok(ops.into_iter().map(|op| op.into_value()).collect())
+        let result = ops.into_iter().map(|op| op.into_value()).collect();
+        Ok(result)
     }
 
     /// Returns the location of the last commit.
@@ -213,6 +262,17 @@ where
     pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Update state gauges from the current database state.
+    async fn update_metrics(&self) {
+        let bounds = self.journal.reader().await.bounds();
+        self.metrics.state.set(
+            bounds.end,
+            bounds.start,
+            *self.inactivity_floor_loc,
+            *self.last_commit_loc,
+        );
     }
 
     /// Return the most recent location from which this database can safely be synced, and the
@@ -326,6 +386,8 @@ where
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
     ///   the last committed batch.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.operations.prune_timer();
+        self.metrics.operations.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
@@ -333,7 +395,7 @@ where
             ));
         }
         self.journal.prune(loc).await?;
-
+        self.update_metrics().await;
         Ok(())
     }
 
@@ -392,6 +454,7 @@ where
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
+        self.update_metrics().await;
         Ok(())
     }
 
@@ -399,12 +462,18 @@ where
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        self.journal.sync().await.map_err(Into::into)
+        let _timer = self.metrics.operations.sync_timer();
+        self.metrics.operations.sync_calls.inc();
+        self.journal.sync().await?;
+        Ok(())
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
     pub async fn commit(&self) -> Result<(), Error<F>> {
-        self.journal.commit().await.map_err(Into::into)
+        let _timer = self.metrics.operations.commit_timer();
+        self.metrics.operations.commit_calls.inc();
+        self.journal.commit().await?;
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.
@@ -463,6 +532,8 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
+        let _timer = self.metrics.operations.apply_batch_timer();
+        self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
@@ -483,7 +554,7 @@ where
         for i in (0..batch.ancestor_batch_ends.len()).rev() {
             let ancestor_end = batch.ancestor_batch_ends[i];
             if ancestor_end <= db_size {
-                // Already on disk — its floor was validated when it was first applied.
+                // Already on disk -- its floor was validated when it was first applied.
                 continue;
             }
             let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
@@ -519,7 +590,13 @@ where
         self.root = batch.root;
         let end_loc = Location::new(batch.total_size);
         debug!(size = ?end_loc, "applied batch");
-        Ok(start_loc..end_loc)
+        let range = start_loc..end_loc;
+        self.update_metrics().await;
+        self.metrics
+            .operations
+            .operations_applied
+            .inc_by(*range.end - *range.start);
+        Ok(range)
     }
 }
 
