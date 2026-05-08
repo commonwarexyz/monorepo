@@ -62,7 +62,7 @@ test *args='':
 
 # Run loom tests
 test-loom *args='':
-    cargo nextest run --release --features loom --lib {{ args }} ::loom_tests::
+    cargo nextest run --release --features loom --lib {{ args }} loom_tests
 
 # Test the Rust documentation
 test-docs *args='--all':
