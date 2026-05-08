@@ -1,5 +1,6 @@
 //! Bounded ready queues with policy-managed overflow.
 
+use crate::Feedback;
 #[cfg(not(feature = "loom"))]
 use futures::task::AtomicWaker;
 use std::{
@@ -24,26 +25,6 @@ cfg_if::cfg_if! {
             atomic::{AtomicUsize, Ordering},
             Arc,
         };
-    }
-}
-
-/// Feedback from submitting work to a bounded endpoint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Feedback {
-    /// The work was accepted immediately.
-    Ok,
-    /// The policy handled the submission but requests producer backoff.
-    Backoff,
-    /// The work was dropped by policy.
-    Dropped,
-    /// The endpoint has closed.
-    Closed,
-}
-
-impl Feedback {
-    /// Returns true if the submission was handled by the mailbox.
-    pub const fn accepted(&self) -> bool {
-        matches!(self, Self::Ok | Self::Backoff)
     }
 }
 

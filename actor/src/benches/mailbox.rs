@@ -1,4 +1,7 @@
-use commonware_actor::mailbox::{self as actor, Feedback, Policy as MailboxPolicy};
+use commonware_actor::{
+    mailbox::{self as actor, Policy as MailboxPolicy},
+    Feedback,
+};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
