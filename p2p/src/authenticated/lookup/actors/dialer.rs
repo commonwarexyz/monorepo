@@ -24,7 +24,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::channel::{
-    actor::{self, ActorInbox, MessagePolicy},
+    actor::{self, ActorInbox, Backpressure},
     Feedback,
 };
 use rand::seq::SliceRandom;
@@ -293,8 +293,8 @@ pub(crate) enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> MessagePolicy for Message<C> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl<C: PublicKey> Backpressure for Message<C> {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         actor::replace_or_retain(match message {
             Self::Dialable(dialable) => actor::replace_last(
                 queue,

@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{actor::{self, ActorMailbox, MessagePolicy}, Feedback},
+    channel::{actor::{self, ActorMailbox, Backpressure}, Feedback},
     vec::NonEmptyVec,
     Span,
 };
@@ -64,8 +64,8 @@ fn merge_fetches<K: Eq, P: PartialEq>(
     }
 }
 
-impl<K: Span, P: PublicKey> MessagePolicy for Message<K, P> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl<K: Span, P: PublicKey> Backpressure for Message<K, P> {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         actor::replace_or_retain(match message {
             Self::Fetch(requests) => {
                 if requests.is_empty() {

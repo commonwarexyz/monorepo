@@ -1,15 +1,15 @@
 use commonware_macros::select;
 use commonware_utils::channel::{
-    actor::{ActorInbox, ActorMailbox, MessagePolicy}, Feedback,
+    actor::{ActorInbox, ActorMailbox, Backpressure}, Feedback,
 };
 
 #[derive(Clone, Debug)]
-pub struct Relay<T: MessagePolicy> {
+pub struct Relay<T: Backpressure> {
     low: ActorMailbox<T>,
     high: ActorMailbox<T>,
 }
 
-impl<T: MessagePolicy> Relay<T> {
+impl<T: Backpressure> Relay<T> {
     pub const fn new(low: ActorMailbox<T>, high: ActorMailbox<T>) -> Self {
         Self { low, high }
     }
@@ -32,7 +32,7 @@ pub enum Prioritized<C, D> {
 }
 
 /// Awaits a message from an actor control inbox, high, or low priority receivers.
-pub async fn recv_actor_prioritized<C: MessagePolicy, D: MessagePolicy>(
+pub async fn recv_actor_prioritized<C: Backpressure, D: Backpressure>(
     control: &mut ActorInbox<C>,
     high: &mut ActorInbox<D>,
     low: &mut ActorInbox<D>,
@@ -53,8 +53,8 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Data(u32);
 
-    impl MessagePolicy for Data {
-        fn backpressure(_: &mut VecDeque<Self>, _: Self) -> Feedback {
+    impl Backpressure for Data {
+        fn handle(_: &mut VecDeque<Self>, _: Self) -> Feedback {
             Feedback::Dropped
         }
     }

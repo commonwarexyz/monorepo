@@ -12,7 +12,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     channel::{
-        actor::{self, MessagePolicy}, Feedback,
+        actor::{self, Backpressure}, Feedback,
         oneshot, ring,
     },
     NZUsize,
@@ -42,8 +42,8 @@ pub enum Message<P: PublicKey> {
     },
 }
 
-impl<P: PublicKey> MessagePolicy for Message<P> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl<P: PublicKey> Backpressure for Message<P> {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();

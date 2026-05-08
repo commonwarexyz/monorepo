@@ -12,7 +12,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, MessagePolicy}, Feedback,
+        actor::{self, ActorMailbox, Backpressure}, Feedback,
         oneshot,
     },
     vec::NonEmptyVec,
@@ -167,8 +167,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
-impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl<S: Scheme, V: Variant> Backpressure for Message<S, V> {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
             Self::HintFinalized {
                 height,

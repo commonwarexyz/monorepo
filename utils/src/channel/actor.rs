@@ -15,13 +15,13 @@ use std::{
     task::{Context, Poll},
 };
 
-/// Policy for actor messages when an inbox is full.
-pub trait MessagePolicy: Sized {
-    /// Apply backpressure to `message` when the bounded ready queue is full.
+/// Backpressure behavior for actor messages when an inbox is full.
+pub trait Backpressure: Sized {
+    /// Handle `message` when the bounded ready queue is full.
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
     /// overflow retained behind the ready queue.
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback;
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback;
 }
 
 struct Overflow<T> {
@@ -47,14 +47,14 @@ impl<T> Overflow<T> {
 
     fn apply_policy(&self, message: T, closed: &AtomicBool) -> Feedback
     where
-        T: MessagePolicy,
+        T: Backpressure,
     {
         let mut queue = self.queue.lock();
         if closed.load(Ordering::Acquire) {
             return Feedback::Closed;
         }
 
-        let feedback = T::backpressure(&mut queue, message);
+        let feedback = T::handle(&mut queue, message);
         self.len.store(queue.len(), Ordering::Release);
         feedback
     }
@@ -100,11 +100,11 @@ impl<T> Drop for SendPermit<'_, T> {
 }
 
 /// Sender half of an actor mailbox.
-pub struct ActorMailbox<T: MessagePolicy> {
+pub struct ActorMailbox<T: Backpressure> {
     shared: Arc<Shared<T>>,
 }
 
-impl<T: MessagePolicy> Clone for ActorMailbox<T> {
+impl<T: Backpressure> Clone for ActorMailbox<T> {
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -113,7 +113,7 @@ impl<T: MessagePolicy> Clone for ActorMailbox<T> {
     }
 }
 
-impl<T: MessagePolicy> Drop for ActorMailbox<T> {
+impl<T: Backpressure> Drop for ActorMailbox<T> {
     fn drop(&mut self) {
         let previous = self.shared.senders.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0);
@@ -123,7 +123,7 @@ impl<T: MessagePolicy> Drop for ActorMailbox<T> {
     }
 }
 
-impl<T: MessagePolicy> fmt::Debug for ActorMailbox<T> {
+impl<T: Backpressure> fmt::Debug for ActorMailbox<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ActorMailbox")
             .field("len", &self.len())
@@ -133,7 +133,7 @@ impl<T: MessagePolicy> fmt::Debug for ActorMailbox<T> {
     }
 }
 
-impl<T: MessagePolicy> ActorMailbox<T> {
+impl<T: Backpressure> ActorMailbox<T> {
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Feedback {
@@ -273,7 +273,7 @@ impl<T> Drop for ActorInbox<T> {
 }
 
 /// Create an actor mailbox with a bounded ready queue and policy-managed overflow.
-pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbox<T>) {
+pub fn channel<T: Backpressure>(capacity: usize) -> (ActorMailbox<T>, ActorInbox<T>) {
     assert!(capacity > 0, "actor mailbox capacity must be greater than zero");
 
     let shared = Arc::new(Shared {
@@ -350,8 +350,8 @@ mod tests {
         Hint(u64),
     }
 
-    impl MessagePolicy for Message {
-        fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+    impl Backpressure for Message {
+        fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
             match message {
                 Self::Update(value) => replace_or_retain(
                     replace_last(queue, Self::Update(value), |pending| {

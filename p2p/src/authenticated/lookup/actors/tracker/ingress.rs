@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, MessagePolicy}, Feedback,
+        actor::{self, Backpressure}, Feedback,
         ring, oneshot,
     },
     ordered::Map,
@@ -151,8 +151,8 @@ pub(crate) enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> MessagePolicy for Message<C> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl<C: PublicKey> Backpressure for Message<C> {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         actor::replace_or_retain(match message {
             Self::Register { index, peers } => actor::replace_last(
                 queue,

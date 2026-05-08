@@ -8,7 +8,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, MessagePolicy}, Feedback,
+        actor::{self, ActorMailbox, Backpressure}, Feedback,
         oneshot,
     },
     sequence::U64,
@@ -46,8 +46,8 @@ fn certificate_key<S: Scheme, D: Digest>(
     }
 }
 
-impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl<S: Scheme, D: Digest> Backpressure for MailboxMessage<S, D> {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         actor::replace_or_retain(match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
@@ -123,8 +123,8 @@ impl Handler {
     }
 }
 
-impl MessagePolicy for HandlerMessage {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl Backpressure for HandlerMessage {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         actor::replace_or_retain(match &message {
             Self::Deliver { .. } => actor::replace_last(queue, message, |pending| {
                 matches!(pending, Self::Produce { .. })

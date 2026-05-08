@@ -3,7 +3,7 @@
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_utils::channel::{
-    actor::{find_last_mut, retain, MessagePolicy},
+    actor::{find_last_mut, retain, Backpressure},
     Feedback,
 };
 use std::{
@@ -39,8 +39,8 @@ impl Deref for ListenableIps {
     }
 }
 
-impl MessagePolicy for ListenableIps {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+impl Backpressure for ListenableIps {
+    fn handle(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         if let Some(pending) = find_last_mut(queue, |_| true) {
             *pending = message;
             Feedback::Backoff

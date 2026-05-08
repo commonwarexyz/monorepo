@@ -1,12 +1,12 @@
 use commonware_utils::channel::{
-    actor::{self, ActorInbox, ActorMailbox, MessagePolicy}, Feedback,
+    actor::{self, ActorInbox, ActorMailbox, Backpressure}, Feedback,
 };
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
-pub struct Mailbox<T: MessagePolicy>(pub(crate) ActorMailbox<T>);
+pub struct Mailbox<T: Backpressure>(pub(crate) ActorMailbox<T>);
 
-impl<T: MessagePolicy> Mailbox<T> {
+impl<T: Backpressure> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
     pub fn new(size: usize) -> (Self, ActorInbox<T>) {
         let (sender, receiver) = actor::channel(size);
@@ -19,7 +19,7 @@ impl<T: MessagePolicy> Mailbox<T> {
     }
 }
 
-impl<T: MessagePolicy> Clone for Mailbox<T> {
+impl<T: Backpressure> Clone for Mailbox<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
