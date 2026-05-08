@@ -231,10 +231,14 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.context.child("decode").shared(true).spawn(|_| async move {
-                    let result = V::decode_cfg(bytes.as_ref(), &config);
-                    (peer, result)
-                });
+                let handle = self
+                    .context
+                    .child("decode")
+                    .shared(true)
+                    .spawn(|_| async move {
+                        let result = V::decode_cfg(bytes.as_ref(), &config);
+                        (peer, result)
+                    });
                 decode_pool.push(handle);
             },
         }

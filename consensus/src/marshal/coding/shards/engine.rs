@@ -517,10 +517,7 @@ where
                 return;
             } => {
                 // Track shard receipt per peer.
-                self.metrics
-                    .shards_received
-                    .get_or_create_by(&peer)
-                    .inc();
+                self.metrics.shards_received.get_or_create_by(&peer).inc();
 
                 let commitment = shard.commitment();
                 if !self.should_handle_network_shard(commitment) {

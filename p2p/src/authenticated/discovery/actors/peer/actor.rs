@@ -220,9 +220,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     msg = recv_prioritized(control, high, low) => {
                         let (metric, payload) = match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
-                            Prioritized::Control(msg) => {
-                                Self::prepare_control(&peer, msg, &pool)?
-                            }
+                            Prioritized::Control(msg) => Self::prepare_control(&peer, msg, &pool)?,
                             Prioritized::Data(encoded) => {
                                 Self::prepare_data(&peer, encoded, &rate_limits)
                             }

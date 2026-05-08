@@ -643,27 +643,20 @@ where
             }
             next_op_time = context.current() + config.op_interval;
         },
-        client_result = listener.accept() => {
-            match client_result {
-                Ok((client_addr, sink, stream)) => {
-                    let state = state.clone();
-                    context.child("client").spawn(move |context| async move {
-                        if let Err(err) = handle_client::<DB, _, Mode>(
-                            context,
-                            state,
-                            sink,
-                            stream,
-                            client_addr,
-                        )
-                        .await
-                        {
-                            error!(client_addr = %client_addr, ?err, "error handling client");
-                        }
-                    });
-                }
-                Err(err) => {
-                    error!(?err, "failed to accept client");
-                }
+        client_result = listener.accept() => match client_result {
+            Ok((client_addr, sink, stream)) => {
+                let state = state.clone();
+                context.child("client").spawn(move |context| async move {
+                    if let Err(err) =
+                        handle_client::<DB, _, Mode>(context, state, sink, stream, client_addr)
+                            .await
+                    {
+                        error!(client_addr = %client_addr, ?err, "error handling client");
+                    }
+                });
+            }
+            Err(err) => {
+                error!(?err, "failed to accept client");
             }
         },
     }

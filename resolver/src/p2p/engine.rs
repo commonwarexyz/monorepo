@@ -328,8 +328,9 @@ impl<
                 };
                 match msg.payload {
                     wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) =>
-                        self.handle_network_response(peer, msg.id, response),
+                    wire::Payload::Response(response) => {
+                        self.handle_network_response(peer, msg.id, response)
+                    }
                     wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },

@@ -198,9 +198,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
                             Prioritized::Control(msg) => match msg {
-                                Message::Kill => {
-                                    return Err(Error::PeerKilled(peer.to_string()))
-                                }
+                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             },
                             Prioritized::Data(encoded) => {
                                 let (metric, payload) =
