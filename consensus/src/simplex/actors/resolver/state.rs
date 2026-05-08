@@ -228,7 +228,7 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::{channel::actor::Enqueue, sync::Mutex, test_rng, vec::NonEmptyVec};
+    use commonware_utils::{channel::Submission, sync::Mutex, test_rng, vec::NonEmptyVec};
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-state";
@@ -256,45 +256,45 @@ mod tests {
         type Message = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, key: U64) -> Enqueue<()> {
+        fn fetch(&mut self, key: U64) -> Submission {
             self.outstanding.lock().insert(key);
-            Enqueue::Queued
+            Submission::Accepted
         }
 
-        fn fetch_all(&mut self, keys: Vec<U64>) -> Enqueue<()> {
+        fn fetch_all(&mut self, keys: Vec<U64>) -> Submission {
             for key in keys {
                 self.outstanding.lock().insert(key);
             }
-            Enqueue::Queued
+            Submission::Accepted
         }
 
-        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Enqueue<()> {
+        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Submission {
             // For testing, just treat targeted fetch the same as regular fetch
             self.outstanding.lock().insert(key);
-            Enqueue::Queued
+            Submission::Accepted
         }
 
-        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Enqueue<()> {
+        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Submission {
             // For testing, just treat targeted fetch the same as regular fetch
             for (key, _targets) in requests {
                 self.outstanding.lock().insert(key);
             }
-            Enqueue::Queued
+            Submission::Accepted
         }
 
-        fn cancel(&mut self, key: U64) -> Enqueue<()> {
+        fn cancel(&mut self, key: U64) -> Submission {
             self.outstanding.lock().remove(&key);
-            Enqueue::Queued
+            Submission::Accepted
         }
 
-        fn clear(&mut self) -> Enqueue<()> {
+        fn clear(&mut self) -> Submission {
             self.outstanding.lock().clear();
-            Enqueue::Queued
+            Submission::Accepted
         }
 
-        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue<()> {
+        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Submission {
             self.outstanding.lock().retain(|key| predicate(key));
-            Enqueue::Queued
+            Submission::Accepted
         }
     }
 

@@ -665,7 +665,7 @@ mod tests {
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::{
-        channel::{actor::Enqueue, ring},
+        channel::{ring, Submission},
         N3f1, NZUsize, TryCollect, NZU32,
     };
     use core::marker::PhantomData;
@@ -694,11 +694,11 @@ mod tests {
     }
 
     impl<P: PublicKey> Manager for NoopManager<P> {
-        fn track<R>(&mut self, _: u64, _: R) -> Enqueue<()>
+        fn track<R>(&mut self, _: u64, _: R) -> Submission
         where
             R: Into<TrackedPeers<Self::PublicKey>>,
         {
-            Enqueue::Queued
+            Submission::Accepted
         }
     }
 

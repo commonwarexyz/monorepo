@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Quota};
-use commonware_utils::channel::{actor::Enqueue, mpsc};
+use commonware_utils::channel::{Submission, mpsc};
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and
@@ -49,22 +49,15 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue<()> {
+    ) -> Submission {
         let message = message.into();
         if message.len() > self.max_size as usize {
-            return Enqueue::Rejected(());
+            return Submission::Dropped;
         }
 
-        match self
+        self
             .messenger
             .enqueue_content(recipients, self.channel, message, priority)
-        {
-            Enqueue::Queued => Enqueue::Queued,
-            Enqueue::Retained => Enqueue::Retained,
-            Enqueue::Replaced => Enqueue::Replaced,
-            Enqueue::Rejected(_) => Enqueue::Rejected(()),
-            Enqueue::Closed(_) => Enqueue::Closed(()),
-        }
     }
 }
 
@@ -112,7 +105,7 @@ impl<P: PublicKey, C: Clock + Send + 'static> crate::MailboxSender for Sender<P,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue<()> {
+    ) -> Submission {
         <UnlimitedSender<P> as crate::MailboxSender>::send(
             &self.mailbox_sender,
             recipients,

@@ -7,7 +7,7 @@ use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_runtime::{iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Spawner};
 use commonware_utils::{
-    channel::{actor::Enqueue, fallible::AsyncFallibleExt, mpsc},
+    channel::{Submission, fallible::AsyncFallibleExt, mpsc},
     futures::Pool,
 };
 use std::time::SystemTime;
@@ -54,13 +54,13 @@ impl<S: crate::MailboxSender, V: Codec> WrappedMailboxSender<S, V> {
         }
     }
 
-    /// Enqueue a message to a set of recipients.
+    /// Submit a message to a set of recipients.
     pub fn send(
         &self,
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Enqueue<()> {
+    ) -> Submission {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority)
     }
@@ -415,8 +415,8 @@ mod tests {
     impl crate::Blocker for NoopBlocker {
         type PublicKey = PublicKey;
 
-        fn block(&mut self, _peer: Self::PublicKey) -> Enqueue<()> {
-            Enqueue::Rejected(())
+        fn block(&mut self, peer: Self::PublicKey) -> Submission {
+            Submission::Dropped
         }
     }
 

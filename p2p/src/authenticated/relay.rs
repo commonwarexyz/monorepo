@@ -1,6 +1,6 @@
 use commonware_macros::select;
 use commonware_utils::channel::{
-    actor::{ActorInbox, ActorMailbox, Enqueue, MessagePolicy},
+    actor::{ActorInbox, ActorMailbox, MessagePolicy}, Submission,
 };
 
 #[derive(Clone, Debug)]
@@ -15,7 +15,7 @@ impl<T: MessagePolicy> Relay<T> {
     }
 
     /// Sends the given `message` to the appropriate channel based on `priority`.
-    pub fn send(&self, message: T, priority: bool) -> Enqueue<T> {
+    pub fn send(&self, message: T, priority: bool) -> Submission {
         let sender = if priority { &self.high } else { &self.low };
         sender.enqueue(message)
     }

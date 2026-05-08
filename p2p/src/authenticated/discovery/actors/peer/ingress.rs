@@ -1,6 +1,6 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::actor::{self, Backpressure, Enqueue, MessagePolicy};
+use commonware_utils::channel::{actor::{self, Backpressure, MessagePolicy}, Submission};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the peer [super::Actor].
@@ -38,15 +38,15 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: PublicKey> Mailbox<Message<C>> {
-    pub fn bit_vec(&mut self, bit_vec: types::BitVec) -> Enqueue<Message<C>> {
+    pub fn bit_vec(&mut self, bit_vec: types::BitVec) -> Submission {
         self.enqueue(Message::BitVec(bit_vec))
     }
 
-    pub fn peers(&mut self, peers: Vec<types::Info<C>>) -> Enqueue<Message<C>> {
+    pub fn peers(&mut self, peers: Vec<types::Info<C>>) -> Submission {
         self.enqueue(Message::Peers(peers))
     }
 
-    pub fn kill(&mut self) -> Enqueue<Message<C>> {
+    pub fn kill(&mut self) -> Submission {
         self.enqueue(Message::Kill)
     }
 }

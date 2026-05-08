@@ -9,7 +9,7 @@ use commonware_runtime::{
     },
     Clock, Metrics,
 };
-use commonware_utils::{channel::actor::Enqueue, PrioritySet, Span, SystemTimeExt};
+use commonware_utils::{channel::Submission, PrioritySet, Span, SystemTimeExt};
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -280,7 +280,7 @@ where
                     payload: wire::Payload::Request(key.clone()),
                 };
                 match sender.send(Recipients::One(peer.clone()), message, self.priority_requests) {
-                    Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
+                    Submission::Accepted | Submission::Backlogged => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -628,11 +628,11 @@ mod tests {
 
         fn send(
             &self,
-            _recipients: Recipients<Self::PublicKey>,
-            _message: impl Into<IoBufs> + Send,
-            _priority: bool,
-        ) -> Enqueue<()> {
-            Enqueue::Rejected(())
+            recipients: Recipients<Self::PublicKey>,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> Submission {
+            Submission::Dropped
         }
     }
 
@@ -684,9 +684,9 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Enqueue<()> {
+        ) -> Submission {
             match recipients {
-                Recipients::One(_) => Enqueue::Queued,
+                Recipients::One(_) => Submission::Accepted,
                 _ => unimplemented!(),
             }
         }
@@ -753,7 +753,7 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Enqueue<()> {
+        ) -> Submission {
             let peer = match &recipients {
                 Recipients::One(p) => p,
                 _ => unimplemented!(),
@@ -761,9 +761,9 @@ mod tests {
 
             let rate_limiter = self.rate_limiter.write();
             if rate_limiter.check_key(peer).is_err() {
-                return Enqueue::Rejected(());
+                return Submission::Dropped;
             }
-            Enqueue::Queued
+            Submission::Accepted
         }
     }
 

@@ -6,7 +6,10 @@ use commonware_cryptography::{
     PublicKey,
 };
 use commonware_utils::{
-    channel::actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
+    channel::{
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy},
+        Submission,
+    },
     ordered::Set,
 };
 use std::collections::VecDeque;
@@ -60,11 +63,11 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
         Self { sender }
     }
 
-    pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Enqueue<()> {
-        self.sender.enqueue(Message::Enter(transition)).discard()
+    pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Submission {
+        self.sender.enqueue(Message::Enter(transition))
     }
 
-    pub fn exit(&mut self, epoch: Epoch) -> Enqueue<()> {
-        self.sender.enqueue(Message::Exit(epoch)).discard()
+    pub fn exit(&mut self, epoch: Epoch) -> Submission {
+        self.sender.enqueue(Message::Exit(epoch))
     }
 }

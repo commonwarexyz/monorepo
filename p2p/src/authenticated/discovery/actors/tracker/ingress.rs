@@ -13,7 +13,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure, Enqueue, MessagePolicy},
+        actor::{self, Backpressure, MessagePolicy}, Submission,
         ring, oneshot,
     },
     NZUsize,
@@ -252,8 +252,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             dialer,
             responder,
         }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok(),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
+            Submission::Accepted | Submission::Backlogged => receiver.await.ok(),
+            Submission::Dropped | Submission::Closed => None,
         }
     }
 
@@ -263,7 +263,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         public_key: C,
         dialer: bool,
         spawner: Mailbox<spawner::Connect<C>>,
-    ) -> Enqueue<Message<C>> {
+    ) -> Submission {
         self.enqueue(Message::ConnectForSpawner {
             public_key,
             dialer,
@@ -272,7 +272,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     }
 
     /// Send a `Construct` message to the tracker.
-    pub fn construct(&self, public_key: C, peer: Mailbox<peer::Message<C>>) -> Enqueue<Message<C>> {
+    pub fn construct(&self, public_key: C, peer: Mailbox<peer::Message<C>>) -> Submission {
         self.enqueue(Message::Construct { public_key, peer })
     }
 
@@ -281,17 +281,17 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         bit_vec: types::BitVec,
         peer: Mailbox<peer::Message<C>>,
-    ) -> Enqueue<Message<C>> {
+    ) -> Submission {
         self.enqueue(Message::BitVec { bit_vec, peer })
     }
 
     /// Send a `Peers` message to the tracker.
-    pub fn peers(&self, peers: Vec<types::Info<C>>) -> Enqueue<Message<C>> {
+    pub fn peers(&self, peers: Vec<types::Info<C>>) -> Submission {
         self.enqueue(Message::Peers { peers })
     }
 
     /// Request dialable peers from the tracker and send the response to the dialer actor.
-    pub fn request_dialable(&self, dialer: Mailbox<dialer::Message<C>>) -> Enqueue<Message<C>> {
+    pub fn request_dialable(&self, dialer: Mailbox<dialer::Message<C>>) -> Submission {
         self.enqueue(Message::DialableForDialer { dialer })
     }
 
@@ -300,7 +300,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         dialer: Mailbox<dialer::Message<C>>,
-    ) -> Enqueue<Message<C>> {
+    ) -> Submission {
         self.enqueue(Message::DialForDialer { public_key, dialer })
     }
 
@@ -309,7 +309,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         listener: Mailbox<listener::Message<C>>,
-    ) -> Enqueue<Message<C>> {
+    ) -> Submission {
         self.enqueue(Message::AcceptableForListener {
             public_key,
             listener,
@@ -321,7 +321,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         listener: Mailbox<listener::Message<C>>,
-    ) -> Enqueue<Message<C>> {
+    ) -> Submission {
         self.enqueue(Message::ListenForListener {
             public_key,
             listener,
@@ -334,8 +334,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     pub async fn dialable(&self) -> Dialable<C> {
         let (responder, receiver) = oneshot::channel();
         match self.enqueue(Message::Dialable { responder }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_default(),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => Dialable::default(),
+            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_default(),
+            Submission::Dropped | Submission::Closed => Dialable::default(),
         }
     }
 
@@ -348,8 +348,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             reservation,
         }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
+            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
+            Submission::Dropped | Submission::Closed => None,
         }
     }
 
@@ -362,8 +362,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             responder,
         }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or(false),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => false,
+            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or(false),
+            Submission::Dropped | Submission::Closed => false,
         }
     }
 
@@ -376,8 +376,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             reservation,
         }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
+            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
+            Submission::Dropped | Submission::Closed => None,
         }
     }
 }
@@ -424,19 +424,19 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
             index: id,
             responder,
         }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.ok().flatten(),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => None,
+            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
+            Submission::Dropped | Submission::Closed => None,
         }
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         let (responder, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { responder }) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
+            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => {
+            Submission::Dropped | Submission::Closed => {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }
@@ -445,33 +445,21 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
-    fn track<R>(&mut self, index: u64, peers: R) -> Enqueue<()>
+    fn track<R>(&mut self, index: u64, peers: R) -> Submission
     where
         R: Into<TrackedPeers<Self::PublicKey>>,
     {
-        match self.sender.enqueue(Message::Register {
+        self.sender.enqueue(Message::Register {
             index,
             peers: peers.into(),
-        }) {
-            Enqueue::Queued => Enqueue::Queued,
-            Enqueue::Retained => Enqueue::Retained,
-            Enqueue::Replaced => Enqueue::Replaced,
-            Enqueue::Rejected(_) => Enqueue::Rejected(()),
-            Enqueue::Closed(_) => Enqueue::Closed(()),
-        }
+        })
     }
 }
 
 impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
-    fn block(&mut self, public_key: Self::PublicKey) -> Enqueue<()> {
-        match self.sender.enqueue(Message::Block { public_key }) {
-            Enqueue::Queued => Enqueue::Queued,
-            Enqueue::Retained => Enqueue::Retained,
-            Enqueue::Replaced => Enqueue::Replaced,
-            Enqueue::Rejected(_) => Enqueue::Rejected(()),
-            Enqueue::Closed(_) => Enqueue::Closed(()),
-        }
+    fn block(&mut self, public_key: Self::PublicKey) -> Submission {
+        self.sender.enqueue(Message::Block { public_key })
     }
 }

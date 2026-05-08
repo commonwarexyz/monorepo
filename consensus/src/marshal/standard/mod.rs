@@ -91,7 +91,7 @@ mod tests {
     };
     use commonware_utils::{
         channel::{
-            actor::{self, ActorMailbox, Enqueue},
+            actor::{self, ActorMailbox}, Submission,
             fallible::OneshotExt,
             oneshot,
         },
@@ -1708,31 +1708,31 @@ mod tests {
         type Message = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, _key: Self::Key) -> Enqueue<()> {
-            Enqueue::Queued
+        fn fetch(&mut self, _key: Self::Key) -> Submission {
+            Submission::Accepted
         }
-        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Enqueue<()> {
-            Enqueue::Queued
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Submission {
+            Submission::Accepted
         }
-        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Enqueue<()> {
+        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Submission {
             self.targeted.lock().push((key, targets));
-            Enqueue::Queued
+            Submission::Accepted
         }
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Enqueue<()> {
+        ) -> Submission {
             self.targeted.lock().extend(requests);
-            Enqueue::Queued
+            Submission::Accepted
         }
-        fn cancel(&mut self, _key: Self::Key) -> Enqueue<()> {
-            Enqueue::Queued
+        fn cancel(&mut self, _key: Self::Key) -> Submission {
+            Submission::Accepted
         }
-        fn clear(&mut self) -> Enqueue<()> {
-            Enqueue::Queued
+        fn clear(&mut self) -> Submission {
+            Submission::Accepted
         }
-        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Enqueue<()> {
-            Enqueue::Queued
+        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Submission {
+            Submission::Accepted
         }
     }
 
@@ -1778,7 +1778,7 @@ mod tests {
     impl Reporter for GatedBlockReporter {
         type Activity = Update<B>;
 
-        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::actor::Enqueue<()> {
+        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::Submission {
             match activity {
                 Update::Block(block, _ack) => {
                     if let Some(started) = self.started.lock().take() {
@@ -1788,7 +1788,7 @@ mod tests {
                 }
                 Update::Tip(_, _, _) => {}
             }
-            commonware_utils::channel::actor::Enqueue::<()>::Queued
+            commonware_utils::channel::Submission::<()>::Accepted
         }
     }
 

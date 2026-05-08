@@ -4,7 +4,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy};
+use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Submission};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,7 +71,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         leader: Participant,
         finalized: View,
         forwardable_proposal: Option<Proposal<D>>,
-    ) -> Enqueue<Message<S, D>> {
+    ) -> Submission {
         self.sender.enqueue(Message::Update {
             current,
             leader,
@@ -81,7 +81,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a constructed vote.
-    pub fn constructed(&mut self, message: Vote<S, D>) -> Enqueue<Message<S, D>> {
+    pub fn constructed(&mut self, message: Vote<S, D>) -> Submission {
         self.sender.enqueue(Message::Constructed(message))
     }
 

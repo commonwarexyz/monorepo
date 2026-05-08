@@ -11,8 +11,8 @@ use commonware_cryptography::{
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{
-        actor::{ActorMailbox, Backpressure, Enqueue, MessagePolicy},
-        oneshot,
+        actor::{ActorMailbox, Backpressure, MessagePolicy},
+        oneshot, Submission,
     },
     Acknowledgement,
 };
@@ -114,17 +114,15 @@ where
 {
     type Activity = Update<Block<H, C, V>, A>;
 
-    fn report(&mut self, update: Self::Activity) -> Enqueue<()> {
+    fn report(&mut self, update: Self::Activity) -> Submission {
         // Report the finalized block to the DKG actor on a best-effort basis.
         let Update::Block(block, ack_tx) = update else {
             // We ignore any other updates sent by marshal.
-            return Enqueue::Rejected(());
+            return Submission::Dropped;
         };
-        self.sender
-            .enqueue(Message::Finalized {
-                block,
-                response: ack_tx,
-            })
-            .discard()
+        self.sender.enqueue(Message::Finalized {
+            block,
+            response: ack_tx,
+        })
     }
 }

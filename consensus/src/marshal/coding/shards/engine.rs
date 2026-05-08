@@ -168,7 +168,7 @@ use commonware_runtime::{
 use commonware_utils::{
     bitmap::BitMap,
     channel::{
-        actor::{self, ActorInbox, Enqueue},
+        actor::{self, ActorInbox}, Submission,
         fallible::OneshotExt,
         oneshot,
     },
@@ -814,7 +814,7 @@ where
                 return;
             };
             match sender.send(Recipients::One(peer.clone()), shard, true) {
-                Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {}
+                Submission::Accepted | Submission::Backlogged => {}
                 result => warn!(?result, ?peer, %commitment, "unable to enqueue shard"),
             }
         }
@@ -828,7 +828,7 @@ where
             .collect();
         if !non_participants.is_empty() {
             match sender.send(Recipients::Some(non_participants), leader_shard, true) {
-                Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {}
+                Submission::Accepted | Submission::Backlogged => {}
                 result => warn!(?result, %commitment, "unable to enqueue leader shard"),
             }
         }
@@ -851,7 +851,7 @@ where
     ) {
         let commitment = shard.commitment();
         match sender.send(Recipients::All, shard, true) {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => {
+            Submission::Accepted | Submission::Backlogged => {
                 debug!(?commitment, "enqueued shard broadcast");
             }
             result => warn!(?result, ?commitment, "unable to enqueue shard broadcast"),

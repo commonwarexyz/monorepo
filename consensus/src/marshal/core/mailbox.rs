@@ -12,7 +12,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Submission,
         oneshot,
     },
     vec::NonEmptyVec,
@@ -428,21 +428,15 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
 impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     type Activity = Activity<S, V::Commitment>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
+    fn report(&mut self, activity: Self::Activity) -> Submission {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
-                return Enqueue::Rejected(());
+                return Submission::Dropped;
             }
         };
-        match self.sender.enqueue(message) {
-            Enqueue::Queued => Enqueue::Queued,
-            Enqueue::Retained => Enqueue::Retained,
-            Enqueue::Replaced => Enqueue::Replaced,
-            Enqueue::Rejected(_) => Enqueue::Rejected(()),
-            Enqueue::Closed(_) => Enqueue::Closed(()),
-        }
+        self.sender.enqueue(message)
     }
 }

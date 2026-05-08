@@ -1,5 +1,5 @@
 use crate::authenticated::Mailbox;
-use commonware_utils::channel::actor::{Backpressure, Enqueue, MessagePolicy};
+use commonware_utils::channel::{actor::{Backpressure, MessagePolicy}, Submission};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the peer [super::Actor].
@@ -16,7 +16,7 @@ impl MessagePolicy for Message {
 }
 
 impl Mailbox<Message> {
-    pub fn kill(&mut self) -> Enqueue<Message> {
+    pub fn kill(&mut self) -> Submission {
         self.enqueue(Message::Kill)
     }
 }

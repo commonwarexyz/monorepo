@@ -8,7 +8,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Backpressure, Enqueue, MessagePolicy},
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Submission,
         oneshot,
     },
     sequence::U64,
@@ -86,13 +86,13 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a certificate.
-    pub fn updated(&mut self, certificate: Certificate<S, D>) -> Enqueue<MailboxMessage<S, D>> {
+    pub fn updated(&mut self, certificate: Certificate<S, D>) -> Submission {
         self.sender
             .enqueue(MailboxMessage::Certificate(certificate))
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, view: View, success: bool) -> Enqueue<MailboxMessage<S, D>> {
+    pub fn certified(&mut self, view: View, success: bool) -> Submission {
         self.sender
             .enqueue(MailboxMessage::Certified { view, success })
     }
@@ -150,7 +150,7 @@ impl Consumer for Handler {
             data: value,
             response,
         });
-        if !matches!(result, Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced) {
+        if !matches!(result, Submission::Accepted | Submission::Backlogged) {
             return false;
         }
         receiver.await.unwrap_or(false)
@@ -167,7 +167,7 @@ impl Producer for Handler {
             view: View::new(key.into()),
             response,
         });
-        if !matches!(result, Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced) {
+        if !matches!(result, Submission::Accepted | Submission::Backlogged) {
             return receiver;
         }
         receiver

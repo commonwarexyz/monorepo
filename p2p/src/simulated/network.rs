@@ -26,7 +26,7 @@ use commonware_runtime::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
     channel::{
-        actor::{ActorInbox, Enqueue},
+        actor::{ActorInbox}, Submission,
         mpsc, oneshot, ring,
     },
     ordered::Set,
@@ -769,7 +769,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Determine if the message should be delivered
             let should_deliver = self.context.gen_bool(link.success_rate);
 
-            // Enqueue message for delivery
+            // Submit message for delivery
             let completions = self.transmitter.enqueue(
                 now,
                 origin.clone(),
@@ -856,11 +856,11 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
             .mailbox
             .enqueue(ingress::Message::SubscribeConnected { response })
         {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => receiver.await.unwrap_or_else(|_| {
+            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_else(|_| {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }),
-            Enqueue::Rejected(_) | Enqueue::Closed(_) => {
+            Submission::Dropped | Submission::Closed => {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }
@@ -924,21 +924,22 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
         recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue<()> {
-        let message = message.into().coalesce();
+    ) -> Submission {
+        let message = message.into();
 
         if message.len() > self.max_size as usize {
-            return Enqueue::Rejected(());
+            return Submission::Dropped;
         }
 
+        let message = message.coalesce();
         let channel = if priority { &self.high } else { &self.low };
         if channel
             .send((self.channel, self.me.clone(), recipients, message, None))
             .is_err()
         {
-            return Enqueue::Closed(());
+            return Submission::Closed;
         }
-        Enqueue::Queued
+        Submission::Accepted
     }
 }
 
@@ -1054,7 +1055,7 @@ impl<P: PublicKey, E: Clock + Send + 'static> crate::MailboxSender for Sender<P,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue<()> {
+    ) -> Submission {
         <UnlimitedSender<P> as crate::MailboxSender>::send(
             &self.mailbox_sender,
             recipients,
@@ -1139,10 +1140,10 @@ where
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Enqueue<()> {
+    ) -> Submission {
         let message = message.into().coalesce();
         let Some(recipients) = (self.forwarder)(self.replica, &recipients, &message) else {
-            return Enqueue::Rejected(());
+            return Submission::Dropped;
         };
         <Sender<P, E> as crate::MailboxSender>::send(&self.inner, recipients, message, priority)
     }

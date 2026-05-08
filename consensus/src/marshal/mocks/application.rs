@@ -1,5 +1,5 @@
 use crate::{marshal::Update, types::Height, Block, Reporter};
-use commonware_utils::channel::actor::Enqueue;
+use commonware_utils::channel::Submission;
 use commonware_utils::{
     acknowledgement::Exact,
     sync::{Mutex, Notify},
@@ -82,7 +82,7 @@ impl<B: Block> Application<B> {
 impl<B: Block> Reporter for Application<B> {
     type Activity = Update<B>;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
+    fn report(&mut self, activity: Self::Activity) -> Submission {
         match activity {
             Update::Block(block, ack_tx) => {
                 let height = block.height();
@@ -98,6 +98,6 @@ impl<B: Block> Reporter for Application<B> {
                 *self.tip.lock() = Some((height, digest));
             }
         }
-        Enqueue::Queued
+        Submission::Accepted
     }
 }

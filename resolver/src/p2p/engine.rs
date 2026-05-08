@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{actor, actor::ActorInbox, actor::Enqueue, oneshot},
+    channel::{actor, actor::ActorInbox, Submission, oneshot},
     futures::Pool as FuturesPool,
     Span,
 };
@@ -364,7 +364,7 @@ impl<
 
         // Log result, but do not handle errors
         match result {
-            Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced => trace!(?peer, ?id, "serve sent"),
+            Submission::Accepted | Submission::Backlogged => trace!(?peer, ?id, "serve sent"),
             result => warn!(?peer, ?id, ?result, "serve send failed"),
         };
     }

@@ -1,5 +1,5 @@
 use commonware_utils::channel::{
-    actor::{self, ActorInbox, ActorMailbox, Enqueue, MessagePolicy},
+    actor::{self, ActorInbox, ActorMailbox, MessagePolicy}, Submission,
 };
 
 /// A mailbox wraps a sender for messages of type `T`.
@@ -13,8 +13,8 @@ impl<T: MessagePolicy> Mailbox<T> {
         (Self(sender), receiver)
     }
 
-    /// Enqueue a message without waiting for inbox capacity.
-    pub fn enqueue(&self, msg: T) -> Enqueue<T> {
+    /// Submit a message without waiting for inbox capacity.
+    pub fn enqueue(&self, msg: T) -> Submission {
         self.0.enqueue(msg)
     }
 }

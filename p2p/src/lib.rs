@@ -17,7 +17,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::{actor::Enqueue, ring},
+        channel::{Submission, ring},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -208,7 +208,7 @@ stability_scope!(BETA {
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
 
-        /// Enqueue a message to a set of recipients.
+        /// Submit a message to a set of recipients.
         ///
         /// This method only reports whether the p2p actor accepted the work. It
         /// does not report which peers eventually received the message.
@@ -217,7 +217,7 @@ stability_scope!(BETA {
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Enqueue<()>;
+        ) -> Submission;
     }
 
     /// Interface for receiving messages from arbitrary recipients.
@@ -363,7 +363,7 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> Enqueue<()>
+        fn track<R>(&mut self, id: u64, peers: R) -> Submission
         where
             R: Into<TrackedPeers<Self::PublicKey>>;
     }
@@ -395,7 +395,11 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> Enqueue<()>
+        fn track<R>(
+            &mut self,
+            id: u64,
+            peers: R,
+        ) -> Submission
         where
             R: Into<AddressableTrackedPeers<Self::PublicKey>>;
 
@@ -405,7 +409,10 @@ stability_scope!(BETA {
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
-        fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Enqueue<()>;
+        fn overwrite(
+            &mut self,
+            peers: Map<Self::PublicKey, Address>,
+        ) -> Submission;
     }
 
     /// Interface for blocking other peers.
@@ -414,7 +421,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
-        fn block(&mut self, peer: Self::PublicKey) -> Enqueue<()>;
+        fn block(&mut self, peer: Self::PublicKey) -> Submission;
     }
 });
 
@@ -453,6 +460,6 @@ macro_rules! block {
     reason = "test helper that bypasses the block! macro"
 )]
 #[cfg(test)]
-pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Enqueue<()> {
+pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Submission {
     blocker.block(peer)
 }

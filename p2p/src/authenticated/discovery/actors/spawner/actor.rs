@@ -18,7 +18,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::actor::{ActorInbox, Enqueue};
+use commonware_utils::channel::{actor::{ActorInbox}, Submission};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
@@ -133,7 +133,7 @@ impl<
                                         is_dialer,
                                         connect_mailbox
                                     ),
-                                    Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
+                                    Submission::Accepted | Submission::Backlogged
                                 ) {
                                     debug!(?peer, "peer not eligible");
                                     drop(reservation);
@@ -168,7 +168,7 @@ impl<
                                 // Register peer with the router (may fail during shutdown).
                                 if !matches!(
                                     router.ready(peer.clone(), messenger),
-                                    Enqueue::Queued | Enqueue::Retained | Enqueue::Replaced
+                                    Submission::Accepted | Submission::Backlogged
                                 ) {
                                     debug!(?peer, "router shut down during peer setup");
                                     return;

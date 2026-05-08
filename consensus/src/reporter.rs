@@ -1,7 +1,7 @@
 //! Reporter implementations for various standard types.
 
 use crate::Reporter;
-use commonware_utils::channel::actor::Enqueue;
+use commonware_utils::channel::Submission;
 use std::marker::PhantomData;
 
 /// An implementation of [Reporter] for an optional [Reporter].
@@ -11,9 +11,9 @@ use std::marker::PhantomData;
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
+    fn report(&mut self, activity: Self::Activity) -> Submission {
         let Some(reporter) = self else {
-            return Enqueue::Rejected(());
+            return Submission::Dropped;
         };
         reporter.report(activity)
     }
@@ -36,21 +36,22 @@ where
 {
     type Activity = A;
 
-    fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
+    fn report(&mut self, activity: Self::Activity) -> Submission {
         match (&mut self.r1, &mut self.r2) {
             (Some(r1), Some(r2)) => combine(r1.report(activity.clone()), r2.report(activity)),
             (Some(r1), None) => r1.report(activity),
             (None, Some(r2)) => r2.report(activity),
-            (None, None) => Enqueue::Rejected(()),
+            (None, None) => Submission::Dropped,
         }
     }
 }
 
-fn combine(left: Enqueue<()>, right: Enqueue<()>) -> Enqueue<()> {
+fn combine(left: Submission, right: Submission) -> Submission {
     match (left, right) {
-        (Enqueue::Closed(_), _) | (_, Enqueue::Closed(_)) => Enqueue::Closed(()),
-        (Enqueue::Rejected(_), _) | (_, Enqueue::Rejected(_)) => Enqueue::Rejected(()),
-        _ => Enqueue::Queued,
+        (Submission::Closed, _) | (_, Submission::Closed) => Submission::Closed,
+        (Submission::Dropped, _) | (_, Submission::Dropped) => Submission::Dropped,
+        (Submission::Backlogged, _) | (_, Submission::Backlogged) => Submission::Backlogged,
+        (Submission::Accepted, Submission::Accepted) => Submission::Accepted,
     }
 }
 
@@ -107,9 +108,9 @@ mod tests {
     impl crate::Reporter for SimpleAcknowledger {
         type Activity = Exact;
 
-        fn report(&mut self, activity: Self::Activity) -> Enqueue<()> {
+        fn report(&mut self, activity: Self::Activity) -> Submission {
             activity.acknowledge();
-            Enqueue::Queued
+            Submission::Accepted
         }
     }
 
@@ -121,7 +122,7 @@ mod tests {
         ));
 
         let (ack, waiter) = Exact::handle();
-        assert_eq!(reporters.report(ack), Enqueue::Queued);
+        assert_eq!(reporters.report(ack), Submission::Accepted);
 
         assert!(
             waiter.now_or_never().unwrap().is_ok(),
