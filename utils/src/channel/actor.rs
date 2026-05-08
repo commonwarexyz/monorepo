@@ -41,14 +41,16 @@ impl Backpressure {
         }
     }
 
-    const fn retained() -> Self {
+    const fn backoff() -> Self {
         Self {
             feedback: Feedback::Backoff,
         }
     }
+}
 
-    const fn into_feedback(self) -> Feedback {
-        self.feedback
+impl From<Backpressure> for Feedback {
+    fn from(backpressure: Backpressure) -> Self {
+        backpressure.feedback
     }
 }
 
@@ -66,13 +68,13 @@ impl<T> Overflow<'_, T> {
     /// Spill `message` into overflow after capacity is exceeded.
     pub fn spill(&mut self, message: T) -> Backpressure {
         self.queue.push_back(message);
-        Backpressure::retained()
+        Backpressure::backoff()
     }
 
     /// Spill the message into overflow if it could not replace existing overflow work.
     pub fn replace_or_spill(&mut self, result: ReplaceResult<T>) -> Backpressure {
         match result.result {
-            Ok(()) => Backpressure::retained(),
+            Ok(()) => Backpressure::backoff(),
             Err(message) => self.spill(message),
         }
     }
@@ -80,7 +82,7 @@ impl<T> Overflow<'_, T> {
     /// Drop the message if it could not replace existing overflow work.
     pub fn replace_or_drop(&mut self, result: ReplaceResult<T>) -> Backpressure {
         match result.result {
-            Ok(()) => Backpressure::retained(),
+            Ok(()) => Backpressure::backoff(),
             Err(_) => Backpressure::dropped(),
         }
     }
@@ -109,7 +111,7 @@ impl<T> Overflow<'_, T> {
     ) -> Backpressure {
         if let Some(pending) = self.find_last_mut(is_match) {
             merge(pending, message);
-            Backpressure::retained()
+            Backpressure::backoff()
         } else {
             self.spill(message)
         }
@@ -125,7 +127,7 @@ impl<T> Overflow<'_, T> {
     ) -> Backpressure {
         if let Some(pending) = self.find_last_mut(coalesce_match) {
             coalesce(pending, message);
-            Backpressure::retained()
+            Backpressure::backoff()
         } else {
             let result = self.replace_last(message, replace_match);
             self.replace_or_spill(result)
@@ -309,7 +311,7 @@ impl<T> OverflowState<T> {
             "backpressure policy retained no overflow"
         );
         self.len.store(queue.len(), Ordering::Release);
-        backpressure.into_feedback()
+        backpressure.into()
     }
 
     fn refill_ready(&self, ready: &ReadyQueue<T>) {
