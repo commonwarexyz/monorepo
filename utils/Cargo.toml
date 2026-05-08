@@ -23,6 +23,7 @@ commonware-macros.workspace = true
 crossbeam-queue = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 hashbrown.workspace = true
+loom = { workspace = true, optional = true }
 num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
 num-rational = { workspace = true, optional = true }
@@ -85,6 +86,7 @@ analysis = []
 # in-test `minifuzz`-driven property test. Off by default. Tests pick it up via the
 # `arbitrary` dev-dependency path; the `cargo-fuzz` target opts in via `--features fuzz`.
 fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
+loom = [ "dep:loom", "std" ]
 
 [lib]
 bench = false

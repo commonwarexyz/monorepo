@@ -1776,6 +1776,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.16",
  "hashbrown 0.16.1",
+ "loom",
  "num-bigint",
  "num-integer",
  "num-rational",
