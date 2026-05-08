@@ -371,13 +371,13 @@ mod tests {
 
         #[test_group("slow")]
         #[test]
-        fn property_test_ed25519_twin_connected(input in property_test_strategy()) {
+        fn property_test_ed25519_twins_mutator_connected(input in property_test_strategy()) {
             fuzz::<SimplexEd25519, TwinsMutator>(input);
         }
 
         #[test_group("slow")]
         #[test]
-        fn property_test_ed25519_shuffled_twin_connected(input in property_test_strategy()) {
+        fn property_test_ed25519_shuffled_twins_mutator_connected(input in property_test_strategy()) {
             fuzz::<SimplexEd25519CustomRoundRobin, TwinsMutator>(input);
         }
 

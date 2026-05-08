@@ -70,57 +70,57 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_twin"
-path = "fuzz_targets/simplex_ed25519_twin.rs"
+name = "simplex_ed25519_twins_mutator"
+path = "fuzz_targets/simplex_ed25519_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_shuffled_twin"
-path = "fuzz_targets/simplex_ed25519_shuffled_twin.rs"
+name = "simplex_ed25519_shuffled_twins_mutator"
+path = "fuzz_targets/simplex_ed25519_shuffled_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_msg"
-path = "fuzz_targets/simplex_ed25519_msg.rs"
+name = "simplex_ed25519_faulty_msg"
+path = "fuzz_targets/simplex_ed25519_faulty_msg.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_threshold_selected_minpk_twin"
-path = "fuzz_targets/simplex_bls12381_threshold_selected_minpk_twin.rs"
+name = "simplex_bls12381_threshold_selected_minpk_twins_mutator"
+path = "fuzz_targets/simplex_bls12381_threshold_selected_minpk_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_threshold_minpk_twin"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk_twin.rs"
+name = "simplex_bls12381_threshold_minpk_twins_mutator"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_threshold_minsig_twin"
-path = "fuzz_targets/simplex_bls12381_threshold_minsig_twin.rs"
+name = "simplex_bls12381_threshold_minsig_twins_mutator"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_multisig_minpk_twin"
-path = "fuzz_targets/simplex_bls12381_multisig_minpk_twin.rs"
+name = "simplex_bls12381_multisig_minpk_twins_mutator"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_multisig_minsig_twin"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig_twin.rs"
+name = "simplex_bls12381_multisig_minsig_twins_mutator"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig_twins_mutator.rs"
 test = false
 doc = false
 bench = false
@@ -161,15 +161,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_secp256r1_twin"
-path = "fuzz_targets/simplex_secp256r1_twin.rs"
+name = "simplex_secp256r1_twins_mutator"
+path = "fuzz_targets/simplex_secp256r1_twins_mutator.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_secp256r1_msg"
-path = "fuzz_targets/simplex_secp256r1_msg.rs"
+name = "simplex_secp256r1_faulty_msg"
+path = "fuzz_targets/simplex_secp256r1_faulty_msg.rs"
 test = false
 doc = false
 bench = false
@@ -252,8 +252,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_cert_mock_msg"
-path = "fuzz_targets/simplex_cert_mock_msg.rs"
+name = "simplex_cert_mock_faulty_msg"
+path = "fuzz_targets/simplex_cert_mock_faulty_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_mutator"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign.rs"
 test = false
 doc = false
 bench = false
@@ -266,8 +280,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_msg"
-path = "fuzz_targets/simplex_id_msg.rs"
+name = "simplex_id_faulty_msg"
+path = "fuzz_targets/simplex_id_faulty_msg.rs"
 test = false
 doc = false
 bench = false
@@ -275,6 +289,20 @@ bench = false
 [[bin]]
 name = "simplex_id_faulty_net"
 path = "fuzz_targets/simplex_id_faulty_net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_twins_mutator"
+path = "fuzz_targets/simplex_id_twins_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_twins_campaign"
+path = "fuzz_targets/simplex_id_twins_campaign.rs"
 test = false
 doc = false
 bench = false
@@ -310,13 +338,6 @@ bench = false
 [[bin]]
 name = "simplex_ed25519_faulty_net"
 path = "fuzz_targets/simplex_ed25519_faulty_net.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_cert_mock_twins_campaign"
-path = "fuzz_targets/simplex_cert_mock_twins_campaign.rs"
 test = false
 doc = false
 bench = false
