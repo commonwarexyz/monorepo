@@ -27,38 +27,32 @@ jobs:
             exit 1
           fi
 
-  publish:
-    name: Publish
+  benchmark:
+    name: Run
     needs: has-new-commit # Only run if there are new commits
     runs-on: ubuntu-latest-8
     timeout-minutes: 720
     strategy:
-      max-parallel: 1 # Run one package at a time
+      fail-fast: false
       matrix:
         include:
           - package: commonware-cryptography
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-cryptography"
           - package: commonware-storage
             cargo_flags: "--features test-traits"
-            file_suffix: ""
             benchmark_name: "commonware-storage"
           - package: commonware-storage
             cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
-            file_suffix: "-features"
             benchmark_name: "commonware-storage --features"
           - package: commonware-coding
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-coding"
           - package: commonware-formatting
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-formatting"
           - package: commonware-utils
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-utils"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -67,7 +61,9 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Compile benchmarks
-        run: cargo bench ${{ matrix.cargo_flags }} --no-run
+        env:
+          RUSTFLAGS: "--cfg full_bench"
+        run: cargo bench ${{ matrix.cargo_flags }} --benches -p ${{ matrix.package }} --no-run
       - name: Run benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
@@ -75,13 +71,63 @@ jobs:
           cargo bench ${{ matrix.cargo_flags }} \
             --benches -p ${{ matrix.package }} \
             -- --output-format bencher \
-            | tee "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+            | tee "${{ matrix.benchmark_name }}.txt"
+      - name: Upload benchmark result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-${{ matrix.benchmark_name }}
+          path: "${{ matrix.benchmark_name }}.txt"
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: benchmark
+    if: ${{ always() && needs.benchmark.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # Push benchmark results one package at a time.
+      matrix:
+        include:
+          - package: commonware-cryptography
+            benchmark_name: "commonware-cryptography"
+          - package: commonware-storage
+            benchmark_name: "commonware-storage"
+          - package: commonware-storage
+            benchmark_name: "commonware-storage --features"
+          - package: commonware-coding
+            benchmark_name: "commonware-coding"
+          - package: commonware-formatting
+            benchmark_name: "commonware-formatting"
+          - package: commonware-utils
+            benchmark_name: "commonware-utils"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Download benchmark result
+        continue-on-error: ${{ needs.benchmark.result != 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchmark-${{ matrix.benchmark_name }}
+      - name: Validate benchmark result
+        id: result
+        run: |
+          output="${{ matrix.benchmark_name }}.txt"
+          if [ ! -f "$output" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No benchmark result found for ${{ matrix.benchmark_name }}; skipping publish"
+            exit 0
+          fi
+          test -s "$output"
+          grep -Eq '^test .+ \.\.\. bench:' "$output"
+          echo "found=true" >> "$GITHUB_OUTPUT"
       - name: Publish benchmark result
+        if: steps.result.outputs.found == 'true'
         uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: ${{ matrix.benchmark_name }}
           tool: 'cargo'
-          output-file-path: "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+          output-file-path: "${{ matrix.benchmark_name }}.txt"
           github-token: ${{ secrets.BENCHMARKS_SECRET }}
           gh-repository: github.com/commonwarexyz/benchmarks
           gh-pages-branch: main
