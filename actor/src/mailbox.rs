@@ -310,16 +310,6 @@ struct State<T> {
     receiver_waker: AtomicWaker,
 }
 
-impl<T> State<T> {
-    fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-    }
-}
-
 /// Sender half of a mailbox.
 pub struct Sender<T: Policy> {
     state: Arc<State<T>>,
@@ -346,7 +336,7 @@ impl<T: Policy> fmt::Debug for Sender<T> {
         f.debug_struct("Sender")
             .field("len", &self.len())
             .field("capacity", &self.state.ready.capacity())
-            .field("closed", &self.state.is_closed())
+            .field("closed", &self.state.closed.load(Ordering::Acquire))
             .finish()
     }
 }
@@ -362,7 +352,7 @@ impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Feedback {
-        if self.state.is_closed() {
+        if self.state.closed.load(Ordering::Acquire) {
             return Feedback::Closed;
         }
 
@@ -389,7 +379,7 @@ impl<T: Policy> Sender<T> {
         let feedback = self
             .state
             .overflow
-            .apply_policy(message, || self.state.is_closed());
+            .apply_policy(message, || self.state.closed.load(Ordering::Acquire));
         if feedback == Feedback::Backoff {
             self.state.receiver_waker.wake();
         }
@@ -452,13 +442,13 @@ impl<T> Receiver<T> {
     }
 
     fn is_disconnected(&self) -> bool {
-        self.state.is_closed() || self.state.senders.load(Ordering::Acquire) == 0
+        self.state.closed.load(Ordering::Acquire) || self.state.senders.load(Ordering::Acquire) == 0
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.state.close();
+        self.state.closed.store(true, Ordering::Release);
     }
 }
 
@@ -704,7 +694,7 @@ mod loom_tests {
     }
 
     fn assert_closed(sender: &Sender<Message>) {
-        assert!(sender.state.is_closed());
+        assert!(sender.state.closed.load(Ordering::Acquire));
     }
 
     fn record(seen: &AtomicUsize, message: Message) {
