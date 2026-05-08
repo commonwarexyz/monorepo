@@ -143,7 +143,8 @@ where
         return Some(false);
     };
     // The candidate block is already available, so the parent request can be
-    // height-bound instead of round-bound.
+    // height-bound instead of round-bound. The parent is certified by the
+    // proposal context, but the child block is what gives us the parent height.
     let parent_request = fetch_parent(
         parent_digest,
         CommitmentRequest::FetchByCommitment {
@@ -223,7 +224,9 @@ where
 /// `FetchByRound` only when the caller knows the certified parent round and
 /// commitment but not the parent height, such as proposal construction. Do not
 /// derive that height from the finalized tip: proposals may build on a certified
-/// parent that is not finalized locally yet.
+/// parent that is not finalized locally yet. Once a round-bound response arrives
+/// it is heightable, but that is too late to use height as the resolver key or
+/// pruning floor.
 ///
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.

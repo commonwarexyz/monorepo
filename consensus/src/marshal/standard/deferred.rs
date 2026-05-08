@@ -41,7 +41,7 @@
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
 //!
-//! # Notarization and Data Availability
+//! # Certification and Data Availability
 //!
 //! In rare crash cases, it is possible for a notarization certificate to exist without a block being
 //! available to the honest parties if [`CertifiableAutomaton::certify`] fails after a notarization is
@@ -49,11 +49,11 @@
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
 //! to the lack of an available block. Certification waits for local availability of the candidate
-//! proposal data and does not fetch a missing candidate block. Once the candidate is locally
-//! available, its parent chain may be fetched because Simplex only verifies and proposes against
-//! certified parents. A certification path that did not run local verification may use the block's
-//! embedded context for that fetch; this is safe because a notarization quorum contains honest
-//! validators that already checked the same block digest against the consensus context.
+//! proposal data and does not fetch a missing candidate block. During certification, once the
+//! candidate is locally available, its parent chain may be fetched because Simplex only verifies
+//! and proposes against certified parents. A certification path that did not run local
+//! verification may use the block's embedded context for that fetch; this is safe because honest
+//! validators checked the certified context before the certification path can succeed.
 //!
 //! ```text
 //!                                      ┌───────────────────────────────────────────────────┐
@@ -138,8 +138,8 @@ use tracing::debug;
 /// before voting. If a validator crashes after voting but before certification, they lose their in-memory
 /// verification task. When recovering, validators extract context from a [`CertifiableBlock`].
 ///
-/// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
-/// validators) verified that the block's context matched the consensus context before voting._
+/// _This embedded context is trustworthy because the quorum that certified the block contains at least
+/// f+1 honest validators that verified the block's context matched the consensus context before voting._
 pub struct Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -377,9 +377,10 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                // Proposal context carries the certified parent view/commitment
-                // but not the parent height. Do not infer height from the
-                // finalized tip because the parent may only be certified.
+                // Proposal context carries the certified parent
+                // view/commitment but not the parent height. The parent may be
+                // certified above the finalized tip, so this must stay
+                // round-bound until the block is returned.
                 CommitmentRequest::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
@@ -611,13 +612,14 @@ where
         // No in-progress task means we never verified this proposal locally. We can use the
         // block's embedded context to help complete finalization when Byzantine validators
         // withhold their finalize votes. If a Byzantine proposer embedded a malicious context,
-        // the f+1 honest validators from the notarizing quorum will verify against the proper
+        // the f+1 honest validators from the certifying quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
         // Wait for the candidate block locally, then verify using its embedded
-        // context. The later parent fetch is safe because this path only runs
-        // after notarization, which implies honest validators checked the same
-        // block digest against the consensus context.
+        // context. Candidate data is not fetched just because it was notarized.
+        // The later parent fetch is safe because certification works over
+        // certified ancestry: honest validators checked the same block digest
+        // against the consensus context and certified its parent.
         debug!(
             ?round,
             ?digest,

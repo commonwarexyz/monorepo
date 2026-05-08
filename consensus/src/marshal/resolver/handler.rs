@@ -100,18 +100,23 @@ impl<D: Digest> Producer for Handler<D> {
     }
 }
 
-/// Context for a block request.
+/// Local processing context for a resolved block request.
+///
+/// The resolver request key is the peer-visible lookup. A subscriber is local
+/// metadata attached to that lookup so marshal can decide how to process the
+/// response after validating it against the request key. Multiple local
+/// subscribers may share one peer request when they depend on the same block.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BlockFetchContext {
-    /// A block requested only to satisfy ancestry verification.
+    /// A block requested only to satisfy certified ancestry verification.
     ///
     /// The expected height is known before the request from the child block.
     Ancestry { height: Height },
     /// A block requested from a certified round whose height is not known until
     /// the response block is decoded.
     ///
-    /// This covers notarized parent fetches by round and finalized-block
-    /// fetches where the finalization names a commitment but not a height.
+    /// This covers certified parent fetches by round and finalized-block fetches
+    /// where the finalization names a commitment but not a height.
     Finalized { round: Round },
     /// A block requested while repairing an internal finalized-chain gap.
     ///
@@ -123,7 +128,8 @@ impl BlockFetchContext {
     /// Return the expected block height when it is known before the request.
     ///
     /// Round-bound fetches validate commitment immediately and can only learn
-    /// height from the decoded block.
+    /// height from the decoded block, so they cannot be pruned by height before
+    /// the response arrives.
     pub(crate) const fn expected_height(&self) -> Option<Height> {
         match self {
             Self::Ancestry { height } | Self::Repair { height } => Some(*height),
@@ -166,7 +172,13 @@ impl<D: Digest> Request<D> {
     }
 }
 
-/// A local subscriber for deciding whether a resolver fetch should be retained.
+/// A local subscriber for a resolver fetch.
+///
+/// `Request` is the default subscriber: the resolved response is valid for the
+/// peer-visible request, but there is no extra local storage context. `Block`
+/// records why marshal asked for a block so delivery can notify local waiters,
+/// populate the verified ancestry cache, or finalize repaired data without
+/// exposing that context to peers.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ResolverSubscriber<D: Digest> {
     /// A peer-visible request.
@@ -207,8 +219,11 @@ impl<D: Digest> ResolverSubscriber<D> {
 
     /// The predicate to use when pruning subjects related to this subject.
     ///
-    /// Specifically, any subjects unrelated will be left unmodified. Any related
-    /// subjects will be pruned if they are "less than or equal to" this subject.
+    /// Unrelated subjects are retained. Related subjects are pruned if they are
+    /// "less than or equal to" this subscriber's floor. This keeps pending
+    /// candidate waits out of the resolver entirely, drops height-bound block
+    /// requests once the processed height passes them, and drops round-bound
+    /// certified-parent fetches once their round is no longer useful.
     pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
         let cloned = *self;
         move |s| match (&cloned, s) {

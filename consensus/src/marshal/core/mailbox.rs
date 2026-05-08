@@ -166,21 +166,30 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 /// How a commitment subscription should behave when the block is missing locally.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitmentRequest {
-    /// Wait for local availability only. Use this for pending proposal data that
-    /// is not yet safe to fetch from peers.
+    /// Wait for local availability only.
+    ///
+    /// Use this for pending candidate proposal data. A notarization is not, by
+    /// itself, permission to ask peers for the candidate block: crash or
+    /// availability failures can leave a notarization without fetchable proposal
+    /// data. The caller may still fetch the candidate's parents after the
+    /// candidate becomes locally available, because those parents are certified.
     Wait,
-    /// Request the notarized proposal for `round` from peers.
+    /// Request the certified parent proposal for `round` from peers.
     ///
     /// Use this only for certified parent lookups where the caller knows the
-    /// parent round and commitment but not the parent height. In particular,
-    /// do not infer height from the finalized tip: proposals may build on a
-    /// certified parent that is not finalized locally yet.
+    /// parent round and commitment but not the parent height, such as proposal
+    /// construction. Do not infer height from the finalized tip: proposals may
+    /// build on a certified parent that is not finalized locally yet.
+    ///
+    /// The returned block is heightable once decoded, but that is too late to
+    /// make height the resolver request key or the pruning bound.
     FetchByRound { round: Round },
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
     /// Use this when the expected height is known before the request, such as
-    /// walking an already certified parent chain from a known child block.
+    /// walking a certified parent chain from a known child block or repairing a
+    /// finalized gap.
     FetchByCommitment { height: Height },
 }
 
@@ -203,11 +212,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Create an ancestor stream that fetches missing parents by commitment.
     ///
-    /// The stream is for ancestry only: callers must already have the candidate
-    /// block they are verifying, certifying, building on, or repairing from.
-    /// Missing parents may be fetched because the stream only walks the
-    /// certified parent chain. Do not use this to wait for pending proposal
-    /// data.
+    /// This stream is always a fetching stream. Callers must only use it after
+    /// they already have a block that is safe to verify, certify, build on, or
+    /// repair from. From that point, every parent walked by the stream is part of
+    /// a certified ancestry chain, and the stream can derive each missing
+    /// parent's height from its child before issuing a height-bound request.
+    ///
+    /// Do not use this to wait for pending candidate proposal data.
     pub(crate) fn ancestor_stream(
         &self,
         initial: impl IntoIterator<Item = V::Block>,
@@ -293,7 +304,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
     ///
-    /// If `round` is provided, marshal also asks peers for the notarized proposal at that round.
+    /// If `round` is provided, marshal also asks peers for the certified parent proposal at that
+    /// round.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     async fn subscribe_by_digest(
@@ -342,7 +354,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
     ///
     /// This stream may fetch missing parents because callers should only request
-    /// ancestry for data they are already willing to build on or repair from.
+    /// ancestry for data they already have locally and are willing to build on,
+    /// verify, certify, or repair from. It is not a candidate fetch path.
     ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(

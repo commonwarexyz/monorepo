@@ -1941,6 +1941,10 @@ mod tests {
             self.fetches.lock().is_empty() && self.targeted.lock().is_empty()
         }
 
+        fn fetches(&self) -> Vec<ResolverFetch> {
+            self.fetches.lock().clone()
+        }
+
         fn targeted(&self) -> Vec<TargetedFetch> {
             self.targeted.lock().clone()
         }
@@ -2157,6 +2161,144 @@ mod tests {
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_propose_parent_fetches_by_round_when_height_unknown() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+                let partition_prefix = format!("proposal-parent-round-fetch-{kind:?}-{me}");
+                let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context
+                        .child("validator")
+                        .with_attribute("kind", format!("{kind:?}")),
+                    &partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::default(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let app = MockVerifyingApp::<B, S>::new(genesis.clone());
+                let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, mailbox);
+
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent_digest = Sha256::hash(b"certified-parent");
+                let proposal_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                    leader: me,
+                    parent: (parent_round.view(), parent_digest),
+                };
+                let _proposal = wrapper.propose(proposal_context).await;
+
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "proposal parent fetch",
+                    || !resolver.fetches().is_empty(),
+                )
+                .await;
+
+                let fetches = resolver.fetches();
+                assert_eq!(fetches.len(), 1, "proposal should issue one fetch");
+                match fetches[0] {
+                    handler::Request::Notarized { round } => {
+                        assert_eq!(round, parent_round);
+                    }
+                    _ => panic!("proposal parent fetch must be round-bound"),
+                }
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "proposal parent fetch should not be targeted"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_verify_parent_fetches_by_height_when_child_available() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+                let partition_prefix = format!("verify-parent-height-fetch-{kind:?}-{me}");
+                let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context
+                        .child("validator")
+                        .with_attribute("kind", format!("{kind:?}")),
+                    &partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::default(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let app = MockVerifyingApp::<B, S>::new(genesis);
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), app, mailbox.clone());
+
+                let parent_digest = Sha256::hash(b"missing-certified-parent");
+                let round = Round::new(Epoch::zero(), View::new(2));
+                let verify_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::new(1), parent_digest),
+                };
+                let block =
+                    B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+                let digest = block.digest();
+                assert!(mailbox.verified(round, block).await);
+
+                let _verify = wrapper.verify(verify_context, digest).await;
+
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "verification parent fetch",
+                    || !resolver.fetches().is_empty(),
+                )
+                .await;
+
+                let fetches = resolver.fetches();
+                assert_eq!(
+                    fetches.len(),
+                    1,
+                    "verification should issue one parent fetch"
+                );
+                match fetches[0] {
+                    handler::Request::Block { commitment } => {
+                        assert_eq!(commitment, parent_digest);
+                    }
+                    _ => panic!("verification parent fetch must be height-bound commitment fetch"),
+                }
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "verification parent fetch should not be targeted"
+                );
+            });
+        }
     }
 
     #[test_traced("WARN")]

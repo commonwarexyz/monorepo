@@ -287,9 +287,10 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                // Proposal context carries the certified parent view/commitment
-                // but not the parent height. Do not infer height from the
-                // finalized tip because the parent may only be certified.
+                // Proposal context carries the certified parent
+                // view/commitment but not the parent height. The parent may be
+                // certified above the finalized tip, so this must stay
+                // round-bound until the block is returned.
                 CommitmentRequest::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },

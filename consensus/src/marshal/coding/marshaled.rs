@@ -55,7 +55,7 @@
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
 //!
-//! # Notarization and Data Availability
+//! # Certification and Data Availability
 //!
 //! In rare crash cases, it is possible for a notarization certificate to exist without a block being
 //! available to the honest parties (e.g., if the whole network crashed before receiving `f+1` shards
@@ -64,14 +64,14 @@
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
 //! to the lack of an available block. Certification waits for local availability of the candidate
-//! proposal data and does not fetch a missing candidate block. Once the candidate is locally
-//! available, its parent chain may be fetched because Simplex only verifies and proposes against
-//! certified parents. A certification path that did not run local verification may use the block's
-//! embedded context for that fetch; this is safe because the commitment binds the context digest
-//! and a notarization quorum contains honest validators that already checked that commitment against
-//! the consensus context. This case is already present in the event of a block that was proposed
-//! with invalid codec; Marshal will not be able to reconstruct the block, and therefore won't serve
-//! it.
+//! proposal data and does not fetch a missing candidate block. During certification, once the
+//! candidate is locally available, its parent chain may be fetched because Simplex only verifies
+//! and proposes against certified parents. A certification path that did not run local
+//! verification may use the block's embedded context for that fetch; this is safe because the
+//! commitment binds the context digest, and honest validators checked the certified context before
+//! the certification path can succeed. This case is already present in the event of a block that was
+//! proposed with invalid codec; Marshal will not be able to reconstruct the block, and therefore
+//! won't serve it.
 //!
 //! ```text
 //!                                      ┌───────────────────────────────────────────────────┐
@@ -379,7 +379,9 @@ where
                 return;
             };
             // Once the candidate block is available, its parent request can be
-            // height-bound instead of round-bound.
+            // height-bound instead of round-bound. The parent is certified by
+            // the proposal context, but the child block is what gives us the
+            // parent height.
             let parent_request = fetch_parent(
                 parent_commitment,
                 core::CommitmentRequest::FetchByCommitment {
@@ -599,9 +601,10 @@ where
             let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_commitment,
-                // Proposal context carries the certified parent view/commitment
-                // but not the parent height. Do not infer height from the
-                // finalized tip because the parent may only be certified.
+                // Proposal context carries the certified parent
+                // view/commitment but not the parent height. The parent may be
+                // certified above the finalized tip, so this must stay
+                // round-bound until the block is returned.
                 core::CommitmentRequest::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
@@ -921,14 +924,15 @@ where
 
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
-        // proposer embedded a malicious context, the f+1 honest validators from the notarizing quorum
+        // proposer embedded a malicious context, the f+1 honest validators from the certifying quorum
         // will verify against the proper context and reject the mismatch, preventing a 2f+1
         // finalization quorum.
         //
         // Wait for the candidate block locally, then verify using its embedded
-        // context. The later parent fetch is safe because this path only runs
-        // after notarization, which implies honest validators checked the same
-        // commitment against the consensus context.
+        // context. Candidate data is not fetched just because it was notarized.
+        // The later parent fetch is safe because certification works over
+        // certified ancestry: honest validators checked the same commitment
+        // against the consensus context and certified its parent.
         debug!(
             ?round,
             ?payload,
@@ -1090,7 +1094,9 @@ where
 /// `FetchByRound` only when the caller knows the certified parent round and
 /// commitment but not the parent height, such as proposal construction. Do not
 /// derive that height from the finalized tip: proposals may build on a certified
-/// parent that is not finalized locally yet.
+/// parent that is not finalized locally yet. Once a round-bound response arrives
+/// it is heightable, but that is too late to use height as the resolver key or
+/// pruning floor.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[allow(clippy::type_complexity)]

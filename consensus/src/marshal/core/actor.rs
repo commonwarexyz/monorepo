@@ -930,10 +930,14 @@ where
             return;
         }
 
-        // We don't have the block locally. Round-based fetching is only for
-        // certified parent lookups whose height is not known before the
-        // request. Height-based fetching is used when the caller already knows
-        // the expected height, such as ancestry from a known child block.
+        // We don't have the block locally. Pending candidate data uses
+        // `CommitmentRequest::Wait` and reaches this point without a round or
+        // height, so it only registers a local subscriber below.
+        //
+        // Round-based fetching is only for certified parent lookups whose
+        // height is not known before the request. Height-based fetching is used
+        // once the caller has a child block, which makes the expected parent
+        // height known before the request.
         if let Some(round) = round {
             if round < self.last_processed_round {
                 // At this point, we have failed to find the block locally, and
@@ -943,10 +947,11 @@ where
                 // be available.
                 return;
             }
-            // Fetch the notarized proposal for this round. The response must
-            // include a notarization so the commitment is tied to the certified
-            // parent context. The decoded block is heightable, but that is too
-            // late to use height as the request key or stale-request bound.
+            // Fetch the certified parent proposal for this round. The response
+            // must include a certificate so the commitment is tied to the
+            // certified parent context. The decoded block is heightable, but
+            // that height is not known soon enough to key, coalesce, or prune
+            // the in-flight resolver request.
             debug!(?round, ?digest, "requested block missing");
             let request = Request::Notarized { round };
             match key {
@@ -965,8 +970,8 @@ where
             }
         } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
             if height <= self.last_processed_height {
-                // We already checked local storage. Missing ancestors at or below
-                // the processed floor are no longer safe to keep requesting.
+                // We already checked local storage. Missing ancestors at or
+                // below the processed floor are no longer useful to request.
                 debug!(
                     %height,
                     floor = %self.last_processed_height,
@@ -975,7 +980,7 @@ where
                 );
                 return;
             }
-            debug!(%height, ?commitment, ?digest, "requested ancestry block missing");
+            debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
             resolver
                 .fetch(Subscribers::with_subscriber(
                     Request::Block { commitment },
@@ -1048,6 +1053,10 @@ where
                     return false;
                 }
 
+                // The peer-visible request only says "give me this block".
+                // Local subscribers explain why the block was requested and
+                // therefore where, if anywhere, it should be stored. A stale
+                // subscriber is ignored rather than allowed to drive storage.
                 let height = block.height();
                 let digest = block.digest();
                 let mut contexts = Vec::new();
@@ -1113,6 +1122,8 @@ where
                     false
                 };
                 debug!(?digest, %height, "received block");
+                // The delivery result is only request validity. Stale local
+                // subscribers do not make the peer response invalid.
                 response.send_lossy(true);
                 wrote
             }
