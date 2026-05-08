@@ -27,13 +27,13 @@ jobs:
             exit 1
           fi
 
-  publish:
-    name: Publish
+  benchmark:
+    name: Run
     needs: has-new-commit # Only run if there are new commits
     runs-on: ubuntu-latest-8
     timeout-minutes: 720
     strategy:
-      max-parallel: 1 # Run one package at a time
+      fail-fast: false
       matrix:
         include:
           - package: commonware-cryptography
@@ -67,7 +67,9 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Compile benchmarks
-        run: cargo bench ${{ matrix.cargo_flags }} --no-run
+        env:
+          RUSTFLAGS: "--cfg full_bench"
+        run: cargo bench ${{ matrix.cargo_flags }} --benches -p ${{ matrix.package }} --no-run
       - name: Run benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
@@ -76,6 +78,46 @@ jobs:
             --benches -p ${{ matrix.package }} \
             -- --output-format bencher \
             | tee "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+      - name: Upload benchmark result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-${{ matrix.package }}${{ matrix.file_suffix }}
+          path: "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      max-parallel: 1 # Push benchmark results one package at a time.
+      matrix:
+        include:
+          - package: commonware-cryptography
+            file_suffix: ""
+            benchmark_name: "commonware-cryptography"
+          - package: commonware-storage
+            file_suffix: ""
+            benchmark_name: "commonware-storage"
+          - package: commonware-storage
+            file_suffix: "-features"
+            benchmark_name: "commonware-storage --features"
+          - package: commonware-coding
+            file_suffix: ""
+            benchmark_name: "commonware-coding"
+          - package: commonware-formatting
+            file_suffix: ""
+            benchmark_name: "commonware-formatting"
+          - package: commonware-utils
+            file_suffix: ""
+            benchmark_name: "commonware-utils"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Download benchmark result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchmark-${{ matrix.package }}${{ matrix.file_suffix }}
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
