@@ -1694,45 +1694,50 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        let mut bitmap = self.bitmap.write();
-        bitmap.extend_to(*batch.new_last_commit_loc + 1);
+        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
+        {
+            let mut bitmap = self.bitmap.write();
+            bitmap.extend_to(*batch.new_last_commit_loc + 1);
 
-        if batch.ancestor_diffs.is_empty() {
-            // Fast path: no ancestors to merge, no fixups to look up.
-            for (key, entry) in batch.diff.iter() {
-                apply_diff(
-                    &mut self.snapshot,
-                    &mut bitmap,
-                    key,
-                    entry,
-                    entry.base_old_loc(),
+            if batch.ancestor_diffs.is_empty() {
+                // Fast path: no ancestors to merge, no fixups to look up.
+                for (key, entry) in batch.diff.iter() {
+                    apply_diff(
+                        &mut self.snapshot,
+                        &mut bitmap,
+                        key,
+                        entry,
+                        entry.base_old_loc(),
+                    );
+                }
+            } else {
+                // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
+                // and pending (still to be applied; merged with the child).
+                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
+                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
+                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                    if batch.ancestor_diff_ends[i] <= db_size {
+                        applied.push(ancestor_diff.as_slice());
+                    } else {
+                        pending.push(ancestor_diff.as_slice());
+                    }
+                }
+                let mut resolver = AppliedAncestorResolver::new(applied);
+                let merge = DiffMerge::new(
+                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
                 );
-            }
-        } else {
-            // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
-            // and pending (still to be applied; merged with the child).
-            let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-            let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                if batch.ancestor_diff_ends[i] <= db_size {
-                    applied.push(ancestor_diff.as_slice());
-                } else {
-                    pending.push(ancestor_diff.as_slice());
+                for (key, entry) in merge {
+                    let old = resolver.lookup(key).unwrap_or_else(|| entry.base_old_loc());
+                    apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
                 }
             }
-            let mut resolver = AppliedAncestorResolver::new(applied);
-            let merge =
-                DiffMerge::new(iter::once(batch.diff.as_slice()).chain(pending.iter().copied()));
-            for (key, entry) in merge {
-                let old = resolver.lookup(key).unwrap_or_else(|| entry.base_old_loc());
-                apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
-            }
-        }
 
-        // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-        // set the new; earlier ancestor commits between them are already 0 from `extend_to`.
-        bitmap.set_bit(*self.last_commit_loc, false);
-        bitmap.set_bit(*batch.new_last_commit_loc, true);
+            // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
+            // set the new; earlier ancestor commits between them are already 0 from
+            // `extend_to`.
+            bitmap.set_bit(*self.last_commit_loc, false);
+            bitmap.set_bit(*batch.new_last_commit_loc, true);
+        }
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
