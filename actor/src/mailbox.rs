@@ -15,14 +15,14 @@ use std::{
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, Mutex, MutexGuard,
         };
     } else {
         use crossbeam_queue::ArrayQueue;
         use parking_lot::{Mutex, MutexGuard};
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         };
     }
@@ -300,58 +300,23 @@ impl<T> OverflowState<T> {
         }
         self.len.store(queue.len(), Ordering::Release);
     }
-
-    fn clear(&self) {
-        let mut queue = lock(&self.queue);
-        queue.clear();
-        self.len.store(0, Ordering::Release);
-    }
 }
 
 struct Shared<T> {
     ready: ReadyQueue<T>,
     overflow: OverflowState<T>,
-    lifecycle: AtomicUsize,
+    closed: AtomicBool,
     senders: AtomicUsize,
     receiver_waker: AtomicWaker,
 }
 
-const LIFECYCLE_CLOSED: usize = 1;
-const LIFECYCLE_INFLIGHT: usize = 2;
-
 impl<T> Shared<T> {
     fn is_closed(&self) -> bool {
-        self.lifecycle.load(Ordering::Acquire) & LIFECYCLE_CLOSED != 0
+        self.closed.load(Ordering::Acquire)
     }
 
     fn close(&self) {
-        self.lifecycle.fetch_or(LIFECYCLE_CLOSED, Ordering::AcqRel);
-    }
-
-    fn inflight(&self) -> usize {
-        self.lifecycle.load(Ordering::Acquire) & !LIFECYCLE_CLOSED
-    }
-
-    fn cleanup(&self) {
-        while self.ready.pop().is_some() {}
-        self.overflow.clear();
-    }
-}
-
-struct SendPermit<'a, T> {
-    shared: &'a Shared<T>,
-}
-
-impl<T> Drop for SendPermit<'_, T> {
-    fn drop(&mut self) {
-        let previous = self
-            .shared
-            .lifecycle
-            .fetch_sub(LIFECYCLE_INFLIGHT, Ordering::AcqRel);
-        assert!(previous & !LIFECYCLE_CLOSED >= LIFECYCLE_INFLIGHT);
-        if previous & LIFECYCLE_CLOSED != 0 && previous & !LIFECYCLE_CLOSED == LIFECYCLE_INFLIGHT {
-            self.shared.cleanup();
-        }
+        self.closed.store(true, Ordering::Release);
     }
 }
 
@@ -393,10 +358,9 @@ impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Feedback {
-        let (_permit, message) = match self.acquire_send(message) {
-            Ok(send) => send,
-            Err(_) => return Feedback::Closed,
-        };
+        if self.shared.is_closed() {
+            return Feedback::Closed;
+        }
 
         let message = if self.shared.overflow.is_active() {
             message
@@ -411,31 +375,6 @@ impl<T: Policy> Sender<T> {
         };
 
         self.backpressure_overflow(message)
-    }
-
-    fn acquire_send(&self, message: T) -> Result<(SendPermit<'_, T>, T), T> {
-        let mut lifecycle = self.shared.lifecycle.load(Ordering::Acquire);
-        loop {
-            if lifecycle & LIFECYCLE_CLOSED != 0 {
-                return Err(message);
-            }
-            match self.shared.lifecycle.compare_exchange_weak(
-                lifecycle,
-                lifecycle + LIFECYCLE_INFLIGHT,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Ok((
-                        SendPermit {
-                            shared: &self.shared,
-                        },
-                        message,
-                    ));
-                }
-                Err(next) => lifecycle = next,
-            }
-        }
     }
 
     fn len(&self) -> usize {
@@ -516,9 +455,6 @@ impl<T> Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.shared.close();
-        if self.shared.inflight() == 0 {
-            self.shared.cleanup();
-        }
     }
 }
 
@@ -527,7 +463,7 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         ready: ReadyQueue::new(capacity.get()),
         overflow: OverflowState::new(),
-        lifecycle: AtomicUsize::new(0),
+        closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         receiver_waker: AtomicWaker::new(),
     });
@@ -768,11 +704,8 @@ mod loom_tests {
         }
     }
 
-    fn assert_closed_and_empty(sender: &Sender<Message>) {
+    fn assert_closed(sender: &Sender<Message>) {
         assert!(sender.shared.is_closed());
-        assert_eq!(sender.shared.inflight(), 0);
-        assert_eq!(sender.shared.ready.len(), 0);
-        assert_eq!(sender.shared.overflow.len(), 0);
     }
 
     fn record(seen: &AtomicUsize, message: Message) {
@@ -783,7 +716,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn close_waits_for_inflight_ready_enqueue() {
+    fn concurrent_close_and_ready_enqueue_remains_closed() {
         loom::model(|| {
             let (sender, receiver) = new::<Message>(NZUsize!(1));
 
@@ -798,13 +731,13 @@ mod loom_tests {
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            assert_closed_and_empty(&sender);
+            assert_closed(&sender);
             assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
         });
     }
 
     #[test]
-    fn close_waits_for_inflight_overflow_enqueue() {
+    fn concurrent_close_and_overflow_enqueue_remains_closed() {
         loom::model(|| {
             let (sender, receiver) = new::<Message>(NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
@@ -820,7 +753,7 @@ mod loom_tests {
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            assert_closed_and_empty(&sender);
+            assert_closed(&sender);
             assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
         });
     }
