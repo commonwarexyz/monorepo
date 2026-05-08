@@ -27,7 +27,7 @@ commonware-utils.workspace = true
 criterion.workspace = true
 
 [features]
-loom = ["dep:loom"]
+loom = [ "dep:loom" ]
 
 [lib]
 bench = false

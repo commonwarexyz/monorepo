@@ -306,6 +306,7 @@ struct OverflowState<T> {
 }
 
 impl<T> OverflowState<T> {
+    #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
@@ -591,6 +592,7 @@ pub struct Mailbox<T: MessagePolicy> {
 
 impl<T: MessagePolicy> Mailbox<T> {
     /// Create a mailbox with a bounded ready queue and policy-managed overflow.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         let shared = Arc::new(Shared {
             ready: ReadyQueue::new(capacity.get()),
