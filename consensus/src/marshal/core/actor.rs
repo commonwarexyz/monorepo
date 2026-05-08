@@ -939,11 +939,11 @@ where
         // height known before the request.
         if let Some(round) = round {
             if round < self.last_processed_round {
-                // At this point, we have failed to find the block locally, and
-                // we know that its round is less than the last processed round.
-                // This means that something else was finalized in that round,
-                // so we drop the response to indicate that the block may never
-                // be available.
+                // The finalized flow is responsible for recovering any
+                // missing block data at or below the processed finalized round.
+                // A round-bound certified-parent fetch below that floor is only
+                // proposal-construction assistance, so it is redundant once we
+                // have processed a later finalization.
                 return;
             }
             // Fetch the certified parent proposal for this round. The response
@@ -1482,7 +1482,9 @@ where
             let round = finalization.round();
             self.last_processed_round = round;
 
-            // Cancel useless requests
+            // Cancel round-bound certified-parent fetches made redundant by the
+            // processed finalized round. If the block is still needed, the
+            // finalization path recovers it under the finalized context.
             resolver
                 .retain(ResolverSubscriber::request(Request::Notarized { round }).predicate())
                 .await;
