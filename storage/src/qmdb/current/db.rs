@@ -123,7 +123,7 @@ where
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         proof: &RangeProof<F, H::Digest>,
         start_loc: Location<F>,
         ops: &[Operation<F, U>],
@@ -188,7 +188,7 @@ where
     /// This can be used to authenticate an ops root against a trusted canonical `current` root.
     pub async fn ops_root_witness(
         &self,
-        hasher: &mut StandardHasher<H>,
+        hasher: &StandardHasher<H>,
     ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
@@ -226,7 +226,7 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
@@ -255,7 +255,7 @@ where
     /// `start_loc` >= number of leaves in the tree.
     pub async fn range_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
@@ -1166,23 +1166,23 @@ mod tests {
                 next_idx += 1;
             }
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_none());
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1198,31 +1198,31 @@ mod tests {
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_some());
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
             tampered.partial_chunk.as_mut().unwrap().0 += 1;
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness;
             tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1247,19 +1247,19 @@ mod tests {
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1274,12 +1274,12 @@ mod tests {
             .await
             .unwrap();
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 }

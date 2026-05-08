@@ -1743,8 +1743,8 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let mut hasher = commonware_cryptography::Sha256::new();
-            let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            let hasher = crate::qmdb::hasher::<Sha256>();
+            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -1984,10 +1984,10 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let mut hasher = commonware_cryptography::Sha256::new();
-            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            let hasher = crate::qmdb::hasher::<Sha256>();
+            let proof = db.key_value_proof(&hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2007,10 +2007,10 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let mut hasher = commonware_cryptography::Sha256::new();
-            let proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            let hasher = crate::qmdb::hasher::<Sha256>();
+            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2234,11 +2234,11 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let mut hasher = commonware_cryptography::Sha256::new();
-                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                let hasher = crate::qmdb::hasher::<Sha256>();
+                let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &mut hasher,
+                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2267,11 +2267,11 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let mut hasher = commonware_cryptography::Sha256::new();
-                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                let hasher = crate::qmdb::hasher::<Sha256>();
+                let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &mut hasher,
+                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,

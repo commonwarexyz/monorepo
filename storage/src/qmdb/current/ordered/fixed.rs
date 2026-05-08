@@ -144,7 +144,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
-            let mut hasher = Sha256::new();
+            let hasher = crate::qmdb::hasher::<Sha256>();
             let mut db = open_db(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
@@ -173,9 +173,7 @@ pub mod test {
 
             // Requesting a range proof at location 0 (in the pruned range) should return
             // OperationPruned, not panic.
-            let result = db
-                .range_proof(&mut hasher, Location::new(0), NZU64!(1))
-                .await;
+            let result = db.range_proof(&hasher, Location::new(0), NZU64!(1)).await;
             assert!(
                 matches!(result, Err(Error::OperationPruned(_))),
                 "expected OperationPruned, got {result:?}"
