@@ -291,6 +291,7 @@ where
                 // in the same epoch (recall, the boundary block of the previous epoch
                 // is the genesis block of the current epoch).
                 Some(Round::new(consensus_context.epoch(), parent_view)),
+                true,
                 &mut application,
                 &mut marshal,
             )
@@ -338,7 +339,8 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream =
+                AncestorStream::new(marshal.fetching_ancestry_provider(), [parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -416,12 +418,7 @@ where
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
             let block_request = marshal
-                .subscribe_by_commitment(
-                    digest,
-                    CommitmentRequest::FetchByRound {
-                        round: context.round,
-                    },
-                )
+                .subscribe_by_commitment(digest, CommitmentRequest::Wait)
                 .await;
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
@@ -482,7 +479,7 @@ where
     }
 }
 
-/// Inline mode only waits for block availability during certification.
+/// Inline mode fetches block availability during certification if verify did not already run.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -517,7 +514,7 @@ where
         // Otherwise, subscribe to marshal for block availability.
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
+            .subscribe_by_commitment(digest, CommitmentRequest::FetchByRound { round })
             .await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();

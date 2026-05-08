@@ -378,6 +378,7 @@ where
                 // in the same epoch (recall, the boundary block of the previous epoch
                 // is the genesis block of the current epoch).
                 Some(Round::new(consensus_context.epoch(), parent_view)),
+                true,
                 &mut application,
                 &mut marshal,
             )
@@ -427,7 +428,8 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream =
+                AncestorStream::new(marshal.fetching_ancestry_provider(), [parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -493,12 +495,7 @@ where
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
             let block_request = marshal
-                .subscribe_by_commitment(
-                    digest,
-                    CommitmentRequest::FetchByRound {
-                        round: context.round,
-                    },
-                )
+                .subscribe_by_commitment(digest, CommitmentRequest::Wait)
                 .await;
                 let block = select! {
                     _ = tx.closed() => {
@@ -602,10 +599,12 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // Attempt to retrieve the existing verification task for this (round, payload).
-        let task = self.verification_tasks.take(round, digest);
-        if let Some(task) = task {
-            return task;
+        // Reuse only completed verification work. A pending verify-stage task may be
+        // waiting for local availability only, while certification can fetch notarized data.
+        if let Some(valid) = self.verification_tasks.take_ready(round, digest) {
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy(valid);
+            return rx;
         }
 
         // No in-progress task means we never verified this proposal locally. We can use the
@@ -622,7 +621,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
+            .subscribe_by_commitment(digest, CommitmentRequest::FetchByRound { round })
             .await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();

@@ -347,6 +347,7 @@ where
                 // in the same epoch (recall, the boundary block of the previous epoch
                 // is the genesis block of the current epoch).
                 Some(Round::new(consensus_context.epoch(), parent_view)),
+                matches!(stage, Stage::Certified),
                 &mut application,
                 &mut marshal,
                 cached_genesis,
@@ -375,12 +376,12 @@ where
                 (parent, block)
             } else {
                 // No prefetched block, fetch both parent and block
-                let block_request = marshal
-                    .subscribe_by_commitment(
-                        commitment,
-                        core::CommitmentRequest::FetchByRound { round },
-                    )
-                    .await;
+                let request = if matches!(stage, Stage::Certified) {
+                    core::CommitmentRequest::FetchByRound { round }
+                } else {
+                    core::CommitmentRequest::Wait
+                };
+                let block_request = marshal.subscribe_by_commitment(commitment, request).await;
                 let block_requests = try_join(parent_request, block_request);
 
                 select! {
@@ -428,7 +429,11 @@ where
                 return;
             }
 
-            let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
+            let provider = match stage {
+                Stage::Verified => marshal.local_ancestry_provider(),
+                Stage::Certified => marshal.fetching_ancestry_provider(),
+            };
+            let ancestry_stream = AncestorStream::new(provider, [block.clone(), parent]);
             let validity_request = application.verify(
                 (
                     runtime_context.child("app_verify"),
@@ -600,6 +605,7 @@ where
                 // in the same epoch (recall, the boundary block of the previous epoch
                 // is the genesis block of the current epoch).
                 Some(Round::new(consensus_context.epoch(), parent_view)),
+                true,
                 &mut application,
                 &mut marshal,
                 cached_genesis,
@@ -653,7 +659,8 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream =
+                AncestorStream::new(marshal.fetching_ancestry_provider(), [parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -773,12 +780,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(
-                    payload,
-                    core::CommitmentRequest::FetchByRound {
-                        round: consensus_context.round,
-                    },
-                )
+                .subscribe_by_commitment(payload, core::CommitmentRequest::Wait)
                 .await;
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
@@ -913,10 +915,12 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // First, check for an in-progress verification task from `verify()`.
-        let task = self.verification_tasks.take(round, payload);
-        if let Some(task) = task {
-            return task;
+        // Reuse only completed verification work. A pending verify-stage task may be
+        // waiting for local availability only, while certification can fetch notarized data.
+        if let Some(valid) = self.verification_tasks.take_ready(round, payload) {
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy(valid);
+            return rx;
         }
 
         // No in-progress task means we never verified this proposal locally.
@@ -933,7 +937,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::CommitmentRequest::Wait)
+            .subscribe_by_commitment(payload, core::CommitmentRequest::FetchByRound { round })
             .await;
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
@@ -1090,6 +1094,7 @@ where
 async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
     parent_round: Option<Round>,
+    fetch_missing: bool,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
@@ -1115,9 +1120,13 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        let request = parent_round.map_or(core::CommitmentRequest::Wait, |round| {
-            core::CommitmentRequest::FetchByRound { round }
-        });
+        let request = if fetch_missing {
+            parent_round.map_or(core::CommitmentRequest::Wait, |round| {
+                core::CommitmentRequest::FetchByRound { round }
+            })
+        } else {
+            core::CommitmentRequest::Wait
+        };
         Either::Right(
             marshal
                 .subscribe_by_commitment(parent_commitment, request)

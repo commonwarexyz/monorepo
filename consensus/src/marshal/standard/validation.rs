@@ -145,6 +145,7 @@ where
         // in the same epoch (recall, the boundary block of the previous epoch
         // is the genesis block of the current epoch).
         Some(Round::new(context.epoch(), parent_view)),
+        matches!(stage, Stage::Certified),
         application,
         marshal,
     )
@@ -185,7 +186,11 @@ where
     }
 
     // Request verification from the application over the two-block ancestry prefix.
-    let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
+    let provider = match stage {
+        Stage::Verified => marshal.local_ancestry_provider(),
+        Stage::Certified => marshal.fetching_ancestry_provider(),
+    };
+    let ancestry_stream = AncestorStream::new(provider, [block.clone(), parent]);
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,
@@ -223,6 +228,7 @@ where
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
     parent_round: Option<Round>,
+    fetch_missing: bool,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
@@ -236,20 +242,26 @@ where
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {
-        let receiver = match parent_round {
-            Some(round) => {
-                marshal
-                    .subscribe_by_commitment(
-                        parent_digest,
-                        CommitmentRequest::FetchByRound { round },
-                    )
-                    .await
+        let receiver = if fetch_missing {
+            match parent_round {
+                Some(round) => {
+                    marshal
+                        .subscribe_by_commitment(
+                            parent_digest,
+                            CommitmentRequest::FetchByRound { round },
+                        )
+                        .await
+                }
+                None => {
+                    marshal
+                        .subscribe_by_commitment(parent_digest, CommitmentRequest::Wait)
+                        .await
+                }
             }
-            None => {
-                marshal
-                    .subscribe_by_commitment(parent_digest, CommitmentRequest::Wait)
-                    .await
-            }
+        } else {
+            marshal
+                .subscribe_by_commitment(parent_digest, CommitmentRequest::Wait)
+                .await
         };
         Either::Right(receiver)
     }

@@ -179,10 +179,33 @@ pub struct Mailbox<S: Scheme, V: Variant> {
     sender: mpsc::Sender<Message<S, V>>,
 }
 
+/// A block provider with explicit network-fetch behavior for missing ancestors.
+#[derive(Clone)]
+pub struct AncestryProvider<S: Scheme, V: Variant> {
+    mailbox: Mailbox<S, V>,
+    fetch_missing: bool,
+}
+
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
     pub(crate) const fn new(sender: mpsc::Sender<Message<S, V>>) -> Self {
         Self { sender }
+    }
+
+    /// Create an ancestry provider that only listens for local block availability.
+    pub(crate) fn local_ancestry_provider(&self) -> AncestryProvider<S, V> {
+        AncestryProvider {
+            mailbox: self.clone(),
+            fetch_missing: false,
+        }
+    }
+
+    /// Create an ancestry provider that fetches missing parents by commitment.
+    pub(crate) fn fetching_ancestry_provider(&self) -> AncestryProvider<S, V> {
+        AncestryProvider {
+            mailbox: self.clone(),
+            fetch_missing: true,
+        }
     }
 
     /// A request to retrieve the information about the highest finalized block.
@@ -310,12 +333,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn ancestry(
         &self,
         (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
-    ) -> Option<AncestorStream<Self>> {
+    ) -> Option<AncestorStream<AncestryProvider<S, V>>> {
         let receiver = self.subscribe_by_digest(start_digest, start_round).await;
         receiver
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.clone(), [block]))
+            .map(|block| AncestorStream::new(self.fetching_ancestry_provider(), [block]))
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -398,7 +421,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 }
 
-impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
+impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
     type Block = V::ApplicationBlock;
     type AncestryBlock = V::Block;
 
@@ -406,20 +429,23 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
         self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<Self::AncestryBlock> {
-        let subscription = self.subscribe_by_digest(digest, None).await;
+        let subscription = self.mailbox.subscribe_by_digest(digest, None).await;
         subscription.await.ok()
     }
 
     async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
         let parent_height = block.height().previous()?;
         let commitment = V::parent_commitment(&block);
+        let request = if self.fetch_missing {
+            CommitmentRequest::FetchByCommitment {
+                height: parent_height,
+            }
+        } else {
+            CommitmentRequest::Wait
+        };
         let subscription = self
-            .subscribe_by_commitment(
-                commitment,
-                CommitmentRequest::FetchByCommitment {
-                    height: parent_height,
-                },
-            )
+            .mailbox
+            .subscribe_by_commitment(commitment, request)
             .await;
         subscription.await.ok()
     }
