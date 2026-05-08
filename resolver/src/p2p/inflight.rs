@@ -1,4 +1,4 @@
-use crate::{Consumer, Dependencies};
+use crate::{Consumer, Subscribers};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::histogram, Clock};
 use commonware_utils::{
@@ -99,19 +99,19 @@ where
     }
 
     /// Begin a consumer delivery for the entry, attaching the abort handle.
-    /// Spawns `consumer.deliver(dependencies, value)` as an in-flight future and records
+    /// Spawns `consumer.deliver(subscribers, value)` as an in-flight future and records
     /// the result for later handling.
     pub(super) fn deliver(
         &mut self,
         key: Key,
-        dependencies: Dependencies<Key, Con::Dependency>,
+        subscribers: Subscribers<Key, Con::Subscriber>,
         peer: P,
         value: Con::Value,
     ) {
         let lookup_key = key.clone();
         let mut consumer = self.consumer.clone();
         let aborter = self.deliveries.push(async move {
-            let valid = consumer.deliver(dependencies, value).await;
+            let valid = consumer.deliver(subscribers, value).await;
             (peer, key, valid)
         });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
@@ -273,7 +273,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Dependencies::new(key.clone()),
+                Subscribers::new(key.clone()),
                 peer.clone(),
                 value.clone(),
             );
@@ -304,7 +304,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Dependencies::new(key.clone()),
+                Subscribers::new(key.clone()),
                 peer,
                 Bytes::from("v"),
             );
@@ -330,7 +330,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Dependencies::new(key.clone()),
+                Subscribers::new(key.clone()),
                 peer,
                 Bytes::from("v"),
             );
@@ -359,7 +359,7 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
                 key.clone(),
-                Dependencies::new(key.clone()),
+                Subscribers::new(key.clone()),
                 peer,
                 Bytes::from("v"),
             );
@@ -384,7 +384,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(key.clone(), Dependencies::new(key), peer, Bytes::from("v"));
+            inflight.deliver(key.clone(), Subscribers::new(key), peer, Bytes::from("v"));
 
             assert_eq!(inflight.drain(), 1);
 

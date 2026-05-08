@@ -3445,8 +3445,8 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 ///
 /// This models a resolver peer that responds to `Request::Block` only after the
 /// victim has advanced its floor and pruned finalized storage. The stale delivery
-/// must be rejected and must not be persisted.
-pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
+/// must be ignored and must not be persisted.
+pub fn ignore_stale_block_delivery_after_floor_update<H: TestHarness>() {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()
             .with_seed(0xBADC0DE)

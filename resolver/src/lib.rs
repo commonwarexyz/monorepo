@@ -12,22 +12,22 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
-    /// A dependency that kept a fetch active.
+    /// A subscriber that kept a fetch active.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum FetchDependency<L> {
+    pub enum FetchSubscriber<L> {
         /// The peer-visible request key itself kept the fetch active.
         Request,
-        /// A separate local dependency kept the fetch active.
+        /// A separate local subscriber kept the fetch active.
         Local(L),
     }
 
-    impl<L> FetchDependency<L> {
-        /// Return true if this is the peer-visible request dependency.
+    impl<L> FetchSubscriber<L> {
+        /// Return true if this is the peer-visible request subscriber.
         pub const fn is_request(&self) -> bool {
             matches!(self, Self::Request)
         }
 
-        /// Return the local dependency, if this is one.
+        /// Return the local subscriber, if this is one.
         pub const fn local(&self) -> Option<&L> {
             match self {
                 Self::Request => None,
@@ -36,58 +36,58 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// Dependencies attached to a resolved fetch.
+    /// Subscribers attached to a resolved fetch.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct Dependencies<K, L> {
+    pub struct Subscribers<K, L> {
         /// The peer-visible request key.
         pub request: K,
-        /// Dependencies that kept the fetch active.
-        pub dependencies: Vec<FetchDependency<L>>,
+        /// Subscribers that kept the fetch active.
+        pub subscribers: Vec<FetchSubscriber<L>>,
     }
 
-    impl<K, L> Dependencies<K, L> {
-        /// Create dependencies for an ordinary fetch.
+    impl<K, L> Subscribers<K, L> {
+        /// Create subscribers for an ordinary fetch.
         pub fn new(request: K) -> Self {
             Self {
                 request,
-                dependencies: vec![FetchDependency::Request],
+                subscribers: vec![FetchSubscriber::Request],
             }
         }
 
-        /// Create dependencies for a fetch with explicit dependencies.
-        pub const fn with_dependencies(request: K, dependencies: Vec<FetchDependency<L>>) -> Self {
+        /// Create subscribers for a fetch with explicit subscribers.
+        pub const fn with_subscribers(request: K, subscribers: Vec<FetchSubscriber<L>>) -> Self {
             Self {
                 request,
-                dependencies,
+                subscribers,
             }
         }
 
-        /// Create dependencies for a fetch with local dependencies only.
+        /// Create subscribers for a fetch with local subscribers only.
         pub fn with_locals(request: K, locals: Vec<L>) -> Self {
             Self {
                 request,
-                dependencies: locals.into_iter().map(FetchDependency::Local).collect(),
+                subscribers: locals.into_iter().map(FetchSubscriber::Local).collect(),
             }
         }
 
-        /// Create dependencies for a fetch with one local dependency.
-        pub fn with_dependency(request: K, dependency: L) -> Self {
-            Self::with_locals(request, vec![dependency])
+        /// Create subscribers for a fetch with one local subscriber.
+        pub fn with_subscriber(request: K, subscriber: L) -> Self {
+            Self::with_locals(request, vec![subscriber])
         }
 
-        /// Split into the peer-visible request and dependencies.
-        pub fn into_parts(self) -> (K, Vec<FetchDependency<L>>) {
-            (self.request, self.dependencies)
+        /// Split into the peer-visible request and subscribers.
+        pub fn into_parts(self) -> (K, Vec<FetchSubscriber<L>>) {
+            (self.request, self.subscribers)
         }
 
         /// Return true if the request key itself kept the fetch active.
         pub fn has_request(&self) -> bool {
-            self.dependencies.iter().any(FetchDependency::is_request)
+            self.subscribers.iter().any(FetchSubscriber::is_request)
         }
 
-        /// Return the local dependencies.
+        /// Return the local subscribers.
         pub fn locals(&self) -> impl Iterator<Item = &L> {
-            self.dependencies.iter().filter_map(FetchDependency::local)
+            self.subscribers.iter().filter_map(FetchSubscriber::local)
         }
 
         /// Return the peer-visible request key.
@@ -96,7 +96,7 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    impl<K, L> From<K> for Dependencies<K, L> {
+    impl<K, L> From<K> for Subscribers<K, L> {
         fn from(request: K) -> Self {
             Self::new(request)
         }
@@ -107,16 +107,15 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to uniquely identify data.
         type Key: Span;
 
-        /// Type used to track local dependencies on fetch requests.
-        type Dependency: Clone + Send + 'static;
+        /// Type used to track local subscribers on fetch requests.
+        type Subscriber: Clone + Send + 'static;
 
         /// Type of data to retrieve.
         type Value;
 
         /// Deliver data to the consumer.
         ///
-        /// Returns `true` if the data is valid for the request and all of its
-        /// dependencies.
+        /// Returns `true` if the data is valid for the request.
         ///
         /// The returned future may be dropped before completion if the
         /// application cancels the fetch via [`Resolver::cancel`],
@@ -126,13 +125,15 @@ commonware_macros::stability_scope!(BETA {
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
         ///
-        /// `dependencies` contains the peer-visible request key and the currently
-        /// retained dependencies for the fetch. Ordinary fetches include a
-        /// zero-payload [`FetchDependency::Request`] marker, avoiding a duplicate local
-        /// key when the request key itself keeps the fetch active.
+        /// `subscribers` contains the peer-visible request key and the currently
+        /// retained subscribers for the fetch. Subscribers are local metadata for
+        /// deciding who should observe a valid response; they do not define peer
+        /// validity. Ordinary fetches include a zero-payload
+        /// [`FetchSubscriber::Request`] marker, avoiding a duplicate local key
+        /// when the request key itself keeps the fetch active.
         fn deliver(
             &mut self,
-            dependencies: Dependencies<Self::Key, Self::Dependency>,
+            subscribers: Subscribers<Self::Key, Self::Subscriber>,
             value: Self::Value,
         ) -> impl Future<Output = bool> + Send;
     }
@@ -142,36 +143,36 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to uniquely identify data.
         type Key: Span;
 
-        /// Type used to track local dependencies on fetch requests.
+        /// Type used to track local subscribers on fetch requests.
         ///
-        /// Implementations that also own the [`Consumer`] should supply dependencies to
+        /// Implementations that also own the [`Consumer`] should supply subscribers to
         /// [`Consumer::deliver`] when a fetch resolves.
-        type Dependency: Clone + Send + 'static;
+        type Subscriber: Clone + Send + 'static;
 
         /// Type used to identify peers for targeted fetches.
         type PublicKey: PublicKey;
 
         /// Initiate a fetch request.
         ///
-        /// The resolver fetches and delivers the request key. Dependencies control
+        /// The resolver fetches and delivers the request key. Subscribers control
         /// whether the request is retained by [`retain`](Self::retain) and are also
         /// supplied to [`Consumer::deliver`] when the fetch resolves. If multiple
-        /// dependencies are attached to the same request key, the fetch is retained
-        /// as long as at least one dependency satisfies the predicate.
+        /// subscribers are attached to the same request key, the fetch is retained
+        /// as long as at least one subscriber satisfies the predicate.
         ///
-        /// Passing a bare key is equivalent to [`Dependencies::new`]. [`cancel`](Self::cancel)
+        /// Passing a bare key is equivalent to [`Subscribers::new`]. [`cancel`](Self::cancel)
         /// still cancels by request key.
         fn fetch<R>(
             &mut self,
             request: R,
         ) -> impl Future<Output = ()> + Send
         where
-            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send;
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send;
 
         /// Initiate a fetch request for a batch of requests.
         fn fetch_all<R>(&mut self, requests: Vec<R>) -> impl Future<Output = ()> + Send
         where
-            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send;
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send;
 
         /// Initiate a fetch request restricted to specific target peers.
         ///
@@ -191,7 +192,7 @@ commonware_macros::stability_scope!(BETA {
         /// from the target set.
         fn fetch_targeted(
             &mut self,
-            request: impl Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            request: impl Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> impl Future<Output = ()> + Send;
 
@@ -203,7 +204,7 @@ commonware_macros::stability_scope!(BETA {
             requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
         ) -> impl Future<Output = ()> + Send
         where
-            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send;
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send;
 
         /// Cancel a fetch request.
         ///
@@ -218,13 +219,13 @@ commonware_macros::stability_scope!(BETA {
         /// in-progress response validation.
         fn clear(&mut self) -> impl Future<Output = ()> + Send;
 
-        /// Retain only the fetch requests with at least one dependency satisfying the predicate.
+        /// Retain only the fetch requests with at least one subscriber satisfying the predicate.
         ///
         /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
         /// how cancellation affects in-progress response validation.
         fn retain(
             &mut self,
-            predicate: impl Fn(&Self::Dependency) -> bool + Send + 'static,
+            predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
         ) -> impl Future<Output = ()> + Send;
     }
 });

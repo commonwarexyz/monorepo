@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, BlockFetchContext, Request, ResolverDependency},
+        resolver::handler::{self, BlockFetchContext, Request, ResolverSubscriber},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Dependencies, FetchDependency, Resolver};
+use commonware_resolver::{FetchSubscriber, Resolver, Subscribers};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -194,10 +194,10 @@ enum BlockSubscriptionKey<C, D> {
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
 type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
-type ResolverDependencyFor<V> = ResolverDependency<<V as Variant>::Commitment>;
+type ResolverSubscriberFor<V> = ResolverSubscriber<<V as Variant>::Commitment>;
 
 struct ResolverDelivery<V: Variant> {
-    dependencies: Dependencies<ResolverRequestFor<V>, ResolverDependencyFor<V>>,
+    subscribers: Subscribers<ResolverRequestFor<V>, ResolverSubscriberFor<V>>,
     value: Bytes,
     response: oneshot::Sender<bool>,
 }
@@ -379,7 +379,7 @@ where
     where
         R: Resolver<
             Key = ResolverRequestFor<V>,
-            Dependency = ResolverDependencyFor<V>,
+            Subscriber = ResolverSubscriberFor<V>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -396,7 +396,7 @@ where
     ) where
         R: Resolver<
             Key = ResolverRequestFor<V>,
-            Dependency = ResolverDependencyFor<V>,
+            Subscriber = ResolverSubscriberFor<V>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -645,9 +645,9 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver
-                                .fetch(Dependencies::with_dependency(
+                                .fetch(Subscribers::with_subscriber(
                                     Request::Block { commitment },
-                                    ResolverDependency::block_request(
+                                    ResolverSubscriber::block(
                                         commitment,
                                         BlockFetchContext::Finalized { round },
                                     ),
@@ -808,14 +808,14 @@ where
                             produces.push((key, response));
                         }
                         handler::Message::Deliver {
-                            dependencies,
+                            subscribers,
                             value,
                             response,
                         } => {
                             needs_sync |= self
                                 .handle_deliver(
                                     ResolverDelivery {
-                                        dependencies,
+                                        subscribers,
                                         value,
                                         response,
                                     },
@@ -900,7 +900,7 @@ where
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
         subscription: BlockSubscriptionRequest<V>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -948,9 +948,9 @@ where
                 BlockSubscriptionKey::Digest(_) => resolver.fetch(request).await,
                 BlockSubscriptionKey::Commitment(commitment) => {
                     resolver
-                        .fetch(Dependencies::with_dependency(
+                        .fetch(Subscribers::with_subscriber(
                             request,
-                            ResolverDependency::block_request(
+                            ResolverSubscriber::block(
                                 commitment,
                                 BlockFetchContext::Finalized { round },
                             ),
@@ -972,12 +972,9 @@ where
             }
             debug!(%height, ?commitment, ?digest, "requested ancestry block missing");
             resolver
-                .fetch(Dependencies::with_dependency(
+                .fetch(Subscribers::with_subscriber(
                     Request::Block { commitment },
-                    ResolverDependency::block_request(
-                        commitment,
-                        BlockFetchContext::Ancestry { height },
-                    ),
+                    ResolverSubscriber::block(commitment, BlockFetchContext::Ancestry { height }),
                 ))
                 .await;
         }
@@ -1021,16 +1018,19 @@ where
     async fn handle_deliver(
         &mut self,
         delivery: ResolverDelivery<V>,
-        _resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
+        _resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = ResolverSubscriberFor<V>,
+        >,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let ResolverDelivery {
-            dependencies,
+            subscribers,
             value,
             response,
         } = delivery;
-        let (key, dependencies) = dependencies.into_parts();
+        let (key, subscribers) = subscribers.into_parts();
         match key {
             Request::Block { commitment } => {
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config)
@@ -1046,31 +1046,31 @@ where
                 let height = block.height();
                 let digest = block.digest();
                 let mut contexts = Vec::new();
-                let mut dependencies_satisfied = true;
-                for dependency in dependencies {
-                    match dependency {
-                        FetchDependency::Request => {}
-                        FetchDependency::Local(ResolverDependency::Block {
+                let mut has_request_subscriber = false;
+                for subscriber in subscribers {
+                    match subscriber {
+                        FetchSubscriber::Request => has_request_subscriber = true,
+                        FetchSubscriber::Local(ResolverSubscriber::Block {
                             commitment: retained_commitment,
                             context,
-                        }) if retained_commitment == commitment
-                            && context
-                                .expected_height()
-                                .is_none_or(|expected| expected == height) =>
-                        {
-                            contexts.push(context);
+                        }) => {
+                            if retained_commitment == commitment
+                                && context
+                                    .expected_height()
+                                    .is_none_or(|expected| expected == height)
+                            {
+                                contexts.push(context);
+                            } else {
+                                debug!(
+                                    ?commitment,
+                                    ?retained_commitment,
+                                    %height,
+                                    "ignoring stale block subscriber"
+                                );
+                            }
                         }
-                        _ => dependencies_satisfied = false,
+                        FetchSubscriber::Local(ResolverSubscriber::Request(_)) => {}
                     }
-                }
-
-                if contexts.is_empty() || !dependencies_satisfied {
-                    debug!(
-                        ?commitment,
-                        "received block without matching local fetch context"
-                    );
-                    response.send_lossy(false);
-                    return false;
                 }
 
                 let finalization = self.cache.get_finalization_for(digest).await;
@@ -1083,7 +1083,10 @@ where
                 let wrote = if should_finalize || finalization.is_some() {
                     self.store_finalization(height, digest, block, finalization, application)
                         .await
-                } else {
+                } else if contexts
+                    .iter()
+                    .any(|context| matches!(context, BlockFetchContext::Ancestry { .. }))
+                {
                     if height > self.last_processed_height {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
@@ -1098,28 +1101,17 @@ where
                         self.notify_subscribers(&block);
                     }
                     false
+                } else if has_request_subscriber {
+                    self.notify_subscribers(&block);
+                    false
+                } else {
+                    false
                 };
                 debug!(?digest, %height, "received block");
                 response.send_lossy(true);
                 wrote
             }
             Request::Finalized { height } => {
-                let dependencies_satisfied = dependencies.into_iter().all(|dependency| {
-                    match dependency {
-                        FetchDependency::Request => true,
-                        FetchDependency::Local(ResolverDependency::Request(
-                            Request::Finalized {
-                                height: retained_height,
-                            },
-                        )) => retained_height == height,
-                        _ => false,
-                    }
-                });
-                if !dependencies_satisfied {
-                    response.send_lossy(false);
-                    return false;
-                }
-
                 let Some(bounds) = self.epocher.containing(height) else {
                     debug!(
                         %height,
@@ -1197,27 +1189,6 @@ where
                     return false;
                 }
 
-                let dependencies_satisfied = dependencies.into_iter().all(|dependency| {
-                    match dependency {
-                        FetchDependency::Request => true,
-                        FetchDependency::Local(ResolverDependency::Request(
-                            Request::Notarized {
-                                round: retained_round,
-                            },
-                        )) => retained_round == round,
-                        FetchDependency::Local(ResolverDependency::Block {
-                            commitment: retained_commitment,
-                            context: BlockFetchContext::Finalized {
-                                round: retained_round,
-                            },
-                        }) => retained_commitment == commitment && retained_round == round,
-                        _ => false,
-                    }
-                });
-                if !dependencies_satisfied {
-                    response.send_lossy(false);
-                    return false;
-                }
                 delivers.push(PendingVerification::Notarized {
                     notarization,
                     block,
@@ -1476,7 +1447,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver).await;
@@ -1484,7 +1455,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .retain(ResolverDependency::without_block_commitment(commitment))
+            .retain(ResolverSubscriber::without_block_commitment(commitment))
             .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1504,7 +1475,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(ResolverDependency::request(Request::Notarized { round }).predicate())
+                .retain(ResolverSubscriber::request(Request::Notarized { round }).predicate())
                 .await;
         }
     }
@@ -1770,7 +1741,7 @@ where
         self.find_block_in_storage_matching(V::commitment_to_inner(commitment), |block| {
             V::commitment(block) == commitment
         })
-            .await
+        .await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
@@ -1787,7 +1758,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1822,9 +1793,9 @@ where
                 } else {
                     // Request the missing block.
                     resolver
-                        .fetch(Dependencies::with_dependency(
+                        .fetch(Subscribers::with_subscriber(
                             Request::Block { commitment },
-                            ResolverDependency::block_request(
+                            ResolverSubscriber::block(
                                 commitment,
                                 BlockFetchContext::Repair {
                                     height: last_finalized,
@@ -1885,11 +1856,11 @@ where
                         .previous()
                         .expect("gap repair cursor must be above genesis");
                     resolver
-                        .fetch(Dependencies::with_dependency(
+                        .fetch(Subscribers::with_subscriber(
                             Request::Block {
                                 commitment: parent_commitment,
                             },
-                            ResolverDependency::block_request(
+                            ResolverSubscriber::block(
                                 parent_commitment,
                                 BlockFetchContext::Repair {
                                     height: parent_height,
@@ -1925,7 +1896,7 @@ where
     async fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;
@@ -1935,7 +1906,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(ResolverDependency::request(Request::Finalized { height }).predicate())
+            .retain(ResolverSubscriber::request(Request::Finalized { height }).predicate())
             .await;
     }
 

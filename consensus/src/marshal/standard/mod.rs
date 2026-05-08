@@ -80,7 +80,7 @@ mod tests {
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Dependencies, Resolver};
+    use commonware_resolver::{Resolver, Subscribers};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
@@ -232,9 +232,9 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_reject_stale_block_delivery_after_floor_update() {
-        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
-        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
+    fn test_standard_ignore_stale_block_delivery_after_floor_update() {
+        harness::ignore_stale_block_delivery_after_floor_update::<InlineHarness>();
+        harness::ignore_stale_block_delivery_after_floor_update::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -1123,9 +1123,9 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_standard_rejects_block_delivery_below_floor() {
-        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
-        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
+    fn test_standard_ignores_block_delivery_below_floor() {
+        harness::ignore_stale_block_delivery_after_floor_update::<InlineHarness>();
+        harness::ignore_stale_block_delivery_after_floor_update::<DeferredHarness>();
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1892,22 +1892,22 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = handler::Request<D>;
-        type Dependency = handler::ResolverDependency<D>;
+        type Subscriber = handler::ResolverSubscriber<D>;
         type PublicKey = PublicKey;
 
         async fn fetch<R>(&mut self, _request: R)
         where
-            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
         }
         async fn fetch_all<R>(&mut self, _requests: Vec<R>)
         where
-            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
         }
         async fn fetch_targeted(
             &mut self,
-            request: impl Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            request: impl Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) {
             let key = request.into().request;
@@ -1915,7 +1915,7 @@ mod tests {
         }
         async fn fetch_all_targeted<R>(&mut self, requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>)
         where
-            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
             self.targeted.lock().extend(
                 requests
@@ -1927,7 +1927,7 @@ mod tests {
         async fn clear(&mut self) {}
         async fn retain(
             &mut self,
-            _predicate: impl Fn(&Self::Dependency) -> bool + Send + 'static,
+            _predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
         ) {
         }
     }
@@ -2204,7 +2204,7 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    dependencies: commonware_resolver::Dependencies::new(
+                    subscribers: commonware_resolver::Subscribers::new(
                         handler::Request::Finalized {
                             height: Height::new(5),
                         },
@@ -2220,7 +2220,7 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    dependencies: commonware_resolver::Dependencies::new(
+                    subscribers: commonware_resolver::Subscribers::new(
                         handler::Request::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
                         },

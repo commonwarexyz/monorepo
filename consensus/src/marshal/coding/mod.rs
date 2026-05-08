@@ -198,8 +198,8 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_rejects_block_delivery_below_floor() {
-        harness::reject_stale_block_delivery_after_floor_update::<CodingHarness>();
+    fn test_coding_ignores_block_delivery_below_floor() {
+        harness::ignore_stale_block_delivery_after_floor_update::<CodingHarness>();
     }
 
     #[test_traced("WARN")]

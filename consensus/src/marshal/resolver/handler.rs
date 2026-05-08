@@ -2,7 +2,7 @@ use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer, Dependencies};
+use commonware_resolver::{p2p::Producer, Consumer, Subscribers};
 use commonware_utils::{
     channel::{mpsc, oneshot},
     Span,
@@ -23,8 +23,8 @@ const NOTARIZED_REQUEST: u8 = 2;
 pub enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
-        /// The dependencies attached to the resolved value.
-        dependencies: Dependencies<Request<D>, ResolverDependency<D>>,
+        /// The subscribers attached to the resolved value.
+        subscribers: Subscribers<Request<D>, ResolverSubscriber<D>>,
         /// The value being delivered.
         value: Bytes,
         /// A channel to send the result of the delivery.
@@ -57,19 +57,19 @@ impl<D: Digest> Handler<D> {
 
 impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
-    type Dependency = ResolverDependency<D>;
+    type Subscriber = ResolverSubscriber<D>;
     type Value = Bytes;
 
     async fn deliver(
         &mut self,
-        dependencies: Dependencies<Self::Key, Self::Dependency>,
+        subscribers: Subscribers<Self::Key, Self::Subscriber>,
         value: Self::Value,
     ) -> bool {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
             .send(Message::Deliver {
-                dependencies,
+                subscribers,
                 value,
                 response,
             })
@@ -155,9 +155,9 @@ impl<D: Digest> Request<D> {
     }
 }
 
-/// A local dependency for deciding whether a resolver fetch should be retained.
+/// A local subscriber for deciding whether a resolver fetch should be retained.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ResolverDependency<D: Digest> {
+pub enum ResolverSubscriber<D: Digest> {
     /// A peer-visible request.
     Request(Request<D>),
     /// A locally annotated block fetch.
@@ -167,14 +167,14 @@ pub enum ResolverDependency<D: Digest> {
     },
 }
 
-impl<D: Digest> ResolverDependency<D> {
-    /// Create a dependency for a peer-visible request.
+impl<D: Digest> ResolverSubscriber<D> {
+    /// Create a subscriber for a peer-visible request.
     pub const fn request(request: Request<D>) -> Self {
         Self::Request(request)
     }
 
-    /// Create a dependency for a locally annotated block request.
-    pub const fn block_request(commitment: D, context: BlockFetchContext) -> Self {
+    /// Create a subscriber for a locally annotated block request.
+    pub const fn block(commitment: D, context: BlockFetchContext) -> Self {
         Self::Block {
             commitment,
             context,
@@ -245,7 +245,7 @@ impl<D: Digest> ResolverDependency<D> {
     }
 }
 
-impl<D: Digest> From<Request<D>> for ResolverDependency<D> {
+impl<D: Digest> From<Request<D>> for ResolverSubscriber<D> {
     fn from(request: Request<D>) -> Self {
         Self::Request(request)
     }
@@ -508,26 +508,26 @@ mod tests {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
 
-        let predicate = ResolverDependency::request(r1).predicate();
-        assert!(predicate(&ResolverDependency::request(r2))); // r2.height > r1.height
-        assert!(predicate(&ResolverDependency::request(r3))); // Different variant (notarized)
+        let predicate = ResolverSubscriber::request(r1).predicate();
+        assert!(predicate(&ResolverSubscriber::request(r2))); // r2.height > r1.height
+        assert!(predicate(&ResolverSubscriber::request(r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(&ResolverDependency::request(r1_same))); // Same height, should not pass
+        assert!(!predicate(&ResolverSubscriber::request(r1_same))); // Same height, should not pass
     }
 
     #[test]
-    fn test_block_dependency_context_affects_identity() {
+    fn test_block_subscriber_context_affects_identity() {
         let digest = Sha256::hash(b"annotated");
-        let ancestry = ResolverDependency::block_request(
+        let ancestry = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Ancestry {
                 height: Height::new(10),
             },
         );
-        let repair = ResolverDependency::block_request(
+        let repair = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(10),
@@ -541,22 +541,22 @@ mod tests {
     #[test]
     fn test_subject_predicate_prunes_annotated_blocks() {
         let digest = Sha256::hash(b"prune");
-        let height_floor = ResolverDependency::request(Request::<D>::Finalized {
+        let height_floor = ResolverSubscriber::request(Request::<D>::Finalized {
             height: Height::new(10),
         });
-        let keep_repair = ResolverDependency::block_request(
+        let keep_repair = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(11),
             },
         );
-        let drop_repair = ResolverDependency::block_request(
+        let drop_repair = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(10),
             },
         );
-        let drop_ancestry = ResolverDependency::block_request(
+        let drop_ancestry = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Ancestry {
                 height: Height::new(9),
@@ -568,16 +568,16 @@ mod tests {
         assert!(!predicate(&drop_repair));
         assert!(!predicate(&drop_ancestry));
 
-        let round_floor = ResolverDependency::request(Request::<D>::Notarized {
+        let round_floor = ResolverSubscriber::request(Request::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(10)),
         });
-        let keep_finalized = ResolverDependency::block_request(
+        let keep_finalized = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(11)),
             },
         );
-        let drop_finalized = ResolverDependency::block_request(
+        let drop_finalized = ResolverSubscriber::block(
             digest,
             BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(10)),

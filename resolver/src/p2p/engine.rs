@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::{Consumer, Dependencies, FetchDependency};
+use crate::{Consumer, FetchSubscriber, Subscribers};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -46,11 +46,11 @@ pub struct Engine<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, Dependency = Dep, Value = Bytes>,
+    Con: Consumer<Key = Key, Subscriber = Sub, Value = Bytes>,
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-    Dep = Key,
+    Sub = Key,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -68,7 +68,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key, P, Dep>>,
+    mailbox: mpsc::Receiver<Message<Key, P, Sub>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -77,7 +77,7 @@ pub struct Engine<
     inflight: Inflight<E, Con, P, Key>,
 
     /// Local reasons that keep each fetch key alive.
-    retainers: HashMap<Key, BTreeSet<FetchDependency<Dep>>>,
+    subscribers: HashMap<Key, BTreeSet<FetchSubscriber<Sub>>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -101,19 +101,19 @@ impl<
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
-        Con: Consumer<Key = Key, Dependency = Dep, Value = Bytes>,
+        Con: Consumer<Key = Key, Subscriber = Sub, Value = Bytes>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-        Dep,
-    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR, Dep>
+        Sub,
+    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR, Sub>
 where
-    Dep: Clone + From<Key> + Ord + Send + 'static,
+    Sub: Clone + From<Key> + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P, Dep>) {
+    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P, Sub>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
@@ -137,7 +137,7 @@ where
                 mailbox: receiver,
                 fetcher,
                 inflight: Inflight::new(cfg.consumer),
-                retainers: HashMap::new(),
+                subscribers: HashMap::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -197,7 +197,7 @@ where
             on_stopped => {
                 debug!("shutdown");
                 self.inflight.drain();
-                self.retainers.clear();
+                self.subscribers.clear();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -231,7 +231,7 @@ where
                     Message::Fetch(requests) => {
                         for FetchRequest {
                             key,
-                            mut dependencies,
+                            mut subscribers,
                             targets,
                         } in requests
                         {
@@ -239,13 +239,13 @@ where
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
-                            if dependencies.is_empty() {
-                                dependencies.push(FetchDependency::Request);
+                            if subscribers.is_empty() {
+                                subscribers.push(FetchSubscriber::Request);
                             }
-                            self.retainers
+                            self.subscribers
                                 .entry(key.clone())
                                 .or_default()
-                                .extend(dependencies);
+                                .extend(subscribers);
 
                             // Update targets
                             match targets {
@@ -275,7 +275,7 @@ where
                     Message::Cancel { key } => {
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
-                        self.retainers.remove(&key);
+                        self.subscribers.remove(&key);
                         self.fetcher.cancel(&key);
                         if self.inflight.cancel(&key) {
                             guard.set(Status::Success);
@@ -284,14 +284,14 @@ where
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.retainers.retain(|key, retainers| {
-                            retainers.retain(|retainer| match retainer {
-                                FetchDependency::Request => predicate(&Dep::from(key.clone())),
-                                FetchDependency::Local(dependency) => predicate(dependency),
+                        self.subscribers.retain(|key, subscribers| {
+                            subscribers.retain(|subscriber| match subscriber {
+                                FetchSubscriber::Request => predicate(&Sub::from(key.clone())),
+                                FetchSubscriber::Local(subscriber) => predicate(subscriber),
                             });
-                            !retainers.is_empty()
+                            !subscribers.is_empty()
                         });
-                        let retained: HashSet<_> = self.retainers.keys().cloned().collect();
+                        let retained: HashSet<_> = self.subscribers.keys().cloned().collect();
                         self.fetcher.retain(|key| retained.contains(key));
                         let count = self.inflight.retain(|key| retained.contains(key)) as u64;
                         self.record_cancellations(count);
@@ -299,7 +299,7 @@ where
                     Message::Clear => {
                         trace!("mailbox: clear");
 
-                        self.retainers.clear();
+                        self.subscribers.clear();
                         self.fetcher.clear();
                         let count = self.inflight.drain() as u64;
                         self.record_cancellations(count);
@@ -436,15 +436,15 @@ where
             return;
         };
 
-        let dependencies = self
-            .retainers
+        let subscribers = self
+            .subscribers
             .get(&key)
-            .map(|retainers| retainers.iter().cloned().collect())
+            .map(|subscribers| subscribers.iter().cloned().collect())
             .unwrap_or_default();
-        let dependencies = Dependencies::with_dependencies(key.clone(), dependencies);
+        let subscribers = Subscribers::with_subscribers(key.clone(), subscribers);
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(key, dependencies, peer, response);
+        self.inflight.deliver(key, subscribers, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
@@ -452,7 +452,7 @@ where
         if valid {
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());
-            self.retainers.remove(&key);
+            self.subscribers.remove(&key);
             self.fetcher.clear_targets(&key);
             return;
         }
