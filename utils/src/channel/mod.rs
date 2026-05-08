@@ -1,5 +1,7 @@
 //! Utilities for working with channels and actor mailboxes.
 
+use std::collections::VecDeque;
+
 pub mod actor;
 pub mod fallible;
 pub mod reservation;
@@ -25,5 +27,27 @@ impl Feedback {
     /// Returns true if the work was accepted.
     pub const fn accepted(&self) -> bool {
         matches!(self, Self::Ok | Self::Backoff)
+    }
+
+    /// Retain `message` behind the bounded ready queue.
+    pub fn retain<T>(queue: &mut VecDeque<T>, message: T) -> Self {
+        queue.push_back(message);
+        Self::Backoff
+    }
+
+    /// Retain the message if it could not replace existing work.
+    pub fn replace_or_retain<T>(result: Result<(), T>, queue: &mut VecDeque<T>) -> Self {
+        match result {
+            Ok(()) => Self::Backoff,
+            Err(message) => Self::retain(queue, message),
+        }
+    }
+
+    /// Drop the message if it could not replace existing work.
+    pub fn replace_or_drop<T>(result: Result<(), T>) -> Self {
+        match result {
+            Ok(()) => Self::Backoff,
+            Err(_) => Self::Dropped,
+        }
     }
 }

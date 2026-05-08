@@ -47,15 +47,15 @@ pub async fn recv_actor_prioritized<C: MessagePolicy, D: MessagePolicy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::channel::actor::{self, Backpressure};
+    use commonware_utils::channel::actor;
     use std::collections::VecDeque;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Data(u32);
 
     impl MessagePolicy for Data {
-        fn backpressure(_queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-            Backpressure::Skip(message)
+        fn backpressure(_: &mut VecDeque<Self>, _: Self) -> Feedback {
+            Feedback::Dropped
         }
     }
 

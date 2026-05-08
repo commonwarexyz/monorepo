@@ -7,7 +7,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure, MessagePolicy}, Feedback,
+        actor::{self, MessagePolicy}, Feedback,
         oneshot, ring,
     },
     ordered::Map,
@@ -97,8 +97,8 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_retain(match message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+        Feedback::replace_or_retain(match message {
             Self::Track { id, peers } => actor::replace_last(
                 queue,
                 Self::Track { id, peers },

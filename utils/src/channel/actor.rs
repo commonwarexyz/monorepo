@@ -15,48 +15,13 @@ use std::{
     task::{Context, Poll},
 };
 
-/// Result of applying backpressure to a full actor inbox.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backpressure<T> {
-    /// The incoming message was retained behind the bounded ready queue.
-    Retained,
-    /// The incoming message replaced stale overflow work.
-    Replaced,
-    /// Skip the incoming message.
-    Skip(T),
-}
-
-impl<T> Backpressure<T> {
-    /// Retain `message` behind the bounded ready queue.
-    pub fn retain(queue: &mut VecDeque<T>, message: T) -> Self {
-        queue.push_back(message);
-        Self::Retained
-    }
-
-    /// Retain the message if it could not replace existing work.
-    pub fn replace_or_retain(result: Result<(), T>, queue: &mut VecDeque<T>) -> Self {
-        match result {
-            Ok(()) => Self::Replaced,
-            Err(message) => Self::retain(queue, message),
-        }
-    }
-
-    /// Skip the message if it could not replace existing work.
-    pub fn replace_or_skip(result: Result<(), T>) -> Self {
-        match result {
-            Ok(()) => Self::Replaced,
-            Err(message) => Self::Skip(message),
-        }
-    }
-}
-
 /// Policy for actor messages when an inbox is full.
 pub trait MessagePolicy: Sized {
     /// Apply backpressure to `message` when the bounded ready queue is full.
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
     /// overflow retained behind the ready queue.
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self>;
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback;
 }
 
 struct Overflow<T> {
@@ -175,31 +140,19 @@ impl<T: MessagePolicy> ActorMailbox<T> {
             return Feedback::Closed;
         }
 
-        let old_len = overflow.queue.len();
-        match T::backpressure(&mut overflow.queue, message) {
-            Backpressure::Retained => {
-                self.sync_overflow_state(overflow.queue.len());
+        let feedback = T::backpressure(&mut overflow.queue, message);
+        let len = overflow.queue.len();
+        self.sync_overflow_state(len);
+        match feedback {
+            Feedback::Backoff => {
                 drop(overflow);
-
-                self.shared.receiver_waker.wake();
-                Feedback::Backoff
-            }
-            Backpressure::Replaced => {
-                let new_len = overflow.queue.len();
-                self.sync_overflow_state(new_len);
-                if old_len == 0 && new_len > 0 {
+                if len > 0 {
                     self.shared.receiver_waker.wake();
                 }
                 Feedback::Backoff
             }
-            Backpressure::Skip(_) => {
-                self.sync_overflow_state(overflow.queue.len());
-                if self.shared.closed.load(Ordering::Acquire) {
-                    Feedback::Closed
-                } else {
-                    Feedback::Dropped
-                }
-            }
+            Feedback::Dropped if self.shared.closed.load(Ordering::Acquire) => Feedback::Closed,
+            feedback => feedback,
         }
     }
 
@@ -369,22 +322,22 @@ mod tests {
     }
 
     impl MessagePolicy for Message {
-        fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+        fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
             match message {
-                Self::Update(value) => Backpressure::replace_or_retain(
+                Self::Update(value) => Feedback::replace_or_retain(
                     replace_last(queue, Self::Update(value), |pending| {
                         matches!(pending, Self::Update(_))
                     }),
                     queue,
                 ),
-                Self::Required(_) => Backpressure::retain(queue, message),
-                Self::Buffered(_) => Backpressure::retain(queue, message),
-                Self::Hint(value) => Backpressure::replace_or_skip(replace_last(
+                Self::Required(_) => Feedback::retain(queue, message),
+                Self::Buffered(_) => Feedback::retain(queue, message),
+                Self::Hint(value) => Feedback::replace_or_drop(replace_last(
                     queue,
                     Self::Hint(value),
                     |pending| matches!(pending, Self::Update(_)),
                 )),
-                Self::Vote(_) => Backpressure::Skip(message),
+                Self::Vote(_) => Feedback::Dropped,
             }
         }
     }
@@ -483,7 +436,7 @@ mod tests {
     }
 
     #[commonware_macros::test_async]
-    async fn full_inbox_can_replace_or_skip_by_message() {
+    async fn full_inbox_can_replace_or_drop_by_message() {
         let (sender, mut receiver) = channel(1);
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);

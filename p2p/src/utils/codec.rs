@@ -415,7 +415,7 @@ mod tests {
     impl crate::Blocker for NoopBlocker {
         type PublicKey = PublicKey;
 
-        fn block(&mut self, peer: Self::PublicKey) -> Feedback {
+        fn block(&mut self, _: Self::PublicKey) -> Feedback {
             Feedback::Dropped
         }
     }

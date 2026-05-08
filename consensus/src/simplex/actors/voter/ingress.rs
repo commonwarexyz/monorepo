@@ -7,7 +7,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback};
+use commonware_utils::channel::{actor::{self, ActorMailbox, MessagePolicy}, Feedback};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,8 +66,8 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View) {
 }
 
 impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::replace_or_retain(match &message {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+        Feedback::replace_or_retain(match &message {
             Self::Proposal(proposal) => {
                 let view = proposal.view();
                 actor::replace_last(queue, message, |pending| {

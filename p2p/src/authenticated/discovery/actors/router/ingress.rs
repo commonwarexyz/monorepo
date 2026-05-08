@@ -12,7 +12,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure, MessagePolicy}, Feedback,
+        actor::{self, MessagePolicy}, Feedback,
         oneshot, ring,
     },
     NZUsize,
@@ -43,11 +43,11 @@ pub enum Message<P: PublicKey> {
 }
 
 impl<P: PublicKey> MessagePolicy for Message<P> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
-                Backpressure::replace_or_retain(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
+                Feedback::replace_or_retain(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
@@ -56,15 +56,15 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
             }
             Self::Release { peer } => {
                 let key = peer.clone();
-                Backpressure::replace_or_retain(actor::replace_last(queue, Self::Release { peer }, |pending| {
+                Feedback::replace_or_retain(actor::replace_last(queue, Self::Release { peer }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
                 }), queue)
             }
-            Self::Content { .. } => Backpressure::retain(queue, message),
-            Self::SubscribePeers { .. } => Backpressure::Skip(message),
+            Self::Content { .. } => Feedback::retain(queue, message),
+            Self::SubscribePeers { .. } => Feedback::Dropped,
         }
     }
 }

@@ -9,7 +9,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::{
-    actor::{ActorMailbox, Backpressure, MessagePolicy},
+    actor::{ActorMailbox, MessagePolicy},
     oneshot, Feedback,
 };
 use std::collections::VecDeque;
@@ -34,8 +34,8 @@ pub enum Message<D: Digest> {
 }
 
 impl<D: Digest> MessagePolicy for Message<D> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::retain(queue, message)
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+        Feedback::retain(queue, message)
     }
 }
 

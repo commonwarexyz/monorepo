@@ -3,8 +3,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::{
-    actor::{ActorMailbox, Backpressure, MessagePolicy},
-    oneshot,
+    actor::{ActorMailbox, MessagePolicy},
+    oneshot, Feedback,
 };
 use std::collections::VecDeque;
 
@@ -26,8 +26,8 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
 }
 
 impl<P: PublicKey, R: Committable + Digestible + Codec> MessagePolicy for Message<P, R> {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::retain(queue, message)
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+        Feedback::retain(queue, message)
     }
 }
 

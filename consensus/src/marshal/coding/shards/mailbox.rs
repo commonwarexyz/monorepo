@@ -8,8 +8,8 @@ use crate::{
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::{
-    actor::{ActorMailbox, Backpressure, MessagePolicy},
-    oneshot,
+    actor::{ActorMailbox, MessagePolicy},
+    oneshot, Feedback,
 };
 use std::collections::VecDeque;
 
@@ -99,8 +99,8 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
-        Backpressure::retain(queue, message)
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
+        Feedback::retain(queue, message)
     }
 }
 

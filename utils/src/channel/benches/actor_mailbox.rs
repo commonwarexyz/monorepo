@@ -1,5 +1,5 @@
 use commonware_utils::channel::{
-    actor::{self, Backpressure, MessagePolicy},
+    actor::{self, MessagePolicy},
     mpsc, Feedback,
 };
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
@@ -35,11 +35,11 @@ enum Message {
 }
 
 impl MessagePolicy for Message {
-    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Backpressure<Self> {
+    fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
-            Self::Reject(_) => Backpressure::Skip(message),
-            Self::Retain(_) => Backpressure::retain(queue, message),
-            Self::Replace(_) => Backpressure::replace_or_retain(
+            Self::Reject(_) => Feedback::Dropped,
+            Self::Retain(_) => Feedback::retain(queue, message),
+            Self::Replace(_) => Feedback::replace_or_retain(
                 actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Replace(_))
                 }),
