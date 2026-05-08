@@ -1,16 +1,15 @@
 //! Bounded ready queues with policy-managed overflow.
 
+#[cfg(not(feature = "loom"))]
+use futures::task::AtomicWaker;
 use std::{
     collections::VecDeque,
-    future::poll_fn,
     fmt,
+    future::poll_fn,
     num::NonZeroUsize,
     sync::mpsc::TryRecvError,
     task::{Context, Poll},
 };
-
-#[cfg(not(feature = "loom"))]
-use futures::task::AtomicWaker;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
@@ -133,7 +132,10 @@ impl<T> Overflow<'_, T> {
 
     /// Find the newest matching overflow message.
     pub fn find_last_mut(&mut self, mut is_match: impl FnMut(&T) -> bool) -> Option<&mut T> {
-        self.queue.iter_mut().rev().find(|message| is_match(message))
+        self.queue
+            .iter_mut()
+            .rev()
+            .find(|message| is_match(message))
     }
 
     /// Remove all overflow messages.
@@ -352,8 +354,7 @@ impl<T> Shared<T> {
     }
 
     fn close(&self) {
-        self.lifecycle
-            .fetch_or(LIFECYCLE_CLOSED, Ordering::AcqRel);
+        self.lifecycle.fetch_or(LIFECYCLE_CLOSED, Ordering::AcqRel);
     }
 
     fn inflight(&self) -> usize {
@@ -377,9 +378,7 @@ impl<T> Drop for SendPermit<'_, T> {
             .lifecycle
             .fetch_sub(LIFECYCLE_INFLIGHT, Ordering::AcqRel);
         assert!(previous & !LIFECYCLE_CLOSED >= LIFECYCLE_INFLIGHT);
-        if previous & LIFECYCLE_CLOSED != 0
-            && previous & !LIFECYCLE_CLOSED == LIFECYCLE_INFLIGHT
-        {
+        if previous & LIFECYCLE_CLOSED != 0 && previous & !LIFECYCLE_CLOSED == LIFECYCLE_INFLIGHT {
             self.shared.cleanup();
         }
     }
@@ -723,10 +722,7 @@ mod tests {
         let (sender, mut receiver) = new::<Message>(NZUsize!(1));
         drop(sender);
 
-        assert_eq!(
-            receiver.try_recv(),
-            Err(TryRecvError::Disconnected)
-        );
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
         assert_eq!(receiver.recv().await, None);
     }
 
