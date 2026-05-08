@@ -302,7 +302,7 @@ impl<T> OverflowState<T> {
     }
 }
 
-struct Shared<T> {
+struct Channel<T> {
     ready: ReadyQueue<T>,
     overflow: OverflowState<T>,
     closed: AtomicBool,
@@ -310,7 +310,11 @@ struct Shared<T> {
     receiver_waker: AtomicWaker,
 }
 
-impl<T> Shared<T> {
+impl<T> Channel<T> {
+    fn capacity(&self) -> usize {
+        self.ready.capacity()
+    }
+
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
@@ -318,56 +322,49 @@ impl<T> Shared<T> {
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
     }
-}
 
-/// Sender half of a mailbox.
-pub struct Sender<T: Policy> {
-    shared: Arc<Shared<T>>,
-}
-
-impl<T: Policy> Clone for Sender<T> {
-    fn clone(&self) -> Self {
-        self.shared.senders.fetch_add(1, Ordering::Relaxed);
-        Self {
-            shared: self.shared.clone(),
-        }
+    fn increment_senders(&self) {
+        self.senders.fetch_add(1, Ordering::Relaxed);
     }
-}
 
-impl<T: Policy> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let previous = self.shared.senders.fetch_sub(1, Ordering::AcqRel);
+    fn release_sender(&self) {
+        let previous = self.senders.fetch_sub(1, Ordering::AcqRel);
         assert!(previous > 0);
         if previous == 1 {
-            self.shared.receiver_waker.wake();
+            self.wake_receiver();
         }
     }
-}
 
-impl<T: Policy> fmt::Debug for Sender<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sender")
-            .field("len", &self.len())
-            .field("capacity", &self.shared.ready.capacity())
-            .field("closed", &self.shared.is_closed())
-            .finish()
+    fn wake_receiver(&self) {
+        self.receiver_waker.wake();
     }
-}
 
-impl<T: Policy> Sender<T> {
-    /// Submit a message without waiting for inbox capacity.
-    #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
-    pub fn enqueue(&self, message: T) -> Feedback {
-        if self.shared.is_closed() {
+    fn register_receiver(&self, waker: &std::task::Waker) {
+        self.receiver_waker.register(waker);
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.is_closed() || self.senders.load(Ordering::Acquire) == 0
+    }
+
+    fn len(&self) -> usize {
+        self.ready.len() + self.overflow.len()
+    }
+
+    fn enqueue(&self, message: T) -> Feedback
+    where
+        T: Policy,
+    {
+        if self.is_closed() {
             return Feedback::Closed;
         }
 
-        let message = if self.shared.overflow.is_active() {
+        let message = if self.overflow.is_active() {
             message
         } else {
-            match self.shared.ready.push(message) {
+            match self.ready.push(message) {
                 Ok(()) => {
-                    self.shared.receiver_waker.wake();
+                    self.wake_receiver();
                     return Feedback::Ok;
                 }
                 Err(message) => message,
@@ -377,25 +374,110 @@ impl<T: Policy> Sender<T> {
         self.backpressure_overflow(message)
     }
 
-    fn len(&self) -> usize {
-        self.shared.ready.len() + self.shared.overflow.len()
-    }
-
-    fn backpressure_overflow(&self, message: T) -> Feedback {
-        let feedback = self
-            .shared
-            .overflow
-            .apply_policy(message, || self.shared.is_closed());
+    fn backpressure_overflow(&self, message: T) -> Feedback
+    where
+        T: Policy,
+    {
+        let feedback = self.overflow.apply_policy(message, || self.is_closed());
         if feedback == Feedback::Backoff {
-            self.shared.receiver_waker.wake();
+            self.wake_receiver();
         }
         feedback
+    }
+
+    fn pop(&self) -> Option<T> {
+        if let Some(message) = self.ready.pop() {
+            return Some(message);
+        }
+
+        // Refill on receive so senders keep the lock-free ready path when no overflow exists.
+        self.overflow.refill_ready(&self.ready);
+        self.ready.pop()
+    }
+}
+
+struct Shared<T> {
+    channel: Arc<Channel<T>>,
+}
+
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self::new(&self.channel)
+    }
+}
+
+impl<T> Drop for Shared<T> {
+    fn drop(&mut self) {
+        self.channel.release_sender();
+    }
+}
+
+impl<T> Shared<T> {
+    fn new(channel: &Arc<Channel<T>>) -> Self {
+        channel.increment_senders();
+        Self {
+            channel: channel.clone(),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.channel.capacity()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.channel.is_closed()
+    }
+
+    fn len(&self) -> usize {
+        self.channel.len()
+    }
+
+    fn enqueue(&self, message: T) -> Feedback
+    where
+        T: Policy,
+    {
+        self.channel.enqueue(message)
+    }
+}
+
+/// Sender half of a mailbox.
+pub struct Sender<T: Policy> {
+    shared: Shared<T>,
+}
+
+impl<T: Policy> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T: Policy> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender")
+            .field("len", &self.len())
+            .field("capacity", &self.shared.capacity())
+            .field("closed", &self.shared.is_closed())
+            .finish()
+    }
+}
+
+impl<T: Policy> Sender<T> {
+    /// Submit a message without waiting for inbox capacity.
+    #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
+    pub fn enqueue(&self, message: T) -> Feedback {
+        self.shared.enqueue(message)
+    }
+
+    fn len(&self) -> usize {
+        self.shared.len()
     }
 }
 
 /// Receiver half of a mailbox.
 pub struct Receiver<T> {
-    shared: Arc<Shared<T>>,
+    channel: Arc<Channel<T>>,
 }
 
 impl<T> Receiver<T> {
@@ -413,7 +495,7 @@ impl<T> Receiver<T> {
             return Poll::Ready(None);
         }
 
-        self.shared.receiver_waker.register(cx.waker());
+        self.channel.register_receiver(cx.waker());
 
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
@@ -438,40 +520,34 @@ impl<T> Receiver<T> {
     }
 
     fn pop(&mut self) -> Option<T> {
-        if let Some(message) = self.shared.ready.pop() {
-            return Some(message);
-        }
-
-        // Refill on receive so senders keep the lock-free ready path when no overflow exists.
-        self.shared.overflow.refill_ready(&self.shared.ready);
-        self.shared.ready.pop()
+        self.channel.pop()
     }
 
     fn is_disconnected(&self) -> bool {
-        self.shared.is_closed() || self.shared.senders.load(Ordering::Acquire) == 0
+        self.channel.is_disconnected()
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.close();
+        self.channel.close();
     }
 }
 
 /// Create a mailbox with a bounded ready queue and policy-managed overflow.
 pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-    let shared = Arc::new(Shared {
+    let channel = Arc::new(Channel {
         ready: ReadyQueue::new(capacity.get()),
         overflow: OverflowState::new(),
         closed: AtomicBool::new(false),
-        senders: AtomicUsize::new(1),
+        senders: AtomicUsize::new(0),
         receiver_waker: AtomicWaker::new(),
     });
     (
         Sender {
-            shared: shared.clone(),
+            shared: Shared::new(&channel),
         },
-        Receiver { shared },
+        Receiver { channel },
     )
 }
 
@@ -784,8 +860,8 @@ mod loom_tests {
             while let Ok(message) = receiver.try_recv() {
                 record(&seen, message);
             }
-            assert_eq!(receiver.shared.ready.len(), 0);
-            assert_eq!(receiver.shared.overflow.len(), 0);
+            assert_eq!(receiver.channel.ready.len(), 0);
+            assert_eq!(receiver.channel.overflow.len(), 0);
             assert_eq!(seen.load(Ordering::Acquire), 0b11);
         });
     }
