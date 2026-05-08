@@ -889,7 +889,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
 /// Role of the secondary half in a twin pair.
 #[derive(Clone, Copy)]
 enum TwinsRole {
-    /// Secondary runs `Disrupter` over `input.strategy` (Twinable mode).
+    /// Secondary runs `Disrupter` over `input.strategy` (TwinsMutator mode).
     /// Liveness wait uses absolute view targets.
     Mutator,
     /// Secondary runs a full legitimate engine and contributes a reporter
@@ -898,7 +898,7 @@ enum TwinsRole {
     Campaign,
 }
 
-fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
     run_twins::<P>(input, TwinsRole::Mutator);
 }
 
@@ -906,7 +906,7 @@ fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput) {
     run_twins::<P>(input, TwinsRole::Campaign);
 }
 
-/// Unified twins driver. The two existing modes (Twinable / TwinsCampaign)
+/// Unified twins driver. The two existing modes (TwinsMutator / TwinsCampaign)
 /// share scenario sampling, forwarders/routers, twin-half splitting, the
 /// primary engine, the honest validators, and the byzantine-aware invariants.
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
@@ -1331,7 +1331,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
-    Twinable,
+    TwinsMutator,
     TwinsCampaign,
     FaultyMessaging,
     FaultyNet,
@@ -1357,7 +1357,7 @@ impl FuzzMode for Standard {
     const MODE: Mode = Mode::Standard;
 }
 
-/// **Twinable mode** - twin pairs with a `Disrupter` on the secondary half.
+/// **TwinsMutator mode** - twin pairs with a `Disrupter` on the secondary half.
 ///
 /// Each compromised participant (from a sampled `twins::cases` scenario) runs
 /// two halves: a legitimate primary engine and a secondary `Disrupter` that
@@ -1367,9 +1367,9 @@ impl FuzzMode for Standard {
 ///
 /// Use this to fuzz byzantine *content* mutations layered on top of twins-style
 /// network splits.
-pub struct Twinable;
-impl FuzzMode for Twinable {
-    const MODE: Mode = Mode::Twinable;
+pub struct TwinsMutator;
+impl FuzzMode for TwinsMutator {
+    const MODE: Mode = Mode::TwinsMutator;
 }
 
 /// **TwinsCampaign mode** - twin pairs where both halves are full engines.
@@ -1508,8 +1508,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
             input.partition = Partition::Adaptive(Vec::new());
             panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
         }
-        Mode::Twinable => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twin_mutator::<P>(input)
+        Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_twins_mutator::<P>(input)
         })),
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)
