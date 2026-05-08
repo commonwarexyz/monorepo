@@ -90,6 +90,13 @@
 //! Above the grafting height, internal nodes use standard hashing over the grafted leaves.
 //! Below the grafting height, the ops tree is unchanged.
 //!
+//! Not every complete chunk is graftable. A chunk is _active_ when its height-`h` ancestor
+//! exists as a single node in the ops tree. In MMR every complete chunk is immediately active.
+//! In MMB, delayed merges can leave a chunk bit-complete before its height-`h` ancestor is
+//! born; that chunk is _pending_ and rides in the canonical-root trailer until the merge
+//! happens, at which point it migrates into the grafted tree. See
+//! [Trailer chunks](#trailer-chunks-partial-and-pending).
+//!
 //! ## Example
 //!
 //! Consider 8 operations with `N = 1` (8-bit chunks, so `h = log2(8) = 3`). But to illustrate
@@ -144,20 +151,89 @@
 //! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.
 //!
-//! ## Partial chunks
+//! Range proofs over a window that includes the trailing pending or partial chunk additionally
+//! carry that chunk's digest in the proof and have the verifier re-derive it from the supplied
+//! chunk bytes. Active-chunk reconstruction is always single-peak: the height-`gh` ancestor
+//! exists in the ops tree and yields a single grafted leaf to fold against the bitmap chunk.
 //!
-//! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
-//! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
-//! corresponding complete subtree in the ops tree. To still authenticate these bits, the partial
-//! chunk's digest and bit count are folded into the canonical root hash:
+//! ## Trailer chunks: partial and pending
+//!
+//! Two kinds of bitmap chunk are *not* committed by `grafted_root`; instead they ride in a
+//! _trailer_ that hashes into the canonical root.
+//!
+//! - **Partial chunk.** The trailing bitmap chunk is usually incomplete (fewer than `N * 8`
+//!   bits). It has no grafted leaf because no corresponding subtree exists in the ops tree.
+//!
+//! - **Pending chunk.** A chunk whose bits are complete but whose height-`gh` ancestor has
+//!   not yet been born in the ops tree. Its leaves are split across multiple sub-`gh` peaks,
+//!   so there is no single ops node to graft onto. The chunk is _deferred_ until the merge
+//!   happens, at which point it migrates into the grafted tree.
+//!
+//! Pending chunks only arise in families with delayed merges (MMB). Define `birth_chunk_0`
+//! as the value of `ops_leaves` at which chunk 0's height-`gh` ancestor is first born in the
+//! ops tree. Then chunk `i` is active when `ops_leaves >= i * 2^gh + birth_chunk_0`.
+//!
+//! - In MMR, `birth_chunk_0 = 2^gh`, so a chunk is active the moment it is bit-complete
+//!   and pending chunks never exist.
+//! - In MMB, `birth_chunk_0 = 3 * 2^(gh-1) - 1`, which exceeds the chunk size `2^gh` by
+//!   `2^(gh-1) - 1`. That gap is the **pending window** for chunk `i`: ops_leaves values
+//!   for which chunk `i` is bit-complete but not yet active.
+//!
+//! The pending window is strictly narrower than one chunk stride, so **at most one chunk is
+//! pending at any time**. The pending and partial slots are independent: at `gh >= 3` both
+//! can be present; at `gh == 1` the pending window is empty and only the partial slot is
+//! ever populated.
+//!
+//! ### Chunk lifecycle (MMB)
 //!
 //! ```text
-//! root = hash(ops_root || grafted_root || next_bit || hash(partial_chunk))
+//!                       ops_leaves N grows --->
+//!
+//!   chunk i state:    incomplete    pending          active
+//!                    (bits being   (bits set;       (h=gh ancestor born;
+//!                     appended)    ancestor not      chunk grafted onto
+//!                                  yet born)         that ops node)
+//!
+//!   N reaches:                    (i+1)*2^gh     i*2^gh + birth_chunk_0
+//!                                 ^                  ^
+//!                                 |                  |
+//!                                 chunk completes    chunk activates
+//!
+//!   Where chunk i's bytes live:
+//!     incomplete -> trailer, in the partial slot
+//!     pending    -> trailer, in the pending slot
+//!     active     -> grafted tree
+//!
+//!   At any moment, the trailer holds zero, one, or both of {pending, partial};
+//!   the grafted tree commits to every chunk in [pruned_chunks, active_chunks).
 //! ```
 //!
-//! where `next_bit` is the index of the next unset position in the partial chunk and
-//! `grafted_root` is the root of the grafted tree (which covers only complete chunks).
-//! When all chunks are complete, the partial chunk components are omitted.
+//! ### Worked example: pending + partial coexistence (MMB, `gh = 3`)
+//!
+//! For `gh = 3` MMB, `birth_chunk_0 = 3 * 2^(gh-1) - 1 = 11`. Chunk 0 fills at `N = 8` but
+//! does not activate until `N = 11`. The pending window is `N` in `[8, 10]`.
+//!
+//! ```text
+//!   Snapshot at N = 10 (chunk 0 bit-complete; chunk 1 has 2 of 8 bits):
+//!
+//!     chunks (8 bits each)     chunk 0       chunk 1
+//!     ops index range          0..7          8..15
+//!     bits set                 11111111      11
+//!     state                    pending       incomplete
+//!
+//!     active_chunks = 0      (chunk 0's h=3 ancestor is not yet born)
+//!     grafted_root           commits to no chunks
+//!     trailer.pending        = H(chunk_0_bytes)
+//!     trailer.partial        = (next_bit = 2, H(chunk_1_bytes))
+//!     canonical_root         = hash(ops_root || grafted_root || pending
+//!                                                            || next_bit || partial)
+//!
+//!   At N = 11, chunk 0's h=3 ancestor is born:
+//!     active_chunks becomes 1, the pending slot is dropped, chunk 0 migrates
+//!     into the grafted tree.
+//! ```
+//!
+//! See [Root structure](#root-structure) below for the canonical root layout.
 //!
 //! ## Incremental updates
 //!
@@ -213,26 +289,34 @@
 //! The canonical root of a `current` database is:
 //!
 //! ```text
-//! root = hash(ops_root || grafted_root [|| next_bit || hash(partial_chunk)])
+//! root = hash(
+//!     ops_root
+//!     || grafted_root
+//!     [|| pending_chunk_digest]
+//!     [|| next_bit || partial_chunk_digest]
+//! )
 //! ```
 //!
-//! where `grafted_root` is the root of the grafted tree (covering only complete
-//! bitmap chunks), `next_bit` is the index of the next unset position in the partial chunk, and
-//! `hash(partial_chunk)` is the digest of the incomplete trailing chunk. The partial chunk
-//! components are only present when the last bitmap chunk is incomplete.
-//!
-//! This combines two (or three) components into a single hash:
+//! Components:
 //!
 //! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
 //!   against this root using ops-tree range proofs.
 //!
-//! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
-//!   with ops subtree roots). Used for proofs about operation values and their activity status.
-//!   See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//! - **Grafted root**: The root of the grafted tree, which covers only the bitmap's _active_
+//!   chunks (chunks whose height-`gh` ancestor has been born in the ops tree). Used for proofs
+//!   about operation values and their activity status. See [RangeProof](proof::RangeProof) and
+//!   [OperationProof](proof::OperationProof).
 //!
-//! - **Partial chunk** (optional): When operations arrive continuously, the last bitmap chunk is
-//!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
+//! - **Pending chunk digest** (optional): `H(pending_chunk_bytes)` when a chunk's bits are
+//!   complete but its height-`gh` ancestor has not yet been born in the ops tree. Absent in
+//!   MMR and in the steady state of MMB.
+//!
+//! - **Partial chunk** (optional): When the bitmap length is not chunk-aligned, the trailing
+//!   incomplete chunk's digest and bit count are folded in.
+//!
+//! Pending and partial slots are independent. When both are present, pending hashes in
+//! before partial.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
 //! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
@@ -360,13 +444,18 @@ where
 
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
-    // Build the grafted tree from the bitmap and ops tree.
+    // Build the grafted tree from the bitmap and ops tree. Snapshot ops_leaves once and
+    // thread it through both grafted-tree construction and root computation so the
+    // active-chunks boundary is consistent.
     let hasher = qmdb::hasher::<H>();
+    let ops_size = any.log.merkle.size();
+    let ops_leaves = *crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
+        ops_leaves,
         &strategy,
     )
     .await?;
@@ -384,6 +473,7 @@ where
         &hasher,
         any.bitmap.as_ref(),
         &storage,
+        ops_leaves,
         partial_chunk,
         any.inactivity_floor_loc,
         &ops_root,

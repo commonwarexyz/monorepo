@@ -473,8 +473,7 @@ pub mod tests {
             // Empty range proof should not crash or verify, since even an empty db has a single
             let proof = RangeProof {
                 proof: Proof::default(),
-                prefix_witnesses: vec![],
-                suffix_witnesses: vec![],
+                pending_chunk_digest: None,
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
@@ -885,8 +884,7 @@ pub mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            prefix_witnesses: vec![Sha256::hash(b"peak")],
-            suffix_witnesses: vec![Sha256::hash(b"suf")],
+            pending_chunk_digest: None,
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
@@ -900,8 +898,6 @@ pub mod tests {
 
     fn op_proof_digest_count(proof: &OperationProof<mmb::Family, Digest, 32>) -> usize {
         proof.range_proof.proof.digests.len()
-            + proof.range_proof.prefix_witnesses.len()
-            + proof.range_proof.suffix_witnesses.len()
     }
 
     type CodecExclusionProof =
