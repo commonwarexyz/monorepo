@@ -307,7 +307,7 @@ struct State<T> {
     overflow: OverflowState<T>,
     closed: AtomicBool,
     senders: AtomicUsize,
-    receiver_waker: AtomicWaker,
+    waker: AtomicWaker,
 }
 
 /// Sender half of a mailbox.
@@ -326,7 +326,7 @@ impl<T: Policy> Drop for Sender<T> {
         let previous = self.state.senders.fetch_sub(1, Ordering::AcqRel);
         assert!(previous > 0);
         if previous == 1 {
-            self.state.receiver_waker.wake();
+            self.state.waker.wake();
         }
     }
 }
@@ -361,7 +361,7 @@ impl<T: Policy> Sender<T> {
         } else {
             match self.state.ready.push(message) {
                 Ok(()) => {
-                    self.state.receiver_waker.wake();
+                    self.state.waker.wake();
                     return Feedback::Ok;
                 }
                 Err(message) => message,
@@ -381,7 +381,7 @@ impl<T: Policy> Sender<T> {
             .overflow
             .apply_policy(message, || self.state.closed.load(Ordering::Acquire));
         if feedback == Feedback::Backoff {
-            self.state.receiver_waker.wake();
+            self.state.waker.wake();
         }
         feedback
     }
@@ -407,7 +407,7 @@ impl<T> Receiver<T> {
             return Poll::Ready(None);
         }
 
-        self.state.receiver_waker.register(cx.waker());
+        self.state.waker.register(cx.waker());
 
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
@@ -459,7 +459,7 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         overflow: OverflowState::new(),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(0),
-        receiver_waker: AtomicWaker::new(),
+        waker: AtomicWaker::new(),
     });
     (Sender::from_state(&state), Receiver { state })
 }
@@ -672,11 +672,6 @@ mod loom_tests {
         },
         thread,
     };
-
-    // These tests run the real actor mailbox with loom-backed atomics, mutexes,
-    // and ready queue. The only modeled boundary is the production `ArrayQueue`,
-    // which is replaced under the loom feature with a small capacity-preserving
-    // queue because crossbeam's queue internals are not loom-instrumented.
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Message {
