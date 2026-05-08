@@ -1,7 +1,6 @@
 //! Shared validation for QMDB batch chains.
 //!
-//! A batch chain is a linked sequence of in-memory batches built on top of a committed DB
-//! state. Each batch records its position via [`Bounds`] (where its operations sit in the log)
+//! A batch chain is a linked sequence of in-memory batches built on top of a DB state. Each batch records its position via [`Bounds`] (where its operations sit in the log)
 //! and the inactivity floor declared by its commit. Ancestors (older batches in the chain that
 //! have not yet been applied to the DB) are tracked as [`AncestorBounds`] in newest-first
 //! order.
