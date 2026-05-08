@@ -13,7 +13,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure}, Feedback,
+        actor::{self, Backpressure, MessagePolicy}, Feedback,
         ring, oneshot,
     },
     NZUsize,
@@ -187,49 +187,62 @@ pub(crate) enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
-        let result = match message {
-            Self::Register { index, peers } => overflow.replace_last(
-                Self::Register { index, peers },
-                |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
-            ),
+impl<C: PublicKey> MessagePolicy for Message<C> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
+        match message {
+            Self::Register { index, peers } => {
+                let result = overflow.replace_last(
+                    Self::Register { index, peers },
+                    |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
+                );
+                overflow.replace_or_spill(result)
+            }
             Self::Block { public_key } => {
                 let expected = public_key.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
             Self::Construct { public_key, peer } => {
                 let expected = public_key.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::Construct { public_key, peer },
                     |pending| matches!(pending, Self::Construct { public_key: pending, .. } if pending == &expected),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
-            Self::BitVec { bit_vec, peer } => overflow.replace_last(
-                Self::BitVec { bit_vec, peer },
-                |pending| matches!(pending, Self::BitVec { .. }),
-            ),
-            Self::Peers { peers } => overflow.replace_last(
-                Self::Peers { peers },
-                |pending| matches!(pending, Self::Peers { .. }),
-            ),
-            Self::DialableForDialer { dialer } => overflow.replace_last(
-                Self::DialableForDialer { dialer },
-                |pending| matches!(pending, Self::DialableForDialer { .. }),
-            ),
+            Self::BitVec { bit_vec, peer } => {
+                let result = overflow.replace_last(
+                    Self::BitVec { bit_vec, peer },
+                    |pending| matches!(pending, Self::BitVec { .. }),
+                );
+                overflow.replace_or_spill(result)
+            }
+            Self::Peers { peers } => {
+                let result = overflow.replace_last(Self::Peers { peers }, |pending| {
+                    matches!(pending, Self::Peers { .. })
+                });
+                overflow.replace_or_spill(result)
+            }
+            Self::DialableForDialer { dialer } => {
+                let result = overflow.replace_last(
+                    Self::DialableForDialer { dialer },
+                    |pending| matches!(pending, Self::DialableForDialer { .. }),
+                );
+                overflow.replace_or_spill(result)
+            }
             Self::Release { metadata } => {
                 let expected = metadata.public_key().clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::Release { metadata },
                     |pending| matches!(pending, Self::Release { metadata } if metadata.public_key() == &expected),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
-            message => Err(message),
-        };
-        overflow.replace_or_spill(result)
+            message => overflow.spill(message),
+        }
     }
 }
 

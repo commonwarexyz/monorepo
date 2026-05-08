@@ -27,6 +27,36 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Result of applying backpressure to a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Backpressure {
+    feedback: Feedback,
+}
+
+impl Backpressure {
+    /// Drop the message being handled.
+    pub const fn dropped() -> Self {
+        Self {
+            feedback: Feedback::Dropped,
+        }
+    }
+
+    const fn retained() -> Self {
+        Self {
+            feedback: Feedback::Backoff,
+        }
+    }
+
+    const fn into_feedback(self) -> Feedback {
+        self.feedback
+    }
+}
+
+/// Result of trying to replace overflow work.
+pub struct ReplaceResult<T> {
+    result: Result<(), T>,
+}
+
 /// Policy-managed overflow behind the bounded ready queue.
 pub struct Overflow<'a, T> {
     queue: &'a mut VecDeque<T>,
@@ -34,24 +64,24 @@ pub struct Overflow<'a, T> {
 
 impl<T> Overflow<'_, T> {
     /// Spill `message` into overflow after capacity is exceeded.
-    pub fn spill(&mut self, message: T) -> Feedback {
+    pub fn spill(&mut self, message: T) -> Backpressure {
         self.queue.push_back(message);
-        Feedback::Backoff
+        Backpressure::retained()
     }
 
     /// Spill the message into overflow if it could not replace existing overflow work.
-    pub fn replace_or_spill(&mut self, result: Result<(), T>) -> Feedback {
-        match result {
-            Ok(()) => Feedback::Backoff,
+    pub fn replace_or_spill(&mut self, result: ReplaceResult<T>) -> Backpressure {
+        match result.result {
+            Ok(()) => Backpressure::retained(),
             Err(message) => self.spill(message),
         }
     }
 
     /// Drop the message if it could not replace existing overflow work.
-    pub fn replace_or_drop(&mut self, result: Result<(), T>) -> Feedback {
-        match result {
-            Ok(()) => Feedback::Backoff,
-            Err(_) => Feedback::Dropped,
+    pub fn replace_or_drop(&mut self, result: ReplaceResult<T>) -> Backpressure {
+        match result.result {
+            Ok(()) => Backpressure::retained(),
+            Err(_) => Backpressure::dropped(),
         }
     }
 
@@ -59,13 +89,46 @@ impl<T> Overflow<'_, T> {
     pub fn replace_last(
         &mut self,
         message: T,
-        is_stale: impl FnMut(&T) -> bool,
-    ) -> Result<(), T> {
-        if let Some(pending) = self.find_last_mut(is_stale) {
+        is_match: impl FnMut(&T) -> bool,
+    ) -> ReplaceResult<T> {
+        let result = if let Some(pending) = self.find_last_mut(is_match) {
             *pending = message;
             Ok(())
         } else {
             Err(message)
+        };
+        ReplaceResult { result }
+    }
+
+    /// Coalesce `message` into the newest matching overflow message, or spill it.
+    pub fn coalesce_or_spill(
+        &mut self,
+        message: T,
+        is_match: impl FnMut(&T) -> bool,
+        merge: impl FnOnce(&mut T, T),
+    ) -> Backpressure {
+        if let Some(pending) = self.find_last_mut(is_match) {
+            merge(pending, message);
+            Backpressure::retained()
+        } else {
+            self.spill(message)
+        }
+    }
+
+    /// Coalesce `message` into preferred overflow, replace fallback overflow, or spill it.
+    pub fn coalesce_or_replace_or_spill(
+        &mut self,
+        message: T,
+        coalesce_match: impl FnMut(&T) -> bool,
+        coalesce: impl FnOnce(&mut T, T),
+        replace_match: impl FnMut(&T) -> bool,
+    ) -> Backpressure {
+        if let Some(pending) = self.find_last_mut(coalesce_match) {
+            coalesce(pending, message);
+            Backpressure::retained()
+        } else {
+            let result = self.replace_last(message, replace_match);
+            self.replace_or_spill(result)
         }
     }
 
@@ -80,19 +143,19 @@ impl<T> Overflow<'_, T> {
     }
 
     /// Replace overflow with a single spilled `message`.
-    pub fn replace_all(&mut self, message: T) -> Feedback {
+    pub fn replace_all(&mut self, message: T) -> Backpressure {
         self.clear();
         self.spill(message)
     }
 }
 
 /// Backpressure behavior for actor messages when an inbox is full.
-pub trait Backpressure: Sized {
-    /// Handle `message` when the bounded ready queue is full.
+pub trait MessagePolicy: Sized {
+    /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// Messages already in the ready queue are not provided here; replacement only applies to
     /// overflow spilled beyond ready capacity.
-    fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback;
+    fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Backpressure;
 }
 
 #[cfg(feature = "loom")]
@@ -230,19 +293,23 @@ impl<T> OverflowState<T> {
 
     fn apply_policy(&self, message: T, is_closed: impl Fn() -> bool) -> Feedback
     where
-        T: Backpressure,
+        T: MessagePolicy,
     {
         let mut queue = lock(&self.queue);
         if is_closed() {
             return Feedback::Closed;
         }
 
-        let feedback = {
+        let backpressure = {
             let mut overflow = Overflow { queue: &mut queue };
             T::handle(&mut overflow, message)
         };
+        debug_assert!(
+            backpressure.feedback != Feedback::Backoff || !queue.is_empty(),
+            "backpressure policy retained no overflow"
+        );
         self.len.store(queue.len(), Ordering::Release);
-        feedback
+        backpressure.into_feedback()
     }
 
     fn refill_ready(&self, ready: &ReadyQueue<T>) {
@@ -305,11 +372,11 @@ impl<T> Drop for SendPermit<'_, T> {
 }
 
 /// Sender half of an actor mailbox.
-pub struct ActorMailbox<T: Backpressure> {
+pub struct ActorMailbox<T: MessagePolicy> {
     shared: Arc<Shared<T>>,
 }
 
-impl<T: Backpressure> Clone for ActorMailbox<T> {
+impl<T: MessagePolicy> Clone for ActorMailbox<T> {
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -318,7 +385,7 @@ impl<T: Backpressure> Clone for ActorMailbox<T> {
     }
 }
 
-impl<T: Backpressure> Drop for ActorMailbox<T> {
+impl<T: MessagePolicy> Drop for ActorMailbox<T> {
     fn drop(&mut self) {
         let previous = self.shared.senders.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0);
@@ -328,7 +395,7 @@ impl<T: Backpressure> Drop for ActorMailbox<T> {
     }
 }
 
-impl<T: Backpressure> fmt::Debug for ActorMailbox<T> {
+impl<T: MessagePolicy> fmt::Debug for ActorMailbox<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ActorMailbox")
             .field("len", &self.len())
@@ -338,7 +405,7 @@ impl<T: Backpressure> fmt::Debug for ActorMailbox<T> {
     }
 }
 
-impl<T: Backpressure> ActorMailbox<T> {
+impl<T: MessagePolicy> ActorMailbox<T> {
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
     pub fn enqueue(&self, message: T) -> Feedback {
@@ -402,7 +469,12 @@ impl<T: Backpressure> ActorMailbox<T> {
             .apply_policy(message, || self.shared.is_closed());
         match feedback {
             Feedback::Backoff => {
-                if self.shared.overflow.is_active() {
+                let retained = self.shared.overflow.is_active();
+                debug_assert!(
+                    retained,
+                    "backpressure policy returned Backoff without retained overflow"
+                );
+                if retained {
                     self.shared.receiver_waker.wake();
                 }
                 Feedback::Backoff
@@ -483,7 +555,7 @@ impl<T> Drop for ActorInbox<T> {
 }
 
 /// Create an actor mailbox with a bounded ready queue and policy-managed overflow.
-pub fn channel<T: Backpressure>(capacity: usize) -> (ActorMailbox<T>, ActorInbox<T>) {
+pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbox<T>) {
     assert!(capacity > 0, "actor mailbox capacity must be greater than zero");
 
     let shared = Arc::new(Shared {
@@ -515,8 +587,8 @@ mod tests {
         Hint(u64),
     }
 
-    impl Backpressure for Message {
-        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback {
+    impl MessagePolicy for Message {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Backpressure {
             match message {
                 Self::Update(value) => {
                     let result = overflow.replace_last(Self::Update(value), |pending| {
@@ -532,7 +604,7 @@ mod tests {
                     });
                     overflow.replace_or_drop(result)
                 }
-                Self::Vote(_) => Feedback::Dropped,
+                Self::Vote(_) => Backpressure::dropped(),
             }
         }
     }
@@ -675,6 +747,7 @@ mod tests {
             Feedback::Closed
         );
     }
+
 }
 
 #[cfg(all(test, feature = "loom"))]
@@ -699,10 +772,10 @@ mod loom_tests {
         Spill(u8),
     }
 
-    impl Backpressure for Message {
-        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback {
+    impl MessagePolicy for Message {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Backpressure {
             match message {
-                Self::Drop(_) => Feedback::Dropped,
+                Self::Drop(_) => Backpressure::dropped(),
                 Self::Spill(_) => overflow.spill(message),
             }
         }

@@ -11,7 +11,7 @@ use commonware_cryptography::{
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{
-        actor::{self, ActorMailbox, Backpressure},
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy},
         oneshot, Feedback,
     },
     Acknowledgement,
@@ -40,16 +40,16 @@ where
     Finalized { block: Block<H, C, V>, response: A },
 }
 
-impl<H, C, V, A> Backpressure for Message<H, C, V, A>
+impl<H, C, V, A> MessagePolicy for Message<H, C, V, A>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
     A: Acknowledgement,
 {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         match message {
-            Self::Act { .. } => Feedback::Dropped,
+            Self::Act { .. } => Backpressure::dropped(),
             Self::Finalized { .. } => overflow.spill(message),
         }
     }

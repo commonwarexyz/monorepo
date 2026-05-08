@@ -20,7 +20,7 @@ use commonware_runtime::{
     StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::channel::{actor::{self, ActorInbox, Backpressure}, Feedback};
+use commonware_utils::channel::{actor::{self, ActorInbox, Backpressure, MessagePolicy}, Feedback};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::{    time::{Duration, SystemTime},
@@ -281,16 +281,18 @@ pub(crate) enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
-        let result = match message {
-            Self::Dialable(dialable) => overflow.replace_last(
-                Self::Dialable(dialable),
-                |pending| matches!(pending, Self::Dialable(_)),
-            ),
-            message => Err(message),
-        };
-        overflow.replace_or_spill(result)
+impl<C: PublicKey> MessagePolicy for Message<C> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
+        match message {
+            Self::Dialable(dialable) => {
+                let result = overflow.replace_last(
+                    Self::Dialable(dialable),
+                    |pending| matches!(pending, Self::Dialable(_)),
+                );
+                overflow.replace_or_spill(result)
+            }
+            message => overflow.spill(message),
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{actor::{self, ActorMailbox, Backpressure}, Feedback},
+    channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback},
     vec::NonEmptyVec,
     Span,
 };
@@ -63,19 +63,26 @@ fn merge_fetches<K: Eq, P: PartialEq>(
     }
 }
 
-impl<K: Span, P: PublicKey> Backpressure for Message<K, P> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<K: Span, P: PublicKey> MessagePolicy for Message<K, P> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         let result = match message {
             Self::Fetch(requests) => {
                 if requests.is_empty() {
-                    Ok(())
-                } else if let Some(Self::Fetch(existing)) =
-                    overflow.find_last_mut(|pending| matches!(pending, Self::Fetch(_)))
-                {
-                    merge_fetches(existing, requests);
-                    Ok(())
+                    return Backpressure::dropped();
                 } else {
-                    Err(Self::Fetch(requests))
+                    return overflow.coalesce_or_spill(
+                        Self::Fetch(requests),
+                        |pending| matches!(pending, Self::Fetch(_)),
+                        |pending, message| {
+                            let Self::Fetch(requests) = message else {
+                                unreachable!();
+                            };
+                            let Self::Fetch(existing) = pending else {
+                                unreachable!();
+                            };
+                            merge_fetches(existing, requests);
+                        },
+                    );
                 }
             }
             Self::Cancel { key } => overflow.replace_last(Self::Cancel { key: key.clone() }, |pending| {

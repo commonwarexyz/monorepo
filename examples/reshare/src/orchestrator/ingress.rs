@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Backpressure},
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy},
         Feedback,
     },
     ordered::Set,
@@ -28,8 +28,8 @@ impl<V: Variant, P: PublicKey> Message<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Backpressure for Message<V, P> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<V: Variant, P: PublicKey> MessagePolicy for Message<V, P> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         let epoch = message.epoch();
         let result = overflow.replace_last(message, |pending| pending.epoch() == epoch);
         overflow.replace_or_spill(result)

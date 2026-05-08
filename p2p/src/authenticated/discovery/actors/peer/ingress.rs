@@ -1,7 +1,7 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_utils::channel::{
-    actor::{self, Backpressure},
+    actor::{self, Backpressure, MessagePolicy},
     Feedback,
 };
 
@@ -18,8 +18,8 @@ pub enum Message<C: PublicKey> {
     Kill,
 }
 
-impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<C: PublicKey> MessagePolicy for Message<C> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         match message {
             Self::BitVec(bit_vec) => {
                 let result = overflow.replace_last(Self::BitVec(bit_vec), |pending| {
@@ -34,12 +34,8 @@ impl<C: PublicKey> Backpressure for Message<C> {
                 overflow.replace_or_spill(result)
             }
             Self::Kill => {
-                if let Some(pending) = overflow.find_last_mut(|_| true) {
-                    *pending = Self::Kill;
-                    Feedback::Backoff
-                } else {
-                    overflow.spill(Self::Kill)
-                }
+                let result = overflow.replace_last(Self::Kill, |_| true);
+                overflow.replace_or_spill(result)
             }
         }
     }

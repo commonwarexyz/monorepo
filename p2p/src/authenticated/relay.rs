@@ -1,15 +1,15 @@
 use commonware_macros::select;
 use commonware_utils::channel::{
-    actor::{ActorInbox, ActorMailbox, Backpressure}, Feedback,
+    actor::{ActorInbox, ActorMailbox, MessagePolicy}, Feedback,
 };
 
 #[derive(Clone, Debug)]
-pub struct Relay<T: Backpressure> {
+pub struct Relay<T: MessagePolicy> {
     low: ActorMailbox<T>,
     high: ActorMailbox<T>,
 }
 
-impl<T: Backpressure> Relay<T> {
+impl<T: MessagePolicy> Relay<T> {
     pub const fn new(low: ActorMailbox<T>, high: ActorMailbox<T>) -> Self {
         Self { low, high }
     }
@@ -32,7 +32,7 @@ pub enum Prioritized<C, D> {
 }
 
 /// Awaits a message from an actor control inbox, high, or low priority receivers.
-pub async fn recv_actor_prioritized<C: Backpressure, D: Backpressure>(
+pub async fn recv_actor_prioritized<C: MessagePolicy, D: MessagePolicy>(
     control: &mut ActorInbox<C>,
     high: &mut ActorInbox<D>,
     low: &mut ActorInbox<D>,
@@ -47,14 +47,14 @@ pub async fn recv_actor_prioritized<C: Backpressure, D: Backpressure>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::channel::actor;
+    use commonware_utils::channel::actor::{self, Backpressure};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Data(u32);
 
-    impl Backpressure for Data {
-        fn handle(_: &mut actor::Overflow<'_, Self>, _: Self) -> Feedback {
-            Feedback::Dropped
+    impl MessagePolicy for Data {
+        fn handle(_: &mut actor::Overflow<'_, Self>, _: Self) -> Backpressure {
+            Backpressure::dropped()
         }
     }
 

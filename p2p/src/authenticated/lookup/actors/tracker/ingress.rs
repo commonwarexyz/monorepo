@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure}, Feedback,
+        actor::{self, Backpressure, MessagePolicy}, Feedback,
         ring, oneshot,
     },
     ordered::Map,
@@ -151,27 +151,33 @@ pub(crate) enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> Backpressure for Message<C> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
-        let result = match message {
-            Self::Register { index, peers } => overflow.replace_last(
-                Self::Register { index, peers },
-                |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
-            ),
+impl<C: PublicKey> MessagePolicy for Message<C> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
+        match message {
+            Self::Register { index, peers } => {
+                let result = overflow.replace_last(
+                    Self::Register { index, peers },
+                    |pending| matches!(pending, Self::Register { index: pending, .. } if *pending == index),
+                );
+                overflow.replace_or_spill(result)
+            }
             Self::Block { public_key } => {
                 let expected = public_key.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::Block { public_key },
                     |pending| matches!(pending, Self::Block { public_key: pending } if pending == &expected),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
-            Self::DialableForDialer { dialer } => overflow.replace_last(
-                Self::DialableForDialer { dialer },
-                |pending| matches!(pending, Self::DialableForDialer { .. }),
-            ),
-            message => Err(message),
-        };
-        overflow.replace_or_spill(result)
+            Self::DialableForDialer { dialer } => {
+                let result = overflow.replace_last(
+                    Self::DialableForDialer { dialer },
+                    |pending| matches!(pending, Self::DialableForDialer { .. }),
+                );
+                overflow.replace_or_spill(result)
+            }
+            message => overflow.spill(message),
+        }
     }
 }
 

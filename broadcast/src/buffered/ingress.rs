@@ -3,8 +3,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::{
-    actor::{self, ActorMailbox, Backpressure},
-    oneshot, Feedback,
+    actor::{self, ActorMailbox, Backpressure, MessagePolicy},
+    oneshot,
 };
 
 /// Message types that can be sent to the `Mailbox`
@@ -35,8 +35,8 @@ pub enum Message<P: PublicKey, M: Digestible> {
     },
 }
 
-impl<P: PublicKey, M: Digestible + Codec> Backpressure for Message<P, M> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<P: PublicKey, M: Digestible + Codec> MessagePolicy for Message<P, M> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         overflow.spill(message)
     }
 }

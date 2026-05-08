@@ -1,7 +1,7 @@
 use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
-use commonware_utils::channel::{actor::{self, Backpressure}, Feedback};
+use commonware_utils::channel::actor::{self, Backpressure, MessagePolicy};
 use std::collections::HashMap;
 
 /// Data is an arbitrary message sent between peers.
@@ -53,8 +53,8 @@ pub struct EncodedData {
     pub payload: IoBufs,
 }
 
-impl Backpressure for EncodedData {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl MessagePolicy for EncodedData {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         overflow.spill(message)
     }
 }

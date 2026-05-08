@@ -12,7 +12,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure}, Feedback,
+        actor::{self, Backpressure, MessagePolicy}, Feedback,
         oneshot, ring,
     },
     NZUsize,
@@ -41,8 +41,8 @@ pub enum Message<P: PublicKey> {
     },
 }
 
-impl<P: PublicKey> Backpressure for Message<P> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<P: PublicKey> MessagePolicy for Message<P> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
@@ -65,7 +65,7 @@ impl<P: PublicKey> Backpressure for Message<P> {
                 overflow.replace_or_spill(result)
             }
             Self::Content { .. } => overflow.spill(message),
-            Self::SubscribePeers { .. } => Feedback::Dropped,
+            Self::SubscribePeers { .. } => Backpressure::dropped(),
         }
     }
 }

@@ -2,7 +2,7 @@ use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::{actor::{self, Backpressure}, Feedback};
+use commonware_utils::channel::{actor::{self, Backpressure, MessagePolicy}, Feedback};
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
@@ -17,8 +17,8 @@ pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
     },
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> Backpressure for Message<Si, St, P> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<Si: Sink, St: Stream, P: PublicKey> MessagePolicy for Message<Si, St, P> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         overflow.spill(message)
     }
 }

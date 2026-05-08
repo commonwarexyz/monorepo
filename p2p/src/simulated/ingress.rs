@@ -7,7 +7,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure}, Feedback,
+        actor::{self, Backpressure, MessagePolicy}, Feedback,
         oneshot, ring,
     },
     ordered::Map,
@@ -96,13 +96,16 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
-        let result = match message {
-            Self::Track { id, peers } => overflow.replace_last(
-                Self::Track { id, peers },
-                |pending| matches!(pending, Self::Track { id: pending, .. } if *pending == id),
-            ),
+impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
+        match message {
+            Self::Track { id, peers } => {
+                let result = overflow.replace_last(
+                    Self::Track { id, peers },
+                    |pending| matches!(pending, Self::Track { id: pending, .. } if *pending == id),
+                );
+                overflow.replace_or_spill(result)
+            }
             Self::LimitBandwidth {
                 public_key,
                 egress_cap,
@@ -110,7 +113,7 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
                 result,
             } => {
                 let expected = public_key.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::LimitBandwidth {
                         public_key,
                         egress_cap,
@@ -118,7 +121,8 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
                         result,
                     },
                     |pending| matches!(pending, Self::LimitBandwidth { public_key: pending, .. } if pending == &expected),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
             Self::AddLink {
                 sender,
@@ -129,7 +133,7 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
             } => {
                 let expected_sender = sender.clone();
                 let expected_receiver = receiver.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::AddLink {
                         sender,
                         receiver,
@@ -138,7 +142,8 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
                         result,
                     },
                     |pending| matches!(pending, Self::AddLink { sender, receiver, .. } if sender == &expected_sender && receiver == &expected_receiver),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
             Self::RemoveLink {
                 sender,
@@ -147,26 +152,27 @@ impl<P: PublicKey, E: Clock> Backpressure for Message<P, E> {
             } => {
                 let expected_sender = sender.clone();
                 let expected_receiver = receiver.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::RemoveLink {
                         sender,
                         receiver,
                         result,
                     },
                     |pending| matches!(pending, Self::RemoveLink { sender, receiver, .. } if sender == &expected_sender && receiver == &expected_receiver),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
             Self::Block { from, to } => {
                 let expected_from = from.clone();
                 let expected_to = to.clone();
-                overflow.replace_last(
+                let result = overflow.replace_last(
                     Self::Block { from, to },
                     |pending| matches!(pending, Self::Block { from, to } if from == &expected_from && to == &expected_to),
-                )
+                );
+                overflow.replace_or_spill(result)
             }
-            message => Err(message),
-        };
-        overflow.replace_or_spill(result)
+            message => overflow.spill(message),
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 use commonware_utils::channel::{
-    actor::{self, Backpressure},
+    actor::{self, Backpressure, MessagePolicy},
     mpsc, Feedback,
 };
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
@@ -33,10 +33,10 @@ enum Message {
     Replace(u64),
 }
 
-impl Backpressure for Message {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl MessagePolicy for Message {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         match message {
-            Self::Reject(_) => Feedback::Dropped,
+            Self::Reject(_) => Backpressure::dropped(),
             Self::Retain(_) => overflow.spill(message),
             Self::Replace(_) => {
                 let result =

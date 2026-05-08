@@ -2,9 +2,8 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use commonware_utils::channel::{
-    actor::{Backpressure, Overflow as ActorOverflow},
-    Feedback,
+use commonware_utils::channel::actor::{
+    Backpressure, MessagePolicy, Overflow as ActorOverflow,
 };
 use std::{
     collections::HashSet,
@@ -39,14 +38,10 @@ impl Deref for ListenableIps {
     }
 }
 
-impl Backpressure for ListenableIps {
-    fn handle(overflow: &mut ActorOverflow<'_, Self>, message: Self) -> Feedback {
-        if let Some(pending) = overflow.find_last_mut(|_| true) {
-            *pending = message;
-            Feedback::Backoff
-        } else {
-            overflow.spill(message)
-        }
+impl MessagePolicy for ListenableIps {
+    fn handle(overflow: &mut ActorOverflow<'_, Self>, message: Self) -> Backpressure {
+        let result = overflow.replace_last(message, |_| true);
+        overflow.replace_or_spill(result)
     }
 }
 

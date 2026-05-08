@@ -5,8 +5,8 @@ use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Backpressure},
-        oneshot, Feedback,
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy},
+        oneshot,
     },
     Span,
 };
@@ -41,8 +41,8 @@ pub enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> Backpressure for Message<D> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<D: Digest> MessagePolicy for Message<D> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         overflow.spill(message)
     }
 }

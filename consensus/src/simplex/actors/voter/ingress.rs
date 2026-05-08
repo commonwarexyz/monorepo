@@ -7,7 +7,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure}, Feedback};
+use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CertificateKind {
@@ -64,8 +64,8 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View) {
     }
 }
 
-impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         let result = match &message {
             Self::Proposal(proposal) => {
                 let view = proposal.view();
@@ -85,28 +85,29 @@ impl<S: Scheme, D: Digest> Backpressure for Message<S, D> {
             }
             Self::Verified(certificate, _) => {
                 let key = certificate_key(certificate);
-                let mut message = Some(message);
-                if let Some(Self::Verified(pending_certificate, pending_resolved)) =
-                    overflow.find_last_mut(|pending| {
+                return overflow.coalesce_or_replace_or_spill(
+                    message,
+                    |pending| {
                         matches!(
                             pending,
                             Self::Verified(pending_certificate, _)
                                 if certificate_key(pending_certificate) == key
                         )
-                    })
-                {
-                    let Some(Self::Verified(certificate, resolved)) = message.take() else {
-                        unreachable!("message is verified");
-                    };
-                    *pending_certificate = certificate;
-                    *pending_resolved |= resolved;
-                    Ok(())
-                } else {
-                    let message = message.expect("message was not replaced");
-                    overflow.replace_last(message, |pending| {
+                    },
+                    |pending, message| {
+                        let Self::Verified(certificate, resolved) = message else {
+                            unreachable!();
+                        };
+                        let Self::Verified(pending_certificate, pending_resolved) = pending else {
+                            unreachable!();
+                        };
+                        *pending_certificate = certificate;
+                        *pending_resolved |= resolved;
+                    },
+                    |pending| {
                         matches!(pending, Self::Timeout(view, _) if *view <= key.1)
-                    })
-                }
+                    },
+                );
             }
             Self::RetryVote(vote) => {
                 let key = vote_key(vote);

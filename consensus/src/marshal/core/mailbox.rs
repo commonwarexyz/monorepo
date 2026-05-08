@@ -12,7 +12,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Backpressure}, Feedback,
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback,
         oneshot,
     },
     vec::NonEmptyVec,
@@ -166,17 +166,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
-impl<S: Scheme, V: Variant> Backpressure for Message<S, V> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         match message {
             Self::HintFinalized {
                 height,
                 targets,
-            } => {
-                if let Some(Self::HintFinalized {
-                    targets: pending_targets,
-                    ..
-                }) = overflow.find_last_mut(|pending| {
+            } => overflow.coalesce_or_spill(
+                Self::HintFinalized { height, targets },
+                |pending| {
                     matches!(
                         pending,
                         Self::HintFinalized {
@@ -184,13 +182,21 @@ impl<S: Scheme, V: Variant> Backpressure for Message<S, V> {
                             ..
                         } if *pending_height == height
                     )
-                }) {
+                },
+                |pending, message| {
+                    let Self::HintFinalized { targets, .. } = message else {
+                        unreachable!();
+                    };
+                    let Self::HintFinalized {
+                        targets: pending_targets,
+                        ..
+                    } = pending
+                    else {
+                        unreachable!();
+                    };
                     pending_targets.extend(targets);
-                    Feedback::Backoff
-                } else {
-                    overflow.spill(Self::HintFinalized { height, targets })
-                }
-            }
+                },
+            ),
             message => overflow.spill(message),
         }
     }

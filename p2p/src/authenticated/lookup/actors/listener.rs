@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
-    channel::{actor::{self, ActorInbox, Backpressure}, Feedback},
+    channel::{actor::{self, ActorInbox, Backpressure, MessagePolicy}, Feedback},
     concurrency::Limiter,
     net::SubnetMask,
     IpAddrExt,
@@ -312,8 +312,8 @@ pub(crate) enum Message<C: commonware_cryptography::PublicKey> {
     Listen(Option<tracker::Reservation<C>>),
 }
 
-impl<C: commonware_cryptography::PublicKey> Backpressure for Message<C> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         match message {
             Self::Acceptable(acceptable) => {
                 let result = overflow.replace_last(Self::Acceptable(acceptable), |pending| {

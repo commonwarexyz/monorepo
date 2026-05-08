@@ -8,8 +8,8 @@ use crate::{
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::{
-    actor::{self, ActorMailbox, Backpressure},
-    oneshot, Feedback,
+    actor::{self, ActorMailbox, Backpressure, MessagePolicy},
+    oneshot,
 };
 
 /// A message that can be sent to the coding [`Engine`].
@@ -91,14 +91,14 @@ where
     },
 }
 
-impl<B, C, H, P> Backpressure for Message<B, C, H, P>
+impl<B, C, H, P> MessagePolicy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
 {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         overflow.spill(message)
     }
 }

@@ -8,7 +8,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorMailbox, Backpressure}, Feedback,
+        actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback,
         oneshot,
     },
     sequence::U64,
@@ -45,8 +45,8 @@ fn certificate_key<S: Scheme, D: Digest>(
     }
 }
 
-impl<S: Scheme, D: Digest> Backpressure for MailboxMessage<S, D> {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         let result = match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
@@ -57,17 +57,18 @@ impl<S: Scheme, D: Digest> Backpressure for MailboxMessage<S, D> {
             Self::Certified { view, success } => {
                 let view = *view;
                 let success = *success;
-                if let Some(Self::Certified {
-                    success: pending_success,
-                    ..
-                }) = overflow.find_last_mut(|pending| {
-                    matches!(pending, Self::Certified { view: pending_view, .. } if *pending_view == view)
-                }) {
-                    *pending_success |= success;
-                    Ok(())
-                } else {
-                    Err(message)
-                }
+                return overflow.coalesce_or_spill(
+                    message,
+                    |pending| {
+                        matches!(pending, Self::Certified { view: pending_view, .. } if *pending_view == view)
+                    },
+                    |pending, _message| {
+                        let Self::Certified { success: pending_success, .. } = pending else {
+                            unreachable!();
+                        };
+                        *pending_success |= success;
+                    },
+                );
             }
         };
         overflow.replace_or_spill(result)
@@ -123,8 +124,8 @@ impl Handler {
     }
 }
 
-impl Backpressure for HandlerMessage {
-    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Feedback {
+impl MessagePolicy for HandlerMessage {
+    fn handle(overflow: &mut actor::Overflow<'_, Self>, message: Self) -> Backpressure {
         let result = match &message {
             Self::Deliver { .. } => overflow.replace_last(message, |pending| {
                 matches!(pending, Self::Produce { .. })
