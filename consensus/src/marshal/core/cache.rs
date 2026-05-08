@@ -60,8 +60,8 @@ where
         <V::Block as Digestible>::Digest,
         Finalization<S, V::Commitment>,
     >,
-    /// Verified blocks stored by height.
-    verified_blocks_by_height:
+    /// Certified, non-finalized blocks stored by height and keyed by digest.
+    certified_blocks_by_height:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
 }
 
@@ -86,10 +86,10 @@ where
 
     /// Prune height-indexed archives to the given height.
     async fn prune_by_height(&mut self, min_height: Height) {
-        self.verified_blocks_by_height
+        self.certified_blocks_by_height
             .prune(min_height.get())
             .await
-            .expect("failed to prune height-indexed verified blocks");
+            .expect("failed to prune height-indexed certified blocks");
     }
 }
 
@@ -214,7 +214,7 @@ where
             notarized_blocks,
             notarizations,
             finalizations,
-            verified_blocks_by_height,
+            certified_blocks_by_height,
         ) = futures::join!(
             Self::init_archive(
                 &context,
@@ -248,7 +248,7 @@ where
                 &context,
                 &self.cfg,
                 epoch,
-                "verified_by_height",
+                "certified_by_height",
                 self.block_codec_config.clone()
             ),
         );
@@ -259,7 +259,7 @@ where
                 notarized_blocks,
                 notarizations,
                 finalizations,
-                verified_blocks_by_height,
+                certified_blocks_by_height,
             },
         );
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
@@ -310,8 +310,8 @@ where
         Self::handle_result(result, round, "verified");
     }
 
-    /// Add a verified block to the height-indexed archive.
-    pub(crate) async fn put_verified_block_by_height(
+    /// Add a certified block to the height-indexed archive.
+    pub(crate) async fn put_certified_block_by_height(
         &mut self,
         epoch: Epoch,
         height: Height,
@@ -323,25 +323,25 @@ where
         };
 
         match cache
-            .verified_blocks_by_height
+            .certified_blocks_by_height
             .has(Identifier::Key(&digest))
             .await
         {
             Ok(true) => return,
             Ok(false) => {}
-            Err(e) => panic!("failed to check height-indexed verified block: {e}"),
+            Err(e) => panic!("failed to check height-indexed certified block: {e}"),
         }
 
         match cache
-            .verified_blocks_by_height
+            .certified_blocks_by_height
             .put_multi_sync(height.get(), digest, block)
             .await
         {
-            Ok(()) => debug!(%height, "cached height-indexed verified block"),
+            Ok(()) => debug!(%height, "cached height-indexed certified block"),
             Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(%height, "height-indexed verified block already pruned");
+                debug!(%height, "height-indexed certified block already pruned");
             }
-            Err(e) => panic!("failed to insert height-indexed verified block: {e}"),
+            Err(e) => panic!("failed to insert height-indexed certified block: {e}"),
         }
     }
 
@@ -453,7 +453,7 @@ where
         None
     }
 
-    /// Looks for a block (verified or notarized).
+    /// Looks for a block (certified by height, verified, or notarized).
     pub(crate) async fn find_block(
         &self,
         digest: <V::Block as Digestible>::Digest,
@@ -461,10 +461,10 @@ where
         // Check in reverse order
         for cache in self.caches.values().rev() {
             if let Some(block) = cache
-                .verified_blocks_by_height
+                .certified_blocks_by_height
                 .get(Identifier::Key(&digest))
                 .await
-                .expect("failed to get height-indexed verified block")
+                .expect("failed to get height-indexed certified block")
             {
                 return Some(block);
             }
@@ -492,7 +492,7 @@ where
         None
     }
 
-    /// Looks for a block (verified or notarized) that matches `predicate`.
+    /// Looks for a block (certified by height, verified, or notarized) that matches `predicate`.
     pub(crate) async fn find_block_matching(
         &self,
         digest: <V::Block as Digestible>::Digest,
@@ -501,10 +501,10 @@ where
         // Check in reverse order
         for cache in self.caches.values().rev() {
             if let Some(block) = cache
-                .verified_blocks_by_height
+                .certified_blocks_by_height
                 .get(Identifier::Key(&digest))
                 .await
-                .expect("failed to get height-indexed verified block")
+                .expect("failed to get height-indexed certified block")
             {
                 if predicate(&block) {
                     return Some(block);
@@ -554,13 +554,13 @@ where
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
-                verified_blocks_by_height: vbh,
+                certified_blocks_by_height: cbh,
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
             nv.destroy().await.expect("failed to destroy nv");
             fv.destroy().await.expect("failed to destroy fv");
-            vbh.destroy().await.expect("failed to destroy vbh");
+            cbh.destroy().await.expect("failed to destroy cbh");
         }
 
         // Update metadata if necessary
@@ -577,7 +577,7 @@ where
         }
     }
 
-    /// Prune height-indexed verified blocks below the given height.
+    /// Prune height-indexed certified blocks below the given height.
     pub(crate) async fn prune_by_height(&mut self, height: Height) {
         for cache in self.caches.values_mut() {
             cache.prune_by_height(height).await;

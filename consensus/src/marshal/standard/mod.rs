@@ -1038,10 +1038,10 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_cache_load_persisted_epochs_finds_verified_blocks_by_height() {
+    fn test_cache_load_persisted_epochs_finds_certified_blocks_by_height() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let prefix = "test-verified-by-height-cache";
+            let prefix = "test-certified-by-height-cache";
             let make_cfg = || cache::Config {
                 partition_prefix: prefix.to_string(),
                 prunable_items_per_section: NZU64!(10),
@@ -1061,7 +1061,7 @@ mod tests {
                     (),
                 )
                 .await;
-                mgr.put_verified_block_by_height(
+                mgr.put_certified_block_by_height(
                     Epoch::zero(),
                     block.height(),
                     digest,

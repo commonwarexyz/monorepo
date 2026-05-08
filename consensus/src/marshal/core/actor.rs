@@ -939,11 +939,11 @@ where
         // height known before the request.
         if let Some(round) = round {
             if round < self.last_processed_round {
-                // The finalized flow is responsible for recovering any
-                // missing block data at or below the processed finalized round.
-                // A round-bound certified-parent fetch below that floor is only
-                // proposal-construction assistance, so it is redundant once we
-                // have processed a later finalization.
+                // `last_processed_round` only advances after the application
+                // processes the corresponding finalized block. A round-bound
+                // certified-parent fetch below that floor is only
+                // proposal-construction assistance for data behind the
+                // processed chain.
                 return;
             }
             // Fetch the certified parent proposal for this round. The response
@@ -1103,7 +1103,7 @@ where
                     if height > self.last_processed_height {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
-                                .put_verified_block_by_height(
+                                .put_certified_block_by_height(
                                     bounds.epoch(),
                                     height,
                                     digest,
@@ -1482,9 +1482,9 @@ where
             let round = finalization.round();
             self.last_processed_round = round;
 
-            // Cancel round-bound certified-parent fetches made redundant by the
-            // processed finalized round. If the block is still needed, the
-            // finalization path recovers it under the finalized context.
+            // Cancel round-bound certified-parent fetches below the processed
+            // round floor. Unlike known-finalized data, processed data is past
+            // the point where proposal-construction assistance is useful.
             resolver
                 .retain(ResolverSubscriber::request(Request::Notarized { round }).predicate())
                 .await;

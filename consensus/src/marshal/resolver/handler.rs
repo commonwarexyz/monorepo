@@ -218,8 +218,7 @@ impl<D: Digest> ResolverSubscriber<D> {
     /// "less than or equal to" this subscriber's floor. This keeps pending
     /// candidate waits out of the resolver entirely, drops height-bound block
     /// requests once the processed height passes them, and drops round-bound
-    /// certified-parent fetches once the finalized flow is responsible for any
-    /// missing block data at or below that round.
+    /// certified-parent fetches once the processed round passes them.
     pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
         let cloned = *self;
         move |s| match (&cloned, s) {
