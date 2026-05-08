@@ -2,10 +2,10 @@ use super::{
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
     inflight::Inflight,
-    ingress::{FetchRequest, Mailbox, Message, Retainer},
+    ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::{Consumer, Delivery};
+use crate::{Consumer, Dependencies, FetchDependency};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -46,11 +46,11 @@ pub struct Engine<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, RetainKey = RetainKey, Value = Bytes>,
+    Con: Consumer<Key = Key, Dependency = Dep, Value = Bytes>,
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-    RetainKey = Key,
+    Dep = Key,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -68,7 +68,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key, P, RetainKey>>,
+    mailbox: mpsc::Receiver<Message<Key, P, Dep>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -77,7 +77,7 @@ pub struct Engine<
     inflight: Inflight<E, Con, P, Key>,
 
     /// Local reasons that keep each fetch key alive.
-    retainers: HashMap<Key, BTreeSet<Retainer<RetainKey>>>,
+    retainers: HashMap<Key, BTreeSet<FetchDependency<Dep>>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -101,22 +101,19 @@ impl<
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
-        Con: Consumer<Key = Key, RetainKey = RetainKey, Value = Bytes>,
+        Con: Consumer<Key = Key, Dependency = Dep, Value = Bytes>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-        RetainKey,
-    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR, RetainKey>
+        Dep,
+    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR, Dep>
 where
-    RetainKey: Clone + From<Key> + Ord + Send + 'static,
+    Dep: Clone + From<Key> + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(
-        context: E,
-        cfg: Config<P, D, B, Key, Con, Pro>,
-    ) -> (Self, Mailbox<Key, P, RetainKey>) {
+    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P, Dep>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
@@ -234,7 +231,7 @@ where
                     Message::Fetch(requests) => {
                         for FetchRequest {
                             key,
-                            retainer,
+                            mut dependencies,
                             targets,
                         } in requests
                         {
@@ -242,10 +239,13 @@ where
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
+                            if dependencies.is_empty() {
+                                dependencies.push(FetchDependency::Request);
+                            }
                             self.retainers
                                 .entry(key.clone())
                                 .or_default()
-                                .insert(retainer);
+                                .extend(dependencies);
 
                             // Update targets
                             match targets {
@@ -286,8 +286,8 @@ where
 
                         self.retainers.retain(|key, retainers| {
                             retainers.retain(|retainer| match retainer {
-                                Retainer::Request => predicate(&RetainKey::from(key.clone())),
-                                Retainer::Retain(retain_key) => predicate(retain_key),
+                                FetchDependency::Request => predicate(&Dep::from(key.clone())),
+                                FetchDependency::Local(dependency) => predicate(dependency),
                             });
                             !retainers.is_empty()
                         });
@@ -310,11 +310,11 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
-                let (peer, key, valid) = match delivery {
+                let (peer, key, result) = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
                 };
-                self.handle_delivery(peer, key, valid).await;
+                self.handle_delivery(peer, key, result).await;
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -436,16 +436,15 @@ where
             return;
         };
 
-        let mut delivery = vec![Delivery::Request(key.clone())];
-        if let Some(retainers) = self.retainers.get(&key) {
-            delivery.extend(retainers.iter().filter_map(|retainer| match retainer {
-                Retainer::Request => None,
-                Retainer::Retain(retain_key) => Some(Delivery::Retain(retain_key.clone())),
-            }));
-        }
+        let dependencies = self
+            .retainers
+            .get(&key)
+            .map(|retainers| retainers.iter().cloned().collect())
+            .unwrap_or_default();
+        let dependencies = Dependencies::with_dependencies(key.clone(), dependencies);
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(key, delivery, peer, response);
+        self.inflight.deliver(key, dependencies, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
@@ -458,8 +457,8 @@ where
             return;
         }
 
-        // If the data is invalid, we need to block the peer and try again
-        // (blocking the peer also removes any targets associated with it)
+        // If the data is invalid, block the peer and try again. Blocking the
+        // peer also removes any targets associated with it.
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);

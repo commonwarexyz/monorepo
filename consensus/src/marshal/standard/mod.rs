@@ -80,7 +80,7 @@ mod tests {
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::Resolver;
+    use commonware_resolver::{Dependencies, Resolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
@@ -1860,7 +1860,7 @@ mod tests {
     }
 
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
-    type TargetedFetch = (handler::ResolverKey<D>, NonEmptyVec<PublicKey>);
+    type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
 
     /// A resolver that records each `fetch_targeted` invocation; other
     /// methods are no-ops.
@@ -1891,25 +1891,44 @@ mod tests {
     }
 
     impl Resolver for RecordingResolver {
-        type Key = handler::ResolverKey<D>;
-        type RetainKey = handler::ResolverRetainKey<D>;
+        type Key = handler::Request<D>;
+        type Dependency = handler::ResolverDependency<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_with_retain_key(&mut self, _key: Self::Key, _retain_key: Self::RetainKey) {}
-        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
-        async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
+        async fn fetch<R>(&mut self, _request: R)
+        where
+            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        {
+        }
+        async fn fetch_all<R>(&mut self, _requests: Vec<R>)
+        where
+            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        {
+        }
+        async fn fetch_targeted(
+            &mut self,
+            request: impl Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) {
+            let key = request.into().request;
             self.targeted.lock().push((key, targets));
         }
-        async fn fetch_all_targeted(
-            &mut self,
-            requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
-            self.targeted.lock().extend(requests);
+        async fn fetch_all_targeted<R>(&mut self, requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>)
+        where
+            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        {
+            self.targeted.lock().extend(
+                requests
+                    .into_iter()
+                    .map(|(request, targets)| (request.into().request, targets)),
+            );
         }
         async fn cancel(&mut self, _key: Self::Key) {}
         async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static) {
+        async fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Dependency) -> bool + Send + 'static,
+        ) {
         }
     }
 
@@ -2076,8 +2095,7 @@ mod tests {
     }
 
     /// When the provider has no verifier for an epoch, in-flight deliveries
-    /// for that epoch must be acknowledged (`true`) so the serving peer is
-    /// not blamed, rather than rejected (`false`).
+    /// for that epoch must complete so the serving peer is not blamed.
     #[test_traced("WARN")]
     fn test_standard_stale_finalized_delivery_does_not_block_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2182,15 +2200,15 @@ mod tests {
 
             // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
-            // must ack (true) rather than blame the peer (false).
+            // must complete delivery rather than blame the peer.
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    keys: vec![commonware_resolver::Delivery::Request(
-                        handler::ResolverKey::request(handler::Request::Finalized {
+                    dependencies: commonware_resolver::Dependencies::new(
+                        handler::Request::Finalized {
                             height: Height::new(5),
-                        }),
-                    )],
+                        },
+                    ),
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -2202,11 +2220,11 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    keys: vec![commonware_resolver::Delivery::Request(
-                        handler::ResolverKey::request(handler::Request::Notarized {
+                    dependencies: commonware_resolver::Dependencies::new(
+                        handler::Request::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
-                        }),
-                    )],
+                        },
+                    ),
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -2731,9 +2749,9 @@ mod tests {
             let (request, targets) = &targeted[0];
             assert_eq!(
                 request,
-                &handler::ResolverKey::request(handler::Request::Finalized {
+                &handler::Request::Finalized {
                     height: Height::new(7)
-                })
+                }
             );
             assert_eq!(&targets[..], &[target]);
         });

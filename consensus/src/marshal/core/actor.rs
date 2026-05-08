@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, BlockFetchContext, Request, ResolverKey, ResolverRetainKey},
+        resolver::handler::{self, BlockFetchContext, Request, ResolverDependency},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Resolver};
+use commonware_resolver::{Dependencies, FetchDependency, Resolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -193,11 +193,11 @@ enum BlockSubscriptionKey<C, D> {
 
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
-type ResolverRequestFor<V> = ResolverKey<<V as Variant>::Commitment>;
-type ResolverRetainKeyFor<V> = ResolverRetainKey<<V as Variant>::Commitment>;
+type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
+type ResolverDependencyFor<V> = ResolverDependency<<V as Variant>::Commitment>;
 
 struct ResolverDelivery<V: Variant> {
-    keys: Vec<Delivery<ResolverRequestFor<V>, ResolverRetainKeyFor<V>>>,
+    dependencies: Dependencies<ResolverRequestFor<V>, ResolverDependencyFor<V>>,
     value: Bytes,
     response: oneshot::Sender<bool>,
 }
@@ -379,7 +379,7 @@ where
     where
         R: Resolver<
             Key = ResolverRequestFor<V>,
-            RetainKey = ResolverRetainKeyFor<V>,
+            Dependency = ResolverDependencyFor<V>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -396,7 +396,7 @@ where
     ) where
         R: Resolver<
             Key = ResolverRequestFor<V>,
-            RetainKey = ResolverRetainKeyFor<V>,
+            Dependency = ResolverDependencyFor<V>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -607,9 +607,7 @@ where
                             self.cache_block(round, digest, block).await;
                         } else {
                             debug!(?round, "notarized block missing");
-                            resolver
-                                .fetch(ResolverKey::request(Request::Notarized { round }))
-                                .await;
+                            resolver.fetch(Request::Notarized { round }).await;
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -647,9 +645,12 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver
-                                .fetch(ResolverKey::block_request(
-                                    commitment,
-                                    BlockFetchContext::Finalized { round },
+                                .fetch(Dependencies::with_dependency(
+                                    Request::Block { commitment },
+                                    ResolverDependency::block_request(
+                                        commitment,
+                                        BlockFetchContext::Finalized { round },
+                                    ),
                                 ))
                                 .await;
                         }
@@ -668,7 +669,7 @@ where
                         }
                         BlockID::Latest => {
                             let block = match self.get_latest().await {
-                                Some((_, digest, _)) => self.find_block_by_digest(&buffer, digest).await,
+                                Some((height, _, _)) => self.get_finalized_block(height).await,
                                 None => None,
                             };
                             response.send_lossy(block);
@@ -690,7 +691,7 @@ where
                         }
 
                         // Trigger a targeted fetch via the resolver
-                        let request = ResolverKey::request(Request::Finalized { height });
+                        let request = Request::Finalized { height };
                         resolver.fetch_targeted(request, targets).await;
                     }
                     Message::SubscribeByDigest {
@@ -807,14 +808,14 @@ where
                             produces.push((key, response));
                         }
                         handler::Message::Deliver {
-                            keys,
+                            dependencies,
                             value,
                             response,
                         } => {
                             needs_sync |= self
                                 .handle_deliver(
                                     ResolverDelivery {
-                                        keys,
+                                        dependencies,
                                         value,
                                         response,
                                     },
@@ -861,7 +862,7 @@ where
         response: oneshot::Sender<Bytes>,
         buffer: &Buf,
     ) {
-        match key.request_key() {
+        match key {
             Request::Block { commitment } => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
@@ -899,7 +900,7 @@ where
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
         subscription: BlockSubscriptionRequest<V>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -942,18 +943,18 @@ where
             // If this is a valid view, this request should be fine to keep open
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
-            let request = ResolverKey::request(Request::Notarized { round });
+            let request = Request::Notarized { round };
             match key {
                 BlockSubscriptionKey::Digest(_) => resolver.fetch(request).await,
                 BlockSubscriptionKey::Commitment(commitment) => {
                     resolver
-                        .fetch_with_retain_key(
+                        .fetch(Dependencies::with_dependency(
                             request,
-                            ResolverRetainKey::block_request(
+                            ResolverDependency::block_request(
                                 commitment,
                                 BlockFetchContext::Finalized { round },
                             ),
-                        )
+                        ))
                         .await;
                 }
             }
@@ -971,9 +972,12 @@ where
             }
             debug!(%height, ?commitment, ?digest, "requested ancestry block missing");
             resolver
-                .fetch(ResolverKey::block_request(
-                    commitment,
-                    BlockFetchContext::Ancestry { height },
+                .fetch(Dependencies::with_dependency(
+                    Request::Block { commitment },
+                    ResolverDependency::block_request(
+                        commitment,
+                        BlockFetchContext::Ancestry { height },
+                    ),
                 ))
                 .await;
         }
@@ -1017,34 +1021,18 @@ where
     async fn handle_deliver(
         &mut self,
         delivery: ResolverDelivery<V>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
+        _resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let ResolverDelivery {
-            keys,
+            dependencies,
             value,
             response,
         } = delivery;
-        let Some(key) = keys.iter().find_map(|key| match key {
-            Delivery::Request(key) => Some(*key),
-            Delivery::Retain(_) => None,
-        }) else {
-            response.send_lossy(false);
-            return false;
-        };
-        let retain_keys: Vec<_> = keys
-            .iter()
-            .filter_map(|key| match key {
-                Delivery::Request(_) => None,
-                Delivery::Retain(key) => Some(*key),
-            })
-            .collect();
+        let (key, dependencies) = dependencies.into_parts();
         match key {
-            ResolverKey::Block {
-                commitment,
-                context,
-            } => {
+            Request::Block { commitment } => {
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config)
                 else {
                     response.send_lossy(false);
@@ -1057,67 +1045,81 @@ where
 
                 let height = block.height();
                 let digest = block.digest();
-
-                if let Some(expected_height) = context.expected_height() {
-                    if height != expected_height {
-                        response.send_lossy(false);
-                        return false;
+                let mut contexts = Vec::new();
+                let mut dependencies_satisfied = true;
+                for dependency in dependencies {
+                    match dependency {
+                        FetchDependency::Request => {}
+                        FetchDependency::Local(ResolverDependency::Block {
+                            commitment: retained_commitment,
+                            context,
+                        }) if retained_commitment == commitment
+                            && context
+                                .expected_height()
+                                .is_none_or(|expected| expected == height) =>
+                        {
+                            contexts.push(context);
+                        }
+                        _ => dependencies_satisfied = false,
                     }
                 }
 
+                if contexts.is_empty() || !dependencies_satisfied {
+                    debug!(
+                        ?commitment,
+                        "received block without matching local fetch context"
+                    );
+                    response.send_lossy(false);
+                    return false;
+                }
+
                 let finalization = self.cache.get_finalization_for(digest).await;
-                let wrote = match context {
-                    BlockFetchContext::Ancestry { .. } => {
-                        if finalization.is_some() {
-                            self.store_finalization(
-                                height,
-                                digest,
-                                block,
-                                finalization,
-                                application,
-                            )
-                            .await
-                        } else {
-                            if height > self.last_processed_height {
-                                if let Some(bounds) = self.epocher.containing(height) {
-                                    self.cache
-                                        .put_verified_block_by_height(
-                                            bounds.epoch(),
-                                            height,
-                                            digest,
-                                            block.clone().into(),
-                                        )
-                                        .await;
-                                }
-                                self.notify_subscribers(&block);
-                            }
-                            false
+                let should_finalize = contexts.iter().any(|context| {
+                    matches!(
+                        context,
+                        BlockFetchContext::Repair { .. } | BlockFetchContext::Finalized { .. }
+                    )
+                });
+                let wrote = if should_finalize || finalization.is_some() {
+                    self.store_finalization(height, digest, block, finalization, application)
+                        .await
+                } else {
+                    if height > self.last_processed_height {
+                        if let Some(bounds) = self.epocher.containing(height) {
+                            self.cache
+                                .put_verified_block_by_height(
+                                    bounds.epoch(),
+                                    height,
+                                    digest,
+                                    block.clone().into(),
+                                )
+                                .await;
                         }
+                        self.notify_subscribers(&block);
                     }
-                    BlockFetchContext::Repair { .. } | BlockFetchContext::Finalized { .. } => {
-                        self.store_finalization(height, digest, block, finalization, application)
-                            .await
-                    }
+                    false
                 };
                 debug!(?digest, %height, "received block");
-                resolver
-                    .retain(ResolverRetainKey::retain_current_block_fetch(
-                        commitment, context,
-                    ))
-                    .await;
-                response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
+                response.send_lossy(true);
                 wrote
             }
-            ResolverKey::Request(Request::Block { commitment }) => {
-                debug!(
-                    ?commitment,
-                    retain_keys = retain_keys.len(),
-                    "ignoring block delivery without local fetch context"
-                );
-                response.send_lossy(false);
-                false
-            }
-            ResolverKey::Request(Request::Finalized { height }) => {
+            Request::Finalized { height } => {
+                let dependencies_satisfied = dependencies.into_iter().all(|dependency| {
+                    match dependency {
+                        FetchDependency::Request => true,
+                        FetchDependency::Local(ResolverDependency::Request(
+                            Request::Finalized {
+                                height: retained_height,
+                            },
+                        )) => retained_height == height,
+                        _ => false,
+                    }
+                });
+                if !dependencies_satisfied {
+                    response.send_lossy(false);
+                    return false;
+                }
+
                 let Some(bounds) = self.epocher.containing(height) else {
                     debug!(
                         %height,
@@ -1165,7 +1167,7 @@ where
                 });
                 false
             }
-            ResolverKey::Request(Request::Notarized { round }) => {
+            Request::Notarized { round } => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1195,32 +1197,24 @@ where
                     return false;
                 }
 
-                let has_unscoped_request = keys.iter().any(|delivery_key| {
-                    matches!(
-                        delivery_key,
-                        Delivery::Request(ResolverKey::Request(Request::Notarized { round: retained_round }))
-                            if *retained_round == round
-                    )
-                });
-                let has_commitment_scope = retain_keys.iter().any(|retain_key| {
-                    matches!(
-                        retain_key,
-                        ResolverRetainKey::Block {
-                            context: BlockFetchContext::Finalized { round: retained_round },
-                            ..
-                        } if *retained_round == round
-                    )
-                });
-                let has_matching_commitment_scope = retain_keys.iter().any(|retain_key| {
-                    matches!(
-                        retain_key,
-                        ResolverRetainKey::Block {
+                let dependencies_satisfied = dependencies.into_iter().all(|dependency| {
+                    match dependency {
+                        FetchDependency::Request => true,
+                        FetchDependency::Local(ResolverDependency::Request(
+                            Request::Notarized {
+                                round: retained_round,
+                            },
+                        )) => retained_round == round,
+                        FetchDependency::Local(ResolverDependency::Block {
                             commitment: retained_commitment,
-                            context: BlockFetchContext::Finalized { round: retained_round },
-                        } if *retained_commitment == commitment && *retained_round == round
-                    )
+                            context: BlockFetchContext::Finalized {
+                                round: retained_round,
+                            },
+                        }) => retained_commitment == commitment && retained_round == round,
+                        _ => false,
+                    }
                 });
-                if has_commitment_scope && !has_unscoped_request && !has_matching_commitment_scope {
+                if !dependencies_satisfied {
                     response.send_lossy(false);
                     return false;
                 }
@@ -1482,7 +1476,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver).await;
@@ -1490,7 +1484,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .retain(ResolverRetainKey::without_block_commitment(commitment))
+            .retain(ResolverDependency::without_block_commitment(commitment))
             .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1510,7 +1504,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(ResolverRetainKey::request(Request::Notarized { round }).predicate())
+                .retain(ResolverDependency::request(Request::Notarized { round }).predicate())
                 .await;
         }
     }
@@ -1716,6 +1710,36 @@ where
         }
     }
 
+    /// Looks for a block in cache and finalized storage by digest, returning
+    /// only blocks that match `predicate`.
+    async fn find_block_in_storage_matching(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+        mut predicate: impl FnMut(&V::Block) -> bool,
+    ) -> Option<V::Block> {
+        // Check verified / notarized blocks via cache manager.
+        if let Some(block) = self
+            .cache
+            .find_block_matching(digest, |stored| {
+                let block = stored.clone().into();
+                predicate(&block)
+            })
+            .await
+        {
+            return Some(block.into());
+        }
+
+        // Check finalized blocks.
+        match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
+            Ok(Some(stored)) => {
+                let block = stored.into();
+                predicate(&block).then_some(block)
+            }
+            Ok(None) => None,
+            Err(e) => panic!("failed to get block: {e}"),
+        }
+    }
+
     /// Looks for a block anywhere in local storage using only the digest.
     ///
     /// This is used when we only have a digest (during gap repair following
@@ -1743,7 +1767,9 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
-        self.find_block_in_storage(V::commitment_to_inner(commitment))
+        self.find_block_in_storage_matching(V::commitment_to_inner(commitment), |block| {
+            V::commitment(block) == commitment
+        })
             .await
     }
 
@@ -1761,7 +1787,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1796,11 +1822,14 @@ where
                 } else {
                     // Request the missing block.
                     resolver
-                        .fetch(ResolverKey::block_request(
-                            commitment,
-                            BlockFetchContext::Repair {
-                                height: last_finalized,
-                            },
+                        .fetch(Dependencies::with_dependency(
+                            Request::Block { commitment },
+                            ResolverDependency::block_request(
+                                commitment,
+                                BlockFetchContext::Repair {
+                                    height: last_finalized,
+                                },
+                            ),
                         ))
                         .await;
                 }
@@ -1856,11 +1885,16 @@ where
                         .previous()
                         .expect("gap repair cursor must be above genesis");
                     resolver
-                        .fetch(ResolverKey::block_request(
-                            parent_commitment,
-                            BlockFetchContext::Repair {
-                                height: parent_height,
+                        .fetch(Dependencies::with_dependency(
+                            Request::Block {
+                                commitment: parent_commitment,
                             },
+                            ResolverDependency::block_request(
+                                parent_commitment,
+                                BlockFetchContext::Repair {
+                                    height: parent_height,
+                                },
+                            ),
                         ))
                         .await;
                     break 'cache_repair;
@@ -1878,7 +1912,7 @@ where
             .missing_items(start, self.max_repair.get());
         let requests: Vec<_> = missing_items
             .into_iter()
-            .map(|height| ResolverKey::request(Request::Finalized { height }))
+            .map(|height| Request::Finalized { height })
             .collect();
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
@@ -1891,7 +1925,7 @@ where
     async fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, RetainKey = ResolverRetainKeyFor<V>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Dependency = ResolverDependencyFor<V>>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;
@@ -1901,7 +1935,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(ResolverRetainKey::request(Request::Finalized { height }).predicate())
+            .retain(ResolverDependency::request(Request::Finalized { height }).predicate())
             .await;
     }
 

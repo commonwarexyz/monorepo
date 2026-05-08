@@ -1,4 +1,4 @@
-use crate::Resolver;
+use crate::{Dependencies, FetchDependency, Resolver};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
@@ -8,21 +8,12 @@ use commonware_utils::{
 
 type Predicate<R> = Box<dyn Fn(&R) -> bool + Send>;
 
-/// A local reason keeping a fetch alive.
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum Retainer<R> {
-    /// The fetch is retained by the request key itself.
-    Request,
-    /// The fetch is retained by a separate local key.
-    Retain(R),
-}
-
 /// A request to fetch data for a key, optionally with target peers.
 pub struct FetchRequest<K, P, R> {
     /// The key to fetch.
     pub key: K,
-    /// The reason used to decide whether the fetch should be retained.
-    pub retainer: Retainer<R>,
+    /// The dependencies used to decide whether the fetch should be retained.
+    pub dependencies: Vec<FetchDependency<R>>,
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
@@ -41,7 +32,7 @@ pub enum Message<K, P, R> {
     /// Cancel all fetch requests.
     Clear,
 
-    /// Cancel all fetch requests without a retain key that satisfies the predicate.
+    /// Cancel all fetch requests without a dependency that satisfies the predicate.
     Retain { predicate: Predicate<R> },
 }
 
@@ -66,7 +57,7 @@ where
     R: Clone + Send + 'static,
 {
     type Key = K;
-    type RetainKey = R;
+    type Dependency = R;
     type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
@@ -75,43 +66,41 @@ where
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch(&mut self, key: Self::Key) {
+    async fn fetch<D>(&mut self, request: D)
+    where
+        D: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+    {
+        let request = request.into();
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
-                retainer: Retainer::Request,
-                key,
+                key: request.request,
+                dependencies: request.dependencies,
                 targets: None,
             }]))
             .await;
     }
 
-    /// Send a fetch request to the peer actor with a separate retain key.
-    ///
-    /// If the engine has shut down, this is a no-op.
-    async fn fetch_with_retain_key(&mut self, key: Self::Key, retain_key: Self::RetainKey) {
-        self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest {
-                key,
-                retainer: Retainer::Retain(retain_key),
-                targets: None,
-            }]))
-            .await;
-    }
-
-    /// Send a fetch request to the peer actor for a batch of keys.
+    /// Send a fetch request to the peer actor for a batch of requests.
     ///
     /// If a fetch is already in progress for any key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
+    async fn fetch_all<D>(&mut self, requests: Vec<D>)
+    where
+        D: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+    {
         self.sender
             .send_lossy(Message::Fetch(
-                keys.into_iter()
-                    .map(|key| FetchRequest {
-                        retainer: Retainer::Request,
-                        key,
-                        targets: None,
+                requests
+                    .into_iter()
+                    .map(|request| {
+                        let request = request.into();
+                        FetchRequest {
+                            key: request.request,
+                            dependencies: request.dependencies,
+                            targets: None,
+                        }
                     })
                     .collect(),
             ))
@@ -121,11 +110,16 @@ where
     /// Send a targeted fetch request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
+    async fn fetch_targeted(
+        &mut self,
+        request: impl Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        targets: NonEmptyVec<Self::PublicKey>,
+    ) {
+        let request = request.into();
         self.sender
             .send_lossy(Message::Fetch(vec![FetchRequest {
-                retainer: Retainer::Request,
-                key,
+                key: request.request,
+                dependencies: request.dependencies,
                 targets: Some(targets),
             }]))
             .await;
@@ -134,18 +128,21 @@ where
     /// Send targeted fetch requests to the peer actor for a batch of keys.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all_targeted(
-        &mut self,
-        requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-    ) {
+    async fn fetch_all_targeted<D>(&mut self, requests: Vec<(D, NonEmptyVec<Self::PublicKey>)>)
+    where
+        D: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+    {
         self.sender
             .send_lossy(Message::Fetch(
                 requests
                     .into_iter()
-                    .map(|(key, targets)| FetchRequest {
-                        retainer: Retainer::Request,
-                        key,
-                        targets: Some(targets),
+                    .map(|(request, targets)| {
+                        let request = request.into();
+                        FetchRequest {
+                            key: request.request,
+                            dependencies: request.dependencies,
+                            targets: Some(targets),
+                        }
                     })
                     .collect(),
             ))
@@ -162,7 +159,7 @@ where
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn retain(&mut self, predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static) {
+    async fn retain(&mut self, predicate: impl Fn(&Self::Dependency) -> bool + Send + 'static) {
         self.sender
             .send_lossy(Message::Retain {
                 predicate: Box::new(predicate),

@@ -2,7 +2,7 @@ use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer, Delivery};
+use commonware_resolver::{p2p::Producer, Consumer, Dependencies};
 use commonware_utils::{
     channel::{mpsc, oneshot},
     Span,
@@ -23,17 +23,17 @@ const NOTARIZED_REQUEST: u8 = 2;
 pub enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
-        /// The local keys attached to the resolved value.
-        keys: Vec<Delivery<ResolverKey<D>, ResolverRetainKey<D>>>,
+        /// The dependencies attached to the resolved value.
+        dependencies: Dependencies<Request<D>, ResolverDependency<D>>,
         /// The value being delivered.
         value: Bytes,
-        /// A channel to send the result of the delivery (true for success).
+        /// A channel to send the result of the delivery.
         response: oneshot::Sender<bool>,
     },
     /// A request to produce a value for a given key.
     Produce {
         /// The key of the value to produce.
-        key: ResolverKey<D>,
+        key: Request<D>,
         /// A channel to send the produced value.
         response: oneshot::Sender<Bytes>,
     },
@@ -56,20 +56,20 @@ impl<D: Digest> Handler<D> {
 }
 
 impl<D: Digest> Consumer for Handler<D> {
-    type Key = ResolverKey<D>;
-    type RetainKey = ResolverRetainKey<D>;
+    type Key = Request<D>;
+    type Dependency = ResolverDependency<D>;
     type Value = Bytes;
 
     async fn deliver(
         &mut self,
-        keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
+        dependencies: Dependencies<Self::Key, Self::Dependency>,
         value: Self::Value,
     ) -> bool {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
             .send(Message::Deliver {
-                keys,
+                dependencies,
                 value,
                 response,
             })
@@ -84,7 +84,7 @@ impl<D: Digest> Consumer for Handler<D> {
 }
 
 impl<D: Digest> Producer for Handler<D> {
-    type Key = ResolverKey<D>;
+    type Key = Request<D>;
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
@@ -155,24 +155,9 @@ impl<D: Digest> Request<D> {
     }
 }
 
-/// A resolver key for either peer-visible requests or local annotated block fetches.
-///
-/// The annotation is local delivery metadata. It affects resolver identity and
-/// delivery handling, but it is never encoded on the wire.
-#[derive(Clone, Copy)]
-pub enum ResolverKey<D: Digest> {
-    /// A peer-visible request.
-    Request(Request<D>),
-    /// A locally annotated block fetch.
-    Block {
-        commitment: D,
-        context: BlockFetchContext,
-    },
-}
-
-/// A local key for deciding whether a resolver fetch should be retained.
+/// A local dependency for deciding whether a resolver fetch should be retained.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ResolverRetainKey<D: Digest> {
+pub enum ResolverDependency<D: Digest> {
     /// A peer-visible request.
     Request(Request<D>),
     /// A locally annotated block fetch.
@@ -182,43 +167,13 @@ pub enum ResolverRetainKey<D: Digest> {
     },
 }
 
-impl<D: Digest> ResolverKey<D> {
-    /// Create a peer-visible resolver key.
+impl<D: Digest> ResolverDependency<D> {
+    /// Create a dependency for a peer-visible request.
     pub const fn request(request: Request<D>) -> Self {
         Self::Request(request)
     }
 
-    /// Create a locally annotated block request key.
-    pub const fn block_request(commitment: D, context: BlockFetchContext) -> Self {
-        Self::Block {
-            commitment,
-            context,
-        }
-    }
-
-    /// Return the peer-visible request for this resolver key.
-    pub const fn request_key(&self) -> Request<D> {
-        match self {
-            Self::Request(request) => *request,
-            Self::Block { commitment, .. } => Request::Block {
-                commitment: *commitment,
-            },
-        }
-    }
-
-    /// Return the block commitment, if this is a block request.
-    pub const fn block_commitment(&self) -> Option<D> {
-        self.request_key().block_commitment()
-    }
-}
-
-impl<D: Digest> ResolverRetainKey<D> {
-    /// Create a retain key for a peer-visible request.
-    pub const fn request(request: Request<D>) -> Self {
-        Self::Request(request)
-    }
-
-    /// Create a retain key for a locally annotated block request.
+    /// Create a dependency for a locally annotated block request.
     pub const fn block_request(commitment: D, context: BlockFetchContext) -> Self {
         Self::Block {
             commitment,
@@ -237,16 +192,6 @@ impl<D: Digest> ResolverRetainKey<D> {
     /// A predicate that drops all block requests for `commitment`.
     pub fn without_block_commitment(commitment: D) -> impl Fn(&Self) -> bool + Send + 'static {
         move |request| request.block_commitment() != Some(commitment)
-    }
-
-    /// A predicate that retains this exact annotated block fetch, and drops
-    /// any other block fetch for the same commitment.
-    pub(crate) fn retain_current_block_fetch(
-        commitment: D,
-        context: BlockFetchContext,
-    ) -> impl Fn(&Self) -> bool + Send + 'static {
-        let current = Self::block_request(commitment, context);
-        move |request| *request == current || request.block_commitment() != Some(commitment)
     }
 
     /// The predicate to use when pruning subjects related to this subject.
@@ -300,18 +245,9 @@ impl<D: Digest> ResolverRetainKey<D> {
     }
 }
 
-impl<D: Digest> From<ResolverKey<D>> for ResolverRetainKey<D> {
-    fn from(key: ResolverKey<D>) -> Self {
-        match key {
-            ResolverKey::Request(request) => Self::Request(request),
-            ResolverKey::Block {
-                commitment,
-                context,
-            } => Self::Block {
-                commitment,
-                context,
-            },
-        }
+impl<D: Digest> From<Request<D>> for ResolverDependency<D> {
+    fn from(request: Request<D>) -> Self {
+        Self::Request(request)
     }
 }
 
@@ -419,123 +355,6 @@ impl<D: Digest> Debug for Request<D> {
     }
 }
 
-impl<D: Digest> Write for ResolverKey<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.request_key().write(buf);
-    }
-}
-
-impl<D: Digest> Read for ResolverKey<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, CodecError> {
-        Request::read_cfg(buf, cfg).map(Self::Request)
-    }
-}
-
-impl<D: Digest> EncodeSize for ResolverKey<D> {
-    fn encode_size(&self) -> usize {
-        self.request_key().encode_size()
-    }
-}
-
-impl<D: Digest> Span for ResolverKey<D> {}
-
-impl<D: Digest> PartialEq for ResolverKey<D> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Request(a), Self::Request(b)) => a == b,
-            (
-                Self::Block {
-                    commitment: a,
-                    context: a_context,
-                },
-                Self::Block {
-                    commitment: b,
-                    context: b_context,
-                },
-            ) => a == b && a_context == b_context,
-            _ => false,
-        }
-    }
-}
-
-impl<D: Digest> Eq for ResolverKey<D> {}
-
-impl<D: Digest> Ord for ResolverKey<D> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Request(a), Self::Request(b)) => a.cmp(b),
-            (
-                Self::Block {
-                    commitment: a,
-                    context: a_context,
-                },
-                Self::Block {
-                    commitment: b,
-                    context: b_context,
-                },
-            ) => a.cmp(b).then_with(|| a_context.cmp(b_context)),
-            (a, b) => a
-                .request_key()
-                .cmp(&b.request_key())
-                .then_with(|| matches!(a, Self::Request(_)).cmp(&matches!(b, Self::Request(_)))),
-        }
-    }
-}
-
-impl<D: Digest> PartialOrd for ResolverKey<D> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<D: Digest> Hash for ResolverKey<D> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Self::Request(request) => {
-                0u8.hash(state);
-                request.hash(state);
-            }
-            Self::Block {
-                commitment,
-                context,
-            } => {
-                1u8.hash(state);
-                Request::<D>::Block {
-                    commitment: *commitment,
-                }
-                .hash(state);
-                context.hash(state);
-            }
-        }
-    }
-}
-
-impl<D: Digest> Display for ResolverKey<D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Request(request) => write!(f, "{request}"),
-            Self::Block {
-                commitment,
-                context,
-            } => write!(f, "Block({commitment:?}, {context:?})"),
-        }
-    }
-}
-
-impl<D: Digest> Debug for ResolverKey<D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Request(request) => Debug::fmt(request, f),
-            Self::Block {
-                commitment,
-                context,
-            } => write!(f, "Block({commitment:?}, {context:?})"),
-        }
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<D: Digest> arbitrary::Arbitrary<'_> for Request<D>
 where
@@ -601,12 +420,7 @@ mod tests {
     #[test]
     fn test_subject_block_encoding() {
         let digest = Sha256::hash(b"test");
-        let request = ResolverKey::block_request(
-            digest,
-            BlockFetchContext::Repair {
-                height: Height::new(7),
-            },
-        );
+        let request = Request::Block { commitment: digest };
 
         // Test encoding
         let encoded = request.encode();
@@ -615,9 +429,8 @@ mod tests {
 
         // Test decoding
         let mut buf = encoded.as_ref();
-        let decoded = ResolverKey::<D>::read(&mut buf).unwrap();
-        assert_ne!(request, decoded);
-        assert_eq!(decoded, ResolverKey::request(block(digest)));
+        let decoded = Request::<D>::read(&mut buf).unwrap();
+        assert_eq!(decoded, block(digest));
         assert_eq!(request.encode(), decoded.encode());
     }
 
@@ -695,26 +508,26 @@ mod tests {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
 
-        let predicate = ResolverRetainKey::request(r1).predicate();
-        assert!(predicate(&ResolverRetainKey::request(r2))); // r2.height > r1.height
-        assert!(predicate(&ResolverRetainKey::request(r3))); // Different variant (notarized)
+        let predicate = ResolverDependency::request(r1).predicate();
+        assert!(predicate(&ResolverDependency::request(r2))); // r2.height > r1.height
+        assert!(predicate(&ResolverDependency::request(r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(&ResolverRetainKey::request(r1_same))); // Same height, should not pass
+        assert!(!predicate(&ResolverDependency::request(r1_same))); // Same height, should not pass
     }
 
     #[test]
-    fn test_block_annotation_affects_identity_but_not_encoding() {
+    fn test_block_dependency_context_affects_identity() {
         let digest = Sha256::hash(b"annotated");
-        let ancestry = ResolverKey::block_request(
+        let ancestry = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Ancestry {
                 height: Height::new(10),
             },
         );
-        let repair = ResolverKey::block_request(
+        let repair = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(10),
@@ -722,31 +535,28 @@ mod tests {
         );
 
         assert_ne!(ancestry, repair);
-        assert_eq!(ancestry.encode(), repair.encode());
-
-        let set = [ancestry, repair].into_iter().collect::<BTreeSet<_>>();
-        assert_eq!(set.len(), 2);
+        assert_eq!(ancestry.block_commitment(), repair.block_commitment());
     }
 
     #[test]
     fn test_subject_predicate_prunes_annotated_blocks() {
         let digest = Sha256::hash(b"prune");
-        let height_floor = ResolverRetainKey::request(Request::<D>::Finalized {
+        let height_floor = ResolverDependency::request(Request::<D>::Finalized {
             height: Height::new(10),
         });
-        let keep_repair = ResolverRetainKey::block_request(
+        let keep_repair = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(11),
             },
         );
-        let drop_repair = ResolverRetainKey::block_request(
+        let drop_repair = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Repair {
                 height: Height::new(10),
             },
         );
-        let drop_ancestry = ResolverRetainKey::block_request(
+        let drop_ancestry = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Ancestry {
                 height: Height::new(9),
@@ -758,16 +568,16 @@ mod tests {
         assert!(!predicate(&drop_repair));
         assert!(!predicate(&drop_ancestry));
 
-        let round_floor = ResolverRetainKey::request(Request::<D>::Notarized {
+        let round_floor = ResolverDependency::request(Request::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(10)),
         });
-        let keep_finalized = ResolverRetainKey::block_request(
+        let keep_finalized = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(11)),
             },
         );
-        let drop_finalized = ResolverRetainKey::block_request(
+        let drop_finalized = ResolverDependency::block_request(
             digest,
             BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(10)),
@@ -782,18 +592,13 @@ mod tests {
     #[test]
     fn test_encode_size() {
         let digest = Sha256::hash(&[0u8; 32]);
-        let r1 = ResolverKey::block_request(
-            digest,
-            BlockFetchContext::Ancestry {
-                height: Height::new(1),
-            },
-        );
-        let r2 = ResolverKey::request(Request::<D>::Finalized {
+        let r1 = Request::Block { commitment: digest };
+        let r2 = Request::<D>::Finalized {
             height: Height::new(u64::MAX),
-        });
-        let r3 = ResolverKey::request(Request::<D>::Notarized {
+        };
+        let r3 = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(0)),
-        });
+        };
 
         // Verify encode_size matches actual encoded length
         assert_eq!(r1.encode_size(), r1.encode().len());

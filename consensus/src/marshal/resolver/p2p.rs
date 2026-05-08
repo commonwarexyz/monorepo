@@ -10,7 +10,7 @@ use rand::Rng;
 use std::time::Duration;
 
 /// Mailbox type returned by the marshal resolver.
-pub type Mailbox<D, P> = p2p::Mailbox<handler::ResolverKey<D>, P, handler::ResolverRetainKey<D>>;
+pub type Mailbox<D, P> = p2p::Mailbox<handler::Request<D>, P, handler::ResolverDependency<D>>;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
 pub struct Config<P, C, B>

@@ -4,6 +4,8 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
+#[cfg(test)]
+use commonware_resolver::Dependencies;
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -63,7 +65,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         certificate: Certificate<S, D>,
         request: Option<View>,
-        resolver: &mut impl Resolver<Key = U64, RetainKey = U64>,
+        resolver: &mut impl Resolver<Key = U64, Dependency = U64>,
     ) {
         match certificate {
             Certificate::Nullification(nullification) => {
@@ -102,7 +104,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         success: bool,
-        resolver: &mut impl Resolver<Key = U64, RetainKey = U64>,
+        resolver: &mut impl Resolver<Key = U64, Dependency = U64>,
     ) {
         if success {
             // Certification passed - set floor to notarization if we have it.
@@ -127,13 +129,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
             // Request nullification for this view (if above floor)
             let floor = self.floor_view();
             if view > floor {
-                resolver.fetch(view.into()).await;
+                let request: U64 = view.into();
+                resolver.fetch(request).await;
             }
 
             // Re-request any lower views this notarization had satisfied
             if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
                 for &v in satisfied_views.iter().filter(|v| **v > floor) {
-                    resolver.fetch(v.into()).await;
+                    let request: U64 = v.into();
+                    resolver.fetch(request).await;
                 }
             }
         }
@@ -181,7 +185,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Inform the [Resolver] of any missing nullifications.
-    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64, RetainKey = U64>) {
+    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64, Dependency = U64>) {
         // We must either receive a nullification at the current view or a notarization/finalization at the current
         // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
         let start = self.fetch_floor.max(self.floor_view().next());
@@ -201,7 +205,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Prune stored certificates and requests that are not higher than the floor.
-    async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64, RetainKey = U64>) {
+    async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64, Dependency = U64>) {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
@@ -253,32 +257,42 @@ mod tests {
 
     impl Resolver for MockResolver {
         type Key = U64;
-        type RetainKey = U64;
+        type Dependency = U64;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, key: U64) {
+        async fn fetch<R>(&mut self, request: R)
+        where
+            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        {
+            let key = request.into().request;
             self.outstanding.lock().insert(key);
         }
 
-        async fn fetch_with_retain_key(&mut self, key: U64, _retain_key: U64) {
-            self.outstanding.lock().insert(key);
-        }
-
-        async fn fetch_all(&mut self, keys: Vec<U64>) {
-            for key in keys {
-                self.outstanding.lock().insert(key);
+        async fn fetch_all<R>(&mut self, requests: Vec<R>)
+        where
+            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        {
+            for request in requests {
+                self.outstanding.lock().insert(request.into().request);
             }
         }
 
-        async fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) {
+        async fn fetch_targeted(
+            &mut self,
+            request: impl Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+            _targets: NonEmptyVec<PublicKey>,
+        ) {
             // For testing, just treat targeted fetch the same as regular fetch
-            self.outstanding.lock().insert(key);
+            self.outstanding.lock().insert(request.into().request);
         }
 
-        async fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) {
+        async fn fetch_all_targeted<R>(&mut self, requests: Vec<(R, NonEmptyVec<PublicKey>)>)
+        where
+            R: Into<Dependencies<Self::Key, Self::Dependency>> + Send,
+        {
             // For testing, just treat targeted fetch the same as regular fetch
-            for (key, _targets) in requests {
-                self.outstanding.lock().insert(key);
+            for (request, _targets) in requests {
+                self.outstanding.lock().insert(request.into().request);
             }
         }
 
@@ -290,7 +304,7 @@ mod tests {
             self.outstanding.lock().clear();
         }
 
-        async fn retain(&mut self, predicate: impl Fn(&Self::RetainKey) -> bool + Send + 'static) {
+        async fn retain(&mut self, predicate: impl Fn(&Self::Dependency) -> bool + Send + 'static) {
             self.outstanding.lock().retain(|key| predicate(key));
         }
     }

@@ -37,15 +37,16 @@
 //! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
 //! or blocked peer), the targets for that key are cleared automatically.
 //!
-//! # Retention
+//! # Dependencies
 //!
-//! [`Resolver::fetch_with_retain_key`](crate::Resolver::fetch_with_retain_key) lets callers fetch
-//! one key while retaining the request under another key. This is useful when several local reasons
-//! can share the same peer-visible fetch. A fetch remains active while at least one attached retain
-//! key satisfies the latest [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch
-//! resolves, the request key and currently retained reasons are supplied to
-//! [`Consumer::deliver`](crate::Consumer::deliver). Ordinary fetches are retained by a
-//! marker rather than by cloning the request key into a second retain key.
+//! [`Resolver::fetch`](crate::Resolver::fetch) accepts either a bare request key or
+//! [`Dependencies`](crate::Dependencies) with local dependencies attached. This is useful when
+//! several local reasons can share the same peer-visible fetch. A fetch remains active while at
+//! least one attached dependency satisfies the latest [`Resolver::retain`](crate::Resolver::retain)
+//! predicate. When the fetch resolves, the request key and currently retained dependencies are
+//! supplied to [`Consumer::deliver`](crate::Consumer::deliver). Ordinary fetches are represented by
+//! a [`FetchDependency::Request`](crate::FetchDependency::Request) marker rather than by cloning the
+//! request key into a local dependency.
 //!
 //! # Peer Selection
 //!
@@ -95,7 +96,7 @@ mod tests {
         mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::{Delivery, Resolver};
+    use crate::{Dependencies, FetchDependency, Resolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -244,7 +245,7 @@ mod tests {
             Sender<PublicKey, deterministic::Context>,
             Receiver<PublicKey>,
         ),
-        consumer: impl crate::Consumer<Key = Key, RetainKey = Key, Value = Bytes>,
+        consumer: impl crate::Consumer<Key = Key, Dependency = Key, Value = Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
@@ -303,20 +304,15 @@ mod tests {
 
     impl crate::Consumer for BlockingConsumer {
         type Key = Key;
-        type RetainKey = Key;
+        type Dependency = Key;
         type Value = Bytes;
 
         async fn deliver(
             &mut self,
-            keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
+            dependencies: Dependencies<Self::Key, Self::Dependency>,
             value: Self::Value,
         ) -> bool {
-            let Some(key) = keys.iter().find_map(|key| match key {
-                Delivery::Request(key) => Some(key.clone()),
-                Delivery::Retain(_) => None,
-            }) else {
-                return false;
-            };
+            let key = dependencies.request;
             self.started.send_lossy(key.clone());
             let (gate, valid) = self
                 .gates
@@ -335,31 +331,31 @@ mod tests {
         }
     }
 
-    type RecordedDelivery = (Vec<Delivery<Key, Key>>, Bytes);
+    type RecordedDelivery = (Dependencies<Key, Key>, Bytes);
 
     #[derive(Clone)]
-    struct RetainRecordingConsumer {
+    struct DependencyRecordingConsumer {
         sender: mpsc::UnboundedSender<RecordedDelivery>,
     }
 
-    impl RetainRecordingConsumer {
+    impl DependencyRecordingConsumer {
         fn new() -> (Self, mpsc::UnboundedReceiver<RecordedDelivery>) {
             let (sender, receiver) = mpsc::unbounded_channel();
             (Self { sender }, receiver)
         }
     }
 
-    impl crate::Consumer for RetainRecordingConsumer {
+    impl crate::Consumer for DependencyRecordingConsumer {
         type Key = Key;
-        type RetainKey = Key;
+        type Dependency = Key;
         type Value = Bytes;
 
         async fn deliver(
             &mut self,
-            keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
+            dependencies: Dependencies<Self::Key, Self::Dependency>,
             value: Self::Value,
         ) -> bool {
-            self.sender.send_lossy((keys, value));
+            self.sender.send_lossy((dependencies, value));
             true
         }
     }
@@ -1887,7 +1883,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_retain_uses_retain_keys() {
+    fn test_retain_uses_dependencies() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1921,18 +1917,24 @@ mod tests {
                 prod2,
             );
 
-            let dropped_retain_key = Key(50);
-            let kept_retain_key = Key(51);
+            let dropped_dependency = Key(50);
+            let kept_dependency = Key(51);
             mailbox1
-                .fetch_with_retain_key(key.clone(), dropped_retain_key)
+                .fetch(Dependencies::with_dependency(
+                    key.clone(),
+                    dropped_dependency,
+                ))
                 .await;
             mailbox1
-                .fetch_with_retain_key(key.clone(), kept_retain_key.clone())
+                .fetch(Dependencies::with_dependency(
+                    key.clone(),
+                    kept_dependency.clone(),
+                ))
                 .await;
 
             context.sleep(Duration::from_millis(100)).await;
             mailbox1
-                .retain(move |retain_key| retain_key == &kept_retain_key)
+                .retain(move |dependency| dependency == &kept_dependency)
                 .await;
             context.sleep(Duration::from_millis(100)).await;
 
@@ -1945,7 +1947,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_deliver_receives_retain_keys() {
+    fn test_deliver_receives_dependencies() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1955,7 +1957,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1) = RetainRecordingConsumer::new();
+            let (cons1, mut cons_out1) = DependencyRecordingConsumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -1979,32 +1981,34 @@ mod tests {
                 prod2,
             );
 
-            let first_retain_key = Key(50);
-            let second_retain_key = Key(51);
+            let first_dependency = Key(50);
+            let second_dependency = Key(51);
             mailbox1
-                .fetch_with_retain_key(key.clone(), second_retain_key.clone())
+                .fetch(Dependencies::with_dependency(
+                    key.clone(),
+                    second_dependency.clone(),
+                ))
                 .await;
             mailbox1
-                .fetch_with_retain_key(key.clone(), first_retain_key.clone())
+                .fetch(Dependencies::with_dependency(
+                    key.clone(),
+                    first_dependency.clone(),
+                ))
                 .await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            let (keys, value) = cons_out1.recv().await.unwrap();
+            let (dependencies, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
-                keys,
-                vec![
-                    Delivery::Request(key),
-                    Delivery::Retain(first_retain_key),
-                    Delivery::Retain(second_retain_key),
-                ]
+                dependencies,
+                Dependencies::with_locals(key, vec![first_dependency, second_dependency])
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });
     }
 
     #[test_traced]
-    fn test_deliver_uses_request_retainer_marker() {
+    fn test_deliver_receives_request_and_local_dependencies() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2014,7 +2018,65 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1) = RetainRecordingConsumer::new();
+            let (cons1, mut cons_out1) = DependencyRecordingConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let dependency = Key(50);
+            mailbox1.fetch(key.clone()).await;
+            mailbox1
+                .fetch(Dependencies::with_dependency(
+                    key.clone(),
+                    dependency.clone(),
+                ))
+                .await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (dependencies, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(
+                dependencies,
+                Dependencies::with_dependencies(
+                    key,
+                    vec![FetchDependency::Request, FetchDependency::Local(dependency)]
+                )
+            );
+            assert_eq!(value, Bytes::from("data for key 5"));
+        });
+    }
+
+    #[test_traced]
+    fn test_deliver_uses_request_dependency_marker() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let (cons1, mut cons_out1) = DependencyRecordingConsumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -2041,8 +2103,8 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            let (keys, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(keys, vec![Delivery::Request(key)]);
+            let (dependencies, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(dependencies, Dependencies::new(key));
             assert_eq!(value, Bytes::from("data for key 5"));
         });
     }

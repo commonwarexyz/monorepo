@@ -1,4 +1,4 @@
-use crate::{Delivery, Span};
+use crate::{Dependencies, Span};
 use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 use std::collections::HashMap;
 
@@ -51,7 +51,7 @@ impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
 
 impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consumer<K, V> {
     type Key = K;
-    type RetainKey = K;
+    type Dependency = K;
     type Value = V;
 
     /// Deliver data to the consumer.
@@ -59,15 +59,10 @@ impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consume
     /// Returns `true` if the value is expected for the key or if there is no expected value.
     async fn deliver(
         &mut self,
-        keys: Vec<Delivery<Self::Key, Self::RetainKey>>,
+        dependencies: Dependencies<Self::Key, Self::Dependency>,
         value: Self::Value,
     ) -> bool {
-        let Some(key) = keys.iter().find_map(|key| match key {
-            Delivery::Request(key) => Some(key.clone()),
-            Delivery::Retain(_) => None,
-        }) else {
-            return false;
-        };
+        let key = dependencies.request;
         let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {
             self.sender.send_lossy((key, value));

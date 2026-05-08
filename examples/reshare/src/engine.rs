@@ -348,9 +348,9 @@ where
         marshal: (
             mpsc::Receiver<handler::Message<H::Digest>>,
             commonware_resolver::p2p::Mailbox<
-                handler::ResolverKey<H::Digest>,
+                handler::Request<H::Digest>,
                 C::PublicKey,
-                handler::ResolverRetainKey<H::Digest>,
+                handler::ResolverDependency<H::Digest>,
             >,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -395,9 +395,9 @@ where
         marshal: (
             mpsc::Receiver<handler::Message<H::Digest>>,
             commonware_resolver::p2p::Mailbox<
-                handler::ResolverKey<H::Digest>,
+                handler::Request<H::Digest>,
                 C::PublicKey,
-                handler::ResolverRetainKey<H::Digest>,
+                handler::ResolverDependency<H::Digest>,
             >,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,

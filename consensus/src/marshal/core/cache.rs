@@ -492,6 +492,52 @@ where
         None
     }
 
+    /// Looks for a block (verified or notarized) that matches `predicate`.
+    pub(crate) async fn find_block_matching(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+        mut predicate: impl FnMut(&V::StoredBlock) -> bool,
+    ) -> Option<V::StoredBlock> {
+        // Check in reverse order
+        for cache in self.caches.values().rev() {
+            if let Some(block) = cache
+                .verified_blocks_by_height
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get height-indexed verified block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+
+            // Check verified blocks
+            if let Some(block) = cache
+                .verified_blocks
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get verified block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+
+            // Check notarized blocks
+            if let Some(block) = cache
+                .notarized_blocks
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get notarized block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+        }
+        None
+    }
+
     /// Prune the view-indexed caches below the given round.
     pub(crate) async fn prune_by_view(&mut self, round: Round) {
         // Remove and close prunable archives from older epochs
