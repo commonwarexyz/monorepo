@@ -28,11 +28,6 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Result of trying to replace overflow work.
-pub struct ReplaceResult<T> {
-    result: Result<(), T>,
-}
-
 /// Policy-managed overflow behind the bounded ready queue.
 ///
 /// The mailbox capacity only bounds the ready queue. Overflow is controlled by
@@ -49,34 +44,29 @@ impl<T> Overflow<'_, T> {
     }
 
     /// Spill the message into overflow if it could not replace existing overflow work.
-    pub fn replace_or_spill(&mut self, result: ReplaceResult<T>) -> bool {
-        match result.result {
+    pub fn replace_or_spill(&mut self, result: Result<(), T>) -> bool {
+        match result {
             Ok(()) => true,
             Err(message) => self.spill(message),
         }
     }
 
     /// Drop the message if it could not replace existing overflow work.
-    pub fn replace_or_drop(&mut self, result: ReplaceResult<T>) -> bool {
-        match result.result {
+    pub fn replace_or_drop(&mut self, result: Result<(), T>) -> bool {
+        match result {
             Ok(()) => true,
             Err(_) => false,
         }
     }
 
     /// Replace the newest matching overflow message.
-    pub fn replace_last(
-        &mut self,
-        message: T,
-        is_match: impl FnMut(&T) -> bool,
-    ) -> ReplaceResult<T> {
-        let result = if let Some(pending) = self.find_last_mut(is_match) {
+    pub fn replace_last(&mut self, message: T, is_match: impl FnMut(&T) -> bool) -> Result<(), T> {
+        if let Some(pending) = self.find_last_mut(is_match) {
             *pending = message;
             Ok(())
         } else {
             Err(message)
-        };
-        ReplaceResult { result }
+        }
     }
 
     /// Coalesce `message` into the newest matching overflow message, or spill it.
