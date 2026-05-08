@@ -1,19 +1,31 @@
 //! Actor mailboxes with explicit full-inbox behavior.
 
 use super::{mpsc, Feedback};
-use crate::sync::Mutex;
-use crossbeam_queue::ArrayQueue;
-use futures::task::AtomicWaker;
 use std::{
     collections::VecDeque,
     future::poll_fn,
     fmt,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
     task::{Context, Poll},
 };
+
+#[cfg(not(feature = "loom"))]
+use futures::task::AtomicWaker;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex, MutexGuard,
+        };
+    } else {
+        use crate::sync::{Mutex, MutexGuard};
+        use crossbeam_queue::ArrayQueue;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+    }
+}
 
 /// Policy-managed overflow behind the bounded ready queue.
 pub struct Overflow<'a, T> {
@@ -83,6 +95,118 @@ pub trait Backpressure: Sized {
     fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback;
 }
 
+#[cfg(feature = "loom")]
+struct AtomicWaker {
+    waker: Mutex<Option<std::task::Waker>>,
+}
+
+#[cfg(feature = "loom")]
+impl AtomicWaker {
+    fn new() -> Self {
+        Self {
+            waker: Mutex::new(None),
+        }
+    }
+
+    fn register(&self, waker: &std::task::Waker) {
+        *lock(&self.waker) = Some(waker.clone());
+    }
+
+    fn wake(&self) {
+        let waker = lock(&self.waker).take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+#[cfg(feature = "loom")]
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap()
+}
+
+#[cfg(not(feature = "loom"))]
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock()
+}
+
+#[cfg(feature = "loom")]
+struct ReadyQueue<T> {
+    queue: Mutex<VecDeque<T>>,
+    capacity: usize,
+}
+
+#[cfg(feature = "loom")]
+impl<T> ReadyQueue<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            capacity,
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn len(&self) -> usize {
+        lock(&self.queue).len()
+    }
+
+    fn push(&self, message: T) -> Result<(), T> {
+        let mut queue = lock(&self.queue);
+        if queue.len() >= self.capacity {
+            return Err(message);
+        }
+        queue.push_back(message);
+        Ok(())
+    }
+
+    fn pop(&self) -> Option<T> {
+        lock(&self.queue).pop_front()
+    }
+}
+
+#[cfg(not(feature = "loom"))]
+struct ReadyQueue<T> {
+    queue: ArrayQueue<T>,
+}
+
+#[cfg(not(feature = "loom"))]
+impl<T> ReadyQueue<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queue: ArrayQueue::new(capacity),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.queue.capacity()
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    fn push(&self, message: T) -> Result<(), T> {
+        self.queue.push(message)
+    }
+
+    fn pop(&self) -> Option<T> {
+        self.queue.pop()
+    }
+}
+
+#[cfg(feature = "loom")]
+fn spin_loop() {
+    loom::thread::yield_now();
+}
+
+#[cfg(not(feature = "loom"))]
+fn spin_loop() {
+    std::hint::spin_loop();
+}
+
 struct OverflowState<T> {
     queue: Mutex<VecDeque<T>>,
     len: AtomicUsize,
@@ -108,7 +232,7 @@ impl<T> OverflowState<T> {
     where
         T: Backpressure,
     {
-        let mut queue = self.queue.lock();
+        let mut queue = lock(&self.queue);
         if is_closed() {
             return Feedback::Closed;
         }
@@ -121,8 +245,8 @@ impl<T> OverflowState<T> {
         feedback
     }
 
-    fn refill_ready(&self, ready: &ArrayQueue<T>) {
-        let mut queue = self.queue.lock();
+    fn refill_ready(&self, ready: &ReadyQueue<T>) {
+        let mut queue = lock(&self.queue);
         while let Some(message) = queue.pop_front() {
             match ready.push(message) {
                 Ok(()) => {}
@@ -136,14 +260,14 @@ impl<T> OverflowState<T> {
     }
 
     fn clear(&self) {
-        let mut queue = self.queue.lock();
+        let mut queue = lock(&self.queue);
         queue.clear();
         self.len.store(0, Ordering::Release);
     }
 }
 
 struct Shared<T> {
-    ready: ArrayQueue<T>,
+    ready: ReadyQueue<T>,
     overflow: OverflowState<T>,
     lifecycle: AtomicUsize,
     senders: AtomicUsize,
@@ -351,7 +475,7 @@ impl<T> Drop for ActorInbox<T> {
     fn drop(&mut self) {
         self.shared.close();
         while self.shared.inflight() != 0 {
-            std::hint::spin_loop();
+            spin_loop();
         }
         while self.shared.ready.pop().is_some() {}
         self.shared.overflow.clear();
@@ -363,7 +487,7 @@ pub fn channel<T: Backpressure>(capacity: usize) -> (ActorMailbox<T>, ActorInbox
     assert!(capacity > 0, "actor mailbox capacity must be greater than zero");
 
     let shared = Arc::new(Shared {
-        ready: ArrayQueue::new(capacity),
+        ready: ReadyQueue::new(capacity),
         overflow: OverflowState::new(),
         lifecycle: AtomicUsize::new(0),
         senders: AtomicUsize::new(1),
@@ -555,234 +679,120 @@ mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::{Feedback, LIFECYCLE_CLOSED, LIFECYCLE_INFLIGHT};
+    use super::*;
     use loom::{
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Mutex,
+            Arc,
         },
         thread,
     };
-    use std::collections::VecDeque;
 
-    // This module models the actor mailbox's synchronization protocol without
-    // depending on crossbeam's queue internals or the futures waker. The model
-    // keeps the ready capacity at one so loom explores the handoff between the
-    // bounded ready queue, overflow, and receiver shutdown.
+    // These tests run the real actor mailbox with loom-backed atomics, mutexes,
+    // and ready queue. The only modeled boundary is the production `ArrayQueue`,
+    // which is replaced under the loom feature with a small capacity-preserving
+    // queue because crossbeam's queue internals are not loom-instrumented.
 
-    const READY_CAPACITY: usize = 1;
-
-    struct ModelShared {
-        ready: Mutex<VecDeque<u8>>,
-        overflow: Mutex<VecDeque<u8>>,
-        overflow_len: AtomicUsize,
-        lifecycle: AtomicUsize,
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Message {
+        Drop(u8),
+        Spill(u8),
     }
 
-    impl ModelShared {
-        fn new() -> Self {
-            Self {
-                ready: Mutex::new(VecDeque::new()),
-                overflow: Mutex::new(VecDeque::new()),
-                overflow_len: AtomicUsize::new(0),
-                lifecycle: AtomicUsize::new(0),
-            }
-        }
-
-        fn is_closed(&self) -> bool {
-            self.lifecycle.load(Ordering::Acquire) & LIFECYCLE_CLOSED != 0
-        }
-
-        fn close(&self) {
-            self.lifecycle
-                .fetch_or(LIFECYCLE_CLOSED, Ordering::AcqRel);
-        }
-
-        fn inflight(&self) -> usize {
-            self.lifecycle.load(Ordering::Acquire) & !LIFECYCLE_CLOSED
-        }
-
-        fn enqueue(shared: &Arc<Self>, message: u8) -> Feedback {
-            let Some(_permit) = SendPermit::acquire(shared) else {
-                return Feedback::Closed;
-            };
-
-            if shared.overflow_len.load(Ordering::Acquire) == 0 {
-                let mut ready = shared.ready.lock().unwrap();
-                if ready.len() < READY_CAPACITY {
-                    ready.push_back(message);
-                    return Feedback::Ok;
-                }
-            }
-
-            shared.spill(message)
-        }
-
-        fn spill(&self, message: u8) -> Feedback {
-            let mut overflow = self.overflow.lock().unwrap();
-            if self.is_closed() {
-                return Feedback::Closed;
-            }
-
-            overflow.push_back(message);
-            self.overflow_len
-                .store(overflow.len(), Ordering::Release);
-            Feedback::Backoff
-        }
-
-        fn try_recv(&self) -> Option<u8> {
-            if let Some(message) = self.ready.lock().unwrap().pop_front() {
-                return Some(message);
-            }
-
-            self.refill_ready();
-            self.ready.lock().unwrap().pop_front()
-        }
-
-        fn refill_ready(&self) {
-            let mut ready = self.ready.lock().unwrap();
-            let mut overflow = self.overflow.lock().unwrap();
-            while ready.len() < READY_CAPACITY {
-                let Some(message) = overflow.pop_front() else {
-                    break;
-                };
-                ready.push_back(message);
-            }
-            self.overflow_len
-                .store(overflow.len(), Ordering::Release);
-        }
-
-        fn close_receiver(&self) {
-            self.close();
-            while self.inflight() != 0 {
-                thread::yield_now();
-            }
-            self.ready.lock().unwrap().clear();
-            self.overflow.lock().unwrap().clear();
-            self.overflow_len.store(0, Ordering::Release);
-        }
-
-        fn assert_empty_after_close(&self) {
-            assert!(self.is_closed());
-            assert_eq!(self.inflight(), 0);
-            assert!(self.ready.lock().unwrap().is_empty());
-            assert!(self.overflow.lock().unwrap().is_empty());
-            assert_eq!(self.overflow_len.load(Ordering::Acquire), 0);
-        }
-
-        fn assert_overflow_len_matches_queue(&self) {
-            let overflow = self.overflow.lock().unwrap();
-            assert_eq!(self.overflow_len.load(Ordering::Acquire), overflow.len());
-        }
-    }
-
-    struct SendPermit {
-        shared: Arc<ModelShared>,
-    }
-
-    impl SendPermit {
-        fn acquire(shared: &Arc<ModelShared>) -> Option<Self> {
-            let mut lifecycle = shared.lifecycle.load(Ordering::Acquire);
-            loop {
-                if lifecycle & LIFECYCLE_CLOSED != 0 {
-                    return None;
-                }
-                match shared.lifecycle.compare_exchange_weak(
-                    lifecycle,
-                    lifecycle + LIFECYCLE_INFLIGHT,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        return Some(Self {
-                            shared: shared.clone(),
-                        });
-                    }
-                    Err(next) => lifecycle = next,
-                }
+    impl Backpressure for Message {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> Feedback {
+            match message {
+                Self::Drop(_) => Feedback::Dropped,
+                Self::Spill(_) => overflow.spill(message),
             }
         }
     }
 
-    impl Drop for SendPermit {
-        fn drop(&mut self) {
-            self.shared
-                .lifecycle
-                .fetch_sub(LIFECYCLE_INFLIGHT, Ordering::AcqRel);
-        }
+    fn assert_closed_and_empty(sender: &ActorMailbox<Message>) {
+        assert!(sender.shared.is_closed());
+        assert_eq!(sender.shared.inflight(), 0);
+        assert_eq!(sender.shared.ready.len(), 0);
+        assert_eq!(sender.shared.overflow.len(), 0);
+    }
+
+    fn record(seen: &AtomicUsize, message: Message) {
+        let value = match message {
+            Message::Drop(value) | Message::Spill(value) => value,
+        };
+        seen.fetch_or(1usize << usize::from(value), Ordering::AcqRel);
     }
 
     #[test]
     fn close_waits_for_inflight_ready_enqueue() {
         loom::model(|| {
-            let shared = Arc::new(ModelShared::new());
+            let (sender, receiver) = channel::<Message>(1);
 
-            let sender = shared.clone();
+            let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
-                let _ = ModelShared::enqueue(&sender, 1);
+                let _ = enqueue_sender.enqueue(Message::Spill(1));
             });
 
-            let receiver = shared.clone();
             let close = thread::spawn(move || {
-                receiver.close_receiver();
+                drop(receiver);
             });
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            shared.assert_empty_after_close();
+            assert_closed_and_empty(&sender);
+            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
         });
     }
 
     #[test]
     fn close_waits_for_inflight_overflow_enqueue() {
         loom::model(|| {
-            let shared = Arc::new(ModelShared::new());
-            shared.ready.lock().unwrap().push_back(0);
+            let (sender, receiver) = channel::<Message>(1);
+            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
 
-            let sender = shared.clone();
+            let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
-                let _ = ModelShared::enqueue(&sender, 1);
+                let _ = enqueue_sender.enqueue(Message::Spill(1));
             });
 
-            let receiver = shared.clone();
             let close = thread::spawn(move || {
-                receiver.close_receiver();
+                drop(receiver);
             });
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            shared.assert_empty_after_close();
+            assert_closed_and_empty(&sender);
+            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
         });
     }
 
     #[test]
     fn concurrent_spill_and_refill_preserves_messages() {
         loom::model(|| {
-            let shared = Arc::new(ModelShared::new());
-            shared.ready.lock().unwrap().push_back(0);
+            let (sender, mut receiver) = channel::<Message>(1);
+            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
             let seen = Arc::new(AtomicUsize::new(0));
-            let sender = shared.clone();
             let enqueue = thread::spawn(move || {
-                let feedback = ModelShared::enqueue(&sender, 1);
+                let feedback = sender.enqueue(Message::Spill(1));
                 assert!(matches!(feedback, Feedback::Backoff | Feedback::Ok));
             });
 
-            let receiver = shared.clone();
             let seen_by_receiver = seen.clone();
             let recv = thread::spawn(move || {
-                if let Some(message) = receiver.try_recv() {
-                    seen_by_receiver.fetch_or(1 << message, Ordering::AcqRel);
+                if let Ok(message) = receiver.try_recv() {
+                    record(&seen_by_receiver, message);
                 }
+                receiver
             });
 
             enqueue.join().unwrap();
-            recv.join().unwrap();
+            let mut receiver = recv.join().unwrap();
 
-            while let Some(message) = shared.try_recv() {
-                seen.fetch_or(1 << message, Ordering::AcqRel);
+            while let Ok(message) = receiver.try_recv() {
+                record(&seen, message);
             }
-            shared.assert_overflow_len_matches_queue();
+            assert_eq!(receiver.shared.ready.len(), 0);
+            assert_eq!(receiver.shared.overflow.len(), 0);
             assert_eq!(seen.load(Ordering::Acquire), 0b11);
         });
     }
