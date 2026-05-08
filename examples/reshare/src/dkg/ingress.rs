@@ -12,7 +12,7 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{
         actor::{ActorMailbox, Backpressure, MessagePolicy},
-        oneshot, Submission,
+        oneshot, Feedback,
     },
     Acknowledgement,
 };
@@ -114,11 +114,11 @@ where
 {
     type Activity = Update<Block<H, C, V>, A>;
 
-    fn report(&mut self, update: Self::Activity) -> Submission {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         // Report the finalized block to the DKG actor on a best-effort basis.
         let Update::Block(block, ack_tx) = update else {
             // We ignore any other updates sent by marshal.
-            return Submission::Dropped;
+            return Feedback::Dropped;
         };
         self.sender.enqueue(Message::Finalized {
             block,

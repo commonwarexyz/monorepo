@@ -26,7 +26,7 @@ use commonware_runtime::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
     channel::{
-        actor::{ActorInbox}, Submission,
+        actor::{ActorInbox}, Feedback,
         mpsc, oneshot, ring,
     },
     ordered::Set,
@@ -856,11 +856,11 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
             .mailbox
             .enqueue(ingress::Message::SubscribeConnected { response })
         {
-            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_else(|_| {
+            Feedback::Ok | Feedback::Backoff => receiver.await.unwrap_or_else(|_| {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }),
-            Submission::Dropped | Submission::Closed => {
+            Feedback::Dropped | Feedback::Closed => {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
                 receiver
             }
@@ -924,11 +924,11 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
         recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Submission {
+    ) -> Feedback {
         let message = message.into();
 
         if message.len() > self.max_size as usize {
-            return Submission::Dropped;
+            return Feedback::Dropped;
         }
 
         let message = message.coalesce();
@@ -937,9 +937,9 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
             .send((self.channel, self.me.clone(), recipients, message, None))
             .is_err()
         {
-            return Submission::Closed;
+            return Feedback::Closed;
         }
-        Submission::Accepted
+        Feedback::Ok
     }
 }
 
@@ -1055,7 +1055,7 @@ impl<P: PublicKey, E: Clock + Send + 'static> crate::MailboxSender for Sender<P,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Submission {
+    ) -> Feedback {
         <UnlimitedSender<P> as crate::MailboxSender>::send(
             &self.mailbox_sender,
             recipients,
@@ -1140,10 +1140,10 @@ where
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Submission {
+    ) -> Feedback {
         let message = message.into().coalesce();
         let Some(recipients) = (self.forwarder)(self.replica, &recipients, &message) else {
-            return Submission::Dropped;
+            return Feedback::Dropped;
         };
         <Sender<P, E> as crate::MailboxSender>::send(&self.inner, recipients, message, priority)
     }

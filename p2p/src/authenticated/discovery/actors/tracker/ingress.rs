@@ -13,7 +13,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure, MessagePolicy}, Submission,
+        actor::{self, Backpressure, MessagePolicy}, Feedback,
         ring, oneshot,
     },
     NZUsize,
@@ -252,8 +252,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             dialer,
             responder,
         }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.ok(),
-            Submission::Dropped | Submission::Closed => None,
+            Feedback::Ok | Feedback::Backoff => receiver.await.ok(),
+            Feedback::Dropped | Feedback::Closed => None,
         }
     }
 
@@ -263,7 +263,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         public_key: C,
         dialer: bool,
         spawner: Mailbox<spawner::Connect<C>>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::ConnectForSpawner {
             public_key,
             dialer,
@@ -272,7 +272,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     }
 
     /// Send a `Construct` message to the tracker.
-    pub fn construct(&self, public_key: C, peer: Mailbox<peer::Message<C>>) -> Submission {
+    pub fn construct(&self, public_key: C, peer: Mailbox<peer::Message<C>>) -> Feedback {
         self.enqueue(Message::Construct { public_key, peer })
     }
 
@@ -281,17 +281,17 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         bit_vec: types::BitVec,
         peer: Mailbox<peer::Message<C>>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::BitVec { bit_vec, peer })
     }
 
     /// Send a `Peers` message to the tracker.
-    pub fn peers(&self, peers: Vec<types::Info<C>>) -> Submission {
+    pub fn peers(&self, peers: Vec<types::Info<C>>) -> Feedback {
         self.enqueue(Message::Peers { peers })
     }
 
     /// Request dialable peers from the tracker and send the response to the dialer actor.
-    pub fn request_dialable(&self, dialer: Mailbox<dialer::Message<C>>) -> Submission {
+    pub fn request_dialable(&self, dialer: Mailbox<dialer::Message<C>>) -> Feedback {
         self.enqueue(Message::DialableForDialer { dialer })
     }
 
@@ -300,7 +300,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         dialer: Mailbox<dialer::Message<C>>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::DialForDialer { public_key, dialer })
     }
 
@@ -309,7 +309,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         listener: Mailbox<listener::Message<C>>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::AcceptableForListener {
             public_key,
             listener,
@@ -321,7 +321,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         listener: Mailbox<listener::Message<C>>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::ListenForListener {
             public_key,
             listener,
@@ -334,8 +334,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     pub async fn dialable(&self) -> Dialable<C> {
         let (responder, receiver) = oneshot::channel();
         match self.enqueue(Message::Dialable { responder }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_default(),
-            Submission::Dropped | Submission::Closed => Dialable::default(),
+            Feedback::Ok | Feedback::Backoff => receiver.await.unwrap_or_default(),
+            Feedback::Dropped | Feedback::Closed => Dialable::default(),
         }
     }
 
@@ -348,8 +348,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             reservation,
         }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
-            Submission::Dropped | Submission::Closed => None,
+            Feedback::Ok | Feedback::Backoff => receiver.await.ok().flatten(),
+            Feedback::Dropped | Feedback::Closed => None,
         }
     }
 
@@ -362,8 +362,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             responder,
         }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or(false),
-            Submission::Dropped | Submission::Closed => false,
+            Feedback::Ok | Feedback::Backoff => receiver.await.unwrap_or(false),
+            Feedback::Dropped | Feedback::Closed => false,
         }
     }
 
@@ -376,8 +376,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             reservation,
         }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
-            Submission::Dropped | Submission::Closed => None,
+            Feedback::Ok | Feedback::Backoff => receiver.await.ok().flatten(),
+            Feedback::Dropped | Feedback::Closed => None,
         }
     }
 }
@@ -424,19 +424,19 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
             index: id,
             responder,
         }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
-            Submission::Dropped | Submission::Closed => None,
+            Feedback::Ok | Feedback::Backoff => receiver.await.ok().flatten(),
+            Feedback::Dropped | Feedback::Closed => None,
         }
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         let (responder, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { responder }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_else(|_| {
+            Feedback::Ok | Feedback::Backoff => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
-            Submission::Dropped | Submission::Closed => {
+            Feedback::Dropped | Feedback::Closed => {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }
@@ -445,7 +445,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
-    fn track<R>(&mut self, index: u64, peers: R) -> Submission
+    fn track<R>(&mut self, index: u64, peers: R) -> Feedback
     where
         R: Into<TrackedPeers<Self::PublicKey>>,
     {
@@ -459,7 +459,7 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
 impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
-    fn block(&mut self, public_key: Self::PublicKey) -> Submission {
+    fn block(&mut self, public_key: Self::PublicKey) -> Feedback {
         self.sender.enqueue(Message::Block { public_key })
     }
 }

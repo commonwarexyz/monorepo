@@ -18,7 +18,7 @@ use commonware_p2p::{Blocker, CheckedSender, LimitedSender, MailboxSender, Recei
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };
-use commonware_utils::channel::{mpsc, oneshot, Submission};
+use commonware_utils::channel::{mpsc, oneshot, Feedback};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
@@ -200,8 +200,8 @@ struct FuzzBlocker;
 impl Blocker for FuzzBlocker {
     type PublicKey = PublicKey;
 
-    fn block(&mut self, _peer: Self::PublicKey) -> Submission {
-        Submission::Accepted
+    fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+        Feedback::Ok
     }
 }
 
@@ -232,8 +232,8 @@ impl MailboxSender for MockSender {
         _recipients: Recipients<Self::PublicKey>,
         _message: impl Into<IoBufs> + Send,
         _priority: bool,
-    ) -> Submission {
-        Submission::Accepted
+    ) -> Feedback {
+        Feedback::Ok
     }
 }
 

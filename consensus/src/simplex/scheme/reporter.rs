@@ -24,7 +24,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate, Digest};
 use commonware_parallel::Strategy;
-use commonware_utils::{channel::Submission, sync::Mutex};
+use commonware_utils::{channel::Feedback, sync::Mutex};
 use rand_core::CryptoRngCore;
 use std::sync::Arc;
 
@@ -101,14 +101,14 @@ impl<
 {
     type Activity = Activity<S, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Submission {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         // Verify peer activities if verification is enabled
         if self.verify
             && !activity.verified()
             && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
         {
             // Drop unverified peer activity
-            return Submission::Dropped;
+            return Feedback::Dropped;
         }
 
         // Filter based on scheme attributability
@@ -121,7 +121,7 @@ impl<
                 | Activity::ConflictingFinalize(_)
                 | Activity::NullifyFinalize(_) => {
                     // Drop per-validator peer activity for non-attributable scheme
-                    return Submission::Dropped;
+                    return Feedback::Dropped;
                 }
                 Activity::Notarization(_)
                 | Activity::Certification(_)
@@ -183,9 +183,9 @@ mod tests {
     impl<S: certificate::Scheme, D: Digest> Reporter for MockReporter<S, D> {
         type Activity = Activity<S, D>;
 
-        fn report(&mut self, activity: Self::Activity) -> Submission {
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
             self.activities.lock().push(activity);
-            Submission::Accepted
+            Feedback::Ok
         }
     }
 

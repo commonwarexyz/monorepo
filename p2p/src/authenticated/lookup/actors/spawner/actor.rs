@@ -14,7 +14,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::{actor::{ActorInbox}, Submission};
+use commonware_utils::channel::{actor::{ActorInbox}, Feedback};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
 use tracing::debug;
@@ -133,7 +133,7 @@ impl<
                                 // Register peer with the router (may fail during shutdown).
                                 if !matches!(
                                     router.ready(peer.clone(), messenger),
-                                    Submission::Accepted | Submission::Backlogged
+                                    Feedback::Ok | Feedback::Backoff
                                 ) {
                                     debug!(?peer, "router shut down during peer setup");
                                     return;

@@ -1,6 +1,6 @@
 use commonware_utils::channel::{
     actor::{self, Backpressure, MessagePolicy},
-    mpsc, Submission,
+    mpsc, Feedback,
 };
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
@@ -97,7 +97,7 @@ fn bench_recv_ready(c: &mut Criterion) {
                 || {
                     let (sender, receiver) = actor::channel::<Message>(CAPACITY);
                     for i in 0..MESSAGES as u64 {
-                        assert_eq!(sender.enqueue(Message::Reject(i)), Submission::Accepted);
+                        assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
                     }
                     receiver
                 },
@@ -194,7 +194,7 @@ fn bench_recv_waiting(c: &mut Criterion) {
                             })
                             .await;
 
-                            assert_eq!(sender.enqueue(Message::Reject(i)), Submission::Accepted);
+                            assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
                             black_box(next.await.unwrap());
                         }
                     });
@@ -241,7 +241,7 @@ fn bench_full_queue(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = actor::channel::<Message>(1);
-                assert_eq!(sender.enqueue(Message::Reject(0)), Submission::Accepted);
+                assert_eq!(sender.enqueue(Message::Reject(0)), Feedback::Ok);
                 (sender, receiver)
             },
             |(sender, _receiver)| {
@@ -273,7 +273,7 @@ fn bench_full_queue(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = actor::channel::<Message>(1);
-                assert_eq!(sender.enqueue(Message::Reject(0)), Submission::Accepted);
+                assert_eq!(sender.enqueue(Message::Reject(0)), Feedback::Ok);
                 (sender, receiver)
             },
             |(sender, _receiver)| {
@@ -289,8 +289,8 @@ fn bench_full_queue(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = actor::channel::<Message>(1);
-                assert_eq!(sender.enqueue(Message::Reject(0)), Submission::Accepted);
-                assert_eq!(sender.enqueue(Message::Replace(0)), Submission::Backlogged);
+                assert_eq!(sender.enqueue(Message::Reject(0)), Feedback::Ok);
+                assert_eq!(sender.enqueue(Message::Replace(0)), Feedback::Backoff);
                 (sender, receiver)
             },
             |(sender, _receiver)| {
@@ -311,18 +311,12 @@ fn fill_replace_queue(
 ) -> (actor::ActorMailbox<Message>, actor::ActorInbox<Message>) {
     let (sender, receiver) = actor::channel::<Message>(capacity);
     for i in 0..capacity {
-        assert_eq!(
-            sender.enqueue(Message::Reject(i as u64)),
-            Submission::Accepted
-        );
+        assert_eq!(sender.enqueue(Message::Reject(i as u64)), Feedback::Ok);
     }
-    assert_eq!(sender.enqueue(Message::Replace(0)), Submission::Backlogged);
+    assert_eq!(sender.enqueue(Message::Replace(0)), Feedback::Backoff);
     if !newest {
         for i in 1..capacity {
-            assert_eq!(
-                sender.enqueue(Message::Retain(i as u64)),
-                Submission::Backlogged
-            );
+            assert_eq!(sender.enqueue(Message::Retain(i as u64)), Feedback::Backoff);
         }
     }
     (sender, receiver)
@@ -341,7 +335,7 @@ fn bench_replace_hit(c: &mut Criterion) {
                     |(sender, _receiver)| {
                         for i in 0..MESSAGES as u64 {
                             let result = sender.enqueue(black_box(Message::Replace(i)));
-                            debug_assert_eq!(result, Submission::Backlogged);
+                            debug_assert_eq!(result, Feedback::Backoff);
                             black_box(result);
                         }
                     },
@@ -358,7 +352,7 @@ fn bench_replace_hit(c: &mut Criterion) {
                     |(sender, _receiver)| {
                         for i in 0..MESSAGES as u64 {
                             let result = sender.enqueue(black_box(Message::Replace(i)));
-                            debug_assert_eq!(result, Submission::Backlogged);
+                            debug_assert_eq!(result, Feedback::Backoff);
                             black_box(result);
                         }
                     },
@@ -396,7 +390,7 @@ fn bench_spsc_contended(c: &mut Criterion) {
                     });
 
                     for i in 0..CONTENDED_MESSAGES as u64 {
-                        assert_eq!(sender.enqueue(Message::Reject(i)), Submission::Accepted);
+                        assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
                     }
                     handle.join().unwrap();
                 });
@@ -444,7 +438,7 @@ fn run_actor_spsc_overlap(messages: usize, capacity: usize) {
         let producer = scope.spawn(|| {
             start.wait();
             for i in 0..messages as u64 {
-                assert_eq!(sender.enqueue(Message::Reject(i)), Submission::Accepted);
+                assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
             }
         });
 
@@ -546,7 +540,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
                             for offset in 0..PRODUCER_MESSAGES {
                                 assert_eq!(
                                     sender.enqueue(Message::Reject((base + offset) as u64)),
-                                    Submission::Accepted
+                                    Feedback::Ok
                                 );
                             }
                         });
@@ -612,8 +606,8 @@ fn run_actor_try_send_contended(producers: usize, messages_per_producer: usize, 
                     let message = Message::Reject((base + offset) as u64);
                     loop {
                         match sender.enqueue(message) {
-                            Submission::Accepted => break,
-                            Submission::Dropped => std::hint::spin_loop(),
+                            Feedback::Ok => break,
+                            Feedback::Dropped => std::hint::spin_loop(),
                             result => panic!("unexpected actor enqueue result: {result:?}"),
                         }
                     }
@@ -805,7 +799,7 @@ fn bench_tokio_style(c: &mut Criterion) {
         b.iter(|| {
             let (sender, mut receiver) = actor::channel::<Message>(1_000_000);
             for i in 0..TOKIO_STYLE_MESSAGES as u64 {
-                assert_eq!(sender.enqueue(Message::Reject(i)), Submission::Accepted);
+                assert_eq!(sender.enqueue(Message::Reject(i)), Feedback::Ok);
             }
             futures::executor::block_on(async {
                 for _ in 0..TOKIO_STYLE_MESSAGES {

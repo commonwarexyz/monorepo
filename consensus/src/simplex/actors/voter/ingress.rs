@@ -7,7 +7,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Submission};
+use commonware_utils::channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,22 +140,22 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a leader's proposal.
-    pub fn proposal(&mut self, proposal: Proposal<D>) -> Submission {
+    pub fn proposal(&mut self, proposal: Proposal<D>) -> Feedback {
         self.sender.enqueue(Message::Proposal(proposal))
     }
 
     /// Signal that the current view should timeout (if not already).
-    pub fn timeout(&mut self, view: View, reason: TimeoutReason) -> Submission {
+    pub fn timeout(&mut self, view: View, reason: TimeoutReason) -> Feedback {
         self.sender.enqueue(Message::Timeout(view, reason))
     }
 
     /// Send a recovered certificate.
-    pub fn recovered(&mut self, certificate: Certificate<S, D>) -> Submission {
+    pub fn recovered(&mut self, certificate: Certificate<S, D>) -> Feedback {
         self.sender.enqueue(Message::Verified(certificate, false))
     }
 
     /// Send a resolved certificate.
-    pub fn resolved(&mut self, certificate: Certificate<S, D>) -> Submission {
+    pub fn resolved(&mut self, certificate: Certificate<S, D>) -> Feedback {
         self.sender.enqueue(Message::Verified(certificate, true))
     }
 

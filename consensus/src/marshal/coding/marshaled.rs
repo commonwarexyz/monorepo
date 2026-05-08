@@ -1061,7 +1061,7 @@ where
     type Activity = A::Activity;
 
     /// Relays a report to the underlying [`Application`] and cleans up old verification data.
-    fn report(&mut self, update: Self::Activity) -> commonware_utils::channel::Submission {
+    fn report(&mut self, update: Self::Activity) -> commonware_utils::channel::Feedback {
         // Clean up verification tasks and contexts for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);

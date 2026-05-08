@@ -7,7 +7,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{
-        actor::{self, Backpressure, MessagePolicy}, Submission,
+        actor::{self, Backpressure, MessagePolicy}, Feedback,
         oneshot, ring,
     },
     ordered::Map,
@@ -243,10 +243,10 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         let (result, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Blocked { result }) {
-            Submission::Accepted | Submission::Backlogged => {
+            Feedback::Ok | Feedback::Backoff => {
                 receiver.await.map_err(|_| Error::NetworkClosed)?
             }
-            Submission::Dropped | Submission::Closed => Err(Error::NetworkClosed),
+            Feedback::Dropped | Feedback::Closed => Err(Error::NetworkClosed),
         }
     }
 
@@ -269,10 +269,10 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             ingress_cap,
             result,
         }) {
-            Submission::Accepted | Submission::Backlogged => {
+            Feedback::Ok | Feedback::Backoff => {
                 receiver.await.map_err(|_| Error::NetworkClosed)
             }
-            Submission::Dropped | Submission::Closed => Err(Error::NetworkClosed),
+            Feedback::Dropped | Feedback::Closed => Err(Error::NetworkClosed),
         }
     }
 
@@ -306,10 +306,10 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             success_rate: config.success_rate,
             result,
         }) {
-            Submission::Accepted | Submission::Backlogged => {
+            Feedback::Ok | Feedback::Backoff => {
                 result_receiver.await.map_err(|_| Error::NetworkClosed)?
             }
-            Submission::Dropped | Submission::Closed => Err(Error::NetworkClosed),
+            Feedback::Dropped | Feedback::Closed => Err(Error::NetworkClosed),
         }
     }
 
@@ -328,15 +328,15 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             receiver,
             result,
         }) {
-            Submission::Accepted | Submission::Backlogged => {
+            Feedback::Ok | Feedback::Backoff => {
                 result_receiver.await.map_err(|_| Error::NetworkClosed)?
             }
-            Submission::Dropped | Submission::Closed => Err(Error::NetworkClosed),
+            Feedback::Dropped | Feedback::Closed => Err(Error::NetworkClosed),
         }
     }
 
     /// Set the peers for a given id.
-    fn track(&self, id: u64, peers: TrackedPeers<P>) -> Submission {
+    fn track(&self, id: u64, peers: TrackedPeers<P>) -> Feedback {
         self.sender.enqueue(Message::Track { id, peers })
     }
 
@@ -344,8 +344,8 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::PeerSet { id, response }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.ok().flatten(),
-            Submission::Dropped | Submission::Closed => None,
+            Feedback::Ok | Feedback::Backoff => receiver.await.ok().flatten(),
+            Feedback::Dropped | Feedback::Closed => None,
         }
     }
 
@@ -353,11 +353,11 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     async fn subscribe(&self) -> PeerSetSubscription<P> {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(Message::Subscribe { response }) {
-            Submission::Accepted | Submission::Backlogged => receiver.await.unwrap_or_else(|_| {
+            Feedback::Ok | Feedback::Backoff => receiver.await.unwrap_or_else(|_| {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }),
-            Submission::Dropped | Submission::Closed => {
+            Feedback::Dropped | Feedback::Closed => {
                 let (_, rx) = ring::channel(NZUsize!(1));
                 rx
             }
@@ -400,7 +400,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
-    fn track<R>(&mut self, id: u64, peers: R) -> Submission
+    fn track<R>(&mut self, id: u64, peers: R) -> Feedback
     where
         R: Into<TrackedPeers<Self::PublicKey>>,
     {
@@ -453,7 +453,7 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
         &mut self,
         id: u64,
         peers: R,
-    ) -> Submission
+    ) -> Feedback
     where
         R: Into<AddressableTrackedPeers<Self::PublicKey>>,
     {
@@ -468,9 +468,9 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
     fn overwrite(
         &mut self,
         _peers: Map<Self::PublicKey, Address>,
-    ) -> Submission {
+    ) -> Feedback {
         // We consider all addresses to be valid, so this is a no-op
-        Submission::Accepted
+        Feedback::Ok
     }
 }
 
@@ -513,10 +513,10 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
             quota,
             result,
         }) {
-            Submission::Accepted | Submission::Backlogged => {
+            Feedback::Ok | Feedback::Backoff => {
                 receiver.await.map_err(|_| Error::NetworkClosed)?
             }
-            Submission::Dropped | Submission::Closed => Err(Error::NetworkClosed),
+            Feedback::Dropped | Feedback::Closed => Err(Error::NetworkClosed),
         }
     }
 }
@@ -524,7 +524,7 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
 impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
     type PublicKey = P;
 
-    fn block(&mut self, public_key: P) -> Submission {
+    fn block(&mut self, public_key: P) -> Feedback {
         self.sender.enqueue(Message::Block {
             from: self.me.clone(),
             to: public_key,

@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Submission},
+    channel::{actor::{self, ActorMailbox, Backpressure, MessagePolicy}, Feedback},
     vec::NonEmptyVec,
     Span,
 };
@@ -123,7 +123,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch(&mut self, key: Self::Key) -> Submission {
+    fn fetch(&mut self, key: Self::Key) -> Feedback {
         self.sender
             .enqueue(Message::Fetch(vec![FetchRequest { key, targets: None }]))
     }
@@ -134,13 +134,13 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Submission {
+    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Feedback {
         let requests: Vec<_> = keys
             .into_iter()
             .map(|key| FetchRequest { key, targets: None })
             .collect();
         if requests.is_empty() {
-            return Submission::Dropped;
+            return Feedback::Dropped;
         }
         self.sender.enqueue(Message::Fetch(requests))
     }
@@ -152,7 +152,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
         &mut self,
         key: Self::Key,
         targets: NonEmptyVec<Self::PublicKey>,
-    ) -> Submission {
+    ) -> Feedback {
         self.sender
             .enqueue(Message::Fetch(vec![FetchRequest {
                 key,
@@ -166,7 +166,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     fn fetch_all_targeted(
         &mut self,
         requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-    ) -> Submission {
+    ) -> Feedback {
         let requests: Vec<_> = requests
             .into_iter()
             .map(|(key, targets)| FetchRequest {
@@ -175,7 +175,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
             })
             .collect();
         if requests.is_empty() {
-            return Submission::Dropped;
+            return Feedback::Dropped;
         }
         self.sender.enqueue(Message::Fetch(requests))
     }
@@ -183,7 +183,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a cancel request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn cancel(&mut self, key: Self::Key) -> Submission {
+    fn cancel(&mut self, key: Self::Key) -> Feedback {
         self.sender.enqueue(Message::Cancel { key })
     }
 
@@ -193,7 +193,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     fn retain(
         &mut self,
         predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-    ) -> Submission {
+    ) -> Feedback {
         self.sender.enqueue(Message::Retain {
             predicate: Box::new(predicate),
         })
@@ -202,7 +202,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a clear request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn clear(&mut self) -> Submission {
+    fn clear(&mut self) -> Feedback {
         self.sender.enqueue(Message::Clear)
     }
 }
@@ -217,8 +217,8 @@ mod tests {
         let (sender, mut receiver) = actor::channel(1);
         let mut mailbox = Mailbox::<u64, PublicKey>::new(sender);
 
-        assert!(matches!(mailbox.fetch(1), Submission::Accepted));
-        assert!(matches!(mailbox.fetch(2), Submission::Backlogged));
+        assert!(matches!(mailbox.fetch(1), Feedback::Ok));
+        assert!(matches!(mailbox.fetch(2), Feedback::Backoff));
 
         let Some(Message::Fetch(requests)) = receiver.recv().await else {
             panic!("expected fetch message");

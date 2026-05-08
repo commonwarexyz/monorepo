@@ -10,7 +10,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::{
     actor::{ActorMailbox, Backpressure, MessagePolicy},
-    oneshot, Submission,
+    oneshot, Feedback,
 };
 use std::collections::VecDeque;
 
@@ -123,7 +123,7 @@ impl<D: Digest> Re for Mailbox<D> {
 impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<Scheme, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Submission {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         self.sender.enqueue(Message::Report { activity })
     }
 }

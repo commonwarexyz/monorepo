@@ -8,7 +8,7 @@ use commonware_cryptography::{
 use commonware_utils::{
     channel::{
         actor::{self, ActorMailbox, Backpressure, MessagePolicy},
-        Submission,
+        Feedback,
     },
     ordered::Set,
 };
@@ -63,11 +63,11 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
         Self { sender }
     }
 
-    pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Submission {
+    pub fn enter(&mut self, transition: EpochTransition<V, P>) -> Feedback {
         self.sender.enqueue(Message::Enter(transition))
     }
 
-    pub fn exit(&mut self, epoch: Epoch) -> Submission {
+    pub fn exit(&mut self, epoch: Epoch) -> Feedback {
         self.sender.enqueue(Message::Exit(epoch))
     }
 }

@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
-    channel::{actor::{self, Backpressure, MessagePolicy}, Submission},
+    channel::{actor::{self, Backpressure, MessagePolicy}, Feedback},
     concurrency::Limiter,
     net::SubnetMask,
     IpAddrExt,
@@ -113,7 +113,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 async move {
                     if !matches!(
                         tracker.request_acceptable(peer, mailbox),
-                        Submission::Accepted | Submission::Backlogged
+                        Feedback::Ok | Feedback::Backoff
                     ) {
                         return false;
                     }
@@ -141,7 +141,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         let (listen_mailbox, mut listen_receiver) = Mailbox::new(1);
         if !matches!(
             tracker.request_listen(peer.clone(), listen_mailbox),
-            Submission::Accepted | Submission::Backlogged
+            Feedback::Ok | Feedback::Backoff
         ) {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
@@ -303,11 +303,11 @@ impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: commonware_cryptography::PublicKey> Mailbox<Message<C>> {
-    pub(crate) fn acceptable(&self, acceptable: bool) -> Submission {
+    pub(crate) fn acceptable(&self, acceptable: bool) -> Feedback {
         self.enqueue(Message::Acceptable(acceptable))
     }
 
-    pub(crate) fn listen(&self, reservation: Option<tracker::Reservation<C>>) -> Submission {
+    pub(crate) fn listen(&self, reservation: Option<tracker::Reservation<C>>) -> Feedback {
         self.enqueue(Message::Listen(reservation))
     }
 }

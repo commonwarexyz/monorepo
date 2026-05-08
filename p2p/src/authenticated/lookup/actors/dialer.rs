@@ -25,7 +25,7 @@ use commonware_runtime::{
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::channel::{
     actor::{self, ActorInbox, Backpressure, MessagePolicy},
-    Submission,
+    Feedback,
 };
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
@@ -122,7 +122,7 @@ impl<
         }
         self.awaiting_dialable = matches!(
             tracker.request_dialable(self.mailbox.clone()),
-            Submission::Accepted | Submission::Backlogged
+            Feedback::Ok | Feedback::Backoff
         );
     }
 
@@ -138,7 +138,7 @@ impl<
         };
         self.awaiting_dial = matches!(
             tracker.request_dial(peer.clone(), self.mailbox.clone()),
-            Submission::Accepted | Submission::Backlogged
+            Feedback::Ok | Feedback::Backoff
         );
         if !self.awaiting_dial {
             self.queue.push(peer);
@@ -307,7 +307,7 @@ impl<C: PublicKey> MessagePolicy for Message<C> {
 }
 
 impl<C: PublicKey> Mailbox<Message<C>> {
-    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Submission {
+    pub(crate) fn dialable(&self, dialable: Dialable<C>) -> Feedback {
         self.enqueue(Message::Dialable(dialable))
     }
 
@@ -315,7 +315,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         &self,
         public_key: C,
         reservation: Option<(Reservation<C>, Ingress)>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::Dial {
             public_key,
             reservation,

@@ -33,7 +33,7 @@ use commonware_runtime::{
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
     channel::{
-        actor::{self, ActorInbox, ActorMailbox}, Submission,
+        actor::{self, ActorInbox, ActorMailbox}, Feedback,
         oneshot,
     },
     futures::AbortablePool,
@@ -268,7 +268,7 @@ impl<
 
         // Broadcast vote
         match sender.send(Recipients::All, vote.clone(), true) {
-            Submission::Accepted | Submission::Backlogged => {}
+            Feedback::Ok | Feedback::Backoff => {}
             result => {
                 warn!(?result, "unable to enqueue p2p vote");
                 self.schedule_p2p_retry(Message::RetryVote(vote));
@@ -292,7 +292,7 @@ impl<
 
         // Broadcast certificate
         match sender.send(Recipients::All, certificate.clone(), true) {
-            Submission::Accepted | Submission::Backlogged => {}
+            Feedback::Ok | Feedback::Backoff => {}
             result => {
                 warn!(?result, "unable to enqueue p2p certificate");
                 self.schedule_p2p_retry(Message::RetryCertificate(certificate));

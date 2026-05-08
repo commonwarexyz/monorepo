@@ -9,7 +9,7 @@ use commonware_runtime::{
     },
     Clock, Metrics,
 };
-use commonware_utils::{channel::Submission, PrioritySet, Span, SystemTimeExt};
+use commonware_utils::{channel::Feedback, PrioritySet, Span, SystemTimeExt};
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -280,7 +280,7 @@ where
                     payload: wire::Payload::Request(key.clone()),
                 };
                 match sender.send(Recipients::One(peer.clone()), message, self.priority_requests) {
-                    Submission::Accepted | Submission::Backlogged => {
+                    Feedback::Ok | Feedback::Backoff => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -631,8 +631,8 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Submission {
-            Submission::Dropped
+        ) -> Feedback {
+            Feedback::Dropped
         }
     }
 
@@ -684,9 +684,9 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Submission {
+        ) -> Feedback {
             match recipients {
-                Recipients::One(_) => Submission::Accepted,
+                Recipients::One(_) => Feedback::Ok,
                 _ => unimplemented!(),
             }
         }
@@ -753,7 +753,7 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Submission {
+        ) -> Feedback {
             let peer = match &recipients {
                 Recipients::One(p) => p,
                 _ => unimplemented!(),
@@ -761,9 +761,9 @@ mod tests {
 
             let rate_limiter = self.rate_limiter.write();
             if rate_limiter.check_key(peer).is_err() {
-                return Submission::Dropped;
+                return Feedback::Dropped;
             }
-            Submission::Accepted
+            Feedback::Ok
         }
     }
 

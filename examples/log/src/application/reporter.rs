@@ -1,7 +1,7 @@
 use super::Scheme;
 use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
-use commonware_utils::channel::Submission;
+use commonware_utils::channel::Feedback;
 use std::marker::PhantomData;
 use tracing::info;
 
@@ -22,7 +22,7 @@ impl<D: Digest> Reporter<D> {
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
     type Activity = Activity<Scheme, D>;
 
-    fn report(&mut self, activity: Self::Activity) -> Submission {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {
@@ -36,6 +36,6 @@ impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
             }
             _ => {}
         }
-        Submission::Accepted
+        Feedback::Ok
     }
 }

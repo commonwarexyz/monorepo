@@ -1,7 +1,7 @@
 //! Reporter implementations for various standard types.
 
 use crate::Reporter;
-use commonware_utils::channel::Submission;
+use commonware_utils::channel::Feedback;
 use std::marker::PhantomData;
 
 /// An implementation of [Reporter] for an optional [Reporter].
@@ -11,9 +11,9 @@ use std::marker::PhantomData;
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
-    fn report(&mut self, activity: Self::Activity) -> Submission {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Some(reporter) = self else {
-            return Submission::Dropped;
+            return Feedback::Dropped;
         };
         reporter.report(activity)
     }
@@ -36,22 +36,22 @@ where
 {
     type Activity = A;
 
-    fn report(&mut self, activity: Self::Activity) -> Submission {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match (&mut self.r1, &mut self.r2) {
             (Some(r1), Some(r2)) => combine(r1.report(activity.clone()), r2.report(activity)),
             (Some(r1), None) => r1.report(activity),
             (None, Some(r2)) => r2.report(activity),
-            (None, None) => Submission::Dropped,
+            (None, None) => Feedback::Dropped,
         }
     }
 }
 
-fn combine(left: Submission, right: Submission) -> Submission {
+fn combine(left: Feedback, right: Feedback) -> Feedback {
     match (left, right) {
-        (Submission::Closed, _) | (_, Submission::Closed) => Submission::Closed,
-        (Submission::Dropped, _) | (_, Submission::Dropped) => Submission::Dropped,
-        (Submission::Backlogged, _) | (_, Submission::Backlogged) => Submission::Backlogged,
-        (Submission::Accepted, Submission::Accepted) => Submission::Accepted,
+        (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
+        (Feedback::Dropped, _) | (_, Feedback::Dropped) => Feedback::Dropped,
+        (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
+        (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
     }
 }
 
@@ -108,9 +108,9 @@ mod tests {
     impl crate::Reporter for SimpleAcknowledger {
         type Activity = Exact;
 
-        fn report(&mut self, activity: Self::Activity) -> Submission {
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
             activity.acknowledge();
-            Submission::Accepted
+            Feedback::Ok
         }
     }
 
@@ -122,7 +122,7 @@ mod tests {
         ));
 
         let (ack, waiter) = Exact::handle();
-        assert_eq!(reporters.report(ack), Submission::Accepted);
+        assert_eq!(reporters.report(ack), Feedback::Ok);
 
         assert!(
             waiter.now_or_never().unwrap().is_ok(),

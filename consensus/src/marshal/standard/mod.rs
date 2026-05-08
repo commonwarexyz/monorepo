@@ -91,7 +91,7 @@ mod tests {
     };
     use commonware_utils::{
         channel::{
-            actor::{self, ActorMailbox}, Submission,
+            actor::{self, ActorMailbox}, Feedback,
             fallible::OneshotExt,
             oneshot,
         },
@@ -1708,31 +1708,31 @@ mod tests {
         type Message = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, _key: Self::Key) -> Submission {
-            Submission::Accepted
+        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
         }
-        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Submission {
-            Submission::Accepted
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+            Feedback::Ok
         }
-        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Submission {
+        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Feedback {
             self.targeted.lock().push((key, targets));
-            Submission::Accepted
+            Feedback::Ok
         }
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Submission {
+        ) -> Feedback {
             self.targeted.lock().extend(requests);
-            Submission::Accepted
+            Feedback::Ok
         }
-        fn cancel(&mut self, _key: Self::Key) -> Submission {
-            Submission::Accepted
+        fn cancel(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
         }
-        fn clear(&mut self) -> Submission {
-            Submission::Accepted
+        fn clear(&mut self) -> Feedback {
+            Feedback::Ok
         }
-        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Submission {
-            Submission::Accepted
+        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
+            Feedback::Ok
         }
     }
 
@@ -1778,7 +1778,7 @@ mod tests {
     impl Reporter for GatedBlockReporter {
         type Activity = Update<B>;
 
-        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::Submission {
+        fn report(&mut self, activity: Self::Activity) -> commonware_utils::channel::Feedback {
             match activity {
                 Update::Block(block, _ack) => {
                     if let Some(started) = self.started.lock().take() {
@@ -1788,7 +1788,7 @@ mod tests {
                 }
                 Update::Tip(_, _, _) => {}
             }
-            commonware_utils::channel::Submission::<()>::Accepted
+            commonware_utils::channel::Feedback::Ok
         }
     }
 

@@ -228,7 +228,7 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::{channel::Submission, sync::Mutex, test_rng, vec::NonEmptyVec};
+    use commonware_utils::{channel::Feedback, sync::Mutex, test_rng, vec::NonEmptyVec};
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-state";
@@ -256,45 +256,45 @@ mod tests {
         type Message = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, key: U64) -> Submission {
+        fn fetch(&mut self, key: U64) -> Feedback {
             self.outstanding.lock().insert(key);
-            Submission::Accepted
+            Feedback::Ok
         }
 
-        fn fetch_all(&mut self, keys: Vec<U64>) -> Submission {
+        fn fetch_all(&mut self, keys: Vec<U64>) -> Feedback {
             for key in keys {
                 self.outstanding.lock().insert(key);
             }
-            Submission::Accepted
+            Feedback::Ok
         }
 
-        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Submission {
+        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Feedback {
             // For testing, just treat targeted fetch the same as regular fetch
             self.outstanding.lock().insert(key);
-            Submission::Accepted
+            Feedback::Ok
         }
 
-        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Submission {
+        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Feedback {
             // For testing, just treat targeted fetch the same as regular fetch
             for (key, _targets) in requests {
                 self.outstanding.lock().insert(key);
             }
-            Submission::Accepted
+            Feedback::Ok
         }
 
-        fn cancel(&mut self, key: U64) -> Submission {
+        fn cancel(&mut self, key: U64) -> Feedback {
             self.outstanding.lock().remove(&key);
-            Submission::Accepted
+            Feedback::Ok
         }
 
-        fn clear(&mut self) -> Submission {
+        fn clear(&mut self) -> Feedback {
             self.outstanding.lock().clear();
-            Submission::Accepted
+            Feedback::Ok
         }
 
-        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Submission {
+        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
             self.outstanding.lock().retain(|key| predicate(key));
-            Submission::Accepted
+            Feedback::Ok
         }
     }
 

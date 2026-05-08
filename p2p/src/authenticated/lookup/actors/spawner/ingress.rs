@@ -2,7 +2,7 @@ use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::{actor::{Backpressure, MessagePolicy}, Submission};
+use commonware_utils::channel::{actor::{Backpressure, MessagePolicy}, Feedback};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
@@ -33,7 +33,7 @@ impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
         &mut self,
         connection: (Sender<Si>, Receiver<St>),
         reservation: Reservation<P>,
-    ) -> Submission {
+    ) -> Feedback {
         self.enqueue(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
             connection,

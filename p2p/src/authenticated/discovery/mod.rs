@@ -2509,8 +2509,8 @@ mod tests {
             assert!(
                 matches!(
                     mailbox.ready(slow_peer.clone(), Relay::new(slow_low, slow_high)),
-                    commonware_utils::channel::Submission::Accepted
-                        | commonware_utils::channel::Submission::Backlogged
+                    commonware_utils::channel::Feedback::Ok
+                        | commonware_utils::channel::Feedback::Backoff
                 ),
                 "Failed to register slow peer"
             );
@@ -2522,8 +2522,8 @@ mod tests {
             assert!(
                 matches!(
                     mailbox.ready(fast_peer.clone(), Relay::new(fast_low, fast_high)),
-                    commonware_utils::channel::Submission::Accepted
-                        | commonware_utils::channel::Submission::Backlogged
+                    commonware_utils::channel::Feedback::Ok
+                        | commonware_utils::channel::Feedback::Backoff
                 ),
                 "Failed to register fast peer"
             );

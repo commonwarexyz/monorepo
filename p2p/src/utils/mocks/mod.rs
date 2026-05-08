@@ -69,8 +69,8 @@ impl<P: PublicKey> crate::MailboxSender for InertSender<P> {
         _: Recipients<Self::PublicKey>,
         _: impl Into<IoBufs> + Send,
         _: bool,
-    ) -> commonware_utils::channel::Submission {
-        commonware_utils::channel::Submission::Accepted
+    ) -> commonware_utils::channel::Feedback {
+        commonware_utils::channel::Feedback::Ok
     }
 }
 

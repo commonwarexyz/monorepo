@@ -17,7 +17,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::{Submission, ring},
+        channel::{Feedback, ring},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -217,7 +217,7 @@ stability_scope!(BETA {
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Submission;
+        ) -> Feedback;
     }
 
     /// Interface for receiving messages from arbitrary recipients.
@@ -363,7 +363,7 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> Submission
+        fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
             R: Into<TrackedPeers<Self::PublicKey>>;
     }
@@ -399,7 +399,7 @@ stability_scope!(BETA {
             &mut self,
             id: u64,
             peers: R,
-        ) -> Submission
+        ) -> Feedback
         where
             R: Into<AddressableTrackedPeers<Self::PublicKey>>;
 
@@ -412,7 +412,7 @@ stability_scope!(BETA {
         fn overwrite(
             &mut self,
             peers: Map<Self::PublicKey, Address>,
-        ) -> Submission;
+        ) -> Feedback;
     }
 
     /// Interface for blocking other peers.
@@ -421,7 +421,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
-        fn block(&mut self, peer: Self::PublicKey) -> Submission;
+        fn block(&mut self, peer: Self::PublicKey) -> Feedback;
     }
 });
 
@@ -460,6 +460,6 @@ macro_rules! block {
     reason = "test helper that bypasses the block! macro"
 )]
 #[cfg(test)]
-pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Submission {
+pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Feedback {
     blocker.block(peer)
 }

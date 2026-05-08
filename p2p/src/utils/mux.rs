@@ -15,7 +15,7 @@ use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufs, Spawner};
 use commonware_utils::channel::{
-    Submission,
+    Feedback,
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
     oneshot,
@@ -259,7 +259,7 @@ where
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Submission {
+    ) -> Feedback {
         let subchannel = UInt(self.subchannel);
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
