@@ -25,7 +25,7 @@
 //!         result = reader.recv() => {
 //!             let Some((pos, item)) = result? else { break };
 //!             // Process item...
-//!             reader.ack(pos).await?;
+//!             reader.ack(pos)?;
 //!         }
 //!         _ = shutdown => break,
 //!     }
@@ -69,7 +69,7 @@
 //!         println!("Processing item at position {}", position);
 //!
 //!         // Acknowledge after successful processing
-//!         queue.ack(position).await.unwrap();
+//!         queue.ack(position).unwrap();
 //!     }
 //! });
 //! ```

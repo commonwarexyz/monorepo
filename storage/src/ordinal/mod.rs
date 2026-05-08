@@ -235,10 +235,9 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
 
-            // Both concurrent sync calls must observe the in-flight durability failure.
-            let (first, second) = futures::future::join(store.sync(), store.sync()).await;
-            assert!(first.is_err(), "first sync unexpectedly succeeded");
-            assert!(second.is_err(), "second sync unexpectedly succeeded");
+            // Sync must observe the durability failure.
+            let result = store.sync().await;
+            assert!(result.is_err(), "sync unexpectedly succeeded");
         });
     }
 

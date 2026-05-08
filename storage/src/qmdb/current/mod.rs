@@ -268,7 +268,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_parallel::{Sequential, Strategy};
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
+use commonware_utils::bitmap::Prunable as BitMap;
 use std::sync::Arc;
 
 pub mod batch;
@@ -391,7 +391,7 @@ where
     Ok(db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
     })
@@ -2886,16 +2886,12 @@ pub mod tests {
             let parent_merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(parent_merkleized).await.unwrap();
 
-            let (child_merkleized, commit_result) = futures::join!(
-                async {
-                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-                    let mut child = db.new_batch();
-                    child = child.write(key(1), Some(val(1)));
-                    child.merkleize(&db, None).await.unwrap()
-                },
-                db.commit(),
-            );
-            commit_result.unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            let mut child = db.new_batch();
+            child = child.write(key(1), Some(val(1)));
+            let child_merkleized = child.merkleize(&db, None).await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();

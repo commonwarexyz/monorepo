@@ -398,12 +398,12 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.journal.sync().await.map_err(Into::into)
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.journal.commit().await.map_err(Into::into)
     }
 

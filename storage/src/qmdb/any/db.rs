@@ -662,13 +662,13 @@ where
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.sync().await.map_err(Into::into)
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
-    pub async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.commit().await.map_err(Into::into)
     }
 
@@ -691,11 +691,11 @@ where
 {
     type Error = crate::qmdb::Error<F>;
 
-    async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
+    async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
+    async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         Self::sync(self).await
     }
 

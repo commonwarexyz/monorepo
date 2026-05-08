@@ -358,7 +358,7 @@ where
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the Merkle
     /// structure, meaning recovery will be required on startup if we crash before `sync()`.
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.journal.commit().await.map_err(Error::Journal)
     }
 }
@@ -672,12 +672,11 @@ where
     }
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.merkle.sync().map_err(Error::Merkle)
+            self.merkle.sync().map_err(Error::Merkle),
         )?;
-
         Ok(())
     }
 }
@@ -743,11 +742,11 @@ where
     type Item = C::Item;
 
     async fn reader(&self) -> impl Reader<Item = C::Item> + '_ {
-        self.journal.reader().await
+        Contiguous::reader(&self.journal).await
     }
 
     async fn size(&self) -> u64 {
-        self.journal.size().await
+        Contiguous::size(&self.journal).await
     }
 }
 
@@ -812,11 +811,11 @@ where
 {
     type Error = JournalError;
 
-    async fn commit(&self) -> Result<(), JournalError> {
+    async fn commit(&mut self) -> Result<(), JournalError> {
         self.commit().await.map_err(Self::map_error)
     }
 
-    async fn sync(&self) -> Result<(), JournalError> {
+    async fn sync(&mut self) -> Result<(), JournalError> {
         self.sync().await.map_err(Self::map_error)
     }
 
@@ -1068,7 +1067,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(merkle.leaves(), Location::<F>::new(0));
-        assert_eq!(journal.size().await, 0);
+        assert_eq!(journal.size(), 0);
     }
 
     #[test_traced("INFO")]
@@ -1085,7 +1084,7 @@ mod tests {
 
     /// Verify that align() pops Merkle elements when Merkle is ahead of the journal.
     async fn test_align_when_mmr_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, hasher) = create_components::<F>(context, "mmr-ahead").await;
+        let (mut merkle, mut journal, hasher) = create_components::<F>(context, "mmr-ahead").await;
 
         // Add 20 operations to both Merkle and journal
         {
@@ -1115,7 +1114,7 @@ mod tests {
 
         // Merkle should have been aligned to match journal
         assert_eq!(merkle.leaves(), Location::<F>::new(21));
-        assert_eq!(journal.size().await, 21);
+        assert_eq!(journal.size(), 21);
     }
 
     #[test_traced("WARN")]
@@ -1132,7 +1131,8 @@ mod tests {
 
     /// Verify that align() replays journal operations when journal is ahead of Merkle.
     async fn test_align_when_journal_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, hasher) = create_components::<F>(context, "journal-ahead").await;
+        let (mut merkle, mut journal, hasher) =
+            create_components::<F>(context, "journal-ahead").await;
 
         // Add 20 operations to journal only
         for i in 0..20 {
@@ -1152,7 +1152,7 @@ mod tests {
 
         // Merkle should have been replayed to match journal
         assert_eq!(merkle.leaves(), Location::<F>::new(21));
-        assert_eq!(journal.size().await, 21);
+        assert_eq!(journal.size(), 21);
     }
 
     #[test_traced("WARN")]
@@ -1237,7 +1237,7 @@ mod tests {
             // Rewind to last commit
             let final_size = journal.rewind_to(|op| op.is_commit()).await.unwrap();
             assert_eq!(final_size, 4);
-            assert_eq!(journal.size().await, 4);
+            assert_eq!(journal.size(), 4);
 
             // Verify the commit operation is still there
             let op = journal.read(3).await.unwrap();
@@ -1295,7 +1295,7 @@ mod tests {
             // Rewind should go to pruning boundary (0 for unpruned)
             let final_size = journal.rewind_to(|op| op.is_commit()).await.unwrap();
             assert_eq!(final_size, 0, "Should rewind to pruning boundary (0)");
-            assert_eq!(journal.size().await, 0);
+            assert_eq!(journal.size(), 0);
         }
 
         // Test 4: Rewind with existing pruning boundary
@@ -1322,7 +1322,7 @@ mod tests {
 
             // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
             journal.prune(8).await.unwrap();
-            assert_eq!(journal.reader().await.bounds().start, 7);
+            assert_eq!(journal.reader().bounds().start, 7);
 
             // Add more uncommitted operations
             for i in 15..20 {
@@ -1363,7 +1363,7 @@ mod tests {
             // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
             // Pruning boundary will be at position 7 (start of section 1)
             journal.prune(8).await.unwrap();
-            assert_eq!(journal.reader().await.bounds().start, 7);
+            assert_eq!(journal.reader().bounds().start, 7);
 
             // Add uncommitted operations with no commits (in section 1: 7-13)
             for i in 10..14 {
@@ -1391,7 +1391,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(final_size, 0);
-            assert_eq!(journal.size().await, 0);
+            assert_eq!(journal.size(), 0);
         }
 
         // Test 7: Position based authenticated journal rewind.

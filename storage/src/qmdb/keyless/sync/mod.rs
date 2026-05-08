@@ -108,7 +108,7 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
-        let db = Self {
+        let mut db = Self {
             journal,
             root,
             last_commit_loc,

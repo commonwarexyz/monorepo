@@ -71,9 +71,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
-};
+use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -221,10 +219,10 @@ where
         db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
-    let current_db = db::Db {
+    let mut current_db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
     };
@@ -300,7 +298,7 @@ macro_rules! impl_current_sync_database {
                 else {
                     return false;
                 };
-                let reader = journal.reader().await;
+                let reader = journal.reader();
                 let bounds = reader.bounds();
                 if Location::new(bounds.start) > target.range.start() {
                     return false;
