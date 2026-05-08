@@ -35,7 +35,7 @@ use commonware_consensus::{
     Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_runtime::{Clock, Handle, IoBuf, Spawner, Supervisor};
+use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use commonware_utils::channel::mpsc::UnboundedReceiver;
 use rand::Rng;
 use rand_core::CryptoRngCore;
