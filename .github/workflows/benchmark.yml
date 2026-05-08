@@ -38,27 +38,21 @@ jobs:
         include:
           - package: commonware-cryptography
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-cryptography"
           - package: commonware-storage
             cargo_flags: "--features test-traits"
-            file_suffix: ""
             benchmark_name: "commonware-storage"
           - package: commonware-storage
             cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
-            file_suffix: "-features"
             benchmark_name: "commonware-storage --features"
           - package: commonware-coding
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-coding"
           - package: commonware-formatting
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-formatting"
           - package: commonware-utils
             cargo_flags: ""
-            file_suffix: ""
             benchmark_name: "commonware-utils"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -77,12 +71,12 @@ jobs:
           cargo bench ${{ matrix.cargo_flags }} \
             --benches -p ${{ matrix.package }} \
             -- --output-format bencher \
-            | tee "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+            | tee "${{ matrix.benchmark_name }}.txt"
       - name: Upload benchmark result
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: benchmark-${{ matrix.package }}${{ matrix.file_suffix }}
-          path: "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+          name: benchmark-${{ matrix.benchmark_name }}
+          path: "${{ matrix.benchmark_name }}.txt"
           if-no-files-found: error
 
   publish:
@@ -95,35 +89,29 @@ jobs:
       matrix:
         include:
           - package: commonware-cryptography
-            file_suffix: ""
             benchmark_name: "commonware-cryptography"
           - package: commonware-storage
-            file_suffix: ""
             benchmark_name: "commonware-storage"
           - package: commonware-storage
-            file_suffix: "-features"
             benchmark_name: "commonware-storage --features"
           - package: commonware-coding
-            file_suffix: ""
             benchmark_name: "commonware-coding"
           - package: commonware-formatting
-            file_suffix: ""
             benchmark_name: "commonware-formatting"
           - package: commonware-utils
-            file_suffix: ""
             benchmark_name: "commonware-utils"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Download benchmark result
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: benchmark-${{ matrix.package }}${{ matrix.file_suffix }}
+          name: benchmark-${{ matrix.benchmark_name }}
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: ${{ matrix.benchmark_name }}
           tool: 'cargo'
-          output-file-path: "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
+          output-file-path: "${{ matrix.benchmark_name }}.txt"
           github-token: ${{ secrets.BENCHMARKS_SECRET }}
           gh-repository: github.com/commonwarexyz/benchmarks
           gh-pages-branch: main
