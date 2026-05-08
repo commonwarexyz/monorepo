@@ -22,7 +22,7 @@ use commonware_consensus::{
 use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest, Sha256};
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
 use commonware_utils::{channel::mpsc::Receiver, NZUsize};
 use futures::FutureExt;
 use rand::Rng;
@@ -1518,7 +1518,7 @@ where
         .expect("honest participant must exist");
     let (pending, recovered, resolver) = honest_channels;
     let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-        context.with_label("honest_validator"),
+        context.child("honest_validator"),
         &oracle,
         &participants,
         honest_scheme,
@@ -1535,7 +1535,7 @@ where
     let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
 
     let mut driver = NodeDriver::<P::Scheme>::new(
-        context.with_label("simplex_node_driver"),
+        context.child("simplex_node_driver"),
         honest,
         relay,
         byzantine_participants,
@@ -1568,7 +1568,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
 {
     deterministic::Runner::from(checkpoint).start(|context: deterministic::Context| async move {
         let (network, mut oracle) = simulated::Network::new(
-            context.with_label("network_recovery"),
+            context.child("network_recovery"),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
@@ -1586,7 +1586,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             .expect("honest participant must exist in recovery");
         let (pending, recovered, resolver) = honest_channels;
         let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-            context.with_label("honest_validator_recovery"),
+            context.child("honest_validator_recovery"),
             &oracle,
             &participants,
             schemes[HONEST_ID].clone(),

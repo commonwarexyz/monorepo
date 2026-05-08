@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
-use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
+use commonware_runtime::{deterministic, mocks, Runner, Spawner, Supervisor as _};
 use commonware_stream::encrypted::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -114,7 +114,7 @@ fn fuzz(input: FuzzInput) {
             handshake_timeout,
         };
 
-        let listener_handle = context.with_label("listener").spawn({
+        let listener_handle = context.child("listener").spawn({
             move |context| async move {
                 listen(
                     context,
@@ -128,7 +128,7 @@ fn fuzz(input: FuzzInput) {
         });
 
         let (mut dialer_sender, mut dialer_receiver) = dial(
-            context.clone(),
+            context.child("dialer"),
             dialer_config,
             listener_crypto.public_key(),
             dialer_stream,

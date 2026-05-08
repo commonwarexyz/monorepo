@@ -3,7 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
@@ -132,7 +134,7 @@ where
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
-        context: context.with_label("sync").with_attribute("id", sync_id),
+        context: context.child("sync").with_attribute("id", sync_id),
         update_rx: None,
         finish_rx: None,
         reached_target_tx: None,
@@ -165,7 +167,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let mut db: FixedDb<F> = Db::init(context.clone(), cfg)
+        let mut db: FixedDb<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;
@@ -243,7 +245,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
 
                     let wrapped_src = Arc::new(db);
                     let _result = test_sync(
-                        context.clone(),
+                        context.child("storage").with_attribute("sync", sync_id),
                         wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
@@ -263,9 +265,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
 
                     let cfg = test_config(&test_name, &context);
                     db = Db::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await

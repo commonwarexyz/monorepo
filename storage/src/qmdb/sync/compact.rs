@@ -47,7 +47,7 @@
 //! with `DataCorrupted` rather than silently serving or restoring mismatched state.
 
 use crate::{
-    merkle::{self, hasher::Standard as StandardHasher, Family, Location, Proof},
+    merkle::{Family, Location, Proof},
     qmdb::{
         self,
         any::{value::ValueEncoding, FixedValue, VariableValue},
@@ -249,9 +249,6 @@ pub trait Database: Sized + Send {
     type Context: Storage + Clock + Metrics;
     type Hasher: Hasher<Digest = Self::Digest>;
 
-    /// Bagging policy used by this database when computing roots.
-    const ROOT_BAGGING: merkle::Bagging;
-
     /// Build a database from authenticated state in memory.
     ///
     /// The caller has already verified `last_commit_proof` against the requested target root, but
@@ -327,7 +324,7 @@ where
         }));
     }
 
-    let hasher = StandardHasher::<DB::Hasher>::with_bagging(DB::ROOT_BAGGING);
+    let hasher = qmdb::hasher::<DB::Hasher>();
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     if !verify_proof(
         &hasher,

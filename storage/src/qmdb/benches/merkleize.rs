@@ -16,7 +16,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler,
+    BufferPooler, Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -530,99 +530,99 @@ macro_rules! variants {
 variants! {
     AnyFixed {
         name: "any::unordered::fixed::mmr",
-        init: |ctx, cache_size| AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyUFix::init(ctx.child("storage"), any_fix_cfg(&ctx, cache_size)),
     }
     AnyVariable {
         name: "any::unordered::variable::mmr",
-        init: |ctx, cache_size| AnyUVar::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyUVar::init(ctx.child("storage"), any_var_cfg(&ctx, cache_size)),
     }
     AnyFixedMmb {
         name: "any::unordered::fixed::mmb",
-        init: |ctx, cache_size| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyUFixMmb::init(ctx.child("storage"), any_fix_cfg(&ctx, cache_size)),
     }
     AnyVariableMmb {
         name: "any::unordered::variable::mmb",
-        init: |ctx, cache_size| AnyUVarMmb::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyUVarMmb::init(ctx.child("storage"), any_var_cfg(&ctx, cache_size)),
     }
     AnyOrderedFixed {
         name: "any::ordered::fixed::mmr",
-        init: |ctx, cache_size| AnyOFix::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyOFix::init(ctx.child("storage"), any_fix_cfg(&ctx, cache_size)),
     }
     AnyOrderedVariable {
         name: "any::ordered::variable::mmr",
-        init: |ctx, cache_size| AnyOVar::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyOVar::init(ctx.child("storage"), any_var_cfg(&ctx, cache_size)),
     }
     AnyOrderedFixedMmb {
         name: "any::ordered::fixed::mmb",
-        init: |ctx, cache_size| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyOFixMmb::init(ctx.child("storage"), any_fix_cfg(&ctx, cache_size)),
     }
     AnyOrderedVariableMmb {
         name: "any::ordered::variable::mmb",
-        init: |ctx, cache_size| AnyOVarMmb::init(ctx.clone(), any_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| AnyOVarMmb::init(ctx.child("storage"), any_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed32 {
         name: "current::unordered::fixed::mmr chunk=32",
-        init: |ctx, cache_size| CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUFix32::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable32 {
         name: "current::unordered::variable::mmr chunk=32",
-        init: |ctx, cache_size| CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUVar32::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed32Mmb {
         name: "current::unordered::fixed::mmb chunk=32",
-        init: |ctx, cache_size| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUFix32Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable32Mmb {
         name: "current::unordered::variable::mmb chunk=32",
-        init: |ctx, cache_size| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUVar32Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed256 {
         name: "current::unordered::fixed::mmr chunk=256",
-        init: |ctx, cache_size| CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUFix256::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable256 {
         name: "current::unordered::variable::mmr chunk=256",
-        init: |ctx, cache_size| CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUVar256::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentFixed256Mmb {
         name: "current::unordered::fixed::mmb chunk=256",
-        init: |ctx, cache_size| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUFix256Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentVariable256Mmb {
         name: "current::unordered::variable::mmb chunk=256",
-        init: |ctx, cache_size| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurUVar256Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed32 {
         name: "current::ordered::fixed::mmr chunk=32",
-        init: |ctx, cache_size| CurOFix32::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOFix32::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable32 {
         name: "current::ordered::variable::mmr chunk=32",
-        init: |ctx, cache_size| CurOVar32::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOVar32::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed32Mmb {
         name: "current::ordered::fixed::mmb chunk=32",
-        init: |ctx, cache_size| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOFix32Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable32Mmb {
         name: "current::ordered::variable::mmb chunk=32",
-        init: |ctx, cache_size| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOVar32Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed256 {
         name: "current::ordered::fixed::mmr chunk=256",
-        init: |ctx, cache_size| CurOFix256::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOFix256::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable256 {
         name: "current::ordered::variable::mmr chunk=256",
-        init: |ctx, cache_size| CurOVar256::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOVar256::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
     CurrentOrderedFixed256Mmb {
         name: "current::ordered::fixed::mmb chunk=256",
-        init: |ctx, cache_size| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOFix256Mmb::init(ctx.child("storage"), cur_fix_cfg(&ctx, cache_size)),
     }
     CurrentOrderedVariable256Mmb {
         name: "current::ordered::variable::mmb chunk=256",
-        init: |ctx, cache_size| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx, cache_size)),
+        init: |ctx, cache_size| CurOVar256Mmb::init(ctx.child("storage"), cur_var_cfg(&ctx, cache_size)),
     }
 }
 

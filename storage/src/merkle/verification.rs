@@ -399,7 +399,10 @@ pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::LocationRangeExt as _,
+        merkle::{
+            Bagging::{BackwardFold, ForwardFold},
+            LocationRangeExt as _,
+        },
         mmb::{mem::Mmb, Location as MmbLocation},
         mmr::{mem::Mmr, StandardHasher as Standard},
     };
@@ -416,7 +419,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Mmr::new();
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let batch = {
@@ -476,7 +479,7 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 49 elements. Peaks cover locations 0-31, 32-47, 48.
             // A proof starting at location 32 puts the first peak entirely in the fold prefix.
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Mmr::new();
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let batch = {
@@ -526,7 +529,7 @@ mod tests {
     fn test_verification_proof_store_with_fold_prefix_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..8).map(test_digest).collect();
             let batch = {
@@ -575,7 +578,7 @@ mod tests {
     fn test_verification_proof_store_with_backward_fold_suffix_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let inactive_peaks = 0;
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..123).map(test_digest).collect();
@@ -587,7 +590,7 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let hasher: Standard<Sha256> = Standard::backward();
+            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(0)..MmbLocation::new(1);
@@ -624,7 +627,7 @@ mod tests {
     fn test_verification_proof_store_with_backward_fold_inactive_prefix_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..123).map(test_digest).collect();
             let batch = {
@@ -645,7 +648,7 @@ mod tests {
             let total_leaves = *mmb.leaves();
             assert!(active_start > 0 && active_start < total_leaves);
 
-            let hasher: Standard<Sha256> = Standard::backward();
+            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let root = mmb.root(&hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(active_start)..MmbLocation::new(total_leaves);
@@ -692,7 +695,7 @@ mod tests {
     fn test_verification_proof_store_multi_proof_backward_fold_suffix_peaks() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..123).map(test_digest).collect();
             let batch = {
@@ -703,7 +706,7 @@ mod tests {
                 batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let hasher: Standard<Sha256> = Standard::backward();
+            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let inactive_peaks = 0usize;
             let root = mmb.root(&hasher, inactive_peaks).unwrap();
 

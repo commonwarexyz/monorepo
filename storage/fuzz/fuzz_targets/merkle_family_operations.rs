@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::merkle::{
-    hasher::Standard, mem::Mem, mmb, mmr, Error, Family as MerkleFamily, Location, Position,
+    hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error, Family as MerkleFamily,
+    Location, Position,
 };
 use core::any::type_name;
 use libfuzzer_sys::fuzz_target;
@@ -128,7 +129,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
     let runner = deterministic::Runner::default();
 
     runner.start(|_context| async move {
-        let hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new(ForwardFold);
         let mut merkle = Mem::<F, Digest>::new();
         let mut reference = ReferenceMerkle::<F>::new();
 

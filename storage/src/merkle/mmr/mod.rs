@@ -264,6 +264,7 @@ impl Graftable for Family {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::Bagging::ForwardFold;
     use commonware_cryptography::Sha256;
 
     const MAX_NODES: Position = <Family as crate::merkle::Family>::MAX_NODES;
@@ -397,7 +398,7 @@ mod tests {
     #[test]
     fn test_is_valid_size() {
         let mut size_to_check = Position::new(0);
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmr = mem::Mmr::new();
         let digest = [1u8; 32];
         for _i in 0..10000 {
@@ -710,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_chunk_peaks() {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmr = mem::Mmr::new();
         let digest = [1u8; 32];
 
@@ -784,7 +785,7 @@ mod tests {
     fn test_leftmost_leaf() {
         // Verify leftmost_leaf is consistent with subtree_root_position:
         // `subtree_root_position(leftmost_leaf(pos, h), h) == pos`.
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmr = mem::Mmr::new();
         let digest = [1u8; 32];
         for _ in 0..200 {

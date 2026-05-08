@@ -80,7 +80,7 @@ where
     where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey> + 'static,
     {
-        let context = self.context.clone();
+        let context = self.context.child("run");
         context.spawn(move |_| self.run(vote_sender, intercept_rx))
     }
 

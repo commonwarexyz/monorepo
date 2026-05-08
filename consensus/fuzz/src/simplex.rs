@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::{
         fuzz, strategy::StrategyChoice, utils::Partition, FaultyMessaging, FuzzInput, Standard,
-        Twinable, N4F1C3,
+        TwinsMutator, N4F1C3,
     };
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
@@ -305,7 +305,7 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_ed25519_twin_connected() {
-        fuzz::<SimplexEd25519, Twinable>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexEd25519, TwinsMutator>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
@@ -372,13 +372,13 @@ mod tests {
         #[test_group("slow")]
         #[test]
         fn property_test_ed25519_twin_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, Twinable>(input);
+            fuzz::<SimplexEd25519, TwinsMutator>(input);
         }
 
         #[test_group("slow")]
         #[test]
         fn property_test_ed25519_shuffled_twin_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519CustomRoundRobin, Twinable>(input);
+            fuzz::<SimplexEd25519CustomRoundRobin, TwinsMutator>(input);
         }
 
         #[test_group("slow")]

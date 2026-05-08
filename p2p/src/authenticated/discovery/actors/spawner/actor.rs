@@ -112,7 +112,7 @@ impl<
                         reservation,
                     } => {
                         // Spawn peer
-                        self.context.with_label("peer").spawn({
+                        self.context.child("peer").spawn({
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
                             let dropped_messages = self.dropped_messages.clone();

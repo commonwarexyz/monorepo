@@ -19,7 +19,6 @@ use futures::StreamExt;
 use rand::Rng;
 use std::marker::PhantomData;
 
-#[derive(Clone)]
 pub struct Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -30,6 +29,22 @@ where
 {
     dkg: dkg::Mailbox<H, C, V>,
     _marker: PhantomData<(E, S)>,
+}
+
+impl<E, S, H, C, V> Clone for Application<E, S, H, C, V>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    fn clone(&self) -> Self {
+        Self {
+            dkg: self.dkg.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<E, S, H, C, V> Application<E, S, H, C, V>

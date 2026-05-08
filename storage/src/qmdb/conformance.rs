@@ -23,7 +23,7 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -549,7 +549,7 @@ macro_rules! db_conformance {
         impl Conformance for $name {
             async fn commit($s: u64) -> Vec<u8> {
                 deterministic::Runner::seeded($s).start(|ctx| async move {
-                    let mut $d = <$db>::init(ctx.with_label("db"), ($cfg_fn)("cf", &ctx))
+                    let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx))
                         .await
                         .unwrap();
                     let root = $body;
@@ -916,10 +916,10 @@ macro_rules! order_test {
         #[test]
         fn $name() {
             deterministic::Runner::default().start(|ctx| async move {
-                let mut $fwd = <$db>::init(ctx.with_label("fwd"), ($cfg_fn)("fwd", &ctx))
+                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx))
                     .await
                     .unwrap();
-                let mut $rev = <$db>::init(ctx.with_label("rev"), ($cfg_fn)("rev", &ctx))
+                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx))
                     .await
                     .unwrap();
                 $body;

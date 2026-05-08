@@ -39,11 +39,14 @@ version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
+commonware-invariants.workspace = true
 commonware-macros.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
 proptest.workspace = true
+roaring = "0.10.12"
 rstest.workspace = true
 
 [features]
@@ -73,6 +76,13 @@ arbitrary = [
 	"num-bigint?/arbitrary",
 	"std",
 ]
+# Enables analytical helpers used by roaring analysis benchmarks.
+# Off by default; tests turn it on automatically via `cfg(test)`.
+analysis = []
+# Exposes the `pub mod fuzz` Plan + run harness used by both `cargo fuzz` and the
+# in-test `minifuzz`-driven property test. Off by default. Tests pick it up via the
+# `arbitrary` dev-dependency path; the `cargo-fuzz` target opts in via `--features fuzz`.
+fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [lib]
 bench = false
@@ -81,6 +91,12 @@ bench = false
 name = "bitmap"
 harness = false
 path = "src/bitmap/benches/bench.rs"
+
+[[bench]]
+name = "roaring_memory"
+harness = false
+path = "src/bitmap/benches/roaring_memory.rs"
+required-features = ["analysis"]
 
 [[bench]]
 name = "rational"

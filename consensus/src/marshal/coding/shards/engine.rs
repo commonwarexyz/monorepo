@@ -415,7 +415,7 @@ where
         );
         let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
             WrappedBackgroundReceiver::new(
-                self.context.with_label("shard_ingress"),
+                self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
@@ -517,10 +517,7 @@ where
                 return;
             } => {
                 // Track shard receipt per peer.
-                self.metrics
-                    .shards_received
-                    .get_or_create_by(&peer)
-                    .inc();
+                self.metrics.shards_received.get_or_create_by(&peer).inc();
 
                 let commitment = shard.commitment();
                 if !self.should_handle_network_shard(commitment) {
@@ -1529,7 +1526,7 @@ mod tests {
         Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner};
+    use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};
     use commonware_utils::{
         channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
     };
@@ -1743,7 +1740,7 @@ mod tests {
 
                 let (network, oracle) =
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
-                        context.with_label("network"),
+                        context.child("network"),
                         simulated::Config {
                             max_size: MAX_SHARD_SIZE as u32,
                             disconnect_on_block: true,
@@ -1788,7 +1785,7 @@ mod tests {
                         .expect("peer should be registered");
 
                     let participant = Participant::new(idx as u32);
-                    let engine_context = context.with_label(&format!("peer_{}", idx));
+                    let engine_context = context.child("peer").with_attribute("index", idx);
 
                     let scheme = Scheme::signer(
                         SCHEME_NAMESPACE,
@@ -1830,7 +1827,9 @@ mod tests {
                         .remove(np_key)
                         .expect("non-participant should be registered");
 
-                    let engine_context = context.with_label(&format!("non_participant_{}", idx));
+                    let engine_context = context
+                        .child("non_participant")
+                        .with_attribute("index", idx);
 
                     let scheme = Scheme::verifier(SCHEME_NAMESPACE, participants.clone());
                     let scheme_provider: Prov = MultiEpochProvider::single(scheme);
@@ -3678,7 +3677,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
@@ -3759,7 +3758,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             // Build a coded block using epoch 1's participant set.
@@ -3813,7 +3812,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
@@ -3893,7 +3892,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
-                ChurningShardEngine::new(context.with_label("broadcaster"), broadcaster_config);
+                ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
             broadcaster_engine.start((broadcaster_sender, broadcaster_receiver));
 
             let receiver_scheme = Scheme::signer(
@@ -3916,7 +3915,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
-                ShardEngine::new(context.with_label("receiver"), receiver_config);
+                ShardEngine::new(context.child("receiver"), receiver_config);
             receiver_engine.start((receiver_sender, receiver_receiver));
 
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
@@ -4691,7 +4690,7 @@ mod tests {
         executor.start(|context| async move {
             let num_peers = 10usize;
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
@@ -4754,7 +4753,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             // Build a coded block and extract the shard destined for the receiver.
@@ -4825,7 +4824,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
@@ -4865,7 +4864,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (mut engine, _mailbox) = ShardEngine::new(context.with_label("engine"), config);
+            let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
 
             // Only `sender_pk` is in `latest.primary`, so only that peer may retain a pre-leader
             // buffer row (`buffer_peer_shard` / `peer_buffers`).
@@ -4925,7 +4924,7 @@ mod tests {
         executor.start(|context| async move {
             let num_peers = 6usize;
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
@@ -4999,7 +4998,7 @@ mod tests {
             };
 
             // Receiver engine: schemes for both epochs so post-cutover validation can run if needed.
-            let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             let coding_config = coding_config_for_participants(epoch0_set.len() as u16);
@@ -5068,7 +5067,7 @@ mod tests {
         executor.start(|context| async move {
             let num_peers = 10usize;
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.with_label("network"),
+                context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
@@ -5158,7 +5157,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::new(context.with_label("evicted"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
             engine.start((evicted_sender, evicted_receiver));
 
             let coding_config = coding_config_for_participants(num_peers as u16);

@@ -40,7 +40,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
+    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{channel::mpsc::Receiver, sync::Once, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
@@ -252,7 +252,7 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
 ) {
     let (participants, schemes) = P::setup(context, NAMESPACE, input.configuration.n);
     let (network, mut oracle) = Network::new_with_peers(
-        context.with_label("network"),
+        context.child("network"),
         NetworkConfig {
             max_size: 1024 * 1024,
             disconnect_on_block: false,
@@ -351,7 +351,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
 ) {
     let (vote_network, certificate_network, resolver_network) = channels;
     start_disrupter::<P>(
-        context.with_label("disrupter"),
+        context.child("disrupter"),
         scheme,
         &input.strategy,
         vote_network,
@@ -400,7 +400,7 @@ where
         scheme: scheme.clone(),
         elector: elector.clone(),
     };
-    let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+    let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
     let (vote_sender, vote_receiver) = pending;
     let (certificate_sender, certificate_receiver) = recovered;
@@ -415,8 +415,7 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: application::Certifier::Always,
     };
-    let (actor, application) =
-        application::Application::new(context.with_label("application"), app_cfg);
+    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
     actor.start();
 
     let blocker = oracle.control(validator.clone());
@@ -443,7 +442,7 @@ where
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
     };
-    let engine = Engine::new(context.with_label("engine"), engine_cfg);
+    let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
@@ -473,22 +472,22 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
 
     let vote_router = byzantine_router.clone();
     let (vote_primary, vote_secondary) = vote_receiver
-        .split_with(context.with_label("byzantine_first_vote"), move |msg| {
+        .split_with(context.child("byzantine_first_vote"), move |msg| {
             vote_router.route(msg)
         });
     let vote_receiver = ByzantineFirstReceiver::new(vote_primary, vote_secondary);
 
     let certificate_router = byzantine_router.clone();
-    let (certificate_primary, certificate_secondary) = certificate_receiver.split_with(
-        context.with_label("byzantine_first_certificate"),
-        move |msg| certificate_router.route(msg),
-    );
+    let (certificate_primary, certificate_secondary) = certificate_receiver
+        .split_with(context.child("byzantine_first_certificate"), move |msg| {
+            certificate_router.route(msg)
+        });
     let certificate_receiver =
         ByzantineFirstReceiver::new(certificate_primary, certificate_secondary);
 
     let resolver_router = byzantine_router;
     let (resolver_primary, resolver_secondary) = resolver_receiver
-        .split_with(context.with_label("byzantine_first_resolver"), move |msg| {
+        .split_with(context.child("byzantine_first_resolver"), move |msg| {
             resolver_router.route(msg)
         });
     let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
@@ -522,12 +521,10 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
-    reporters: &mut [reporter::Reporter<
-        deterministic::Context,
-        P::Scheme,
-        P::Elector,
-        Sha256Digest,
-    >],
+    reporters: &mut [(
+        PublicKeyOf<P>,
+        reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
+    )],
     partition: Partition,
     required_containers: u64,
 ) {
@@ -537,13 +534,13 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let (mut latest, mut monitor) = reporters[0].subscribe().await;
+    let (mut latest, mut monitor) = reporters[0].1.subscribe().await;
     let oracle = oracle.clone();
     let participants: Vec<_> = participants.to_vec();
     let base_partition: Option<SetPartition> = partition.set_partition().copied();
     let schedule = schedule.to_vec();
     context
-        .with_label("network_fault_scheduler")
+        .child("network_fault_scheduler")
         .spawn(move |_| async move {
             let link = default_link();
             let mut active: Option<SetPartition> = base_partition;
@@ -597,12 +594,10 @@ fn initial_drop_rate(schedule: &[(View, u8)]) -> u8 {
 /// `finalized_view = 0` therefore covers view 1.
 async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
-    reporters: &mut [reporter::Reporter<
-        deterministic::Context,
-        P::Scheme,
-        P::Elector,
-        Sha256Digest,
-    >],
+    reporters: &mut [(
+        PublicKeyOf<P>,
+        reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
+    )],
     schedule: Vec<(View, u8)>,
     required_containers: u64,
     drop_rate: network::DropRateCell,
@@ -611,9 +606,9 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let (mut latest, mut monitor) = reporters[0].subscribe().await;
+    let (mut latest, mut monitor) = reporters[0].1.subscribe().await;
     context
-        .with_label("messaging_fault_scheduler")
+        .child("messaging_fault_scheduler")
         .spawn(move |_| async move {
             let mut active: u8 = initial_rate;
             let mut finalized_view = latest.get();
@@ -716,7 +711,9 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
+            let ctx = context
+                .child("validator")
+                .with_attribute("public_key", &validator);
             spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
         }
 
@@ -724,13 +721,15 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
+            let ctx = context
+                .child("validator")
+                .with_attribute("public_key", &validator);
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
-                validator,
+                validator.clone(),
                 P::Elector::default(),
                 relay.clone(),
                 Duration::from_secs(1),
@@ -739,7 +738,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
                 recovered,
                 resolver,
             );
-            reporters.push(reporter);
+            reporters.push((validator, reporter));
         }
 
         spawn_network_fault_scheduler::<P>(
@@ -754,14 +753,19 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
 
         if input.partition.is_connected() && config.is_valid() {
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
-                        latest = monitor.recv().await.expect("event missing");
-                    }
-                }));
+                finalizers.push(
+                    context
+                        .child("finalizer")
+                        .with_attribute("public_key", validator)
+                        .spawn(move |_| async move {
+                            while latest.get() < required_containers {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        }),
+                );
             }
             join_all(finalizers).await;
         } else {
@@ -769,8 +773,9 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
         }
 
         if config.is_valid() {
-            invariants::check_vote_invariants(config.faults as usize, &reporters);
-            let states = invariants::extract(reporters, config.n as usize);
+            let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
     });
@@ -813,7 +818,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         let initial_rate = initial_drop_rate(&input.messaging_faults);
         *drop_rate.lock() = initial_rate;
         let byzantine_router = network::Router::new(
-            context.clone(),
+            context.child("byzantine_router"),
             participants
                 .iter()
                 .take(config.faults as usize)
@@ -826,7 +831,9 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
+            let ctx = context
+                .child("validator")
+                .with_attribute("public_key", &validator);
             spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
         }
 
@@ -834,20 +841,22 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
+            let ctx = context
+                .child("validator")
+                .with_attribute("public_key", &validator);
             let reporter = spawn_honest_validator_in_faulty_messaging::<P>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
-                validator,
+                validator.clone(),
                 byzantine_router.clone(),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
                 channels,
             );
-            reporters.push(reporter);
+            reporters.push((validator, reporter));
         }
 
         // Spawn a per-view messaging-fault scheduler that updates the shared
@@ -865,22 +874,28 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         // Wait for finalization or timeout
         if input.partition.is_connected() && config.is_valid() {
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
-                        latest = monitor.recv().await.expect("event missing");
-                    }
-                }));
+                finalizers.push(
+                    context
+                        .child("finalizer")
+                        .with_attribute("public_key", validator)
+                        .spawn(move |_| async move {
+                            while latest.get() < required_containers {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        }),
+                );
             }
             join_all(finalizers).await;
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
         if config.is_valid() {
-            invariants::check_vote_invariants(config.faults as usize, &reporters);
-            let states = invariants::extract(reporters, config.n as usize);
+            let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
     });
@@ -889,7 +904,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
 /// Role of the secondary half in a twin pair.
 #[derive(Clone, Copy)]
 enum TwinsRole {
-    /// Secondary runs `Disrupter` over `input.strategy` (Twinable mode).
+    /// Secondary runs `Disrupter` over `input.strategy` (TwinsMutator mode).
     /// Liveness wait uses absolute view targets.
     Mutator,
     /// Secondary runs a full legitimate engine and contributes a reporter
@@ -898,7 +913,7 @@ enum TwinsRole {
     Campaign,
 }
 
-fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
     run_twins::<P>(input, TwinsRole::Mutator);
 }
 
@@ -906,7 +921,7 @@ fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput) {
     run_twins::<P>(input, TwinsRole::Campaign);
 }
 
-/// Unified twins driver. The two existing modes (Twinable / TwinsCampaign)
+/// Unified twins driver. The two existing modes (TwinsMutator / TwinsCampaign)
 /// share scenario sampling, forwarders/routers, twin-half splitting, the
 /// primary engine, the honest validators, and the byzantine-aware invariants.
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
@@ -980,7 +995,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
         // primary (legitimate engine) + secondary (Disrupter).
         for idx in case.compromised.iter().copied() {
             let validator = participants[idx].clone();
-            let context = context.with_label(&format!("twin_{idx}"));
+            let context = context.child("twin").with_attribute("index", &idx);
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(&validator)
@@ -1050,27 +1065,20 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
 
             let (vote_sender_primary, vote_sender_secondary) =
                 vote_sender.split_with(make_vote_forwarder());
-            let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-                context.with_label(&format!("pending_split_{idx}")),
-                make_vote_router(),
-            );
+            let (vote_receiver_primary, vote_receiver_secondary) =
+                vote_receiver.split_with(context.child("pending_split"), make_vote_router());
             let (certificate_sender_primary, certificate_sender_secondary) =
                 certificate_sender.split_with(make_certificate_forwarder());
             let (certificate_receiver_primary, certificate_receiver_secondary) =
-                certificate_receiver.split_with(
-                    context.with_label(&format!("recovered_split_{idx}")),
-                    make_certificate_router(),
-                );
+                certificate_receiver
+                    .split_with(context.child("recovered_split"), make_certificate_router());
             let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
                 .split_with(|_origin, recipients, _message| Some(recipients.clone()));
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
-                    SplitTarget::Both
-                });
+                .split_with(context.child("resolver_split"), |_| SplitTarget::Both);
 
             // Primary: legitimate engine driven by the twins-aware elector.
-            let primary_label = format!("twin_{idx}_primary");
-            let primary_context = context.with_label(&primary_label);
+            let primary_context = context.child("primary");
             let primary_elector = twin_elector.clone();
             let reporter_cfg = reporter::Config {
                 participants: participants
@@ -1080,8 +1088,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 scheme: scheme.clone(),
                 elector: primary_elector.clone(),
             };
-            let reporter =
-                reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
+            let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -1093,7 +1100,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 should_certify: application::Certifier::Always,
             };
             let (actor, application) =
-                application::Application::new(primary_context.with_label("application"), app_cfg);
+                application::Application::new(primary_context.child("application"), app_cfg);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -1104,7 +1111,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: primary_label,
+                partition: format!("twin_{idx}_primary"),
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
                 leader_timeout: Duration::from_secs(1),
@@ -1120,7 +1127,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
+            let engine = Engine::new(primary_context.child("engine"), engine_cfg);
             engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
@@ -1137,7 +1144,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             match role {
                 TwinsRole::Mutator => {
                     start_disrupter::<P>(
-                        context.with_label(&format!("twin_{idx}_secondary")),
+                        context.child("secondary"),
                         scheme.clone(),
                         &input.strategy,
                         (vote_sender_secondary, vote_receiver_secondary),
@@ -1147,7 +1154,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 }
                 TwinsRole::Campaign => {
                     let secondary_label = format!("twin_{idx}_secondary");
-                    let secondary_context = context.with_label(&secondary_label);
+                    let secondary_context = context.child("secondary");
                     let secondary_elector = twin_elector.clone();
                     let secondary_reporter_cfg = reporter::Config {
                         participants: participants
@@ -1158,7 +1165,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         elector: secondary_elector.clone(),
                     };
                     let secondary_reporter = reporter::Reporter::new(
-                        secondary_context.with_label("reporter"),
+                        secondary_context.child("reporter"),
                         secondary_reporter_cfg,
                     );
                     reporters.push(secondary_reporter.clone());
@@ -1173,7 +1180,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         should_certify: application::Certifier::Always,
                     };
                     let (secondary_actor, secondary_application) = application::Application::new(
-                        secondary_context.with_label("application"),
+                        secondary_context.child("application"),
                         secondary_app_cfg,
                     );
                     secondary_actor.start();
@@ -1207,7 +1214,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let secondary_engine =
-                        Engine::new(secondary_context.with_label("engine"), secondary_engine_cfg);
+                        Engine::new(secondary_context.child("engine"), secondary_engine_cfg);
                     secondary_engine.start(
                         (vote_sender_secondary, vote_receiver_secondary),
                         (certificate_sender_secondary, certificate_receiver_secondary),
@@ -1228,7 +1235,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             if compromised.contains(&idx) {
                 continue;
             }
-            let ctx = context.with_label(&format!("honest_{idx}"));
+            let ctx = context.child("honest").with_attribute("index", &idx);
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
@@ -1257,28 +1264,37 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             let mut finalizers = Vec::new();
             for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                 let required = input.required_containers;
-                let label = format!("finalizer_{i}");
                 match role {
                     TwinsRole::Mutator => {
                         let (mut latest, mut monitor): (View, Receiver<View>) =
                             reporter.subscribe().await;
-                        finalizers.push(context.with_label(&label).spawn(move |_| async move {
-                            while latest.get() < required {
-                                latest = monitor.recv().await.expect("event missing");
-                            }
-                        }));
+                        finalizers.push(
+                            context
+                                .child("finalizer")
+                                .with_attribute("index", &i)
+                                .spawn(move |_| async move {
+                                    while latest.get() < required {
+                                        latest = monitor.recv().await.expect("event missing");
+                                    }
+                                }),
+                        );
                     }
                     TwinsRole::Campaign => {
                         let (_latest, mut monitor) = reporter.subscribe().await;
-                        finalizers.push(context.with_label(&label).spawn(move |_| async move {
-                            let mut count = 0u64;
-                            while count < required {
-                                let view = monitor.recv().await.expect("event missing");
-                                if view > prefix_end {
-                                    count += 1;
-                                }
-                            }
-                        }));
+                        finalizers.push(
+                            context
+                                .child("finalizer")
+                                .with_attribute("index", &i)
+                                .spawn(move |_| async move {
+                                    let mut count = 0u64;
+                                    while count < required {
+                                        let view = monitor.recv().await.expect("event missing");
+                                        if view > prefix_end {
+                                            count += 1;
+                                        }
+                                    }
+                                }),
+                        );
                     }
                 }
             }
@@ -1331,7 +1347,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
-    Twinable,
+    TwinsMutator,
     TwinsCampaign,
     FaultyMessaging,
     FaultyNet,
@@ -1357,7 +1373,7 @@ impl FuzzMode for Standard {
     const MODE: Mode = Mode::Standard;
 }
 
-/// **Twinable mode** - twin pairs with a `Disrupter` on the secondary half.
+/// **TwinsMutator mode** - twin pairs with a `Disrupter` on the secondary half.
 ///
 /// Each compromised participant (from a sampled `twins::cases` scenario) runs
 /// two halves: a legitimate primary engine and a secondary `Disrupter` that
@@ -1367,9 +1383,9 @@ impl FuzzMode for Standard {
 ///
 /// Use this to fuzz byzantine *content* mutations layered on top of twins-style
 /// network splits.
-pub struct Twinable;
-impl FuzzMode for Twinable {
-    const MODE: Mode = Mode::Twinable;
+pub struct TwinsMutator;
+impl FuzzMode for TwinsMutator {
+    const MODE: Mode = Mode::TwinsMutator;
 }
 
 /// **TwinsCampaign mode** - twin pairs where both halves are full engines.
@@ -1508,8 +1524,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
             input.partition = Partition::Adaptive(Vec::new());
             panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
         }
-        Mode::Twinable => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twin_mutator::<P>(input)
+        Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_twins_mutator::<P>(input)
         })),
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)

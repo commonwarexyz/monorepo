@@ -155,11 +155,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         // Setup the rate limiters
         let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
             self.allowed_handshake_rate_per_ip,
-            self.context.clone(),
+            self.context.child("ip_rate_limiter"),
         );
         let subnet_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
             self.allowed_handshake_rate_per_subnet,
-            self.context.clone(),
+            self.context.child("subnet_rate_limiter"),
         );
 
         // Start listening for incoming connections
@@ -247,19 +247,13 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 };
 
                 // Spawn a new handshaker to upgrade connection
-                self.context.with_label("handshaker").spawn({
+                self.context.child("handshaker").spawn({
                     let stream_cfg = self.stream_cfg.clone();
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context.into_present(),
-                            address,
-                            stream_cfg,
-                            sink,
-                            stream,
-                            tracker,
-                            supervisor,
+                            context, address, stream_cfg, sink, stream, tracker, supervisor,
                         )
                         .await;
 
@@ -277,7 +271,9 @@ mod tests {
     use super::*;
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
+    use commonware_runtime::{
+        deterministic, Error as RuntimeError, Runner as _, Stream, Supervisor as _,
+    };
     use commonware_utils::NZU32;
     use std::{
         net::{IpAddr, Ipv4Addr},
@@ -305,7 +301,7 @@ mod tests {
 
             let (updates_tx, updates_rx) = mpsc::channel(1);
             let actor = Actor::new(
-                context.clone(),
+                context.child("listener"),
                 Config {
                     address,
                     stream_cfg,
@@ -326,7 +322,7 @@ mod tests {
                 .expect("update registered ips");
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
-            let tracker_task = context.clone().spawn(|_| async move {
+            let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
@@ -343,7 +339,7 @@ mod tests {
 
             let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
-                .clone()
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
@@ -471,7 +467,7 @@ mod tests {
 
             let (_updates_tx, updates_rx) = mpsc::channel(1);
             let actor = Actor::new(
-                context.clone(),
+                context.child("listener"),
                 Config {
                     address,
                     stream_cfg,
@@ -485,7 +481,7 @@ mod tests {
             );
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
-            let tracker_task = context.clone().spawn(|_| async move {
+            let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
@@ -502,7 +498,7 @@ mod tests {
 
             let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
-                .clone()
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
@@ -551,7 +547,7 @@ mod tests {
 
             let (_updates_tx, updates_rx) = mpsc::channel(1);
             let actor = Actor::new(
-                context.clone(),
+                context.child("listener"),
                 Config {
                     address,
                     stream_cfg,
@@ -565,7 +561,7 @@ mod tests {
             );
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
-            let tracker_task = context.clone().spawn(|_| async move {
+            let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
@@ -582,7 +578,7 @@ mod tests {
 
             let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
-                .clone()
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
@@ -631,7 +627,7 @@ mod tests {
 
             let (updates_tx, updates_rx) = mpsc::channel(1);
             let actor = Actor::new(
-                context.clone(),
+                context.child("listener"),
                 Config {
                     address,
                     stream_cfg,
@@ -653,7 +649,7 @@ mod tests {
                 .expect("update registered ips");
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
-            let tracker_task = context.clone().spawn(|_| async move {
+            let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
@@ -670,7 +666,7 @@ mod tests {
 
             let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
-                .clone()
+                .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 

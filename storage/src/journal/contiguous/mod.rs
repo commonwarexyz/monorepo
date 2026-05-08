@@ -10,6 +10,7 @@ use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
 pub mod fixed;
+mod metrics;
 pub mod variable;
 
 #[cfg(test)]
@@ -35,11 +36,10 @@ pub trait Reader: Send + Sync {
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
-    /// Read multiple items at the given positions, which must be sorted in ascending order.
+    /// Read multiple items at the given positions, which must be strictly increasing.
     ///
-    /// The default implementation calls [`read`](Self::read) in a loop.
-    /// Fixed-size journal implementations override this to amortize lock
-    /// acquisition and avoid per-item buffer allocation.
+    /// The default implementation calls [`read`](Self::read) in a loop. Concrete journal
+    /// implementations override this to amortize lock acquisition and batch I/O.
     fn read_many(
         &self,
         positions: &[u64],
@@ -111,6 +111,14 @@ pub enum Many<'a, T> {
 }
 
 impl<T> Many<'_, T> {
+    /// Returns the total number of items across all segments.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Flat(items) => items.len(),
+            Self::Nested(nested_items) => nested_items.iter().map(|items| items.len()).sum(),
+        }
+    }
+
     /// Returns `true` if there are no items across all segments.
     pub fn is_empty(&self) -> bool {
         match self {

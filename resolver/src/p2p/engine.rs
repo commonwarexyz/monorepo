@@ -29,8 +29,8 @@ use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
-struct Serve<E: Clock, P: PublicKey> {
-    timer: histogram::Timer<E>,
+struct Serve<P: PublicKey> {
+    timer: histogram::Timer,
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
@@ -76,13 +76,13 @@ pub struct Engine<
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<Serve<E, P>>,
+    serves: FuturesPool<Serve<P>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
 
     /// Metrics for the peer actor
-    metrics: metrics::Metrics<E>,
+    metrics: metrics::Metrics,
 
     /// Phantom data for networking types
     _r: PhantomData<NetR>,
@@ -106,10 +106,9 @@ impl<
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
-            context.with_label("fetcher"),
+            context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
                 initial: cfg.initial,
@@ -239,8 +238,10 @@ impl<
 
                             // Only start new fetch if not already in progress
                             if is_new {
-                                self.inflight
-                                    .insert(key.clone(), self.metrics.fetch_duration.timer());
+                                self.inflight.insert(
+                                    key.clone(),
+                                    self.metrics.fetch_duration.timer(self.context.as_ref()),
+                                );
                                 self.fetcher.add_ready(key);
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
@@ -293,11 +294,11 @@ impl<
                 // Metrics and logs
                 match result {
                     Ok(_) => {
+                        timer.observe(self.context.as_ref());
                         self.metrics.serve.inc(Status::Success);
                     }
                     Err(ref err) => {
                         debug!(?err, ?peer, ?id, "serve failed");
-                        timer.cancel();
                         self.metrics.serve.inc(Status::Failure);
                     }
                 }
@@ -327,8 +328,9 @@ impl<
                 };
                 match msg.payload {
                     wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) =>
-                        self.handle_network_response(peer, msg.id, response),
+                    wire::Payload::Response(response) => {
+                        self.handle_network_response(peer, msg.id, response)
+                    }
                     wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
@@ -378,7 +380,7 @@ impl<
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
-        let timer = self.metrics.serve_duration.timer();
+        let timer = self.metrics.serve_duration.timer(self.context.as_ref());
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
@@ -409,7 +411,7 @@ impl<
     async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
         if valid {
             self.metrics.fetch.inc(Status::Success);
-            self.inflight.complete(&key); // records duration on drop
+            self.inflight.complete(&key, self.context.as_ref());
             self.fetcher.clear_targets(&key);
             return;
         }

@@ -18,7 +18,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
-    Metrics as _,
+    Supervisor as _,
 };
 use commonware_utils::{
     channel::{
@@ -75,9 +75,11 @@ struct ProgressMetrics {
 impl ProgressMetrics {
     /// Register sync progress metrics on the provided context.
     fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size =
-            context.gauge("journal_size", "Current journal size (operations applied)");
-        let target_end = context.gauge("target_end", "Target range end (operations needed)");
+        let journal_size = context.gauge("journal_size", "Current sync journal size");
+        let target_end = context.gauge(
+            "target_end",
+            "Exclusive target range end, equal to journal size when sync completes",
+        );
 
         Self {
             journal_size,
@@ -300,7 +302,7 @@ where
         // any engine-owned handles.
         let local_target_state_available = if config.target.range.start() > Location::new(0) {
             DB::has_local_target_state(
-                config.context.with_label("local_target_probe"),
+                config.context.child("local_target_probe"),
                 &config.db_config,
                 &config.target,
             )
@@ -311,13 +313,14 @@ where
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
-            config.context.with_label("journal"),
+            config.context.child("journal"),
             config.db_config.journal_config(),
             config.target.range.clone(),
         )
         .await?;
 
-        let progress_metrics = ProgressMetrics::new(&config.context);
+        let sync_context = config.context.child("sync");
+        let progress_metrics = ProgressMetrics::new(&sync_context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
@@ -332,7 +335,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::with_bagging(DB::ROOT_BAGGING),
+            hasher: qmdb::hasher::<DB::Hasher>(),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,

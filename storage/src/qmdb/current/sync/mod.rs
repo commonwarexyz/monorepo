@@ -6,8 +6,9 @@
 //! The canonical root of a `current` database combines the ops root, grafted tree root, and
 //! optional partial chunk into a single hash (see the [Root structure](super) section in the
 //! module documentation). The sync engine operates on the **ops root**, not the canonical root:
-//! it downloads operations and verifies each batch against the ops root using standard merkle
-//! range proofs (identical to `any` sync). [crate::qmdb::current::proof::OpsRootWitness] can be
+//! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
+//! (identical to `any` sync). Callers that verify current ops proofs directly should
+//! use `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be
 //! used by callers that need to authenticate the synced ops root against a trusted canonical root;
 //! the sync engine does not perform this check itself.
 //!
@@ -33,13 +34,12 @@ use crate::{
     },
     merkle::{
         full::{self, Merkle},
-        hasher::Standard as StandardHasher,
-        Bagging, Graftable, Location,
+        Graftable, Location,
     },
     qmdb::{
         self,
         any::{
-            db::Db as AnyDb,
+            db::{Db as AnyDb, Metrics as AnyMetrics},
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
@@ -62,7 +62,7 @@ use crate::{
             },
             FixedConfig, VariableConfig,
         },
-        operation::{Committable, Key},
+        operation::{Committable, Key, Operation as _},
         sync::{Database, DatabaseConfig as Config},
     },
     translator::Translator,
@@ -118,9 +118,9 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     let merkle = Merkle::<F, _, _, S>::init_sync(
-        context.with_label("merkle"),
+        context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
             range: range.clone(),
@@ -128,7 +128,7 @@ where
         },
     )
     .await?;
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
@@ -150,8 +150,9 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
+    let any_metrics = AnyMetrics::new(context.child("any"));
     let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), false).await?;
+        AnyDb::init_from_log(index, log, Some(bitmap), any_metrics).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -178,7 +179,7 @@ where
     };
 
     // Build grafted tree.
-    let hasher = StandardHasher::<H>::new();
+    let hasher = qmdb::hasher::<H>();
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
@@ -198,7 +199,13 @@ where
         hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(&hasher, any.bitmap.as_ref(), &storage).await?;
+    let grafted_root = db::compute_grafted_root(
+        &hasher,
+        any.bitmap.as_ref(),
+        &storage,
+        any.inactivity_floor_loc,
+    )
+    .await?;
     let ops_root = any.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
@@ -213,16 +220,19 @@ where
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =
-        db::init_metadata::<F, E, DigestOf<H>>(context.with_label("metadata"), &metadata_partition)
+        db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
+    let metrics = db::Metrics::new(context);
     let current_db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
+        metrics,
     };
+    current_db.update_metrics();
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.
     current_db.sync_metadata().await?;
@@ -256,8 +266,6 @@ macro_rules! impl_current_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
-            const ROOT_BAGGING: Bagging = Bagging::ForwardFold;
-
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -289,29 +297,44 @@ macro_rules! impl_current_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
-                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context.with_label("local_target_merkle_probe"),
-                    config.merkle_config.clone(),
-                    target,
-                    0,
-                    Bagging::ForwardFold,
-                )
-                .await
-                {
-                    return false;
-                }
-
                 let Ok(journal) = <$journal>::init(
-                    context.with_label("local_target_journal_probe"),
+                    context.child("local_target_journal_probe"),
                     config.journal_config(),
                 )
                 .await
                 else {
                     return false;
                 };
-                let bounds = journal.reader().await.bounds();
+                let reader = journal.reader().await;
+                let bounds = reader.bounds();
+                if Location::new(bounds.start) > target.range.start() {
+                    return false;
+                }
+                let Ok(inactivity_floor) =
+                    qmdb::find_inactivity_floor_at::<F, _>(&reader, target.range.end(), |op| {
+                        op.has_floor()
+                    })
+                    .await
+                else {
+                    return false;
+                };
 
-                Location::new(bounds.start) <= target.range.start()
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    inactivity_floor,
+                );
+                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
+                    context.child("local_target_merkle_probe"),
+                    config.merkle_config.clone(),
+                    target,
+                    inactive_peaks,
+                )
+                .await
+                {
+                    return false;
+                }
+
+                true
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies

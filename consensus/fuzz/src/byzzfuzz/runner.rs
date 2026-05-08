@@ -39,7 +39,7 @@ use commonware_cryptography::{
     certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest, Hasher, Sha256,
 };
 use commonware_macros::select;
-use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};
 use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, FuzzRng};
 use futures::future::join_all;
 use rand::Rng;
@@ -250,7 +250,9 @@ where
             intercept::resolver_view_extractor::<P::Scheme>(cert_codec, pool.clone()),
         );
 
-        let ctx = context.with_label(&format!("validator_{validator}"));
+        let ctx = context
+            .child("validator")
+            .with_attribute("public_key", &validator);
         let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
             ctx,
             &oracle,
@@ -276,7 +278,7 @@ where
     // as fallback.
     // Cert/resolver process faults are omit-only so the injector
     // doesn't need their senders.
-    let injector_ctx = context.with_label("byzzfuzz_injector");
+    let injector_ctx = context.child("byzzfuzz_injector");
     let injector = ByzzFuzzInjector::new(
         injector_ctx,
         schemes[BYZANTINE_IDX].clone(),
@@ -337,7 +339,7 @@ where
             }
             let required_containers = input.required_containers;
             let (mut latest, mut monitor): (View, ViewReceiver<View>) = reporter.subscribe().await;
-            finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+            finalizers.push(context.child("finalizer").spawn(move |_| async move {
                 while latest.get() < required_containers {
                     let Some(next) = monitor.recv().await else {
                         return;
@@ -469,7 +471,7 @@ where
             let (mut latest, mut monitor): (View, ViewReceiver<View>) =
                 reporters[i].subscribe().await;
             let req = required_containers;
-            phase1_finishers.push(context.with_label("byzzfuzz_phase1_finisher").spawn(
+            phase1_finishers.push(context.child("byzzfuzz_phase1_finisher").spawn(
                 move |_| async move {
                     while latest.get() < req {
                         let Some(next) = monitor.recv().await else {
@@ -541,7 +543,8 @@ where
             for (i, baseline, mut latest, mut monitor) in watcher_inputs {
                 watchers.push(
                     context
-                        .with_label(&format!("byzzfuzz_post_gst_watcher_{i}"))
+                        .child("byzzfuzz_post_gst_watcher")
+                        .with_attribute("index", &i)
                         .spawn(move |_| async move {
                             while latest.get() <= baseline {
                                 let Some(next) = monitor.recv().await else {

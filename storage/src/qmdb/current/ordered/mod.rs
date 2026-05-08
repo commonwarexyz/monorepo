@@ -16,6 +16,8 @@ use crate::{
         operation::Key,
     },
 };
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 
 pub mod db;
@@ -44,33 +46,135 @@ pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const
     Commit(OperationProof<F, D, N>, Option<V::Value>),
 }
 
+const KEY_VALUE_CONTEXT: u8 = 0;
+const COMMIT_CONTEXT: u8 = 1;
+
+impl<F, K, V, D, const N: usize> Write for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Update<K, V>: Write,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::KeyValue(op_proof, update) => {
+                KEY_VALUE_CONTEXT.write(buf);
+                op_proof.write(buf);
+                update.write(buf);
+            }
+            Self::Commit(op_proof, value) => {
+                COMMIT_CONTEXT.write(buf);
+                op_proof.write(buf);
+                value.write(buf);
+            }
+        }
+    }
+}
+
+impl<F, K, V, D, const N: usize> EncodeSize for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Update<K, V>: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::KeyValue(op_proof, update) => op_proof.encode_size() + update.encode_size(),
+            Self::Commit(op_proof, value) => op_proof.encode_size() + value.encode_size(),
+        }
+    }
+}
+
+impl<F, K, V, D, const N: usize> Read for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Update<K, V>: Read,
+{
+    /// `(max_digests, update_cfg, value_cfg)`: total digest cap for the embedded operation
+    /// proof, the read configuration for [Update], and the read configuration for the value type.
+    type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_digests, update_cfg, value_cfg): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        match u8::read(buf)? {
+            KEY_VALUE_CONTEXT => {
+                let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
+                let update = Update::<K, V>::read_cfg(buf, update_cfg)?;
+                Ok(Self::KeyValue(op_proof, update))
+            }
+            COMMIT_CONTEXT => {
+                let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
+                let value = Option::<V::Value>::read_cfg(buf, value_cfg)?;
+                Ok(Self::Commit(op_proof, value))
+            }
+            tag => Err(commonware_codec::Error::InvalidEnum(tag)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F, K, V, D, const N: usize> arbitrary::Arbitrary<'_> for ExclusionProof<F, K, V, D, N>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let op_proof = u.arbitrary()?;
+        if u.arbitrary()? {
+            Ok(Self::KeyValue(op_proof, u.arbitrary()?))
+        } else {
+            Ok(Self::Commit(op_proof, u.arbitrary()?))
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for ordered Current QMDB variants.
 
-    use super::db;
+    use super::{db, ExclusionProof};
     use crate::{
         index::ordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
         merkle::{Graftable, Location, Proof},
+        mmb,
         qmdb::{
             any::{
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
+                value::FixedEncoding,
                 ValueEncoding,
             },
-            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
+            current::{
+                proof::{OperationProof, RangeProof},
+                tests::apply_random_ops,
+                BitmapPrunedBits,
+            },
             store::tests::{TestKey, TestValue},
             Error,
         },
         translator::OneCap,
         Persistable,
     };
-    use commonware_codec::Codec;
+    use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _};
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics as _, Runner as _,
+        Runner as _, Supervisor as _,
     };
     use commonware_utils::{
         bitmap::{Prunable as BitMap, Readable as _},
@@ -100,12 +204,12 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build-small".to_string();
-            let db: C = open_db(context.with_label("first"), partition.clone()).await;
+            let db: C = open_db(context.child("first"), partition.clone()).await;
             assert_eq!(db.inactivity_floor_loc().await, Location::<F>::new(0));
             assert_eq!(db.oldest_retained().await, 0);
             let root0 = db.root();
             drop(db);
-            let mut db: C = open_db(context.with_label("second"), partition.clone()).await;
+            let mut db: C = open_db(context.child("second"), partition.clone()).await;
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
 
@@ -127,7 +231,7 @@ pub mod tests {
             assert_ne!(root1, root0);
 
             drop(db);
-            let mut db: C = open_db(context.with_label("third"), partition.clone()).await;
+            let mut db: C = open_db(context.child("third"), partition.clone()).await;
             assert_eq!(db.root(), root1);
 
             // Create of same key should fail (key already exists).
@@ -148,7 +252,7 @@ pub mod tests {
             let root2 = db.root();
 
             drop(db);
-            let mut db: C = open_db(context.with_label("fourth"), partition.clone()).await;
+            let mut db: C = open_db(context.child("fourth"), partition.clone()).await;
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.root(), root2);
 
@@ -198,9 +302,9 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
+            let hasher = crate::qmdb::hasher::<Sha256>();
             let partition = "build-small".to_string();
-            let mut db = open_db(context.with_label("db"), partition.clone()).await;
+            let mut db = open_db(context.child("db"), partition.clone()).await;
 
             // Add one key.
             let k = Sha256::fill(0x01);
@@ -214,32 +318,24 @@ pub mod tests {
             db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            let proof = db.key_value_proof(&hasher, k).await.unwrap();
 
             // Proof should be verifiable against current root.
             let root = db.root();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
-                k,
-                v1,
-                &proof,
-                &root,
+                &hasher, k, v1, &proof, &root,
             ));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
-                k,
-                v2,
-                &proof,
-                &root,
+                &hasher, k, v2, &proof, &root,
             ));
             // Proof should not verify against a mangled next_key.
             let mut mangled_proof = proof.clone();
             mangled_proof.next_key = Sha256::fill(0xFF);
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 v1,
                 &mangled_proof,
@@ -258,38 +354,23 @@ pub mod tests {
 
             // New value should not be verifiable against the old proof.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
-                k,
-                v2,
-                &proof,
-                &root,
+                &hasher, k, v2, &proof, &root,
             ));
 
             // But the new value should verify against a new proof.
-            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            let proof = db.key_value_proof(&hasher, k).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
-                k,
-                v2,
-                &proof,
-                &root,
+                &hasher, k, v2, &proof, &root,
             ));
 
             // Old value will not verify against new proof.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
-                k,
-                v1,
-                &proof,
-                &root,
+                &hasher, k, v1, &proof, &root,
             ));
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
-            let (p, _, chunks) = db
-                .range_proof(&mut hasher, op_loc, NZU64!(1))
-                .await
-                .unwrap();
+            let (p, _, chunks) = db.range_proof(&hasher, op_loc, NZU64!(1)).await.unwrap();
             let proof_inactive = db::KeyValueProof {
                 proof: crate::qmdb::current::proof::OperationProof {
                     loc: op_loc,
@@ -306,7 +387,7 @@ pub mod tests {
                 next_key: k,
             });
             assert!(TestDb::<F, C, V>::verify_range_proof(
-                &mut hasher,
+                &hasher,
                 &proof_inactive.proof.range_proof,
                 proof_inactive.proof.loc,
                 &[op],
@@ -317,7 +398,7 @@ pub mod tests {
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 v1,
                 &proof_inactive,
@@ -337,7 +418,7 @@ pub mod tests {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -357,7 +438,7 @@ pub mod tests {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.chunk = modified_chunk;
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -385,20 +466,20 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let mut hasher = Sha256::new();
-            let db = open_db(context.with_label("db"), partition.clone()).await;
+            let hasher = crate::qmdb::hasher::<Sha256>();
+            let db = open_db(context.child("db"), partition.clone()).await;
             let root = db.root();
 
             // Empty range proof should not crash or verify, since even an empty db has a single
             let proof = RangeProof {
                 proof: Proof::default(),
-                pre_prefix_acc: None,
-                unfolded_prefix_peaks: vec![],
+                prefix_witnesses: vec![],
+                suffix_witnesses: vec![],
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
             assert!(!TestDb::<F, C, V>::verify_range_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::<F>::new(0),
                 &[],
@@ -421,18 +502,11 @@ pub mod tests {
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
-                let (proof, ops, chunks) = db
-                    .range_proof(&mut hasher, loc, NZU64!(max_ops))
-                    .await
-                    .unwrap();
+                let (proof, ops, chunks) =
+                    db.range_proof(&hasher, loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_range_proof(
-                        &mut hasher,
-                        &proof,
-                        loc,
-                        &ops,
-                        &chunks,
-                        &root
+                        &hasher, &proof, loc, &ops, &chunks, &root
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
@@ -440,7 +514,7 @@ pub mod tests {
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
                 assert!(!TestDb::<F, C, V>::verify_range_proof(
-                    &mut hasher,
+                    &hasher,
                     &proof,
                     loc,
                     &ops,
@@ -470,8 +544,8 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let mut hasher = Sha256::new();
-            let db = open_db(context.with_label("db"), partition.clone()).await;
+            let hasher = crate::qmdb::hasher::<Sha256>();
+            let db = open_db(context.child("db"), partition.clone()).await;
             let mut db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
@@ -481,7 +555,7 @@ pub mod tests {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(&mut hasher, bad_key).await;
+            let res = db.key_value_proof(&hasher, bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
@@ -497,40 +571,28 @@ pub mod tests {
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
-                let proof = db.key_value_proof(&mut hasher, key).await.unwrap();
+                let proof = db.key_value_proof(&hasher, key).await.unwrap();
 
                 // Proof should validate against the current value and correct root.
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher,
-                    key,
-                    value,
-                    &proof,
-                    &root
+                    &hasher, key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
                 let wrong_val = Sha256::hash(&[0xFF]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher,
-                    key,
-                    wrong_val,
-                    &proof,
-                    &root
+                    &hasher, key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::hash(&[0xEE]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher,
-                    wrong_key,
-                    value,
-                    &proof,
-                    &root
+                    &hasher, wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::hash(&[0xDD]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher,
+                    &hasher,
                     key,
                     value,
                     &proof,
@@ -540,11 +602,7 @@ pub mod tests {
                 let mut bad_proof = proof.clone();
                 bad_proof.next_key = wrong_key;
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher,
-                    key,
-                    value,
-                    &bad_proof,
-                    &root,
+                    &hasher, key, value, &bad_proof, &root,
                 ));
             }
 
@@ -568,9 +626,9 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
+            let hasher = crate::qmdb::hasher::<Sha256>();
             let partition = "build-small".to_string();
-            let mut db = open_db(context.with_label("db"), partition.clone()).await;
+            let mut db = open_db(context.child("db"), partition.clone()).await;
 
             // Add one key.
             let k = Sha256::fill(0x00);
@@ -588,20 +646,14 @@ pub mod tests {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
-                    TestDb::<F, C, V>::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
+                    TestDb::<F, C, V>::verify_key_value_proof(&hasher, k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !TestDb::<F, C, V>::verify_key_value_proof(
-                        &mut hasher,
-                        k,
-                        old_val,
-                        &proof,
-                        &root,
-                    ),
+                    !TestDb::<F, C, V>::verify_key_value_proof(&hasher, k, old_val, &proof, &root,),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
@@ -628,20 +680,17 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
+            let hasher = crate::qmdb::hasher::<Sha256>();
             let partition = "exclusion-proofs".to_string();
-            let mut db = open_db(context.with_label("db"), partition.clone()).await;
+            let mut db = open_db(context.child("db"), partition.clone()).await;
 
             let key_exists_1 = Sha256::fill(0x10);
 
             // We should be able to prove exclusion for any key against an empty db.
             let empty_root = db.root();
-            let empty_proof = db
-                .exclusion_proof(&mut hasher, &key_exists_1)
-                .await
-                .unwrap();
+            let empty_proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_1,
                 &empty_proof,
                 &empty_root,
@@ -659,34 +708,34 @@ pub mod tests {
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
-            let result = db.exclusion_proof(&mut hasher, &key_exists_1).await;
+            let result = db.exclusion_proof(&hasher, &key_exists_1).await;
             assert!(matches!(result, Err(Error::KeyExists)));
 
             // Generate some valid exclusion proofs for keys on either side.
             let greater_key = Sha256::fill(0xFF);
             let lesser_key = Sha256::fill(0x00);
-            let proof = db.exclusion_proof(&mut hasher, &greater_key).await.unwrap();
-            let proof2 = db.exclusion_proof(&mut hasher, &lesser_key).await.unwrap();
+            let proof = db.exclusion_proof(&hasher, &greater_key).await.unwrap();
+            let proof2 = db.exclusion_proof(&hasher, &lesser_key).await.unwrap();
 
             // Since there's only one span in the DB, the two exclusion proofs should be identical,
             // and the proof should verify any key but the one that exists in the db.
             assert_eq!(proof, proof2);
             // Any key except the one that exists should verify against this proof.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
@@ -710,50 +759,50 @@ pub mod tests {
             let lesser_key = Sha256::fill(0x0F); // < k1=0x10
             let greater_key = Sha256::fill(0x31); // > k2=0x30
             let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
-            let proof = db.exclusion_proof(&mut hasher, &greater_key).await.unwrap();
+            let proof = db.exclusion_proof(&hasher, &greater_key).await.unwrap();
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &middle_key,
                 &proof,
                 &root,
             ));
 
             // Due to the cycle, lesser & greater keys should produce the same proof.
-            let new_proof = db.exclusion_proof(&mut hasher, &lesser_key).await.unwrap();
+            let new_proof = db.exclusion_proof(&hasher, &lesser_key).await.unwrap();
             assert_eq!(proof, new_proof);
 
             // Test the inner span [k, k2).
-            let proof = db.exclusion_proof(&mut hasher, &middle_key).await.unwrap();
+            let proof = db.exclusion_proof(&hasher, &middle_key).await.unwrap();
             // `k` should fail since it's in the db.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &middle_key,
                 &proof,
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_2,
                 &proof,
                 &root,
@@ -761,7 +810,7 @@ pub mod tests {
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &conflicting_middle_key,
                 &proof,
                 &root,
@@ -769,13 +818,13 @@ pub mod tests {
 
             // Using lesser/greater keys for the middle-proof should fail.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
@@ -799,18 +848,15 @@ pub mod tests {
             assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
-            let proof = db
-                .exclusion_proof(&mut hasher, &key_exists_1)
-                .await
-                .unwrap();
+            let proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_2,
                 &proof,
                 &root,
@@ -818,17 +864,161 @@ pub mod tests {
 
             // Try fooling the verifier with improper values.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_1,
                 &empty_proof, // wrong proof
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &mut hasher,
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &empty_root, // wrong root
             ));
         });
+    }
+
+    fn sample_op_proof() -> OperationProof<mmb::Family, Digest, 32> {
+        let range_proof = RangeProof {
+            proof: Proof::<mmb::Family, Digest> {
+                leaves: mmb::Location::new(7),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"sib")],
+            },
+            prefix_witnesses: vec![Sha256::hash(b"peak")],
+            suffix_witnesses: vec![Sha256::hash(b"suf")],
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops"),
+        };
+        let chunk: [u8; 32] = core::array::from_fn(|i| i as u8);
+        OperationProof {
+            loc: mmb::Location::new(5),
+            chunk,
+            range_proof,
+        }
+    }
+
+    fn op_proof_digest_count(proof: &OperationProof<mmb::Family, Digest, 32>) -> usize {
+        proof.range_proof.proof.digests.len()
+            + proof.range_proof.prefix_witnesses.len()
+            + proof.range_proof.suffix_witnesses.len()
+    }
+
+    type CodecExclusionProof =
+        ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
+    type CodecKeyValueProof = db::KeyValueProof<mmb::Family, Digest, Digest, 32>;
+    const MAX_DIGESTS: usize = 64;
+
+    #[test]
+    fn test_key_value_proof_codec_roundtrip() {
+        let proof = CodecKeyValueProof {
+            proof: sample_op_proof(),
+            next_key: Sha256::hash(b"next-key"),
+        };
+
+        let encoded = proof.encode();
+        assert_eq!(encoded.len(), proof.encode_size());
+        let decoded = CodecKeyValueProof::decode_cfg(encoded, &(MAX_DIGESTS, ())).unwrap();
+        assert_eq!(decoded, proof);
+    }
+
+    #[test]
+    fn test_key_value_proof_codec_enforces_total_digest_budget() {
+        let proof = CodecKeyValueProof {
+            proof: sample_op_proof(),
+            next_key: Sha256::hash(b"next-key"),
+        };
+        let total_digests = op_proof_digest_count(&proof.proof);
+
+        let encoded = proof.encode();
+        let decoded =
+            CodecKeyValueProof::decode_cfg(encoded.clone(), &(total_digests, ())).unwrap();
+        assert_eq!(decoded, proof);
+        assert!(CodecKeyValueProof::decode_cfg(encoded, &(total_digests - 1, ())).is_err());
+    }
+
+    #[test]
+    fn test_exclusion_proof_codec_roundtrip() {
+        let cases = [
+            CodecExclusionProof::KeyValue(
+                sample_op_proof(),
+                Update {
+                    key: Sha256::hash(b"key"),
+                    value: Sha256::hash(b"value"),
+                    next_key: Sha256::hash(b"next-key"),
+                },
+            ),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(b"metadata"))),
+            CodecExclusionProof::Commit(sample_op_proof(), None),
+        ];
+
+        for proof in cases {
+            let encoded = proof.encode();
+            assert_eq!(encoded.len(), proof.encode_size());
+            let decoded = CodecExclusionProof::decode_cfg(encoded, &(MAX_DIGESTS, (), ())).unwrap();
+            assert_eq!(decoded, proof);
+        }
+    }
+
+    #[test]
+    fn test_exclusion_proof_codec_enforces_total_digest_budget() {
+        let cases = [
+            CodecExclusionProof::KeyValue(
+                sample_op_proof(),
+                Update {
+                    key: Sha256::hash(b"key"),
+                    value: Sha256::hash(b"value"),
+                    next_key: Sha256::hash(b"next-key"),
+                },
+            ),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(b"metadata"))),
+            CodecExclusionProof::Commit(sample_op_proof(), None),
+        ];
+
+        for proof in cases {
+            let total_digests = match &proof {
+                CodecExclusionProof::KeyValue(op_proof, _) => op_proof_digest_count(op_proof),
+                CodecExclusionProof::Commit(op_proof, _) => op_proof_digest_count(op_proof),
+            };
+
+            let encoded = proof.encode();
+            let decoded =
+                CodecExclusionProof::decode_cfg(encoded.clone(), &(total_digests, (), ())).unwrap();
+            assert_eq!(decoded, proof);
+            assert!(
+                CodecExclusionProof::decode_cfg(encoded, &(total_digests - 1, (), ())).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_exclusion_proof_rejects_unknown_tag() {
+        let mut bytes = vec![42u8]; // unknown tag
+        bytes.extend_from_slice(&[0u8; 32]); // garbage
+        let result = CodecExclusionProof::decode_cfg(bytes.as_slice(), &(MAX_DIGESTS, (), ()));
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::{
+            merkle::{mmb, mmr},
+            qmdb::{
+                any::value::{FixedEncoding, VariableEncoding},
+                current::ordered::{db::KeyValueProof, ExclusionProof},
+            },
+        };
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+        use commonware_utils::sequence::U64;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<KeyValueProof<mmr::Family, U64, Sha256Digest, 32>>,
+            CodecConformance<KeyValueProof<mmb::Family, U64, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmr::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmr::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmb::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
+            CodecConformance<ExclusionProof<mmb::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+        }
     }
 }
