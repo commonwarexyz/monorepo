@@ -1,17 +1,18 @@
 //! Shared validation for QMDB batch chains.
 //!
-//! A batch chain is a linked sequence of in-memory batches built on top of a DB state. Each batch records its position via [`Bounds`] (where its operations sit in the log)
-//! and the inactivity floor declared by its commit. Ancestors (older batches in the chain that
-//! have not yet been applied to the DB) are tracked as [`AncestorBounds`] in newest-first
-//! order.
+//! A batch chain is a linked sequence of in-memory batches built on top of a DB state. Each
+//! batch records its position via [`Bounds`] (where its operations sit in the log) and the
+//! inactivity floor declared by its commit. Older batches in the chain are tracked as
+//! [`AncestorBounds`] in newest-first order; some may already be on disk and others may not.
 //!
 //! Before applying a batch to the DB, [`Bounds::validate_apply_to`] checks two things shared
 //! across QMDB variants (any, immutable, keyless):
 //!
 //! - The batch is not stale: the current DB size must match either the batch's recorded
 //!   `db_size`, its `base_size`, or one of its ancestor boundaries.
-//! - Commit floors are monotonically non-decreasing across each unapplied ancestor and the
-//!   tip, and no floor exceeds its own commit location.
+//! - Commit floors are monotonically non-decreasing along the chain, and no floor exceeds
+//!   its own commit location. Ancestors already on disk are skipped (their floors were
+//!   validated when they were first applied); the rest of the chain and the tip are checked.
 //!
 //! The helpers [`ancestors`] and [`parent_and_ancestors`] walk the chain via weak parent
 //! references; [`collect_ancestor_bounds`] snapshots them into a `Vec` for storage on a

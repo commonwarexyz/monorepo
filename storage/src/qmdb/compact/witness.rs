@@ -14,7 +14,7 @@
 //!
 //! The lifecycle in this file is:
 //!
-//! 1. Build a [`Witness`] from the current in-memory tip.
+//! 1. Build a [`ServeState`] from the current in-memory tip.
 //! 2. Persist its witness bytes into the same active/inactive slot scheme used by the compact
 //!    Merkle frontier.
 //! 3. Reload that witness on reopen or rewind, re-verify it against the currently loaded root, and
@@ -84,7 +84,7 @@ pub(crate) const fn last_commit_proof_key(slot: u8) -> U64 {
 /// coherent unit. Keeping them together here avoids repeated re-encoding and re-proofing during
 /// steady-state serving while still letting reopen/rewind rebuild the cache from persisted bytes.
 #[derive(Clone)]
-pub(crate) struct Witness<F: Family, D: Digest> {
+pub(crate) struct ServeState<F: Family, D: Digest> {
     /// Root committed by the current persisted frontier/witness pair.
     pub(crate) root: D,
     /// Total leaves in the committed Merkle, which also identifies the tip commit location.
@@ -97,7 +97,7 @@ pub(crate) struct Witness<F: Family, D: Digest> {
     pub(crate) last_commit_proof: Proof<F, D>,
 }
 
-impl<F: Family, D: Digest> Witness<F, D> {
+impl<F: Family, D: Digest> ServeState<F, D> {
     /// Convert the cached witness into the compact-sync target this source can currently serve.
     ///
     /// Compact sources only serve their current committed tip, so the target is just the root plus
@@ -138,30 +138,30 @@ impl<F: Family, D: Digest> Witness<F, D> {
 /// The cache is intentionally tiny: it only hides the lock used to read and replace the witness.
 /// Higher-level persistence and serving logic stays explicit at call sites.
 pub(crate) struct Cache<F: Family, D: Digest> {
-    witness: RwLock<Witness<F, D>>,
+    witness: RwLock<ServeState<F, D>>,
 }
 
 impl<F: Family, D: Digest> Cache<F, D> {
     /// Create a cache from the witness loaded or bootstrapped during db initialization.
-    pub(crate) const fn new(witness: Witness<F, D>) -> Self {
+    pub(crate) const fn new(witness: ServeState<F, D>) -> Self {
         Self {
             witness: RwLock::new(witness),
         }
     }
 
     /// Read the cached witness without exposing the underlying lock to db code.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&Witness<F, D>) -> R) -> R {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&ServeState<F, D>) -> R) -> R {
         f(&self.witness.read())
     }
 
     /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.
-    pub(crate) fn replace(&self, witness: Witness<F, D>) {
+    pub(crate) fn replace(&self, witness: ServeState<F, D>) {
         *self.witness.write() = witness;
     }
 
     /// Mutate the cache in tests that intentionally corrupt witness state.
     #[cfg(test)]
-    pub(crate) fn mutate(&self, f: impl FnOnce(&mut Witness<F, D>)) {
+    pub(crate) fn mutate(&self, f: impl FnOnce(&mut ServeState<F, D>)) {
         f(&mut self.witness.write());
     }
 }
@@ -173,7 +173,7 @@ impl<F: Family, D: Digest> Cache<F, D> {
 pub(crate) fn write_witness_metadata<E, F, D>(
     metadata: &mut Metadata<E, U64, Vec<u8>>,
     slot: u8,
-    witness: &Witness<F, D>,
+    witness: &ServeState<F, D>,
 ) where
     E: Context,
     F: Family,
@@ -205,7 +205,7 @@ pub(crate) fn validate_inactivity_floor<F: Family>(
     Ok(())
 }
 
-/// Build a witness cache from compact state that was already authenticated by the caller.
+/// Build a witness from compact state that was already authenticated by the caller.
 #[allow(clippy::type_complexity)]
 pub(crate) fn witness_from_authenticated_state<F, E, D, S>(
     merkle: &compact::Merkle<F, E, D, S>,
@@ -214,7 +214,7 @@ pub(crate) fn witness_from_authenticated_state<F, E, D, S>(
     last_commit_op_bytes: Vec<u8>,
     last_commit_proof: Proof<F, D>,
     pinned_nodes: Vec<D>,
-) -> Result<(Location<F>, Witness<F, D>), Error<F>>
+) -> Result<(Location<F>, ServeState<F, D>), Error<F>>
 where
     F: Family,
     E: Context,
@@ -227,7 +227,7 @@ where
     let leaf_count = merkle.leaves();
     let last_commit_loc = Location::<F>::new(*leaf_count - 1);
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-    let witness = Witness {
+    let witness = ServeState {
         root,
         leaf_count,
         pinned_nodes,
@@ -254,7 +254,7 @@ pub(crate) async fn load_active_witness<F, E, H, S, C, Op, LastCommitFloor>(
     merkle: &compact::Merkle<F, E, H::Digest, S>,
     commit_codec_config: &C,
     last_commit_floor: LastCommitFloor,
-) -> Result<(Witness<F, H::Digest>, Op), Error<F>>
+) -> Result<(ServeState<F, H::Digest>, Op), Error<F>>
 where
     F: Family,
     E: Context,
@@ -312,7 +312,7 @@ where
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>()
     });
-    let witness = Witness {
+    let witness = ServeState {
         root,
         leaf_count,
         pinned_nodes,
@@ -353,7 +353,7 @@ where
             |mem| {
                 let root = mem.root(&hasher, inactive_peaks)?;
                 let last_commit_proof = mem.proof(&hasher, Location::new(0), inactive_peaks)?;
-                Ok(Witness {
+                Ok(ServeState {
                     root,
                     leaf_count: Location::new(1),
                     pinned_nodes: Vec::new(),
@@ -406,7 +406,7 @@ where
                     .map(|pos| *mem.get_node_unchecked(pos))
                     .collect::<Vec<_>>();
                 let last_commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
-                Ok(Witness {
+                Ok(ServeState {
                     root: mem_root,
                     leaf_count: mem_leaves,
                     pinned_nodes,

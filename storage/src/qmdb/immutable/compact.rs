@@ -29,7 +29,7 @@ use crate::{
         batch_chain,
         compact::{
             batch as compact_batch,
-            witness::{self, Witness},
+            witness::{self, ServeState},
         },
         operation::Key,
         sync::compact as compact_sync,
@@ -265,7 +265,7 @@ where
     async fn load_active_witness(
         merkle: &compact_merkle::Merkle<F, E, H::Digest, S>,
         commit_codec_config: &C,
-    ) -> Result<(Witness<F, H::Digest>, Operation<F, K, V>), Error<F>> {
+    ) -> Result<(ServeState<F, H::Digest>, Operation<F, K, V>), Error<F>> {
         witness::load_active_witness::<F, E, H, S, _, Operation<F, K, V>, _>(
             merkle,
             commit_codec_config,
@@ -403,7 +403,7 @@ where
     /// This reflects the last state for which both frontier and witness were durably captured,
     /// which may lag behind live in-memory mutations until [`Self::sync`] is called.
     pub fn current_target(&self) -> compact_sync::Target<F, H::Digest> {
-        self.witness.with(Witness::target)
+        self.witness.with(ServeState::target)
     }
 
     /// Return the compact-sync state and target derived from one witness snapshot.
