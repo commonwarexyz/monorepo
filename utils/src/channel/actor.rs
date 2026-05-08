@@ -25,13 +25,64 @@ pub trait MessagePolicy: Sized {
 }
 
 struct Overflow<T> {
-    queue: VecDeque<T>,
+    queue: Mutex<VecDeque<T>>,
+    len: AtomicUsize,
+}
+
+impl<T> Overflow<T> {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    fn is_active(&self) -> bool {
+        self.len() > 0
+    }
+
+    fn apply_policy(&self, message: T, closed: &AtomicBool) -> Feedback
+    where
+        T: MessagePolicy,
+    {
+        let mut queue = self.queue.lock();
+        if closed.load(Ordering::Acquire) {
+            return Feedback::Closed;
+        }
+
+        let feedback = T::backpressure(&mut queue, message);
+        self.len.store(queue.len(), Ordering::Release);
+        feedback
+    }
+
+    fn refill_ready(&self, ready: &ArrayQueue<T>) {
+        let mut queue = self.queue.lock();
+        while let Some(message) = queue.pop_front() {
+            match ready.push(message) {
+                Ok(()) => {}
+                Err(message) => {
+                    queue.push_front(message);
+                    break;
+                }
+            }
+        }
+        self.len.store(queue.len(), Ordering::Release);
+    }
+
+    fn clear(&self) {
+        let mut queue = self.queue.lock();
+        queue.clear();
+        self.len.store(0, Ordering::Release);
+    }
 }
 
 struct Shared<T> {
     ready: ArrayQueue<T>,
-    overflow: Mutex<Overflow<T>>,
-    overflow_len: AtomicUsize,
+    overflow: Overflow<T>,
     closed: AtomicBool,
     inflight: AtomicUsize,
     senders: AtomicUsize,
@@ -91,7 +142,7 @@ impl<T: MessagePolicy> ActorMailbox<T> {
             Err(_) => return Feedback::Closed,
         };
 
-        let message = if self.shared.overflow_len.load(Ordering::Acquire) > 0 {
+        let message = if self.shared.overflow.is_active() {
             message
         } else {
             match self.shared.ready.push(message) {
@@ -126,7 +177,7 @@ impl<T: MessagePolicy> ActorMailbox<T> {
     }
 
     fn len(&self) -> usize {
-        self.shared.ready.len() + self.shared.overflow_len.load(Ordering::Acquire)
+        self.shared.ready.len() + self.shared.overflow.len()
     }
 
     fn backpressure_overflow(&self, message: T) -> Feedback {
@@ -134,18 +185,13 @@ impl<T: MessagePolicy> ActorMailbox<T> {
             return Feedback::Closed;
         }
 
-        let mut overflow = self.shared.overflow.lock();
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Feedback::Closed;
-        }
-
-        let feedback = T::backpressure(&mut overflow.queue, message);
-        let len = overflow.queue.len();
-        self.shared.overflow_len.store(len, Ordering::Release);
+        let feedback = self
+            .shared
+            .overflow
+            .apply_policy(message, &self.shared.closed);
         match feedback {
             Feedback::Backoff => {
-                drop(overflow);
-                if len > 0 {
+                if self.shared.overflow.is_active() {
                     self.shared.receiver_waker.wake();
                 }
                 Feedback::Backoff
@@ -205,23 +251,8 @@ impl<T> ActorInbox<T> {
             return Some(message);
         }
 
-        self.refill_ready();
+        self.shared.overflow.refill_ready(&self.shared.ready);
         self.shared.ready.pop()
-    }
-
-    fn refill_ready(&self) {
-        let mut overflow = self.shared.overflow.lock();
-        while let Some(message) = overflow.queue.pop_front() {
-            match self.shared.ready.push(message) {
-                Ok(()) => {}
-                Err(message) => {
-                    overflow.queue.push_front(message);
-                    break;
-                }
-            }
-        }
-        let len = overflow.queue.len();
-        self.shared.overflow_len.store(len, Ordering::Release);
     }
 
     fn is_disconnected(&self) -> bool {
@@ -237,9 +268,7 @@ impl<T> Drop for ActorInbox<T> {
             std::hint::spin_loop();
         }
         while self.shared.ready.pop().is_some() {}
-        let mut overflow = self.shared.overflow.lock();
-        overflow.queue.clear();
-        self.shared.overflow_len.store(0, Ordering::Release);
+        self.shared.overflow.clear();
     }
 }
 
@@ -249,10 +278,7 @@ pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbo
 
     let shared = Arc::new(Shared {
         ready: ArrayQueue::new(capacity),
-        overflow: Mutex::new(Overflow {
-            queue: VecDeque::new(),
-        }),
-        overflow_len: AtomicUsize::new(0),
+        overflow: Overflow::new(),
         closed: AtomicBool::new(false),
         inflight: AtomicUsize::new(0),
         senders: AtomicUsize::new(1),
