@@ -718,6 +718,29 @@ mod loom_tests {
         seen.fetch_or(1usize << usize::from(value), Ordering::AcqRel);
     }
 
+    #[derive(Clone, Debug)]
+    enum StaleHintMessage {
+        Drop(u8),
+        Spill(u8),
+        DropAfterDrain { drained: Arc<AtomicUsize> },
+    }
+
+    impl Policy for StaleHintMessage {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
+            match message {
+                Self::Drop(_) => false,
+                message @ Self::Spill(_) => {
+                    overflow.spill(message);
+                    true
+                }
+                Self::DropAfterDrain { drained } => {
+                    assert_eq!(drained.load(Ordering::Acquire), 0);
+                    false
+                }
+            }
+        }
+    }
+
     #[test]
     fn concurrent_close_and_ready_enqueue_remains_closed() {
         loom::model(|| {
@@ -796,13 +819,39 @@ mod loom_tests {
     #[test]
     fn stale_overflow_hint_retries_ready_before_policy() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new::<StaleHintMessage>(NZUsize!(2));
+            assert_eq!(sender.enqueue(StaleHintMessage::Drop(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(StaleHintMessage::Drop(1)), Feedback::Ok);
+            assert_eq!(
+                sender.enqueue(StaleHintMessage::Spill(2)),
+                Feedback::Backoff
+            );
 
-            // Model a sender seeing overflow as active just after another thread drained it.
-            sender.state.overflow.len.store(1, Ordering::Release);
+            let drained = Arc::new(AtomicUsize::new(0));
+            let enqueue_sender = sender.clone();
+            let drained_for_enqueue = drained.clone();
+            let enqueue = thread::spawn(move || {
+                enqueue_sender.enqueue(StaleHintMessage::DropAfterDrain {
+                    drained: drained_for_enqueue,
+                })
+            });
 
-            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
-            assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
+            assert!(matches!(receiver.try_recv(), Ok(StaleHintMessage::Drop(0))));
+            assert!(matches!(receiver.try_recv(), Ok(StaleHintMessage::Drop(1))));
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(StaleHintMessage::Spill(2))
+            ));
+            drained.store(1, Ordering::Release);
+
+            match enqueue.join().unwrap() {
+                Feedback::Ok => assert!(matches!(
+                    receiver.try_recv(),
+                    Ok(StaleHintMessage::DropAfterDrain { .. })
+                )),
+                Feedback::Dropped => assert!(receiver.try_recv().is_err()),
+                feedback => panic!("unexpected feedback: {feedback:?}"),
+            }
         });
     }
 }
