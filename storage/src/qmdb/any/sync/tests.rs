@@ -372,16 +372,20 @@ where
     executor.start(|mut context| async move {
         let original_ops_data = H::create_ops(original_ops);
 
-        // Create two databases
-        let mut target_db = H::init_db(context.child("target")).await;
+        // Heap-pin large sub-futures so their state machines don't inflate this test's outer
+        // state machine and overflow the test thread stack.
+        let mut target_db = Box::pin(H::init_db(context.child("target"))).await;
         let sync_db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let mut sync_db: H::Db =
-            H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
+        let mut sync_db: H::Db = Box::pin(H::init_db_with_config(
+            client_context.child("client"),
+            sync_db_config.clone(),
+        ))
+        .await;
 
         // Apply the same operations to both databases
-        target_db = H::apply_ops(target_db, original_ops_data.clone()).await;
-        sync_db = H::apply_ops(sync_db, original_ops_data.clone()).await;
+        target_db = Box::pin(H::apply_ops(target_db, original_ops_data.clone())).await;
+        sync_db = Box::pin(H::apply_ops(sync_db, original_ops_data.clone())).await;
         // commit already done in apply_ops
         // commit already done in apply_ops
 
@@ -390,7 +394,7 @@ where
         // Add more operations and commit the target database
         // (use different seed to avoid key collisions)
         let more_ops = H::create_ops_seeded(1, 1);
-        target_db = H::apply_ops(target_db, more_ops.clone()).await;
+        target_db = Box::pin(H::apply_ops(target_db, more_ops.clone())).await;
         // commit already done in apply_ops
 
         let sync_root = H::sync_target_root(&target_db);
@@ -416,7 +420,10 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: H::Db = sync::sync(config).await.unwrap();
+        // Heap-pin the sync future so its (large, monomorphized-per-variant) state
+        // machine doesn't inflate this test's outer state machine and overflow the
+        // test thread stack.
+        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
 
         // Verify database state
         let bounds = synced_db.bounds().await;
@@ -952,8 +959,10 @@ where
             max_retained_roots: 0,
         };
 
-        let sync_handle = sync::sync(config);
-        pin_mut!(sync_handle);
+        // Heap-pin the sync future so its (large, monomorphized-per-variant) state
+        // machine doesn't inflate this test's outer state machine and overflow the
+        // test thread stack.
+        let mut sync_handle = Box::pin(sync::sync(config));
 
         select! {
             _ = sync_handle.as_mut() => {
@@ -1014,8 +1023,8 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     target: &Target<F, Digest>,
 ) {
     let target_end = *target.range.end();
-    let journal_size = format!("client_journal_size {target_end}");
-    let target_end = format!("client_target_end {target_end}");
+    let journal_size = format!("client_sync_journal_size {target_end}");
+    let target_end = format!("client_sync_target_end {target_end}");
     loop {
         let metrics = context.encode();
         if metrics.contains(&journal_size) && metrics.contains(&target_end) {

@@ -141,7 +141,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Runner as _, Supervisor as _,
+        Metrics as _, Runner as _, Supervisor as _,
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
@@ -250,6 +250,52 @@ pub(crate) mod test {
 
     fn val(i: u64) -> Digest {
         Sha256::hash(&(i + 10000).to_be_bytes())
+    }
+
+    #[test_traced("INFO")]
+    fn test_any_unordered_fixed_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db_generic::<mmr::Family>(ctx.child("db")).await;
+            let k = key(1);
+            let v = val(1);
+            let batch = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&k).await.unwrap(), Some(v));
+            assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(Location::new(0)).await.unwrap();
+
+            let metrics = ctx.encode();
+            for expected in [
+                "db_size 4",
+                "db_pruning_boundary 0",
+                "db_retained 4",
+                "db_inactivity_floor 2",
+                "db_last_commit 3",
+                "db_get_calls_total 1",
+                "db_get_many_calls_total 1",
+                "db_keys_requested_total 2",
+                "db_apply_batch_calls_total 1",
+                "db_operations_applied_total 3",
+                "db_commit_calls_total 1",
+                "db_sync_calls_total 1",
+                "db_prune_calls_total 1",
+                "db_get_duration_count 1",
+                "db_get_many_duration_count 1",
+                "db_apply_batch_duration_count 1",
+                "db_commit_duration_count 1",
+                "db_sync_duration_count 1",
+                "db_prune_duration_count 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
     }
 
     // -- Generic inner functions for parameterized batch tests --

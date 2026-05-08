@@ -88,6 +88,7 @@ use crate::{
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log, compact_witness,
+        metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
         operation::{Key, Operation as _},
         Error,
     },
@@ -99,6 +100,28 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_parallel::{Sequential, Strategy};
 use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
+
+/// Metrics for Immutable QMDBs.
+pub(crate) struct Metrics<E: Context> {
+    /// State gauges.
+    pub state: StateMetrics,
+    /// Write and durability metrics.
+    pub operations: OperationMetrics<E>,
+    /// Key read metrics.
+    pub reads: KeyReadMetrics<E>,
+}
+
+impl<E: Context> Metrics<E> {
+    /// Create and register metrics.
+    pub fn new(context: E) -> Self {
+        let context = Arc::new(context);
+        Self {
+            state: StateMetrics::new(context.as_ref()),
+            operations: OperationMetrics::new(context.clone()),
+            reads: KeyReadMetrics::new(context),
+        }
+    }
+}
 
 pub mod batch;
 mod compact;
@@ -166,6 +189,9 @@ pub struct Immutable<
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
     pub(crate) inactivity_floor_loc: Location<F>,
+
+    /// Metrics for this database.
+    metrics: Metrics<E>,
 }
 
 // Shared read-only functionality.
@@ -232,13 +258,17 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
-        Ok(Self {
+        let metrics = Metrics::new(context);
+        let db = Self {
             journal,
             root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
-        })
+            metrics,
+        };
+        db.update_metrics().await;
+        Ok(db)
     }
 
     /// Return the inactivity floor location declared by the last committed batch.
@@ -258,6 +288,17 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
+    /// Update state gauges from the current database state.
+    async fn update_metrics(&self) {
+        let bounds = self.journal.reader().await.bounds();
+        self.metrics.state.set(
+            bounds.end,
+            bounds.start,
+            *self.inactivity_floor_loc,
+            *self.last_commit_loc,
+        );
+    }
+
     /// Return the most recent location from which this database can safely be synced, and the
     /// upper bound on [`Self::prune`]'s `loc`. For immutable databases, this equals the
     /// inactivity floor declared by the last committed batch.
@@ -268,19 +309,24 @@ where
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
+        let _timer = self.metrics.reads.get_timer();
+        self.metrics.reads.get_calls.inc();
+        self.metrics.reads.keys_requested.inc();
         let iter = self.snapshot.get(key);
         let reader = self.journal.reader().await;
         let oldest = reader.bounds().start;
+        let mut result = None;
         for &loc in iter {
             if loc < oldest {
                 continue;
             }
             if let Some(v) = Self::get_from_loc(&reader, key, loc).await? {
-                return Ok(Some(v));
+                result = Some(v);
+                break;
             }
         }
 
-        Ok(None)
+        Ok(result)
     }
 
     /// Batch read multiple keys.
@@ -291,6 +337,9 @@ where
             return Ok(Vec::new());
         }
 
+        let _timer = self.metrics.reads.get_many_timer();
+        self.metrics.reads.get_many_calls.inc();
+        self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
@@ -447,6 +496,8 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.operations.prune_timer();
+        self.metrics.operations.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
@@ -454,7 +505,7 @@ where
             ));
         }
         self.journal.prune(loc).await?;
-
+        self.update_metrics().await;
         Ok(())
     }
 
@@ -549,6 +600,7 @@ where
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
+        self.update_metrics().await;
 
         Ok(())
     }
@@ -584,12 +636,18 @@ where
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        Ok(self.journal.sync().await?)
+        let _timer = self.metrics.operations.sync_timer();
+        self.metrics.operations.sync_calls.inc();
+        self.journal.sync().await?;
+        Ok(())
     }
 
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
     pub async fn commit(&self) -> Result<(), Error<F>> {
-        Ok(self.journal.commit().await?)
+        let _timer = self.metrics.operations.commit_timer();
+        self.metrics.operations.commit_calls.inc();
+        self.journal.commit().await?;
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.
@@ -634,6 +692,8 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
+        let _timer = self.metrics.operations.apply_batch_timer();
+        self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
@@ -685,7 +745,13 @@ where
         self.last_commit_loc = Location::new(batch.total_size - 1);
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.root = batch.root;
-        Ok(start_loc..Location::new(batch.total_size))
+        let range = start_loc..Location::new(batch.total_size);
+        self.update_metrics().await;
+        self.metrics
+            .operations
+            .operations_applied
+            .inc_by(*range.end - *range.start);
+        Ok(range)
     }
 }
 

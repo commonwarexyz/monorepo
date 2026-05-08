@@ -65,6 +65,7 @@ mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
+mod metrics;
 pub mod operation;
 pub mod store;
 pub mod sync;

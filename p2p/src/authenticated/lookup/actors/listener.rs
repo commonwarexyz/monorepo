@@ -253,13 +253,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context,
-                            address,
-                            stream_cfg,
-                            sink,
-                            stream,
-                            tracker,
-                            supervisor,
+                            context, address, stream_cfg, sink, stream, tracker, supervisor,
                         )
                         .await;
 

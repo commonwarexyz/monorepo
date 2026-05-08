@@ -27,9 +27,7 @@ commonware_macros::stability_scope!(BETA {
     pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         // "0x" prefix stripping is handled by `const-hex::decode`.
         let s = s.replace(['\t', '\n', '\r', ' '], "");
-        let stripped = s
-            .strip_prefix("0X")
-            .unwrap_or(&s);
+        let stripped = s.strip_prefix("0X").unwrap_or(&s);
         const_hex::decode(stripped).ok()
     }
 

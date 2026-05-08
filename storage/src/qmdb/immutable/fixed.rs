@@ -87,7 +87,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -135,6 +135,48 @@ mod tests {
             commit_codec_config: (),
         };
         CompactDb::init(context, cfg).await.unwrap()
+    }
+
+    #[test_traced("INFO")]
+    fn test_immutable_fixed_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(2u8);
+            let floor = db.inactivity_floor_loc();
+            let batch = db.new_batch().set(key, value).merkleize(&db, None, floor);
+            db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+
+            let metrics = ctx.encode();
+            for expected in [
+                "db_size 3",
+                "db_pruning_boundary 0",
+                "db_retained 3",
+                "db_inactivity_floor 0",
+                "db_last_commit 2",
+                "db_get_calls_total 1",
+                "db_get_many_calls_total 1",
+                "db_keys_requested_total 2",
+                "db_apply_batch_calls_total 1",
+                "db_operations_applied_total 2",
+                "db_commit_calls_total 1",
+                "db_sync_calls_total 1",
+                "db_prune_calls_total 1",
+                "db_get_duration_count 1",
+                "db_get_many_duration_count 1",
+                "db_apply_batch_duration_count 1",
+                "db_commit_duration_count 1",
+                "db_sync_duration_count 1",
+                "db_prune_duration_count 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
     }
 
     #[allow(clippy::type_complexity)]

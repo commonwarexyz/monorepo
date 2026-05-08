@@ -1,8 +1,8 @@
 //! Utilities for working with histograms.
 
-use super::{raw, Histogram};
-use crate::Clock;
-use std::time::SystemTime;
+use super::{raw, Histogram, MetricsExt as _};
+use crate::{Clock, Metrics};
+use std::{sync::Arc, time::SystemTime};
 
 /// Convenience methods for Prometheus histograms.
 pub trait HistogramExt {
@@ -99,5 +99,91 @@ impl Timer {
     /// Record the duration using the given clock.
     pub fn observe<C: Clock>(self, clock: &C) {
         self.histogram.observe_between(self.start, clock.current());
+    }
+}
+
+/// A timer guard that observes its duration when dropped.
+///
+/// Built on top of [`Timer`]. Useful for `?`-heavy async code where every early-return path
+/// would otherwise need to remember to call [`Timer::observe`]. Validation failures after the
+/// guard is created are still part of the recorded duration; if a code path should not record
+/// a sample, call [`ScopedTimer::cancel`] before the guard is dropped.
+pub struct ScopedTimer<C: Clock> {
+    timer: Option<Timer>,
+    clock: Arc<C>,
+}
+
+impl<C: Clock> ScopedTimer<C> {
+    /// Cancel the guard so it does not observe a sample on drop.
+    pub fn cancel(mut self) {
+        self.timer = None;
+    }
+}
+
+impl<C: Clock> Drop for ScopedTimer<C> {
+    fn drop(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            timer.observe(self.clock.as_ref());
+        }
+    }
+}
+
+impl Timed {
+    /// Start a timer guard that observes the elapsed duration when dropped.
+    pub fn scoped<C: Clock>(&self, clock: &Arc<C>) -> ScopedTimer<C> {
+        ScopedTimer {
+            timer: Some(self.timer(clock.as_ref())),
+            clock: clock.clone(),
+        }
+    }
+}
+
+/// Register a duration histogram using [`Buckets::LOCAL`] (storage-style work).
+pub fn duration_histogram<M: Metrics>(
+    context: &M,
+    name: &'static str,
+    help: &'static str,
+) -> Histogram {
+    context.histogram(name, help, Buckets::LOCAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{deterministic, Runner as _, Supervisor as _};
+    use std::time::Duration;
+
+    #[test]
+    fn duration_records_all_calls() {
+        deterministic::Runner::default().start(|context| async move {
+            let histogram = duration_histogram(&context, "test_duration", "test duration");
+            let timed = Timed::new(histogram);
+            let clock = Arc::new(context.child("timer"));
+
+            {
+                let _timer = timed.scoped(&clock);
+                context.sleep(Duration::from_millis(1)).await;
+                let result: Result<(), ()> = Ok(());
+                assert!(result.is_ok());
+            }
+
+            {
+                let _timer = timed.scoped(&clock);
+                context.sleep(Duration::from_millis(1)).await;
+                let result: Result<(), ()> = Err(());
+                assert!(result.is_err());
+            }
+
+            {
+                let _timer = timed.scoped(&clock);
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("test_duration_count 3"),
+                "unexpected metrics: {metrics}"
+            );
+        });
     }
 }

@@ -50,14 +50,14 @@ impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: St
         cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, V, H, S> = Journal::new(
-            context,
+            context.child("journal"),
             cfg.merkle,
             cfg.log,
             Operation::<F, V>::is_commit,
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal).await
+        Self::init_from_journal(journal, context).await
     }
 }
 
