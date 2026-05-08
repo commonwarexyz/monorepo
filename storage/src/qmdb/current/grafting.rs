@@ -51,7 +51,7 @@ use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-pub(crate) const fn height<const N: usize>() -> u32 {
+pub const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 

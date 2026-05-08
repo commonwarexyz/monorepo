@@ -429,6 +429,128 @@ fn transformed_peak_counts<F: Graftable>(
     out
 }
 
+/// Return the transformed grafted witness positions and shape for a peak slice.
+fn transformed_peak_witnesses<F: Graftable>(
+    peaks: &[(Position<F>, u32)],
+    start_leaf: u64,
+    grafting_height: u32,
+    has_chunk: impl Fn(u64) -> bool,
+) -> Vec<(Position<F>, usize)> {
+    let chunk_size = 1u64 << grafting_height;
+    let mut leaf_cursor = start_leaf;
+    let mut out = Vec::new();
+    let mut pending_chunk: Option<(u64, usize)> = None;
+
+    let flush = |out: &mut Vec<(Position<F>, usize)>, pending: &mut Option<(u64, usize)>| {
+        if let Some((idx, count)) = pending.take() {
+            let grafted_pos = Position::<F>::try_from(Location::<F>::new(idx))
+                .expect("chunk index is a valid grafted leaf location");
+            out.push((
+                grafting::grafted_to_ops_pos(grafted_pos, grafting_height),
+                count,
+            ));
+        }
+    };
+
+    for (pos, height) in peaks {
+        let peak_start = leaf_cursor;
+        leaf_cursor += 1u64 << *height;
+
+        if *height >= grafting_height {
+            flush(&mut out, &mut pending_chunk);
+            out.push((*pos, 1));
+            continue;
+        }
+
+        let chunk_idx = peak_start / chunk_size;
+        match pending_chunk.take() {
+            Some((idx, count)) if idx == chunk_idx => {
+                pending_chunk = Some((idx, count + 1));
+            }
+            old_chunk => {
+                pending_chunk = old_chunk;
+                flush(&mut out, &mut pending_chunk);
+                if has_chunk(chunk_idx) {
+                    pending_chunk = Some((chunk_idx, 1));
+                } else {
+                    out.push((*pos, 1));
+                }
+            }
+        }
+    }
+    flush(&mut out, &mut pending_chunk);
+
+    out
+}
+
+fn add_unfolded_peak_digests<F: Graftable, D: Digest>(
+    proof: &RangeProof<F, D>,
+    plan: &ProofPlan<F>,
+    collected: &mut BTreeMap<Position<F>, D>,
+) -> Option<()> {
+    let prefix_start = 0;
+    let after_start = plan.after_start();
+    let prefix_raw_start = plan.prefix_raw_start();
+    let after_raw_end = plan.after_raw_end();
+
+    let prefix_transformed_positions = transformed_peak_witnesses(
+        &plan.layout.prefix[..prefix_raw_start],
+        prefix_start,
+        plan.grafting.height,
+        |idx| plan.chunk_available(idx),
+    );
+    let suffix_transformed_positions = transformed_peak_witnesses(
+        &plan.layout.after[after_raw_end..],
+        after_start + peaks_leaf_len(&plan.layout.after[..after_raw_end]),
+        plan.grafting.height,
+        |idx| plan.chunk_available(idx),
+    );
+
+    let prefix_witness_len =
+        prefix_transformed_positions.len() + plan.layout.prefix[prefix_raw_start..].len();
+    let suffix_witness_len =
+        plan.layout.after[..after_raw_end].len() + suffix_transformed_positions.len();
+    if proof.unfolded_prefix_peaks.len() != prefix_witness_len
+        || proof.unfolded_suffix_peaks.len() != suffix_witness_len
+    {
+        return None;
+    }
+
+    let (prefix_transformed, prefix_raw) = proof
+        .unfolded_prefix_peaks
+        .split_at(prefix_transformed_positions.len());
+    for ((position, _count), digest) in prefix_transformed_positions
+        .iter()
+        .zip(prefix_transformed.iter().copied())
+    {
+        collected.insert(*position, digest);
+    }
+    for ((position, _height), digest) in plan.layout.prefix[prefix_raw_start..]
+        .iter()
+        .zip(prefix_raw.iter().copied())
+    {
+        collected.insert(*position, digest);
+    }
+
+    let (suffix_raw, suffix_transformed) = proof
+        .unfolded_suffix_peaks
+        .split_at(plan.layout.after[..after_raw_end].len());
+    for ((position, _height), digest) in plan.layout.after[..after_raw_end]
+        .iter()
+        .zip(suffix_raw.iter().copied())
+    {
+        collected.insert(*position, digest);
+    }
+    for ((position, _count), digest) in suffix_transformed_positions
+        .iter()
+        .zip(suffix_transformed.iter().copied())
+    {
+        collected.insert(*position, digest);
+    }
+
+    Some(())
+}
+
 // Reconstructs the canonical grafted root from the combination of generic proof boundaries,
 // operation elements, and grafted prefix/suffix witnesses provided by the prover.
 fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
@@ -985,8 +1107,162 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             hasher.update(&next_bit.to_be_bytes());
             hasher.update(self.partial_chunk_digest.as_ref().unwrap());
         }
-        let reconstructed_root = hasher.finalize();
-        reconstructed_root == *root
+        hasher.finalize() == *root
+    }
+
+    /// Return the authenticated Merkle digests exposed by this current range proof.
+    ///
+    /// The returned map is keyed by ops-space Merkle position and includes the digest material
+    /// authenticated by the proof, including unfolded grafted prefix/suffix witnesses when the
+    /// proof needs grafted peak folding.
+    ///
+    /// This reconstructs the proof with the provided local operations and bitmap chunks, but does
+    /// not compare the resulting current root against a caller-supplied root. Use
+    /// [`Self::verify`] when root verification is required.
+    pub fn extract_digests<H: CHasher<Digest = D>, O: Codec, const N: usize>(
+        &self,
+        start_loc: Location<F>,
+        ops: &[O],
+        chunks: &[[u8; N]],
+    ) -> Option<BTreeMap<Position<F>, D>> {
+        if ops.is_empty() || chunks.is_empty() {
+            debug!("verification failed, empty input");
+            return None;
+        }
+        // Compute the (non-inclusive) end location of the range.
+        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
+            debug!("verification failed, end_loc overflow");
+            return None;
+        };
+
+        let leaves = self.proof.leaves;
+        if end_loc > leaves {
+            debug!(
+                loc = ?end_loc,
+                ?leaves, "verification failed, invalid range"
+            );
+            return None;
+        }
+
+        // Validate the number of input chunks.
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let start_chunk = *start_loc / chunk_bits;
+        let end_chunk = (*end_loc - 1) / chunk_bits;
+        let complete_chunks = *leaves / chunk_bits;
+
+        if (end_chunk - start_chunk + 1) != chunks.len() as u64 {
+            debug!("verification failed, chunk metadata length mismatch");
+            return None;
+        }
+
+        let next_bit = *leaves % chunk_bits;
+        let has_partial_chunk = next_bit != 0;
+
+        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+        let grafting_height = grafting::height::<N>();
+        let grafting = GraftingInfo {
+            height: grafting_height,
+            complete_chunks,
+        };
+        let verifier = grafting::Verifier::<F, H>::new(
+            grafting_height,
+            start_chunk,
+            chunk_vec,
+            qmdb::ROOT_BAGGING,
+        );
+
+        // For partial chunks, validate the last chunk digest from the proof.
+        if has_partial_chunk {
+            let Some(last_chunk_digest) = self.partial_chunk_digest else {
+                debug!("proof has no partial chunk digest");
+                return None;
+            };
+
+            // If the proof covers an operation in the partial chunk, verify that the
+            // chunk provided by the caller matches the digest embedded in the proof.
+            if end_chunk == complete_chunks {
+                let last_chunk = chunks.last().expect("chunks non-empty");
+                if last_chunk_digest != verifier.digest(last_chunk) {
+                    debug!("last chunk digest does not match expected value");
+                    return None;
+                }
+            }
+        } else if self.partial_chunk_digest.is_some() {
+            debug!("proof has unexpected partial chunk digest");
+            return None;
+        }
+
+        let plan = match ProofPlan::new(
+            leaves,
+            start_loc..end_loc,
+            self.proof.inactive_peaks,
+            grafting,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                debug!(?error, "verification failed, invalid peak layout");
+                return None;
+            }
+        };
+        let needs_grafted_peak_fold = match plan.needs_grafted_peak_fold() {
+            Ok(needs_grafted_peak_fold) => needs_grafted_peak_fold,
+            Err(error) => {
+                debug!(?error, "verification failed, invalid size");
+                return None;
+            }
+        };
+        let collected = if !needs_grafted_peak_fold {
+            if !self.unfolded_prefix_peaks.is_empty() || !self.unfolded_suffix_peaks.is_empty() {
+                debug!("verification failed, unexpected grafted metadata");
+                return None;
+            }
+            let mut collected_vec = Vec::new();
+            if let Err(error) = self.proof.reconstruct_root_inner(
+                &verifier,
+                &elements,
+                start_loc,
+                Some(&mut collected_vec),
+            ) {
+                debug!(?error, "invalid proof input");
+                return None;
+            }
+            collected_vec.into_iter().collect()
+        } else {
+            let mut collected_vec = Vec::new();
+            if let Err(error) = self.proof.reconstruct_range_collecting(
+                &verifier,
+                &elements,
+                start_loc,
+                &mut collected_vec,
+            ) {
+                debug!(?error, "invalid proof input");
+                return None;
+            };
+
+            let mut collected_map: BTreeMap<Position<F>, D> = collected_vec.into_iter().collect();
+            let get_chunk = |chunk_idx: u64| -> Option<&[u8]> {
+                if chunk_idx >= complete_chunks {
+                    return None;
+                }
+                chunk_idx
+                    .checked_sub(start_chunk)
+                    .filter(|&idx| idx < chunks.len() as u64)
+                    .map(|idx| chunks[idx as usize].as_ref())
+            };
+            if reconstruct_grafted_root(&verifier, self, &plan, &collected_map, get_chunk).is_none()
+            {
+                debug!("verification failed, could not reconstruct grafted root");
+                return None;
+            }
+            if add_unfolded_peak_digests(self, &plan, &mut collected_map).is_none() {
+                debug!("verification failed, invalid unfolded grafted witnesses");
+                return None;
+            }
+            collected_map
+        };
+
+        Some(collected)
     }
 }
 
@@ -1774,6 +2050,9 @@ mod tests {
                 .push(hasher.digest(b"fake unfolded prefix"));
             let mut verify_hasher = Sha256::new();
             assert!(!tampered.verify(&mut verify_hasher, loc, &[element], &[chunk], &root,));
+            assert!(tampered
+                .extract_digests::<Sha256, _, N>(loc, &[element].as_slice(), &[chunk])
+                .is_none());
 
             // Tamper with the proof by injecting a fake partial chunk digest
             proof.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
@@ -1904,6 +2183,27 @@ mod tests {
                 )],
                 &root,
             ));
+
+            let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx);
+            let extracted = proof
+                .extract_digests::<Sha256, _, N>(loc, &[element].as_slice(), &[chunk])
+                .unwrap();
+            let plan = ProofPlan::new(
+                mmb::Location::new(leaf_count),
+                loc..loc + 1,
+                proof.proof.inactive_peaks,
+                GraftingInfo {
+                    height: grafting_height,
+                    complete_chunks: leaf_count / chunk_bits,
+                },
+            )
+            .unwrap();
+            let mut unfolded = BTreeMap::new();
+            add_unfolded_peak_digests(&proof, &plan, &mut unfolded).unwrap();
+            assert!(!unfolded.is_empty());
+            for (position, digest) in unfolded {
+                assert_eq!(extracted.get(&position), Some(&digest));
+            }
 
             let mut tampered = proof.clone();
             tampered.proof.inactive_peaks = 1;
