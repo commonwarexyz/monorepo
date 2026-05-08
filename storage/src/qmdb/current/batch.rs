@@ -571,36 +571,41 @@ where
     let grafting_height = grafting::height::<N>();
     let ops_tree_adapter =
         BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
-    let base_ops_leaves = Location::<F>::try_from(current_db.any.log.merkle.size())?.as_u64();
 
-    // Recompute grafted leaves for dirty complete chunks. For MMB, the last complete chunk can
-    // still change while delayed merges finalize its grafting-height digest, so we force-refresh
-    // that chunk until its peak birth threshold is reached.
-    let new_grafted_leaves = overlay.complete_chunks();
+    // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
+    // sees this many ops). Thread it through `active_chunks` derivation and root computation.
+    let overlay_ops_leaves = *inner.new_last_commit_loc + 1;
+
+    // Distinguish three counters:
+    //   - new_complete_chunks: chunks with all bits filled in the post-batch bitmap
+    //   - active_overlay:      chunks committed by the grafted tree (have a single h=G ancestor)
+    //   - active_parent:       grafted-tree leaf count from the parent (structural source of truth)
+    //
+    // The pending chunk (if any) sits at index `active_overlay` and is excluded from the
+    // grafted tree — its bytes ride in the trailer.
+    let new_complete_chunks = overlay.complete_chunks();
+    let active_overlay = grafting::ops_active_chunks::<F>(overlay_ops_leaves, grafting_height)
+        .min(new_complete_chunks as u64) as usize;
+    let active_parent = *grafted_parent.leaves() as usize;
+    let pruned_chunks = bitmap_parent.pruned_chunks();
+    debug_assert!(
+        pruned_chunks <= active_parent && active_parent <= active_overlay && active_overlay <= new_complete_chunks,
+        "invariant violated: pruned={pruned_chunks} active_parent={active_parent} active_overlay={active_overlay} new_complete={new_complete_chunks}"
+    );
+
+    // Build the set of chunk indices whose grafted-leaf needs (re)computing:
+    //   1) Dirty chunks (bits changed in this batch) within the active range.
+    //   2) Pending → active transitions: chunks newly graftable because the ops tree built
+    //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
+    //      became active via ops growth alone) but they need a grafted-leaf entry now.
     let mut chunk_indices_to_update: BTreeSet<usize> = overlay
         .chunks
         .iter()
-        .filter(|(&idx, _)| idx < new_grafted_leaves)
+        .filter(|(&idx, _)| idx < active_overlay && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
-    // Both are chunk indices (not bit positions); cast to u64 only for the shift arithmetic.
-    let pruned_chunks = bitmap_parent.pruned_chunks();
-    if new_grafted_leaves > 0 {
-        let last_complete_chunk = new_grafted_leaves - 1;
-        let chunk_start = (last_complete_chunk as u64)
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
-        let chunk_end = ((last_complete_chunk + 1) as u64)
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
-        let chunk_pos = F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
-        let stable_after = F::peak_birth_size(chunk_pos, grafting_height);
-        if stable_after > chunk_end
-            && last_complete_chunk >= pruned_chunks // skip already-pruned chunks
-            && base_ops_leaves < stable_after
-        {
-            chunk_indices_to_update.insert(last_complete_chunk);
-        }
+    for idx in active_parent..active_overlay {
+        chunk_indices_to_update.insert(idx);
     }
     let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
         let chunk = overlay
@@ -654,13 +659,17 @@ where
     };
     let grafted_storage =
         grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
-    // Compute partial chunk (last incomplete chunk, if any).
+    // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
+    // index `new_complete_chunks` (the chunk currently being filled with bits) — distinct
+    // from `active_overlay` (the grafted-tree boundary). At G >= 3, partial and pending can
+    // coexist; this branch only handles partial. The pending chunk (when present) is read
+    // from the bitmap inside `compute_db_root` via `pending_chunk()`.
     let partial = {
         let rem = bitmap_batch.len() % BitmapBatch::<N>::CHUNK_SIZE_BITS;
         if rem == 0 {
             None
         } else {
-            let idx = new_grafted_leaves;
+            let idx = new_complete_chunks;
             let chunk = bitmap_batch.get_chunk(idx);
             Some((chunk, rem))
         }
@@ -669,6 +678,7 @@ where
         &hasher,
         &bitmap_batch,
         &grafted_storage,
+        overlay_ops_leaves,
         partial,
         inner.bounds.inactivity_floor,
         &ops_root,
