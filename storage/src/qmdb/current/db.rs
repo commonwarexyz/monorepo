@@ -9,7 +9,10 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, hasher::Standard as StandardHasher, mem::Mem, storage::Storage as MerkleStorage,
+        self,
+        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+        mem::Mem,
+        storage::Storage as MerkleStorage,
         Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
@@ -271,17 +274,29 @@ where
         hasher: &StandardHasher<H>,
     ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
+        // Snapshot ops_leaves once and thread it through both root computation and the
+        // pending/partial chunk derivation so they observe the same `(ops, bitmap)` state.
+        let ops_size = storage.size().await;
+        let ops_leaves = *Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
             hasher,
             self.any.bitmap.as_ref(),
             &storage,
+            ops_leaves,
             self.any.inactivity_floor_loc,
         )
         .await?;
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
+        let pending_chunk_digest = pending_chunk::<F, _, N>(
+            self.any.bitmap.as_ref(),
+            ops_leaves,
+            grafting::height::<N>(),
+        )
+        .map(|chunk| hasher.digest(&chunk));
         Ok(OpsRootWitness {
             grafted_root,
+            pending_chunk_digest,
             partial_chunk,
         })
     }
@@ -657,11 +672,16 @@ where
         self.any.rewind(size).await?;
 
         let hasher = qmdb::hasher::<H>();
+        // Snapshot ops_leaves once and thread through both grafted-tree construction and root
+        // computation so the active-chunks boundary is consistent.
+        let ops_size = self.any.log.merkle.size();
+        let ops_leaves = *Location::<F>::try_from(ops_size)?;
         let grafted_tree = build_grafted_tree::<F, H, S, N>(
             &hasher,
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
+            ops_leaves,
             &self.strategy,
         )
         .await?;
@@ -677,6 +697,7 @@ where
             &hasher,
             self.any.bitmap.as_ref(),
             &storage,
+            ops_leaves,
             partial_chunk,
             self.any.inactivity_floor_loc,
             &ops_root,
@@ -830,32 +851,87 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     }
 }
 
-/// Compute the canonical root from the ops root, grafted tree root, and optional partial chunk.
+/// Returns the bytes of the "pending" chunk if the bitmap currently has one, else `None`.
 ///
-/// See the [Root structure](super) section in the module documentation.
+/// A chunk is pending when its bits are fully written to the bitmap but its h=G ancestor
+/// has not yet been born in the ops tree. At most one chunk is ever in this state (the most
+/// recently completed one); see [`super::grafting::ops_active_chunks`] for the structural
+/// argument.
+///
+/// The caller must pass a consistent snapshot of `ops_leaves` (the ops tree's leaf count)
+/// and the bitmap state. Both inputs are used to derive `active_chunks`; deriving them from
+/// independent snapshots can result in `active_chunks > complete_chunks`, which would
+/// violate the pending-window invariant.
+pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
+    bitmap: &B,
+    ops_leaves: u64,
+    grafting_height: u32,
+) -> Option<[u8; N]> {
+    let complete = bitmap.complete_chunks() as u64;
+    let active = grafting::ops_active_chunks::<F>(ops_leaves, grafting_height).min(complete);
+    let pruned = bitmap.pruned_chunks() as u64;
+    // The pending chunk is the most recently completed one (right edge of the bitmap),
+    // while pruning advances from the left edge. Since pruning only retires chunks that
+    // are already inactive (covered by the inactivity floor), the pending chunk's index
+    // is strictly greater than `pruned`.
+    debug_assert!(
+        pruned <= active,
+        "pruned_chunks {pruned} > active_chunks {active}"
+    );
+    if complete.saturating_sub(active) != 1 {
+        return None;
+    }
+    Some(bitmap.get_chunk(active as usize))
+}
+
+/// Compute the canonical root from the ops root, grafted tree root, and optional pending /
+/// partial trailing chunk digests.
+///
+/// See [Canonical root structure](super::proof#canonical-root-structure) for the full layout.
+/// The pending and partial slots are independent: either, both, or neither may be set, and
+/// pending precedes partial in hash order when both are present.
 pub(super) fn combine_roots<H: Hasher>(
     hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
     grafted_root: &H::Digest,
+    pending: Option<&H::Digest>,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
-    match partial {
-        Some((next_bit, last_chunk_digest)) => {
-            let next_bit = next_bit.to_be_bytes();
+    match (pending, partial) {
+        (None, None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
+        (Some(pe), None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()]),
+        (None, Some((nb, p))) => {
+            let nb_bytes = nb.to_be_bytes();
             hasher.hash([
                 ops_root.as_ref(),
                 grafted_root.as_ref(),
-                next_bit.as_slice(),
-                last_chunk_digest.as_ref(),
+                nb_bytes.as_slice(),
+                p.as_ref(),
             ])
         }
-        None => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
+        (Some(pe), Some((nb, p))) => {
+            let nb_bytes = nb.to_be_bytes();
+            hasher.hash([
+                ops_root.as_ref(),
+                grafted_root.as_ref(),
+                pe.as_ref(),
+                nb_bytes.as_slice(),
+                p.as_ref(),
+            ])
+        }
     }
 }
 
 /// Compute the canonical root digest of a [Db].
 ///
 /// See the [Root structure](super) section in the module documentation.
+///
+/// `ops_leaves` must be a single consistent snapshot of the ops tree's leaf count, taken
+/// in the same logical instant as the bitmap state passed via `status`. Both the pending
+/// chunk derivation and `compute_grafted_root` use this value to compute `active_chunks`;
+/// deriving them from independent snapshots risks the inconsistent state where a chunk is
+/// counted in one path but not the other.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn compute_db_root<
     F: merkle::Graftable,
     H: Hasher,
@@ -866,11 +942,15 @@ pub(super) async fn compute_db_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
+    ops_leaves: u64,
     partial_chunk: Option<([u8; N], u64)>,
     inactivity_floor: Location<F>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
-    let grafted_root = compute_grafted_root(hasher, status, storage, inactivity_floor).await?;
+    let grafted_root =
+        compute_grafted_root(hasher, status, storage, ops_leaves, inactivity_floor).await?;
+    let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())
+        .map(|chunk| hasher.digest(&chunk));
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
@@ -879,20 +959,20 @@ pub(super) async fn compute_db_root<
         hasher,
         ops_root,
         &grafted_root,
+        pending.as_ref(),
         partial.as_ref().map(|(nb, d)| (*nb, d)),
     ))
 }
 
 /// Compute the root of the grafted structure represented by `storage`.
 ///
-/// We use [`grafting::grafted_root`] instead of a standard `hasher.root()` fold to correctly handle
-/// grafting over MMB (Merkle Mountain Belt) structures. In an MMB, the trailing operations at the
-/// right edge of the structure might not be numerous enough to form a complete subtree at the
-/// grafting height. Therefore, a single bitmap chunk may span across multiple smaller ops peaks.
-/// `grafting::grafted_root` intercepts the folding process to group these sub-grafting-height peaks,
-/// hash them together with their corresponding bitmap chunks, and then complete the final fold using
-/// the hasher's peak-bagging policy. For MMR, each complete chunk already appears as a single
-/// grafted peak, so no extra peak regrouping is needed.
+/// Only **active** chunks (those whose h=G ancestor has been born in the ops tree) are
+/// committed by the grafted tree. The most recently completed but ungraftable chunk, if
+/// any, lives in the trailer and is hashed into the canonical root by [`combine_roots`],
+/// not by this function.
+///
+/// `ops_leaves` must come from the same single snapshot as `status` to preserve the
+/// `pruned_chunks <= active_chunks <= complete_chunks` invariant.
 pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
@@ -903,6 +983,7 @@ pub(super) async fn compute_grafted_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
+    ops_leaves: u64,
     inactivity_floor: Location<F>,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
@@ -920,40 +1001,32 @@ pub(super) async fn compute_grafted_root<
 
     let grafting_height = grafting::height::<N>();
     let complete_chunks = status.complete_chunks() as u64;
+    let active_chunks =
+        grafting::ops_active_chunks::<F>(ops_leaves, grafting_height).min(complete_chunks);
     let pruned_chunks = status.pruned_chunks() as u64;
+    debug_assert!(
+        pruned_chunks <= active_chunks && active_chunks <= complete_chunks,
+        "invariant violated: pruned={pruned_chunks} active={active_chunks} complete={complete_chunks}"
+    );
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
 
-    Ok(grafting::grafted_root(
-        hasher,
-        leaves,
-        inactive_peaks,
-        &peaks,
-        grafting_height,
-        |chunk_idx| {
-            if chunk_idx < complete_chunks {
-                // Pruned chunks are guaranteed to be all-zero (only chunks with no active
-                // operations are prunable), so a synthetic zero chunk produces the correct grafted
-                // digest via the zero-chunk identity shortcut.
-                if chunk_idx < pruned_chunks {
-                    Some([0u8; N])
-                } else {
-                    Some(status.get_chunk(chunk_idx as usize))
-                }
-            } else {
-                None
-            }
-        },
-    )?)
+    // Every peak the storage layer surfaces is either a grafted-tree node (active chunks
+    // already incorporate `hash(chunk || h_G_node)`), an ops node above G (hashed
+    // normally), or an ops node below G (raw, because its chunk is pending and the bytes
+    // ride in the trailer rather than in the tree). Bagging is a straight fold; no
+    // per-chunk transformation is needed.
+    Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
 ///
-/// For each chunk, reads the covering peak digests from the ops structure via
-/// [`Graftable::chunk_peaks`](merkle::Graftable::chunk_peaks), folds them into a single
-/// `chunk_ops_digest`, then combines with the bitmap chunk: `hash(chunk || chunk_ops_digest)`. For
-/// all-zero chunks the grafted leaf equals the `chunk_ops_digest` directly (zero-chunk identity).
+/// Callers must pass only **active** chunks (those whose h=G ancestor has already been born
+/// in the ops tree). Each active chunk has exactly one covering ops node at height G,
+/// looked up via [`merkle::Graftable::subtree_root_position`]. The grafted leaf digest is
+/// `hash(chunk || ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest
+/// directly (zero-chunk identity).
 ///
 /// The provided strategy determines if or how to parallelize merkleization.
 pub(super) async fn compute_grafted_leaves<
@@ -968,24 +1041,16 @@ pub(super) async fn compute_grafted_leaves<
     strategy: &S,
 ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
     let grafting_height = grafting::height::<N>();
-    let ops_size = ops_tree.size().await;
 
-    // For each chunk, read the covering peak digests and fold them into a single
-    // chunk_ops_digest. With MMR there is always exactly one peak; with MMB there
-    // may be multiple. The fold happens inline to avoid per-chunk Vec allocations.
+    // Each active chunk has a single h=G ancestor at the deterministic
+    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
     let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
-        let mut chunk_ops_digest: Option<H::Digest> = None;
-        for (pos, _) in F::chunk_peaks(ops_size, chunk_idx as u64, grafting_height) {
-            let digest = ops_tree
-                .get_node(pos)
-                .await?
-                .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
-            chunk_ops_digest = Some(
-                chunk_ops_digest.map_or(digest, |acc| hasher.hash([acc.as_ref(), digest.as_ref()])),
-            );
-        }
-        let chunk_ops_digest =
-            chunk_ops_digest.expect("chunk must have at least one covering peak");
+        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+        let pos = F::subtree_root_position(leaf_start, grafting_height);
+        let chunk_ops_digest = ops_tree
+            .get_node(pos)
+            .await?
+            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
         Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
     }))
     .await?;
@@ -1011,11 +1076,17 @@ pub(super) async fn compute_grafted_leaves<
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
 ///
-/// For each non-pruned complete chunk (index in `pruned_chunks..complete_chunks`), reads the
+/// For each non-pruned **active** chunk (index in `pruned_chunks..active_chunks`), reads the
 /// ops tree node at the grafting height to compute the grafted leaf (see the
-/// [grafted leaf formula](super) in the module documentation). The caller must ensure that all
-/// ops tree nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops tree
-/// (i.e., not pruned from the journal).
+/// [grafted leaf formula](super) in the module documentation).
+///
+/// The most recently completed chunk may not yet be active (its h=G ancestor not yet born);
+/// that chunk is **excluded** from the grafted tree and its bytes ride in the trailer. The
+/// caller must ensure that all ops tree nodes for chunks `>= pruned_chunks` are still
+/// accessible in the ops tree (i.e., not pruned from the journal).
+///
+/// `ops_leaves` must be a single consistent snapshot of `ops_tree.size()` taken in the same
+/// instant as the bitmap state.
 pub(super) async fn build_grafted_tree<
     F: merkle::Graftable,
     H: Hasher,
@@ -1026,17 +1097,25 @@ pub(super) async fn build_grafted_tree<
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    ops_leaves: u64,
     strategy: &S,
 ) -> Result<Mem<F, H::Digest>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
+    let active_chunks = grafting::ops_active_chunks::<F>(ops_leaves, grafting_height)
+        .min(complete_chunks as u64) as usize;
+    debug_assert!(
+        pruned_chunks <= active_chunks && active_chunks <= complete_chunks,
+        "invariant violated: pruned={pruned_chunks} active={active_chunks} complete={complete_chunks}"
+    );
 
-    // Compute grafted leaves for each unpruned complete chunk.
+    // Compute grafted leaves for each unpruned active chunk. The pending chunk (if any)
+    // sits at index `active_chunks` and is excluded; its bytes ride in the trailer.
     let leaves = compute_grafted_leaves::<F, H, S, N>(
         hasher,
         ops_tree,
-        (pruned_chunks..complete_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
+        (pruned_chunks..active_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
         strategy,
     )
     .await?;
@@ -1184,8 +1263,8 @@ mod tests {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
-        let r1 = combine_roots(&hasher, &ops, &grafted, None);
-        let r2 = combine_roots(&hasher, &ops, &grafted, None);
+        let r1 = combine_roots(&hasher, &ops, &grafted, None, None);
+        let r2 = combine_roots(&hasher, &ops, &grafted, None, None);
         assert_eq!(r1, r2);
     }
 
@@ -1196,9 +1275,43 @@ mod tests {
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
 
-        let without = combine_roots(&hasher, &ops, &grafted, None);
-        let with = combine_roots(&hasher, &ops, &grafted, Some((5, &partial_digest)));
+        let without = combine_roots(&hasher, &ops, &grafted, None, None);
+        let with = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
         assert_ne!(without, with);
+    }
+
+    #[test]
+    fn combine_roots_with_pending_differs() {
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let pending_digest = Sha256::hash(b"pending");
+
+        let without = combine_roots(&hasher, &ops, &grafted, None, None);
+        let with = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn combine_roots_pending_and_partial_independent() {
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let pending_digest = Sha256::hash(b"pending");
+        let partial_digest = Sha256::hash(b"partial");
+
+        let only_pending = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
+        let only_partial = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let both = combine_roots(
+            &hasher,
+            &ops,
+            &grafted,
+            Some(&pending_digest),
+            Some((5, &partial_digest)),
+        );
+        assert_ne!(only_pending, only_partial);
+        assert_ne!(only_pending, both);
+        assert_ne!(only_partial, both);
     }
 
     #[test]
@@ -1208,9 +1321,63 @@ mod tests {
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
 
-        let r1 = combine_roots(&hasher, &ops_a, &grafted, None);
-        let r2 = combine_roots(&hasher, &ops_b, &grafted, None);
+        let r1 = combine_roots(&hasher, &ops_a, &grafted, None, None);
+        let r2 = combine_roots(&hasher, &ops_b, &grafted, None, None);
         assert_ne!(r1, r2);
+    }
+
+    /// Pin the canonical-root format down to the byte. A change to `combine_roots`'s hash
+    /// pre-image (e.g., reordering, dropping a length tag, swapping pending/partial order)
+    /// would silently break wire compatibility; this test catches that.
+    #[test]
+    fn combine_roots_format_golden() {
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let pending = Sha256::hash(b"pending");
+        let partial = Sha256::hash(b"partial");
+        let next_bit: u64 = 0x1122_3344_5566_7788;
+
+        // Empty trailer.
+        assert_eq!(
+            combine_roots(&hasher, &ops, &grafted, None, None),
+            hasher.hash([ops.as_ref(), grafted.as_ref()])
+        );
+
+        // Pending only.
+        assert_eq!(
+            combine_roots(&hasher, &ops, &grafted, Some(&pending), None),
+            hasher.hash([ops.as_ref(), grafted.as_ref(), pending.as_ref()])
+        );
+
+        // Partial only.
+        assert_eq!(
+            combine_roots(&hasher, &ops, &grafted, None, Some((next_bit, &partial))),
+            hasher.hash([
+                ops.as_ref(),
+                grafted.as_ref(),
+                next_bit.to_be_bytes().as_slice(),
+                partial.as_ref(),
+            ])
+        );
+
+        // Both: pending precedes partial.
+        assert_eq!(
+            combine_roots(
+                &hasher,
+                &ops,
+                &grafted,
+                Some(&pending),
+                Some((next_bit, &partial))
+            ),
+            hasher.hash([
+                ops.as_ref(),
+                grafted.as_ref(),
+                pending.as_ref(),
+                next_bit.to_be_bytes().as_slice(),
+                partial.as_ref(),
+            ])
+        );
     }
 
     type MmrDb = fixed::Db<

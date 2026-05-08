@@ -54,8 +54,6 @@ enum CurrentOperation {
         bad_digests: Vec<[u8; 32]>,
         max_ops: NonZeroU64,
         bad_chunks: Vec<[u8; 32]>,
-        bad_prefix_peaks: Vec<[u8; 32]>,
-        bad_suffix_peaks: Vec<[u8; 32]>,
     },
     GetSpan {
         key: RawKey,
@@ -277,8 +275,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     bad_digests,
                     max_ops,
                     bad_chunks,
-                    bad_prefix_peaks,
-                    bad_suffix_peaks,
                 } => {
                     let current_op_count = db.bounds().await.end;
                     if current_op_count == 0 {
@@ -324,35 +320,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             ), "proof with bad chunks should not verify");
                         }
 
-                        let bad_prefix_peaks =
-                            bad_prefix_peaks.iter().map(|d| Digest::from(*d)).collect();
-                        if range_proof.prefix_witnesses != bad_prefix_peaks {
-                            let mut bad_proof = range_proof.clone();
-                            bad_proof.prefix_witnesses = bad_prefix_peaks;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
-                                &bad_proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &root
-                            ), "proof with bad prefix peaks should not verify");
-                        }
-
-                        let bad_suffix_peaks =
-                            bad_suffix_peaks.iter().map(|d| Digest::from(*d)).collect();
-                        if range_proof.suffix_witnesses != bad_suffix_peaks {
-                            let mut bad_proof = range_proof.clone();
-                            bad_proof.suffix_witnesses = bad_suffix_peaks;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
-                                &bad_proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &root
-                            ), "proof with bad suffix peaks should not verify");
-                        }
                     }
                 }
 
