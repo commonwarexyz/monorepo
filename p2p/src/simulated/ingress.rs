@@ -98,7 +98,7 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 
 impl<P: PublicKey, E: Clock> MessagePolicy for Message<P, E> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::replace_or_retain(match message {
+        actor::replace_or_retain(match message {
             Self::Track { id, peers } => actor::replace_last(
                 queue,
                 Self::Track { id, peers },

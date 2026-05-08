@@ -66,7 +66,7 @@ fn merge_fetches<K: Eq, P: PartialEq>(
 
 impl<K: Span, P: PublicKey> MessagePolicy for Message<K, P> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::replace_or_retain(match message {
+        actor::replace_or_retain(match message {
             Self::Fetch(requests) => {
                 if requests.is_empty() {
                     Ok(())

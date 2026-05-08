@@ -11,7 +11,7 @@ use commonware_cryptography::{
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{
-        actor::{ActorMailbox, MessagePolicy},
+        actor::{self, ActorMailbox, MessagePolicy},
         oneshot, Feedback,
     },
     Acknowledgement,
@@ -51,7 +51,7 @@ where
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
             Self::Act { .. } => Feedback::Dropped,
-            Self::Finalized { .. } => Feedback::retain(queue, message),
+            Self::Finalized { .. } => actor::retain(queue, message),
         }
     }
 }

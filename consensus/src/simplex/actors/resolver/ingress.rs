@@ -48,7 +48,7 @@ fn certificate_key<S: Scheme, D: Digest>(
 
 impl<S: Scheme, D: Digest> MessagePolicy for MailboxMessage<S, D> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::replace_or_retain(match &message {
+        actor::replace_or_retain(match &message {
             Self::Certificate(certificate) => {
                 let key = certificate_key(certificate);
                 actor::replace_last(queue, message, |pending| {
@@ -125,7 +125,7 @@ impl Handler {
 
 impl MessagePolicy for HandlerMessage {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::replace_or_retain(match &message {
+        actor::replace_or_retain(match &message {
             Self::Deliver { .. } => actor::replace_last(queue, message, |pending| {
                 matches!(pending, Self::Produce { .. })
             }),

@@ -153,7 +153,7 @@ pub(crate) enum Message<C: PublicKey> {
 
 impl<C: PublicKey> MessagePolicy for Message<C> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::replace_or_retain(match message {
+        actor::replace_or_retain(match message {
             Self::Register { index, peers } => actor::replace_last(
                 queue,
                 Self::Register { index, peers },

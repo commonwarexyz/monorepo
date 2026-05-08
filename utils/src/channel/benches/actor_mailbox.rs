@@ -38,8 +38,8 @@ impl MessagePolicy for Message {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
             Self::Reject(_) => Feedback::Dropped,
-            Self::Retain(_) => Feedback::retain(queue, message),
-            Self::Replace(_) => Feedback::replace_or_retain(
+            Self::Retain(_) => actor::retain(queue, message),
+            Self::Replace(_) => actor::replace_or_retain(
                 actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Replace(_))
                 }),

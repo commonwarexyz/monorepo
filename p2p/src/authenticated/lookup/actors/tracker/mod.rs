@@ -2,7 +2,10 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use commonware_utils::channel::{actor::{find_last_mut, MessagePolicy}, Feedback};
+use commonware_utils::channel::{
+    actor::{find_last_mut, retain, MessagePolicy},
+    Feedback,
+};
 use std::{
     collections::{HashSet, VecDeque},
     net::IpAddr,
@@ -42,7 +45,7 @@ impl MessagePolicy for ListenableIps {
             *pending = message;
             Feedback::Backoff
         } else {
-            Feedback::retain(queue, message)
+            retain(queue, message)
         }
     }
 }

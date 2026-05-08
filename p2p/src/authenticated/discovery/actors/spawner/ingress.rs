@@ -5,7 +5,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::{actor::{MessagePolicy}, Feedback};
+use commonware_utils::channel::{actor::{self, MessagePolicy}, Feedback};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
@@ -23,7 +23,7 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
 
 impl<P: PublicKey, O: Sink, I: Stream> MessagePolicy for Message<O, I, P> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::retain(queue, message)
+        actor::retain(queue, message)
     }
 }
 
@@ -54,7 +54,7 @@ pub(crate) enum Connect<P: PublicKey> {
 
 impl<P: PublicKey> MessagePolicy for Connect<P> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::retain(queue, message)
+        actor::retain(queue, message)
     }
 }
 

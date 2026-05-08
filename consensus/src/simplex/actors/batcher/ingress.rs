@@ -38,12 +38,12 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View, Partici
 impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match &message {
-            Self::Update { .. } => Feedback::replace_or_retain(actor::replace_last(queue, message, |pending| {
+            Self::Update { .. } => actor::replace_or_retain(actor::replace_last(queue, message, |pending| {
                 matches!(pending, Self::Update { .. })
             }), queue),
             Self::Constructed(vote) => {
                 let key = vote_key(vote);
-                Feedback::replace_or_retain(actor::replace_last(queue, message, |pending| {
+                actor::replace_or_retain(actor::replace_last(queue, message, |pending| {
                     matches!(pending, Self::Constructed(pending) if vote_key(pending) == key)
                 }), queue)
             }

@@ -168,7 +168,7 @@ pub struct ActorInbox<T> {
 }
 
 impl<T> ActorInbox<T> {
-    /// Receive the next queued message.
+    /// Receive the next message.
     pub async fn recv(&mut self) -> Option<T> {
         poll_fn(|cx| self.poll_recv(cx)).await
     }
@@ -195,7 +195,7 @@ impl<T> ActorInbox<T> {
         }
     }
 
-    /// Try to receive the next queued message without waiting.
+    /// Try to receive the next message without waiting.
     pub fn try_recv(&mut self) -> Result<T, mpsc::error::TryRecvError> {
         if let Some(message) = self.pop() {
             return Ok(message);
@@ -282,29 +282,48 @@ pub fn channel<T: MessagePolicy>(capacity: usize) -> (ActorMailbox<T>, ActorInbo
     )
 }
 
-/// Replace the newest matching queued message.
+/// Retain `message` in overflow.
+pub fn retain<T>(queue: &mut VecDeque<T>, message: T) -> Feedback {
+    queue.push_back(message);
+    Feedback::Backoff
+}
+
+/// Retain the message in overflow if it could not replace existing overflow work.
+pub fn replace_or_retain<T>(result: Result<(), T>, queue: &mut VecDeque<T>) -> Feedback {
+    match result {
+        Ok(()) => Feedback::Backoff,
+        Err(message) => retain(queue, message),
+    }
+}
+
+/// Drop the message if it could not replace existing overflow work.
+pub fn replace_or_drop<T>(result: Result<(), T>) -> Feedback {
+    match result {
+        Ok(()) => Feedback::Backoff,
+        Err(_) => Feedback::Dropped,
+    }
+}
+
+/// Replace the newest matching overflow message.
 pub fn replace_last<T>(
     queue: &mut VecDeque<T>,
     message: T,
     is_stale: impl FnMut(&T) -> bool,
 ) -> Result<(), T> {
-    if let Some(queued) = find_last_mut(queue, is_stale) {
-        *queued = message;
+    if let Some(pending) = find_last_mut(queue, is_stale) {
+        *pending = message;
         Ok(())
     } else {
         Err(message)
     }
 }
 
-/// Find the newest matching queued message.
+/// Find the newest matching overflow message.
 pub fn find_last_mut<T>(
     queue: &mut VecDeque<T>,
     mut is_match: impl FnMut(&T) -> bool,
 ) -> Option<&mut T> {
-    let index = (0..queue.len())
-        .rev()
-        .find(|&index| is_match(queue.get(index).expect("index is in bounds")))?;
-    queue.get_mut(index)
+    queue.iter_mut().rev().find(|message| is_match(message))
 }
 
 #[cfg(test)]
@@ -324,15 +343,15 @@ mod tests {
     impl MessagePolicy for Message {
         fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
             match message {
-                Self::Update(value) => Feedback::replace_or_retain(
+                Self::Update(value) => replace_or_retain(
                     replace_last(queue, Self::Update(value), |pending| {
                         matches!(pending, Self::Update(_))
                     }),
                     queue,
                 ),
-                Self::Required(_) => Feedback::retain(queue, message),
-                Self::Buffered(_) => Feedback::retain(queue, message),
-                Self::Hint(value) => Feedback::replace_or_drop(replace_last(
+                Self::Required(_) => retain(queue, message),
+                Self::Buffered(_) => retain(queue, message),
+                Self::Hint(value) => replace_or_drop(replace_last(
                     queue,
                     Self::Hint(value),
                     |pending| matches!(pending, Self::Update(_)),
@@ -398,7 +417,7 @@ mod tests {
     }
 
     #[commonware_macros::test_async]
-    async fn full_inbox_replaces_stale_queued_message() {
+    async fn full_inbox_replaces_stale_overflow_after_ready_fills() {
         let (sender, mut receiver) = channel(2);
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok);

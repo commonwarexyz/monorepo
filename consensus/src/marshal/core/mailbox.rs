@@ -189,10 +189,10 @@ impl<S: Scheme, V: Variant> MessagePolicy for Message<S, V> {
                     pending_targets.extend(targets);
                     Feedback::Backoff
                 } else {
-                    Feedback::retain(queue, Self::HintFinalized { height, targets })
+                    actor::retain(queue, Self::HintFinalized { height, targets })
                 }
             }
-            message => Feedback::retain(queue, message),
+            message => actor::retain(queue, message),
         }
     }
 }

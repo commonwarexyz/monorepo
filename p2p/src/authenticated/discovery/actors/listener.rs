@@ -288,12 +288,12 @@ pub(crate) enum Message<C: commonware_cryptography::PublicKey> {
 impl<C: commonware_cryptography::PublicKey> MessagePolicy for Message<C> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
         match message {
-            Self::Acceptable(acceptable) => Feedback::replace_or_retain(actor::replace_last(
+            Self::Acceptable(acceptable) => actor::replace_or_retain(actor::replace_last(
                 queue,
                 Self::Acceptable(acceptable),
                 |pending| matches!(pending, Self::Acceptable(_)),
             ), queue),
-            Self::Listen(reservation) => Feedback::replace_or_retain(actor::replace_last(
+            Self::Listen(reservation) => actor::replace_or_retain(actor::replace_last(
                 queue,
                 Self::Listen(reservation),
                 |pending| matches!(pending, Self::Listen(_)),

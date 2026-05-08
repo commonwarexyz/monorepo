@@ -47,7 +47,7 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
         match message {
             Self::Ready { peer, relay } => {
                 let key = peer.clone();
-                Feedback::replace_or_retain(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
+                actor::replace_or_retain(actor::replace_last(queue, Self::Ready { peer, relay }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
@@ -56,14 +56,14 @@ impl<P: PublicKey> MessagePolicy for Message<P> {
             }
             Self::Release { peer } => {
                 let key = peer.clone();
-                Feedback::replace_or_retain(actor::replace_last(queue, Self::Release { peer }, |pending| {
+                actor::replace_or_retain(actor::replace_last(queue, Self::Release { peer }, |pending| {
                     matches!(
                         pending,
                         Self::Ready { peer, .. } | Self::Release { peer } if peer == &key
                     )
                 }), queue)
             }
-            Self::Content { .. } => Feedback::retain(queue, message),
+            Self::Content { .. } => actor::retain(queue, message),
             Self::SubscribePeers { .. } => Feedback::Dropped,
         }
     }

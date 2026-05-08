@@ -67,7 +67,7 @@ fn vote_key<S: Scheme, D: Digest>(vote: &Vote<S, D>) -> (VoteKind, View) {
 
 impl<S: Scheme, D: Digest> MessagePolicy for Message<S, D> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::replace_or_retain(match &message {
+        actor::replace_or_retain(match &message {
             Self::Proposal(proposal) => {
                 let view = proposal.view();
                 actor::replace_last(queue, message, |pending| {

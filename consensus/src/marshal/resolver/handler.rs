@@ -5,7 +5,7 @@ use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
     channel::{
-        actor::{ActorMailbox, MessagePolicy},
+        actor::{self, ActorMailbox, MessagePolicy},
         oneshot, Feedback,
     },
     Span,
@@ -45,7 +45,7 @@ pub enum Message<D: Digest> {
 
 impl<D: Digest> MessagePolicy for Message<D> {
     fn backpressure(queue: &mut VecDeque<Self>, message: Self) -> Feedback {
-        Feedback::retain(queue, message)
+        actor::retain(queue, message)
     }
 }
 
