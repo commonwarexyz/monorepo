@@ -11,7 +11,7 @@ use crate::{
     qmdb::{
         self,
         any::value::ValueEncoding,
-        keyless::{operation::Codec, CompactDb, Keyless, Operation},
+        keyless::{operation::Codec, CompactDb, Keyless, Metrics, Operation},
         sync,
     },
     Context, Persistable,
@@ -107,12 +107,15 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
+        let metrics = Metrics::new(context);
         let db = Self {
             journal,
             root,
             last_commit_loc,
             inactivity_floor_loc,
+            metrics,
         };
+        db.update_metrics().await;
 
         db.sync().await?;
         Ok(db)

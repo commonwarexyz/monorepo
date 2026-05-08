@@ -10,6 +10,7 @@ use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
 pub mod fixed;
+mod metrics;
 pub mod variable;
 
 #[cfg(test)]
@@ -35,8 +36,7 @@ pub trait Reader: Send + Sync {
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
-    /// Read multiple items at the given positions. `positions` must be sorted in strictly ascending
-    /// order (sorted and unique).
+    /// Read multiple items at the given positions, which must be strictly increasing.
     ///
     /// The default implementation calls [`read`](Self::read) in a loop. Concrete journal
     /// implementations override this to amortize lock acquisition and batch I/O.

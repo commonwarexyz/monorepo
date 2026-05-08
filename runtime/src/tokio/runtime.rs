@@ -396,8 +396,7 @@ impl crate::Runner for Runner {
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let mut iouring_registry =
-                    runtime_registry.sub_registry("iouring_storage");
+                let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(
                         IoUringConfig {
@@ -427,8 +426,7 @@ impl crate::Runner for Runner {
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let mut iouring_registry =
-                    runtime_registry.sub_registry("iouring_network");
+                let mut iouring_registry = runtime_registry.sub_registry("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,

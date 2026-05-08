@@ -89,25 +89,23 @@ async fn run_loop<E, Si, St, M>(
                 let _ = sender.send(Err(Error::RequestChannelClosed));
             }
             return;
-        } => {
-            match M::decode(response_data.coalesce()) {
-                Ok(message) => {
-                    let request_id = message.request_id();
-                    if let Some(sender) = pending_requests.remove(&request_id) {
-                        let _ = sender.send(Ok(message));
-                    }
+        } => match M::decode(response_data.coalesce()) {
+            Ok(message) => {
+                let request_id = message.request_id();
+                if let Some(sender) = pending_requests.remove(&request_id) {
+                    let _ = sender.send(Ok(message));
                 }
-                Err(_) => {
-                    recv_handle.abort();
-                    warn!(
-                        pending_count = pending_requests.len(),
-                        "failed to decode response; terminating I/O task"
-                    );
-                    for (_, sender) in pending_requests.drain() {
-                        let _ = sender.send(Err(Error::InvalidResponse));
-                    }
-                    return;
+            }
+            Err(_) => {
+                recv_handle.abort();
+                warn!(
+                    pending_count = pending_requests.len(),
+                    "failed to decode response; terminating I/O task"
+                );
+                for (_, sender) in pending_requests.drain() {
+                    let _ = sender.send(Err(Error::InvalidResponse));
                 }
+                return;
             }
         },
     }

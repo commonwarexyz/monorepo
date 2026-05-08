@@ -13,7 +13,7 @@ use crate::{
         self,
         any::ValueEncoding,
         build_snapshot_from_log,
-        immutable::{self, CompactDb, Operation},
+        immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
         sync::{self},
         Error,
@@ -130,13 +130,16 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
+        let metrics = Metrics::new(context);
         let db = Self {
             journal,
             root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
+            metrics,
         };
+        db.update_metrics().await;
 
         db.sync().await?;
         Ok(db)

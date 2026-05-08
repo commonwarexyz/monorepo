@@ -15,8 +15,11 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::Shared, build_snapshot_from_log, delete_known_loc,
-        operation::Operation as OperationTrait, update_known_loc, Error,
+        bitmap::Shared,
+        build_snapshot_from_log, delete_known_loc,
+        metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
+        operation::Operation as OperationTrait,
+        update_known_loc, Error,
     },
     Context, Persistable,
 };
@@ -26,6 +29,28 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
+
+/// Metrics for Any QMDBs.
+pub(crate) struct Metrics<E: Context> {
+    /// State gauges.
+    pub state: StateMetrics,
+    /// Write and durability metrics.
+    pub operations: OperationMetrics<E>,
+    /// Key read metrics.
+    pub reads: KeyReadMetrics<E>,
+}
+
+impl<E: Context> Metrics<E> {
+    /// Create and register metrics.
+    pub fn new(context: E) -> Self {
+        let context = Arc::new(context);
+        Self {
+            state: StateMetrics::new(context.as_ref()),
+            operations: OperationMetrics::new(context.clone()),
+            reads: KeyReadMetrics::new(context),
+        }
+    }
+}
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S = Sequential> =
@@ -110,6 +135,9 @@ pub struct Db<
     ///   are 0.
     pub(crate) bitmap: Arc<Shared<N>>,
 
+    /// Metrics for this database.
+    pub(crate) metrics: Metrics<E>,
+
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
 }
@@ -173,19 +201,25 @@ where
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
+        let _timer = self.metrics.reads.get_timer();
+        self.metrics.reads.get_calls.inc();
+        self.metrics.reads.keys_requested.inc();
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
         let reader = self.log.reader().await;
+        let mut result = None;
         for loc in locs {
             let op = reader.read(*loc).await?;
             let Operation::Update(data) = op else {
                 panic!("location does not reference update operation. loc={loc}");
             };
             if data.key() == key {
-                return Ok(Some(data.value().clone()));
+                result = Some(data.value().clone());
+                break;
             }
         }
-        Ok(None)
+
+        Ok(result)
     }
 
     /// Batch read multiple keys.
@@ -198,6 +232,10 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+
+        let _timer = self.metrics.reads.get_many_timer();
+        self.metrics.reads.get_many_calls.inc();
+        self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
 
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
@@ -252,6 +290,17 @@ where
     pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.log.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Update state gauges from the current database state.
+    pub(crate) async fn update_metrics(&self) {
+        let bounds = self.log.reader().await.bounds();
+        self.metrics.state.set(
+            bounds.end,
+            bounds.start,
+            *self.inactivity_floor_loc,
+            *self.last_commit_loc,
+        );
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
@@ -312,8 +361,11 @@ where
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
+        let _timer = self.metrics.operations.prune_timer();
+        self.metrics.operations.prune_calls.inc();
         let actual_pruned = self.prune_log(prune_loc).await?;
         self.prune_bitmap(actual_pruned);
+        self.update_metrics().await;
         Ok(())
     }
 
@@ -529,6 +581,7 @@ where
         self.root = self
             .log
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
+        self.update_metrics().await;
 
         Ok(())
     }
@@ -558,6 +611,7 @@ where
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
+        metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let reader = log.reader().await;
@@ -641,7 +695,7 @@ where
         );
         let root = log.root(inactive_peaks)?;
 
-        Ok(Self {
+        let db = Self {
             log,
             root,
             inactivity_floor_loc,
@@ -649,19 +703,28 @@ where
             last_commit_loc,
             active_keys,
             bitmap,
+            metrics,
             _update: core::marker::PhantomData,
-        })
+        };
+        db.update_metrics().await;
+        Ok(db)
     }
 
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
-        self.log.sync().await.map_err(Into::into)
+        let _timer = self.metrics.operations.sync_timer();
+        self.metrics.operations.sync_calls.inc();
+        self.log.sync().await?;
+        Ok(())
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     pub async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
-        self.log.commit().await.map_err(Into::into)
+        let _timer = self.metrics.operations.commit_timer();
+        self.metrics.operations.commit_calls.inc();
+        self.log.commit().await?;
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.

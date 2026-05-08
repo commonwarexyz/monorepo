@@ -44,8 +44,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
+    /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
+    pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    /// Re-export of [governor::Quota] for rate limiting configuration.
+    pub use governor::Quota;
     use iobuf::PoolError;
     use rayon::ThreadPoolBuildError;
     use std::{
@@ -55,14 +59,8 @@ stability_scope!(BETA {
         num::NonZeroUsize,
         time::{Duration, SystemTime},
     };
-    use thiserror::Error;
-
     pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
-
-    /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
-    pub use bytes::{Buf, BufMut};
-    /// Re-export of [governor::Quota] for rate limiting configuration.
-    pub use governor::Quota;
+    use thiserror::Error;
 
     pub mod iobuf;
     pub use iobuf::{

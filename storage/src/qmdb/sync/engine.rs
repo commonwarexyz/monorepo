@@ -75,9 +75,11 @@ struct ProgressMetrics {
 impl ProgressMetrics {
     /// Register sync progress metrics on the provided context.
     fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size =
-            context.gauge("journal_size", "Current journal size (operations applied)");
-        let target_end = context.gauge("target_end", "Target range end (operations needed)");
+        let journal_size = context.gauge("journal_size", "Current sync journal size");
+        let target_end = context.gauge(
+            "target_end",
+            "Exclusive target range end, equal to journal size when sync completes",
+        );
 
         Self {
             journal_size,
@@ -317,7 +319,8 @@ where
         )
         .await?;
 
-        let progress_metrics = ProgressMetrics::new(&config.context);
+        let sync_context = config.context.child("sync");
+        let progress_metrics = ProgressMetrics::new(&sync_context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
