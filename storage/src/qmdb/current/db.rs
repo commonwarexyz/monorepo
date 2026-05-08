@@ -292,7 +292,7 @@ where
             self.any.bitmap.as_ref(),
             ops_leaves,
             grafting::height::<N>(),
-        )
+        )?
         .map(|chunk| hasher.digest(&chunk));
         Ok(OpsRootWitness {
             grafted_root,
@@ -851,6 +851,30 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     }
 }
 
+/// Return complete and active chunk counts, enforcing the pending and pruning invariants.
+///
+/// Returns [`Error::DataCorrupted`] if `bitmap` and `ops_leaves` imply more than one
+/// pending chunk, or if pruning has advanced past the active chunk boundary.
+fn active_chunk_window<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
+    bitmap: &B,
+    ops_leaves: u64,
+    grafting_height: u32,
+) -> Result<(u64, u64), Error<F>> {
+    let complete = bitmap.complete_chunks() as u64;
+    let active = grafting::ops_active_chunks::<F>(ops_leaves, grafting_height).min(complete);
+    let pending = complete - active;
+    if pending > 1 {
+        return Err(Error::DataCorrupted("multiple pending bitmap chunks"));
+    }
+
+    let pruned = bitmap.pruned_chunks() as u64;
+    if pruned > active {
+        return Err(Error::DataCorrupted("pruned chunks exceed active chunks"));
+    }
+
+    Ok((complete, active))
+}
+
 /// Returns the bytes of the "pending" chunk if the bitmap currently has one, else `None`.
 ///
 /// A chunk is pending when its bits are fully written to the bitmap but its h=G ancestor
@@ -860,28 +884,19 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
 ///
 /// The caller must pass a consistent snapshot of `ops_leaves` (the ops tree's leaf count)
 /// and the bitmap state. Both inputs are used to derive `active_chunks`; deriving them from
-/// independent snapshots can result in `active_chunks > complete_chunks`, which would
-/// violate the pending-window invariant.
+/// independent snapshots can violate the pending-window or pruning invariants.
+///
+/// Returns [`Error::DataCorrupted`] when those invariants are violated.
 pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
     ops_leaves: u64,
     grafting_height: u32,
-) -> Option<[u8; N]> {
-    let complete = bitmap.complete_chunks() as u64;
-    let active = grafting::ops_active_chunks::<F>(ops_leaves, grafting_height).min(complete);
-    let pruned = bitmap.pruned_chunks() as u64;
-    // The pending chunk is the most recently completed one (right edge of the bitmap),
-    // while pruning advances from the left edge. Since pruning only retires chunks that
-    // are already inactive (covered by the inactivity floor), the pending chunk's index
-    // is strictly greater than `pruned`.
-    debug_assert!(
-        pruned <= active,
-        "pruned_chunks {pruned} > active_chunks {active}"
-    );
-    if complete.saturating_sub(active) != 1 {
-        return None;
+) -> Result<Option<[u8; N]>, Error<F>> {
+    let (complete, active) = active_chunk_window::<F, B, N>(bitmap, ops_leaves, grafting_height)?;
+    if complete - active != 1 {
+        return Ok(None);
     }
-    Some(bitmap.get_chunk(active as usize))
+    Ok(Some(bitmap.get_chunk(active as usize)))
 }
 
 /// Compute the canonical root from the ops root, grafted tree root, and optional pending /
@@ -949,7 +964,7 @@ pub(super) async fn compute_db_root<
 ) -> Result<H::Digest, Error<F>> {
     let grafted_root =
         compute_grafted_root(hasher, status, storage, ops_leaves, inactivity_floor).await?;
-    let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())
+    let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
         .map(|chunk| hasher.digest(&chunk));
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
@@ -1000,14 +1015,8 @@ pub(super) async fn compute_grafted_root<
     }
 
     let grafting_height = grafting::height::<N>();
-    let complete_chunks = status.complete_chunks() as u64;
-    let active_chunks =
-        grafting::ops_active_chunks::<F>(ops_leaves, grafting_height).min(complete_chunks);
-    let pruned_chunks = status.pruned_chunks() as u64;
-    debug_assert!(
-        pruned_chunks <= active_chunks && active_chunks <= complete_chunks,
-        "invariant violated: pruned={pruned_chunks} active={active_chunks} complete={complete_chunks}"
-    );
+    let (_complete_chunks, _active_chunks) =
+        active_chunk_window::<F, B, N>(status, ops_leaves, grafting_height)?;
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
