@@ -1454,22 +1454,24 @@ impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
-/// **Byzzfuzz mode** - safety fuzzing under sampled network and process faults.
+/// **Byzzfuzz mode** - sampled network and process faults checked against
+/// safety *and* liveness on every run.
 ///
-/// Runs four honest engines and applies sampled faults for the entire run:
+/// Runs four honest engines plus a per-message intercept layer. Faults are
+/// sampled per iteration:
 /// - **Network faults**: a schedule of `(view, partition)` entries. At a
 ///   scheduled view, traffic across partition blocks is dropped on every
 ///   channel (vote, certificate, resolver, even undecodable bytes); outside
 ///   scheduled views the topology is fully connected.
-/// - **Process faults**: a fixed byzantine identity, whose outgoing
-///   protocol messages are intercepted per a schedule of
-///   `(view, receivers, omit, scope)` entries. `scope` optionally
-///   narrows a fault to a specific channel + message kind (e.g. only
-///   Notarize votes); `Any` matches every byzantine outgoing message at
-///   the view. Vote process faults semantically mutate the intercepted
-///   vote and re-sign it under the byzantine identity. Certificate and
-///   resolver process faults are **omit-only**: the forwarder drops the
-///   original to the targeted recipients and the injector emits nothing.
+/// - **Process faults**: a fixed byzantine identity (always at index 0),
+///   whose outgoing protocol messages are intercepted per a schedule of
+///   `(view, receivers, omit, scope)` entries. `scope` optionally narrows
+///   a fault to a specific channel + message kind (e.g. only Notarize
+///   votes); `Any` matches every byzantine outgoing message at the view.
+///   Vote process faults semantically mutate the intercepted vote and
+///   re-sign it under the byzantine identity. Certificate and resolver
+///   process faults are **omit-only**: the forwarder drops the original
+///   to the targeted recipients and the injector emits nothing.
 ///
 /// Round attribution uses each message sender's current protocol round
 /// (the maximum view that sender has sent or received): network faults
@@ -1477,23 +1479,26 @@ impl FuzzMode for FaultyNet {
 /// Retransmissions of an old view at a later round therefore inherit the
 /// later round's fault window.
 ///
-/// Finalization timeout is not a failure; only invariant violations panic.
+/// Network faults apply during a bounded fault phase. After the phase
+/// elapses (or all non-byzantine reporters reach `required_containers`,
+/// whichever comes first), the shared fault gate reaches GST: partitions
+/// pass through, but the byzantine sender keeps mutating/omitting its own
+/// messages under the same `(view, receivers, scope)` schedule (extended
+/// at GST with a fresh post-GST view budget so byzantine activity does not
+/// silently disappear). Each non-byzantine reporter must then finalize at
+/// least one new view within a fixed post-GST window; failure to advance
+/// panics with a liveness violation. Safety invariants run after the
+/// post-GST check on every successful path. See [`byzzfuzz::run`].
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
-/// **ByzzfuzzLiveness mode** - liveness variant of the ByzzFuzz harness.
+/// **ByzzfuzzLiveness mode** - alias for [`Byzzfuzz`].
 ///
-/// Same fault model as `Byzzfuzz`, but applies faults only during a bounded
-/// fault phase. After the phase elapses (or all non-byzantine reporters
-/// reach `required_containers`, whichever comes first), the shared fault
-/// gate reaches GST: forwarders pass partition decisions through and the
-/// injector drops queued intercepts. Each non-byzantine reporter (every
-/// index except `BYZANTINE_IDX = 0`) must then finalize at least one new
-/// view within a fixed post-GST window; failure to advance panics with a
-/// liveness violation. Safety invariants run after the post-GST check on
-/// every successful path.
+/// Retained as a distinct mode/binary so existing `*_byzzfuzz_liveness`
+/// fuzz targets and their corpora keep working; both modes dispatch to the
+/// same [`byzzfuzz::run`] entry point.
 pub struct ByzzfuzzLiveness;
 impl FuzzMode for ByzzfuzzLiveness {
     const MODE: Mode = Mode::ByzzfuzzLiveness;
@@ -1552,12 +1557,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)
         })),
-        Mode::Byzzfuzz => {
+        Mode::Byzzfuzz | Mode::ByzzfuzzLiveness => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
-        Mode::ByzzfuzzLiveness => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            byzzfuzz::run_liveness::<P>(input)
-        })),
     };
     match run_result {
         Ok(()) => {
