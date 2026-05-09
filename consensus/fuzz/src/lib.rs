@@ -1478,16 +1478,18 @@ impl FuzzMode for FaultyNet {
 /// Retransmissions of an old view at a later round therefore inherit the
 /// later round's fault window.
 ///
-/// Network faults apply during a bounded fault phase. After the phase
-/// elapses (or all non-byzantine reporters reach `required_containers`,
-/// whichever comes first), the shared fault gate reaches GST: partitions
-/// pass through, but the byzantine sender keeps mutating/omitting its own
+/// Network faults apply during a bounded fault phase. If all non-byzantine
+/// reporters reach `required_containers` before the phase elapses, the run
+/// skips GST and goes straight to safety invariants. Otherwise, when the
+/// phase elapses, the shared fault gate reaches GST: partitions pass
+/// through, but the byzantine sender keeps mutating/omitting its own
 /// messages under the same `(view, receivers, scope)` schedule (extended
 /// at GST with a fresh post-GST view budget so byzantine activity does not
 /// silently disappear). Each non-byzantine reporter must then finalize at
 /// least one new view within a fixed post-GST window; failure to advance
-/// panics with a liveness violation. Safety invariants run after the
-/// post-GST check on every successful path. See [`byzzfuzz::run`].
+/// panics with a liveness violation. On the early-complete path safety
+/// invariants run immediately; otherwise they run after the post-GST
+/// progress check. See [`byzzfuzz::run`].
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;

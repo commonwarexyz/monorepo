@@ -23,7 +23,7 @@ use crate::{
     simplex::Simplex,
     spawn_honest_validator,
     utils::Partition,
-    PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, MAX_SLEEP_DURATION, N4F0C4,
+    PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, N4F0C4,
 };
 use bytes::Bytes;
 use commonware_codec::Encode;
@@ -42,12 +42,14 @@ use futures::future::join_all;
 use rand::Rng;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 
-/// Liveness-mode fault phase length. The fuzzer applies network partition
-/// faults during this virtual-time window; after it elapses (or all
-/// non-byzantine reporters reach `required_containers`, whichever comes
-/// first) the [`FaultGate`] reaches GST. Kept close to [`MAX_SLEEP_DURATION`]
-/// so each libFuzzer iteration stays cheap; tune up from corpus signal.
-const BYZZFUZZ_FAULT_PHASE: Duration = MAX_SLEEP_DURATION;
+/// Fault phase length. Network partition faults apply during this
+/// virtual-time window. The window closes when either:
+/// - all non-byzantine reporters reach `required_containers` -- the run
+///   short-circuits to safety invariants without raising the [`FaultGate`]
+///   or running the post-GST check; or
+/// - the timer elapses -- [`run`] then raises the [`FaultGate`] (GST) and
+///   enters Phase 2.
+const BYZZFUZZ_FAULT_PHASE: Duration = Duration::from_secs(30);
 
 /// Liveness-mode post-GST window. After GST, each non-byzantine reporter
 /// must finalize at least one new view within this virtual-time window;
@@ -296,7 +298,9 @@ where
 /// in either phase. At GST the runner prunes any dormant pre-GST faults at
 /// views the byzantine has not yet reached, then appends fresh faults for
 /// `[byzantine_rnd + 1, byzantine_rnd + r_post_gst]` so the appended post-GST
-/// views never double-fire and Phase 2 always exercises the post-GST adversary.
+/// views never double-fire and Phase 2 keeps the post-GST adversary
+/// schedulable (the appended faults still only fire when the byzantine emits
+/// matching outbound messages at those views).
 ///
 /// ```text
 /// time
@@ -304,13 +308,17 @@ where
 ///   | network partitions may drop msgs  | all network links deliver msgs    |
 ///   | Byzantine process faults may run  | Byzantine process faults may run  |
 ///   |                                   |                                   |
-///   | phase timer or early completion   | each correct reporter must        |
+///   | phase timer elapses               | each correct reporter must        |
 ///   |                                   | finalize above its baseline       |
 ///   |                                   |                                   |
 ///   +-----------------------------------+-----------------------------------+
 ///                                       |
 ///                                       +-- record finalization baselines,
 ///                                           then reach GST
+///
+///   (alternative) Phase 1 early completion: every non-byzantine reporter
+///   reaches `required_containers` before the phase timer elapses. The run
+///   skips GST and Phase 2, going straight to safety invariants.
 /// ```
 ///
 /// If all non-byzantine reporters reach `required_containers` during Phase 1,
