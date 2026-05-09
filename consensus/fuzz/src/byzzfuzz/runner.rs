@@ -293,9 +293,10 @@ where
 /// reaches GST on the shared gate and requires each non-byzantine reporter
 /// to finalize at least one view above its pre-GST baseline within the
 /// post-GST window; otherwise it panics. Byzantine process faults may fire
-/// in either phase. At GST the runner appends faults for views in
-/// `[max(byzantine_rnd, highest_pre_gst_proc_fault) + 1, ... + r_post_gst]`
-/// so Phase 2 cannot be exhausted by Phase 1 progress.
+/// in either phase. At GST the runner prunes any dormant pre-GST faults at
+/// views the byzantine has not yet reached, then appends fresh faults for
+/// `[byzantine_rnd + 1, byzantine_rnd + r_post_gst]` so the appended post-GST
+/// views never double-fire and Phase 2 always exercises the post-GST adversary.
 ///
 /// ```text
 /// time
@@ -390,11 +391,16 @@ where
                 watcher_inputs.push((i, baseline, latest, monitor));
             }
 
-            // GST: disable partition drops. Prune dormant pre-GST faults
-            // (views the byzantine has not yet reached) so they cannot
-            // double-fire with the appended post-GST schedule, then append
-            // fresh process faults starting at `byzantine_rnd + 1` so
-            // Phase 2 actually exercises the post-GST adversary.
+            // GST: disable partition drops. Prune pre-GST faults at views
+            // strictly above `byzantine_rnd` so the appended `[byzantine_rnd
+            // + 1, ...]` post-GST schedule cannot double-fire on the same
+            // view, then append fresh process faults so Phase 2 actually
+            // exercises the post-GST adversary. Pre-GST faults at views
+            // `<= byzantine_rnd` are retained: a fault at exactly
+            // `byzantine_rnd` may still fire (the cell can equal `V` because
+            // the byzantine *received* a `V`-tagged message, not because it
+            // already sent every outbound `V` message), and that is the
+            // intended Phase-1-leftover behavior, not a clean slate.
             let byzantine_rnd = byzantine_view.get();
             let pruned_pre_gst_proc_faults = {
                 let mut schedule = proc_schedule.lock();

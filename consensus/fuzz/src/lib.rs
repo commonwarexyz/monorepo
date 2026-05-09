@@ -1374,7 +1374,6 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
-    ByzzfuzzLiveness,
 }
 
 pub trait FuzzMode {
@@ -1494,16 +1493,6 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
-/// **ByzzfuzzLiveness mode** - alias for [`Byzzfuzz`].
-///
-/// Retained as a distinct mode/binary so existing `*_byzzfuzz_liveness`
-/// fuzz targets and their corpora keep working; both modes dispatch to the
-/// same [`byzzfuzz::run`] entry point.
-pub struct ByzzfuzzLiveness;
-impl FuzzMode for ByzzfuzzLiveness {
-    const MODE: Mode = Mode::ByzzfuzzLiveness;
-}
-
 /// Install (once per process) a panic-hook chain that drains and prints the
 /// ByzzFuzz decision log when the `BYZZFUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
@@ -1537,7 +1526,7 @@ fn install_byzzfuzz_panic_hook() {
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
-    if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+    if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
     }
     let run_result = match M::MODE {
@@ -1557,7 +1546,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_campaign::<P>(input)
         })),
-        Mode::Byzzfuzz | Mode::ByzzfuzzLiveness => {
+        Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
     };
@@ -1565,7 +1554,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Ok(()) => {
             // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
             // or otherwise) starts clean. This is cheap when the log is empty.
-            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+            if matches!(M::MODE, Mode::Byzzfuzz) {
                 let _ = byzzfuzz::log::take();
             }
         }

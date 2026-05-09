@@ -13,7 +13,7 @@
 //! certificate, and resolver traffic all participate in this tracking.
 //!
 //! Public surface used from `lib.rs`:
-//! - [`run`] is the entry point for `Mode::Byzzfuzz` and `Mode::ByzzfuzzLiveness`:
+//! - [`run`] is the `Mode::Byzzfuzz` entry point:
 //!   applies network faults during a bounded fault phase, reaches GST on the
 //!   shared fault gate, then requires every non-byzantine reporter to make
 //!   at least one new finalization within a fixed post-GST window while

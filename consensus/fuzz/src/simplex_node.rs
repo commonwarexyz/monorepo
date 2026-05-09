@@ -15,6 +15,7 @@ use commonware_consensus::{
             Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
             Proposal, Vote,
         },
+        ForwardingPolicy,
     },
     types::{Epoch, Round, View},
     Monitor, Viewable,
@@ -30,7 +31,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
-use commonware_consensus::simplex::ForwardingPolicy;
 
 const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 100;
@@ -91,7 +91,11 @@ impl Arbitrary<'_> for NodeFuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        Ok(Self { raw_bytes, events, forwarding })
+        Ok(Self {
+            raw_bytes,
+            events,
+            forwarding,
+        })
     }
 }
 
@@ -1573,7 +1577,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
     checkpoint: deterministic::Checkpoint,
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<P::Scheme>,
-    forwarding: ForwardingPolicy
+    forwarding: ForwardingPolicy,
 ) where
     PublicKeyOf<P>: Send,
 {
@@ -1642,7 +1646,7 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
-            forwarding: ForwardingPolicy::Disabled
+            forwarding: ForwardingPolicy::Disabled,
         };
         fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
     }
@@ -1666,7 +1670,7 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
-            forwarding: ForwardingPolicy::Disabled
+            forwarding: ForwardingPolicy::Disabled,
         };
         fuzz_node::<simplex::SimplexEd25519, WithRecovery>(input);
     }
