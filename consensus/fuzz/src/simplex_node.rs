@@ -30,6 +30,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
+use commonware_consensus::simplex::ForwardingPolicy;
 
 const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 100;
@@ -65,6 +66,7 @@ pub struct NodeEvent {
 pub struct NodeFuzzInput {
     pub raw_bytes: Vec<u8>,
     pub events: Vec<NodeEvent>,
+    pub forwarding: ForwardingPolicy,
 }
 
 impl Arbitrary<'_> for NodeFuzzInput {
@@ -83,7 +85,13 @@ impl Arbitrary<'_> for NodeFuzzInput {
             u.bytes(remaining)?.to_vec()
         };
 
-        Ok(Self { raw_bytes, events })
+        let forwarding = match u.int_in_range(0..=2)? {
+            0 => ForwardingPolicy::Disabled,
+            1 => ForwardingPolicy::SilentVoters,
+            _ => ForwardingPolicy::SilentLeader,
+        };
+
+        Ok(Self { raw_bytes, events, forwarding })
     }
 }
 
@@ -1476,6 +1484,7 @@ where
             fault_rounds_bound: 1,
         },
         messaging_faults: Vec::new(),
+        forwarding: input.forwarding.clone(),
     };
 
     let (oracle, participants, schemes, mut registrations) =
@@ -1527,6 +1536,7 @@ where
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
+        base.forwarding.clone(),
         pending,
         recovered,
         resolver,
@@ -1563,6 +1573,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
     checkpoint: deterministic::Checkpoint,
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<P::Scheme>,
+    forwarding: ForwardingPolicy
 ) where
     PublicKeyOf<P>: Send,
 {
@@ -1595,6 +1606,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             relay,
             Duration::from_secs(1),
             Duration::from_secs(2),
+            forwarding,
             pending,
             recovered,
             resolver,
@@ -1630,6 +1642,7 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
+            forwarding: ForwardingPolicy::Disabled
         };
         fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
     }
@@ -1653,6 +1666,7 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
+            forwarding: ForwardingPolicy::Disabled
         };
         fuzz_node::<simplex::SimplexEd25519, WithRecovery>(input);
     }

@@ -151,6 +151,10 @@ pub struct FuzzInput {
     /// `rate%` honest-message drop while the reference reporter is in `view`;
     /// the rate reverts to 0 outside scheduled views.
     pub messaging_faults: Vec<(View, u8)>,
+    /// Per-iteration forwarding policy threaded into every engine the harness
+    /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
+    /// `batcher::forward_targets` instead of pinning to `Disabled`.
+    pub forwarding: ForwardingPolicy,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -203,6 +207,16 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
+        // Forwarding policy distribution:
+        //   33%  Disabled       - matches prior fuzz behavior; covers the no-op path
+        //   33%  SilentVoters   - exercises `forward_targets` -> `missing_voters`
+        //   34%  SilentLeader   - exercises `forward_targets` -> leader-only branch
+        let forwarding = match u.int_in_range(0..=2)? {
+            0 => ForwardingPolicy::Disabled,
+            1 => ForwardingPolicy::SilentVoters,
+            _ => ForwardingPolicy::SilentLeader,
+        };
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -219,6 +233,7 @@ impl Arbitrary<'_> for FuzzInput {
             required_containers,
             strategy,
             messaging_faults: Vec::new(),
+            forwarding,
         })
     }
 }
@@ -381,6 +396,7 @@ pub(crate) fn spawn_honest_validator<
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -440,7 +456,7 @@ where
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
-        forwarding: ForwardingPolicy::Disabled,
+        forwarding,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(
@@ -463,6 +479,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
@@ -502,6 +519,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         relay,
         leader_timeout,
         certification_timeout,
+        forwarding,
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
@@ -734,6 +752,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
+                input.forwarding,
                 pending,
                 recovered,
                 resolver,
@@ -854,6 +873,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
+                input.forwarding,
                 channels,
             );
             reporters.push((validator, reporter));
@@ -1125,7 +1145,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: ForwardingPolicy::Disabled,
+                forwarding: input.forwarding,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);
             engine.start(
@@ -1211,7 +1231,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                             PAGE_CACHE_SIZE,
                         ),
                         strategy: Sequential,
-                        forwarding: ForwardingPolicy::Disabled,
+                        forwarding: input.forwarding,
                     };
                     let secondary_engine =
                         Engine::new(secondary_context.child("engine"), secondary_engine_cfg);
@@ -1249,6 +1269,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_millis(1_500),
+                input.forwarding,
                 pending,
                 recovered,
                 resolver,
@@ -1326,6 +1347,7 @@ where
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let forwarding = input.forwarding.clone();
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -1338,7 +1360,7 @@ where
                 executor.start_and_recover(|mut context| async move {
                     simplex_node::run::<P>(&mut context, &input).await
                 });
-            simplex_node::run_recovery::<P>(checkpoint, participants, schemes);
+            simplex_node::run_recovery::<P>(checkpoint, participants, schemes, forwarding);
         }
     }
 }

@@ -271,6 +271,7 @@ mod tests {
         fuzz, strategy::StrategyChoice, utils::Partition, FaultyMessaging, FuzzInput, Standard,
         TwinsMutator, N4F1C3,
     };
+    use commonware_consensus::simplex::ForwardingPolicy;
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
 
@@ -287,6 +288,7 @@ mod tests {
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
+            forwarding: ForwardingPolicy::Disabled,
         }
     }
 

@@ -263,6 +263,7 @@ where
             relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
+            input.forwarding,
             (vote_primary, vote_receiver),
             (cert_primary, cert_receiver),
             (resolver_primary, resolver_receiver),
