@@ -78,17 +78,17 @@ impl Arbitrary<'_> for NodeFuzzInput {
             events.push(NodeEvent::arbitrary(u)?);
         }
 
+        let forwarding = match u.int_in_range(0..=2)? {
+            0 => ForwardingPolicy::Disabled,
+            1 => ForwardingPolicy::SilentVoters,
+            _ => ForwardingPolicy::SilentLeader,
+        };
+
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
             vec![0]
         } else {
             u.bytes(remaining)?.to_vec()
-        };
-
-        let forwarding = match u.int_in_range(0..=2)? {
-            0 => ForwardingPolicy::Disabled,
-            1 => ForwardingPolicy::SilentVoters,
-            _ => ForwardingPolicy::SilentLeader,
         };
 
         Ok(Self {
