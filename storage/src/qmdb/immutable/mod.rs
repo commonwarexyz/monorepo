@@ -87,9 +87,9 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding,
-        build_snapshot_from_log, compact_witness,
+        build_snapshot_from_log,
         metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
-        operation::{Key, Operation as _},
+        operation::Key,
         Error,
     },
     translator::Translator,
@@ -617,19 +617,11 @@ where
 
     /// Return the pinned Merkle nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        if !loc.is_valid() {
-            return Err(crate::merkle::Error::LocationOverflow(loc).into());
-        }
-        let futs: Vec<_> = F::nodes_to_pin(loc)
-            .map(|p| async move {
-                self.journal
-                    .merkle
-                    .get_node(p)
-                    .await?
-                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
-            })
-            .collect();
-        futures::future::try_join_all(futs).await
+        self.journal
+            .merkle
+            .pinned_nodes_at(loc)
+            .await
+            .map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -695,26 +687,9 @@ where
         let _timer = self.metrics.operations.apply_batch_timer();
         self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_diff_ends.contains(&db_size);
-        if !valid {
-            return Err(Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
-        let tip_commit_loc = Location::new(batch.total_size - 1);
-        // Per-commit floor validation; see `compact_witness::validate_ancestor_floors`.
-        compact_witness::validate_ancestor_floors(
-            self.inactivity_floor_loc,
-            db_size,
-            &batch.ancestor_diff_ends,
-            &batch.ancestor_new_inactivity_floor_locs,
-            batch.new_inactivity_floor_loc,
-            tip_commit_loc,
-        )?;
+        batch
+            .bounds
+            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
         let start_loc = Location::new(db_size);
 
         // Apply journal.
@@ -730,7 +705,7 @@ where
                 .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
+            if batch.bounds.ancestors[i].end <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
@@ -742,10 +717,10 @@ where
         }
 
         // Update state.
-        self.last_commit_loc = Location::new(batch.total_size - 1);
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
+        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root;
-        let range = start_loc..Location::new(batch.total_size);
+        let range = start_loc..Location::new(batch.bounds.total_size);
         self.update_metrics().await;
         self.metrics
             .operations

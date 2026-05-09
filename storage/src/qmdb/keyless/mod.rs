@@ -52,6 +52,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::value::ValueEncoding,
+        batch_chain,
         metrics::{LocationReadMetrics, OperationMetrics, StateMetrics},
         Error,
     },
@@ -364,19 +365,11 @@ where
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        if !loc.is_valid() {
-            return Err(crate::merkle::Error::LocationOverflow(loc).into());
-        }
-        let futs: Vec<_> = F::nodes_to_pin(loc)
-            .map(|p| async move {
-                self.journal
-                    .merkle
-                    .get_node(p)
-                    .await?
-                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
-            })
-            .collect();
-        futures::future::try_join_all(futs).await
+        self.journal
+            .merkle
+            .pinned_nodes_at(loc)
+            .await
+            .map_err(Into::into)
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
@@ -494,12 +487,13 @@ where
             journal_batch: self.journal.to_merkleized_batch(),
             root: self.root,
             parent: None,
-            base_size: journal_size,
-            total_size: journal_size,
-            db_size: journal_size,
-            ancestor_batch_ends: Vec::new(),
-            ancestor_new_inactivity_floor_locs: Vec::new(),
-            new_inactivity_floor_loc: self.inactivity_floor_loc,
+            bounds: batch_chain::Bounds {
+                base_size: journal_size,
+                db_size: journal_size,
+                total_size: journal_size,
+                ancestors: Vec::new(),
+                inactivity_floor: self.inactivity_floor_loc,
+            },
         })
     }
 
@@ -535,60 +529,17 @@ where
         let _timer = self.metrics.operations.apply_batch_timer();
         self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_batch_ends.contains(&db_size);
-        if !valid {
-            return Err(Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
-        // Validate every unapplied commit's floor (each ancestor in the chain, then the tip)
-        // before mutating the journal. The invariant is per-commit:
-        //   - floors are monotonically non-decreasing across the chain, and
-        //   - each floor is at most its own commit location (= total_size - 1 at that point).
-        // Ancestors are stored newest-first, so walk in reverse to get oldest-first.
-        let mut prev_floor = self.inactivity_floor_loc;
-        for i in (0..batch.ancestor_batch_ends.len()).rev() {
-            let ancestor_end = batch.ancestor_batch_ends[i];
-            if ancestor_end <= db_size {
-                // Already on disk -- its floor was validated when it was first applied.
-                continue;
-            }
-            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
-            let ancestor_commit_loc = Location::new(ancestor_end - 1);
-            if ancestor_floor < prev_floor {
-                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
-            }
-            if ancestor_floor > ancestor_commit_loc {
-                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
-            }
-            prev_floor = ancestor_floor;
-        }
-        // Tip checks chain off the last validated ancestor floor.
-        if batch.new_inactivity_floor_loc < prev_floor {
-            return Err(Error::FloorRegressed(
-                batch.new_inactivity_floor_loc,
-                prev_floor,
-            ));
-        }
-        let tip_commit_loc = Location::new(batch.total_size - 1);
-        if batch.new_inactivity_floor_loc > tip_commit_loc {
-            return Err(Error::FloorBeyondSize(
-                batch.new_inactivity_floor_loc,
-                tip_commit_loc,
-            ));
-        }
+        batch
+            .bounds
+            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
         let start_loc = self.last_commit_loc + 1;
 
         self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = Location::new(batch.total_size - 1);
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
+        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root;
-        let end_loc = Location::new(batch.total_size);
+        let end_loc = Location::new(batch.bounds.total_size);
         debug!(size = ?end_loc, "applied batch");
         let range = start_loc..end_loc;
         self.update_metrics().await;
