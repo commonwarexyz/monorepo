@@ -240,6 +240,15 @@ impl Arbitrary<'_> for FuzzInput {
 
 pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
 
+type ReporterOf<P> = reporter::Reporter<
+    deterministic::Context,
+    <P as simplex::Simplex>::Scheme,
+    <P as simplex::Simplex>::Elector,
+    Sha256Digest,
+>;
+
+type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
+
 type NetworkChannels<P> = (
     (
         commonware_p2p::simulated::Sender<P, deterministic::Context>,
@@ -539,10 +548,7 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
-    reporters: &mut [(
-        PublicKeyOf<P>,
-        reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
-    )],
+    reporters: &mut [ReporterEntry<P>],
     partition: Partition,
     required_containers: u64,
 ) {
@@ -612,10 +618,7 @@ fn initial_drop_rate(schedule: &[(View, u8)]) -> u8 {
 /// `finalized_view = 0` therefore covers view 1.
 async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
-    reporters: &mut [(
-        PublicKeyOf<P>,
-        reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
-    )],
+    reporters: &mut [ReporterEntry<P>],
     schedule: Vec<(View, u8)>,
     required_containers: u64,
     drop_rate: network::DropRateCell,
