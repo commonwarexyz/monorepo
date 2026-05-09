@@ -1015,7 +1015,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
         // primary (legitimate engine) + secondary (Disrupter).
         for idx in case.compromised.iter().copied() {
             let validator = participants[idx].clone();
-            let context = context.child("twin").with_attribute("index", &idx);
+            let context = context.child("twin").with_attribute("index", idx);
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(&validator)
@@ -1255,7 +1255,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             if compromised.contains(&idx) {
                 continue;
             }
-            let ctx = context.child("honest").with_attribute("index", &idx);
+            let ctx = context.child("honest").with_attribute("index", idx);
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
@@ -1290,23 +1290,20 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         let (mut latest, mut monitor): (View, Receiver<View>) =
                             reporter.subscribe().await;
                         finalizers.push(
-                            context
-                                .child("finalizer")
-                                .with_attribute("index", &i)
-                                .spawn(move |_| async move {
+                            context.child("finalizer").with_attribute("index", i).spawn(
+                                move |_| async move {
                                     while latest.get() < required {
                                         latest = monitor.recv().await.expect("event missing");
                                     }
-                                }),
+                                },
+                            ),
                         );
                     }
                     TwinsRole::Campaign => {
                         let (_latest, mut monitor) = reporter.subscribe().await;
                         finalizers.push(
-                            context
-                                .child("finalizer")
-                                .with_attribute("index", &i)
-                                .spawn(move |_| async move {
+                            context.child("finalizer").with_attribute("index", i).spawn(
+                                move |_| async move {
                                     let mut count = 0u64;
                                     while count < required {
                                         let view = monitor.recv().await.expect("event missing");
@@ -1314,7 +1311,8 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                                             count += 1;
                                         }
                                     }
-                                }),
+                                },
+                            ),
                         );
                     }
                 }
@@ -1347,7 +1345,7 @@ where
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
-    let forwarding = input.forwarding.clone();
+    let forwarding = input.forwarding;
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -1478,18 +1476,16 @@ impl FuzzMode for FaultyNet {
 /// Retransmissions of an old view at a later round therefore inherit the
 /// later round's fault window.
 ///
-/// Network faults apply during a bounded fault phase. If all non-byzantine
-/// reporters reach `required_containers` before the phase elapses, the run
-/// skips GST and goes straight to safety invariants. Otherwise, when the
-/// phase elapses, the shared fault gate reaches GST: partitions pass
-/// through, but the byzantine sender keeps mutating/omitting its own
+/// Network faults apply during a bounded fault phase. After the phase
+/// elapses (or all non-byzantine reporters reach `required_containers`,
+/// whichever comes first), the shared fault gate reaches GST: partitions
+/// pass through, but the byzantine sender keeps mutating/omitting its own
 /// messages under the same `(view, receivers, scope)` schedule (extended
 /// at GST with a fresh post-GST view budget so byzantine activity does not
 /// silently disappear). Each non-byzantine reporter must then finalize at
 /// least one new view within a fixed post-GST window; failure to advance
-/// panics with a liveness violation. On the early-complete path safety
-/// invariants run immediately; otherwise they run after the post-GST
-/// progress check. See [`byzzfuzz::run`].
+/// panics with a liveness violation. Safety invariants run after the
+/// post-GST check on every successful path. See [`byzzfuzz::run`].
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;

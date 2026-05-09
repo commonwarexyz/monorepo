@@ -440,7 +440,7 @@ where
                 watchers.push(
                     context
                         .child("byzzfuzz_post_gst_watcher")
-                        .with_attribute("index", &i)
+                        .with_attribute("index", i)
                         .spawn(move |_| async move {
                             while latest.get() <= baseline {
                                 let Some(next) = monitor.recv().await else {

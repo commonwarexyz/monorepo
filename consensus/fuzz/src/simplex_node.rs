@@ -1488,7 +1488,7 @@ where
             fault_rounds_bound: 1,
         },
         messaging_faults: Vec::new(),
-        forwarding: input.forwarding.clone(),
+        forwarding: input.forwarding,
     };
 
     let (oracle, participants, schemes, mut registrations) =
@@ -1540,7 +1540,7 @@ where
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
-        base.forwarding.clone(),
+        base.forwarding,
         pending,
         recovered,
         resolver,
