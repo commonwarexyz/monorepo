@@ -22,17 +22,17 @@
 //! refilled from front to back, but policies decide which overflow messages are
 //! retained and in what order.
 //!
+//! Concurrent enqueue calls, including calls from cloned senders, are not
+//! globally ordered and may be observed in any interleaving. The ready fast path
+//! does not reserve the inactive overflow state. Preserving a global order
+//! between racing producers would add synchronization to the common no-overflow
+//! path.
+//!
 //! Eager refill favors keeping producer enqueue on the ready fast path over
 //! batching receiver refill work. It may take the overflow lock more often under
 //! sustained overflow, but avoids leaving ready slots empty while overflow
-//! remains populated. Overflow is expected to be exceptional; if benchmarks show
+//! remains populated. Overflow is expected to be exceptional. If benchmarks show
 //! refill lock attempts dominate, this can be revisited.
-//!
-//! Concurrent enqueue calls, including calls from cloned senders, are not
-//! globally ordered and may be observed in any interleaving. The ready fast path
-//! intentionally does not reserve the inactive overflow state; preserving a
-//! global order between racing producers would add synchronization to the common
-//! no-overflow path.
 
 use crate::Feedback;
 use std::{
@@ -50,12 +50,10 @@ use std::{
 // overflow is inactive.
 //
 // The low bit records whether the most recently published overflow state was
-// non-empty. This is a state bit, not a message count.
+// non-empty. The higher bits count active overflow mutations. Each mutation
+// adds `OVERFLOW_MUTATION` while it may mutate or publish overflow state, so
+// the count and the state bit coexist in the same word.
 const OVERFLOW_HAS_MESSAGES: usize = 1;
-
-// Each overflow enqueue/refill adds this value while it may mutate or publish
-// overflow state. Since the value is above the low bit, it acts as a mutation
-// count and can coexist with `OVERFLOW_HAS_MESSAGES`.
 const OVERFLOW_MUTATION: usize = 2;
 
 // Useful states:
@@ -68,11 +66,6 @@ const OVERFLOW_MUTATION: usize = 2;
 //   lock-free fast-path/refill decisions from acting on a changing overflow
 //   snapshot.
 //
-// The ready fast path only observes this state; it does not reserve it. A sender
-// that sees zero may race with another sender that enters overflow immediately
-// after the load. Those sends are concurrent, and the mailbox does not provide
-// global FIFO ordering across cloned senders.
-//
 // Activity accesses are relaxed because this word does not publish queue
 // contents. The overflow mutex serializes `VecDeque` access, and the ready queue
 // owns its own synchronization. Stale activity observations only decide whether
@@ -82,14 +75,17 @@ const OVERFLOW_MUTATION: usize = 2;
 pub trait Policy: Sized {
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
-    /// Messages already in the ready queue are not provided here; policy changes only apply to
-    /// overflow retained beyond ready capacity. The receiver eagerly refills ready from overflow
-    /// after ready pops so producer enqueue can return to the ready fast path as soon as capacity
-    /// opens. Policies may append, remove, replace, reorder, or clear overflow, and are responsible
-    /// for bounding it when a hard memory limit is required. The returned value is feedback for
-    /// this enqueue attempt after the policy has made any overflow changes; it does not guarantee
-    /// that `message` or any existing overflow item was retained. Return `true` to report
-    /// [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
+    /// Messages already in the ready queue are not provided here. Policy changes only apply to
+    /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
+    /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
+    ///
+    /// The receiver eagerly refills ready from overflow after ready pops so producer enqueue can
+    /// return to the ready fast path as soon as capacity opens.
+    ///
+    /// The returned value is feedback for this enqueue attempt after the policy has made any
+    /// overflow changes. It does not guarantee that `message` or any existing overflow item was
+    /// retained. Return `true` to report [`Feedback::Backoff`] or `false` to report
+    /// [`Feedback::Dropped`].
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
 }
 
@@ -294,13 +290,9 @@ impl<T> OverflowState<T> {
         ready: &ReadyQueue<T>,
         message: T,
     ) -> Result<(), T> {
-        // The fast-path push may have observed stale ready fullness. Once the
-        // sender reaches the overflow lock, retry ready before applying policy
-        // if there is no retained overflow to preserve ahead of this message.
-        // Once a sender reaches the overflow path, the overflow lock preserves
-        // its order relative to existing overflow. Concurrent direct ready
-        // sends may still interleave because the mailbox does not provide
-        // cross-sender FIFO.
+        // The fast-path push may have observed stale ready fullness. Retry
+        // ready under the overflow lock before applying policy, but only when
+        // there is no retained overflow that must stay ahead of this message.
         if queue.is_empty() {
             ready.push(message)
         } else {
