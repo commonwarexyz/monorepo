@@ -1,4 +1,8 @@
 //! Bounded ready queues with policy-managed overflow.
+//!
+//! The mailbox preserves order for enqueue calls made sequentially by one
+//! producer. Concurrent enqueue calls, including calls from cloned senders, are
+//! not globally ordered and may be observed in any interleaving.
 
 use crate::Feedback;
 #[cfg(not(feature = "loom"))]
@@ -30,6 +34,10 @@ cfg_if::cfg_if! {
 
 const OVERFLOW_HAS_MESSAGES: usize = 1;
 const OVERFLOW_MUTATION: usize = 2;
+
+const fn wakes_receiver(feedback: Feedback) -> bool {
+    matches!(feedback, Feedback::Ok | Feedback::Backoff)
+}
 
 /// Policy-managed overflow behind the bounded ready queue.
 ///
@@ -291,8 +299,10 @@ impl<T> OverflowState<T> {
         ready: &ReadyQueue<T>,
         message: T,
     ) -> Result<(), T> {
-        // The overflow lock is the ordering point for senders. A message may
-        // enter ready directly only when no older overflow exists.
+        // Once a sender reaches the overflow path, the overflow lock preserves
+        // its order relative to existing overflow. Concurrent direct ready
+        // sends may still interleave because the mailbox does not provide
+        // cross-sender FIFO.
         if queue.is_empty() {
             ready.push(message)
         } else {
@@ -410,7 +420,7 @@ impl<T: Policy> Sender<T> {
         let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
             self.state.closed.load(Ordering::Acquire)
         });
-        if feedback.accepted() {
+        if wakes_receiver(feedback) {
             self.state.waker.wake();
         }
         feedback
@@ -712,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_recv_wakes_on_accepted_overflow_enqueue() {
+    fn pending_recv_wakes_on_handled_overflow_enqueue() {
         let (sender, mut receiver) = new(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
@@ -961,7 +971,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn accepted_overflow_enqueue_wakes_registered_receiver() {
+    fn handled_overflow_enqueue_wakes_registered_receiver() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
@@ -979,7 +989,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn receiver_drop_racing_ready_fast_path_feedback_wakes_if_accepted() {
+    fn receiver_drop_racing_ready_fast_path_feedback_wakes_if_ready() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
@@ -1090,8 +1100,8 @@ mod loom_tests {
 
             let seen = Arc::new(AtomicUsize::new(0));
 
-            assert!(enqueue_1.join().unwrap().accepted());
-            assert!(enqueue_2.join().unwrap().accepted());
+            assert!(wakes_receiver(enqueue_1.join().unwrap()));
+            assert!(wakes_receiver(enqueue_2.join().unwrap()));
 
             while let Ok(message) = receiver.try_recv() {
                 record(&seen, message);
@@ -1166,6 +1176,8 @@ mod loom_tests {
                 thread::yield_now();
             }
 
+            // Message 2 has already been spilled. Even without cross-sender
+            // FIFO, later enqueue calls must not bypass retained overflow.
             let mut observed = vec![value(receiver.try_recv().unwrap())];
             gate.store(2, Ordering::Release);
             let feedback = sender.enqueue(OrderedMessage::Item(3));

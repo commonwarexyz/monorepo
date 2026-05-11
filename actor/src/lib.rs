@@ -15,19 +15,12 @@ commonware_macros::stability_scope!(ALPHA {
     pub enum Feedback {
         /// The work was accepted within the configured capacity.
         Ok,
-        /// The submission was accepted but requests sender backoff.
+        /// The submission was handled but requests sender backoff.
         Backoff,
         /// The work was dropped.
         Dropped,
         /// The endpoint is closed.
         Closed,
-    }
-
-    impl Feedback {
-        /// Returns true if the submission was accepted.
-        pub const fn accepted(&self) -> bool {
-            matches!(self, Self::Ok | Self::Backoff)
-        }
     }
 
     pub mod mailbox;
