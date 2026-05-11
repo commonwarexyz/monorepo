@@ -125,8 +125,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[cfg(feature = "loom")]
+struct ReadyState<T> {
+    published: VecDeque<T>,
+    reserved: usize,
+}
+
+#[cfg(feature = "loom")]
 struct ReadyQueue<T> {
-    queue: Mutex<VecDeque<T>>,
+    state: Mutex<ReadyState<T>>,
     capacity: usize,
 }
 
@@ -134,7 +140,10 @@ struct ReadyQueue<T> {
 impl<T> ReadyQueue<T> {
     fn new(capacity: usize) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            state: Mutex::new(ReadyState {
+                published: VecDeque::new(),
+                reserved: 0,
+            }),
             capacity,
         }
     }
@@ -144,20 +153,39 @@ impl<T> ReadyQueue<T> {
     }
 
     fn len(&self) -> usize {
-        lock(&self.queue).len()
+        let state = lock(&self.state);
+        state.published.len() + state.reserved
     }
 
     fn push(&self, message: T) -> Result<(), T> {
-        let mut queue = lock(&self.queue);
-        if queue.len() >= self.capacity {
-            return Err(message);
+        {
+            let mut state = lock(&self.state);
+            if state.published.len() + state.reserved >= self.capacity {
+                return Err(message);
+            }
+            state.reserved += 1;
         }
-        queue.push_back(message);
+
+        loom::thread::yield_now();
+
+        let mut state = lock(&self.state);
+        state.reserved -= 1;
+        state.published.push_back(message);
         Ok(())
     }
 
     fn pop(&self) -> Option<T> {
-        lock(&self.queue).pop_front()
+        loop {
+            let mut state = lock(&self.state);
+            if let Some(message) = state.published.pop_front() {
+                return Some(message);
+            }
+            if state.reserved == 0 {
+                return None;
+            }
+            drop(state);
+            loom::thread::yield_now();
+        }
     }
 }
 
@@ -480,8 +508,16 @@ mod tests {
     use super::*;
     use commonware_macros::test_async;
     use commonware_utils::NZUsize;
-    use futures::{pin_mut, FutureExt};
-    use std::sync::mpsc::TryRecvError;
+    use futures::{
+        pin_mut,
+        task::{waker_ref, ArcWake},
+        FutureExt,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::TryRecvError,
+        Arc,
+    };
 
     #[derive(Debug, PartialEq, Eq)]
     enum Message {
@@ -517,6 +553,23 @@ mod tests {
                 }
                 Self::Vote(_) => false,
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct WakeCounter {
+        wakes: AtomicUsize,
+    }
+
+    impl WakeCounter {
+        fn count(&self) -> usize {
+            self.wakes.load(Ordering::Acquire)
+        }
+    }
+
+    impl ArcWake for WakeCounter {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.wakes.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -642,6 +695,55 @@ mod tests {
         assert_eq!(next.await, Some(Message::Vote(1)));
     }
 
+    #[test]
+    fn pending_recv_wakes_when_senders_drop() {
+        let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+        let wakes = Arc::new(WakeCounter::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(wakes.count(), 0);
+
+        drop(sender);
+
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+    }
+
+    #[test]
+    fn pending_recv_wakes_on_accepted_overflow_enqueue() {
+        let (sender, mut receiver) = new(NZUsize!(1));
+        let wakes = Arc::new(WakeCounter::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(wakes.count(), 0);
+
+        // Prime ready directly to isolate the overflow wake after registration.
+        assert_eq!(sender.state.ready.push(Message::Vote(1)), Ok(()));
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+    }
+
+    #[test]
+    fn receiver_drop_blocks_ready_fast_path_feedback() {
+        let (sender, mut receiver) = new(NZUsize!(1));
+        let wakes = Arc::new(WakeCounter::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        drop(receiver);
+
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
+        assert_eq!(wakes.count(), 0);
+    }
+
     #[test_async]
     async fn empty_inbox_closes_when_senders_drop() {
         let (sender, mut receiver) = new::<Message>(NZUsize!(1));
@@ -701,6 +803,7 @@ mod loom_tests {
         },
         thread,
     };
+    use std::task::{RawWaker, RawWakerVTable, Waker};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Message {
@@ -783,6 +886,121 @@ mod loom_tests {
             ReplacingMessage::FillReady => None,
             ReplacingMessage::Replace(value) => Some(value),
         }
+    }
+
+    unsafe fn clone_counter(data: *const ()) -> RawWaker {
+        // SAFETY: `data` was created by `Arc::into_raw` for an `AtomicUsize`
+        // in `counting_waker` or this function's clone path.
+        let wakes = unsafe { Arc::<AtomicUsize>::from_raw(data.cast()) };
+        let cloned = wakes.clone();
+        let _ = Arc::into_raw(wakes);
+        RawWaker::new(Arc::into_raw(cloned).cast(), &COUNTER_WAKER_VTABLE)
+    }
+
+    unsafe fn wake_counter(data: *const ()) {
+        // SAFETY: `data` owns one raw `Arc<AtomicUsize>` reference for this
+        // consuming wake path.
+        let wakes = unsafe { Arc::<AtomicUsize>::from_raw(data.cast()) };
+        wakes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    unsafe fn wake_counter_by_ref(data: *const ()) {
+        // SAFETY: `data` is a borrowed raw `Arc<AtomicUsize>` reference. The
+        // reference is converted back into raw form before returning.
+        let wakes = unsafe { Arc::<AtomicUsize>::from_raw(data.cast()) };
+        wakes.fetch_add(1, Ordering::AcqRel);
+        let _ = Arc::into_raw(wakes);
+    }
+
+    unsafe fn drop_counter(data: *const ()) {
+        // SAFETY: `data` owns one raw `Arc<AtomicUsize>` reference that should
+        // be dropped by the waker.
+        unsafe {
+            drop(Arc::<AtomicUsize>::from_raw(data.cast()));
+        }
+    }
+
+    static COUNTER_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        clone_counter,
+        wake_counter,
+        wake_counter_by_ref,
+        drop_counter,
+    );
+
+    fn counting_waker(wakes: Arc<AtomicUsize>) -> Waker {
+        let raw = RawWaker::new(Arc::into_raw(wakes).cast(), &COUNTER_WAKER_VTABLE);
+        // SAFETY: The vtable above reconstructs the same `Arc<AtomicUsize>`
+        // type and preserves the raw waker reference-counting contract.
+        unsafe { Waker::from_raw(raw) }
+    }
+
+    #[test]
+    fn sender_drop_racing_waker_registration_wakes_or_disconnects() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            let close = thread::spawn(move || {
+                drop(sender);
+            });
+
+            let poll = receiver.poll_recv(&mut cx);
+            close.join().unwrap();
+
+            match poll {
+                Poll::Ready(None) => {}
+                Poll::Pending => {
+                    assert!(wakes.load(Ordering::Acquire) > 0);
+                    assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+                }
+                Poll::Ready(Some(_)) => panic!("unexpected message"),
+            }
+        });
+    }
+
+    #[test]
+    fn accepted_overflow_enqueue_wakes_registered_receiver() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+            assert_eq!(sender.state.ready.push(Message::Drop(0)), Ok(()));
+            assert_eq!(sender.enqueue(Message::Spill(1)), Feedback::Backoff);
+
+            assert_eq!(wakes.load(Ordering::Acquire), 1);
+            assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
+            assert_eq!(receiver.try_recv(), Ok(Message::Spill(1)));
+        });
+    }
+
+    #[test]
+    fn receiver_drop_racing_ready_fast_path_feedback_wakes_if_accepted() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+
+            let close = thread::spawn(move || {
+                drop(receiver);
+            });
+            let feedback = sender.enqueue(Message::Spill(0));
+            close.join().unwrap();
+
+            match feedback {
+                Feedback::Ok => assert!(wakes.load(Ordering::Acquire) > 0),
+                Feedback::Closed => {}
+                feedback => panic!("unexpected feedback: {feedback:?}"),
+            }
+            assert_eq!(sender.enqueue(Message::Spill(1)), Feedback::Closed);
+        });
     }
 
     #[test]
