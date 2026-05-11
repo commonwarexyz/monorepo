@@ -298,9 +298,12 @@ impl BufferPoolConfig {
     ///
     /// Panics if the derived per-class capacity does not fit in `u32`.
     pub fn with_budget_bytes(mut self, budget_bytes: NonZeroUsize) -> Self {
+        self.validate_size_class_bounds();
+
         let mut class_bytes = 0usize;
-        for i in 0..self.num_classes() {
-            class_bytes = class_bytes.saturating_add(self.class_size(i));
+        let min_size = self.min_size.get();
+        for i in 0..Self::num_classes(min_size, self.max_size.get()) {
+            class_bytes = class_bytes.saturating_add(Self::class_size(min_size, i));
         }
         if class_bytes == 0 {
             return self;
@@ -310,6 +313,28 @@ impl BufferPoolConfig {
         self.max_per_class =
             NonZeroU32::new(max_per_class).expect("max_per_class must be non-zero");
         self
+    }
+
+    /// Validates the size-class bounds, panicking on invalid values.
+    ///
+    /// # Panics
+    ///
+    /// - `min_size` is not a power of two
+    /// - `max_size` is not a power of two
+    /// - `max_size < min_size`
+    fn validate_size_class_bounds(&self) {
+        let min_size = self.min_size.get();
+        let max_size = self.max_size.get();
+
+        assert!(
+            min_size.is_power_of_two(),
+            "min_size must be a power of two"
+        );
+        assert!(
+            max_size.is_power_of_two(),
+            "max_size must be a power of two"
+        );
+        assert!(max_size >= min_size, "max_size must be >= min_size");
     }
 
     /// Validates the configuration, panicking on invalid values.
@@ -324,27 +349,16 @@ impl BufferPoolConfig {
     /// - `pool_min_size > min_size`
     /// - explicit `thread_cache_capacity > max_per_class`
     fn validate(&self) {
+        self.validate_size_class_bounds();
         assert!(
             self.alignment.is_power_of_two(),
             "alignment must be a power of two"
-        );
-        assert!(
-            self.min_size.is_power_of_two(),
-            "min_size must be a power of two"
-        );
-        assert!(
-            self.max_size.is_power_of_two(),
-            "max_size must be a power of two"
         );
         assert!(
             self.min_size >= self.alignment,
             "min_size ({}) must be >= alignment ({})",
             self.min_size,
             self.alignment
-        );
-        assert!(
-            self.max_size >= self.min_size,
-            "max_size must be >= min_size"
         );
         assert!(
             self.pool_min_size <= self.min_size.get(),
@@ -364,71 +378,18 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Returns the number of size classes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if size-class bounds violate the invariants checked by
-    /// [`Self::validate`].
+    /// Returns the number of size classes between validated bounds.
     #[inline]
-    const fn num_classes(&self) -> usize {
-        let min_size = self.min_size.get();
-        let max_size = self.max_size.get();
-
-        assert!(
-            min_size.is_power_of_two(),
-            "min_size must be a power of two"
-        );
-        assert!(
-            max_size.is_power_of_two(),
-            "max_size must be a power of two"
-        );
-        assert!(max_size >= min_size, "max_size must be >= min_size");
-
+    const fn num_classes(min_size: usize, max_size: usize) -> usize {
         // Since sizes are powers of two, trailing zeros is the size-class
         // exponent
         (max_size.trailing_zeros() - min_size.trailing_zeros() + 1) as usize
     }
 
-    /// Returns the size class index for a given size, or `None` if `size > max_size`.
-    ///
-    /// This method assumes the config has already passed [`Self::validate`]. Invalid
-    /// configs can produce meaningless or out-of-range class indexes. Since this is
-    /// used in the allocation hot-path it does not recheck size-class invariants.
+    /// Returns the buffer size for a validated size-class index.
     #[inline]
-    const fn class_index(&self, size: usize) -> Option<usize> {
-        let min_size = self.min_size.get();
-        let max_size = self.max_size.get();
-        if size > max_size {
-            return None;
-        }
-        if size <= min_size {
-            return Some(0);
-        }
-
-        // Config validation guarantees `min_size` and `max_size` are powers of
-        // two. Since `min_size < size <= max_size`, `next_power_of_two()`
-        // resolves to a valid class and its exponent must be greater than
-        // `min_size`'s exponent. Use wrapping arithmetic to avoid a release
-        // overflow-check branch in this hot helper.
-        Some(
-            size.next_power_of_two()
-                .trailing_zeros()
-                .wrapping_sub(min_size.trailing_zeros()) as usize,
-        )
-    }
-
-    /// Returns the buffer size for a given class index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if size-class bounds violate the invariants checked by
-    /// [`Self::validate`].
-    ///
-    /// Panics if `index >= self.num_classes()`.
-    const fn class_size(&self, index: usize) -> usize {
-        assert!(index < self.num_classes(), "class index out of range");
-        self.min_size.get() << index
+    const fn class_size(min_size: usize, index: usize) -> usize {
+        min_size << index
     }
 
     /// Resolves the effective per-thread cache size for each size class.
@@ -1093,10 +1054,12 @@ impl BufferPool {
     pub(crate) fn new(config: BufferPoolConfig, registry: &mut impl Register) -> Self {
         config.validate();
         let metrics = PoolMetrics::new(registry);
-        let mut classes = Vec::with_capacity(config.num_classes());
+        let num_classes =
+            BufferPoolConfig::num_classes(config.min_size.get(), config.max_size.get());
+        let mut classes = Vec::with_capacity(num_classes);
         let thread_cache_capacity = config.resolve_thread_cache_capacity();
-        for i in 0..config.num_classes() {
-            let size = config.class_size(i);
+        for i in 0..num_classes {
+            let size = BufferPoolConfig::class_size(config.min_size.get(), i);
             let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
             let class = Arc::new(SizeClass::new(
                 class_id,
@@ -1130,10 +1093,34 @@ impl BufferPool {
         }
     }
 
+    /// Returns the size class index for a given size, or `None` if `size > max_size`.
+    #[inline(always)]
+    fn class_index(&self, size: usize) -> Option<usize> {
+        let min_size = self.inner.config.min_size.get();
+        let max_size = self.inner.config.max_size.get();
+        if size > max_size {
+            return None;
+        }
+        if size <= min_size {
+            return Some(0);
+        }
+
+        // Pool construction guarantees `min_size` and `max_size` are powers of
+        // two. Since `min_size < size <= max_size`, `next_power_of_two()`
+        // resolves to a valid class and its exponent must be greater than
+        // `min_size`'s exponent. Use wrapping arithmetic to avoid a release
+        // overflow-check branch in this hot helper.
+        Some(
+            size.next_power_of_two()
+                .trailing_zeros()
+                .wrapping_sub(min_size.trailing_zeros()) as usize,
+        )
+    }
+
     /// Returns the size class index for `capacity`, recording oversized metrics on failure.
     #[inline]
     fn class_index_or_record_oversized(&self, capacity: usize) -> Option<usize> {
-        let class_index = self.inner.config.class_index(capacity);
+        let class_index = self.class_index(capacity);
         if class_index.is_none() {
             self.inner.metrics.oversized_total.inc();
         }
@@ -1360,14 +1347,14 @@ mod tests {
     /// With TLS enabled, tracked buffers can be free in either the shared
     /// freelist or the current thread's local cache.
     fn get_allocated(pool: &BufferPool, size: usize) -> usize {
-        let class_index = pool.inner.config.class_index(size).unwrap();
+        let class_index = pool.class_index(size).unwrap();
         let class = &pool.inner.classes[class_index];
         class.created.load(Ordering::Relaxed) - get_global_len(class) - get_local_len(class)
     }
 
     /// Helper to get the number of free buffers visible to the current thread.
     fn get_available(pool: &BufferPool, size: usize) -> i64 {
-        let class_index = pool.inner.config.class_index(size).unwrap();
+        let class_index = pool.class_index(size).unwrap();
         let class = &pool.inner.classes[class_index];
         (get_global_len(class) + get_local_len(class)) as i64
     }
@@ -1430,21 +1417,21 @@ mod tests {
     }
 
     #[test]
-    fn test_config_class_index() {
+    fn test_pool_class_index() {
         let page = page_size();
-        let config = test_config(page, page * 8, 10);
+        let pool = test_pool(test_config(page, page * 8, 10));
 
         // Classes: page, page*2, page*4, page*8
-        assert_eq!(config.num_classes(), 4);
+        assert_eq!(pool.inner.classes.len(), 4);
 
-        assert_eq!(config.class_index(1), Some(0));
-        assert_eq!(config.class_index(page), Some(0));
-        assert_eq!(config.class_index(page + 1), Some(1));
-        assert_eq!(config.class_index(page * 2), Some(1));
-        assert_eq!(config.class_index(page * 4 + 1), Some(3));
-        assert_eq!(config.class_index(page * 8 - 1), Some(3));
-        assert_eq!(config.class_index(page * 8), Some(3));
-        assert_eq!(config.class_index(page * 8 + 1), None);
+        assert_eq!(pool.class_index(1), Some(0));
+        assert_eq!(pool.class_index(page), Some(0));
+        assert_eq!(pool.class_index(page + 1), Some(1));
+        assert_eq!(pool.class_index(page * 2), Some(1));
+        assert_eq!(pool.class_index(page * 4 + 1), Some(3));
+        assert_eq!(pool.class_index(page * 8 - 1), Some(3));
+        assert_eq!(pool.class_index(page * 8), Some(3));
+        assert_eq!(pool.class_index(page * 8 + 1), None);
     }
 
     #[test]
@@ -1692,12 +1679,12 @@ mod tests {
 
         // Half the class budget is divided across expected threads.
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(8)));
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 4);
 
         // Large classes scale past the previous eight-slot cap.
         let pool = test_pool(test_config(page, page, 4096).with_parallelism(NZUsize!(8)));
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 256);
     }
 
@@ -1710,7 +1697,7 @@ mod tests {
         // pool should disable TLS instead of forcing every thread to retain at
         // least one buffer.
         let pool = test_pool(test_config(page, page, 2).with_parallelism(NZUsize!(8)));
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         let class = &pool.inner.classes[class_index];
         assert_eq!(class.thread_cache_capacity, 0);
 
@@ -1751,7 +1738,7 @@ mod tests {
         let page = page_size();
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(16)));
 
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         assert_eq!(
             freelist::tests::num_words(&pool.inner.classes[class_index].global),
             16
@@ -1761,7 +1748,7 @@ mod tests {
         // stripes so every word can contain at least one slot.
         let pool = test_pool(test_config(page, page, 12).with_parallelism(NZUsize!(9)));
 
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         assert_eq!(
             freelist::tests::num_words(&pool.inner.classes[class_index].global),
             8
@@ -1774,7 +1761,7 @@ mod tests {
                 .with_thread_cache_disabled(),
         );
 
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         assert_eq!(
             freelist::tests::num_words(&pool.inner.classes[class_index].global),
             16
@@ -1789,7 +1776,7 @@ mod tests {
                 .with_parallelism(NZUsize!(8))
                 .with_thread_cache_capacity(NZUsize!(7)),
         );
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
 
         // Fixed capacity should bypass the derived parallelism heuristic.
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 7);
@@ -1803,7 +1790,7 @@ mod tests {
     fn test_disabled_thread_cache_does_not_retain_buffers_locally() {
         let page = page_size();
         let pool = test_pool(test_config(page, page, 2).with_thread_cache_disabled());
-        let class_index = pool.inner.config.class_index(page).unwrap();
+        let class_index = pool.class_index(page).unwrap();
         let class = &pool.inner.classes[class_index];
 
         let tracked = pool.try_alloc(page).expect("tracked allocation");
@@ -1824,8 +1811,8 @@ mod tests {
 
         // Use two distinct size classes so the test exercises the whole TLS
         // registry, not just a single per-class cache entry.
-        let small_index = pool.inner.config.class_index(page).unwrap();
-        let large_index = pool.inner.config.class_index(page + 1).unwrap();
+        let small_index = pool.class_index(page).unwrap();
+        let large_index = pool.class_index(page + 1).unwrap();
         let small_class = &pool.inner.classes[small_index];
         let large_class = &pool.inner.classes[large_index];
 
@@ -1916,8 +1903,6 @@ mod tests {
         let page = page_size();
         let pool = test_pool(test_config(page, page, 2));
         let class_index = pool
-            .inner
-            .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
 
@@ -1968,8 +1953,6 @@ mod tests {
             u32::try_from(threads * 8).expect("test capacity must fit in u32 slot ids");
         let pool = test_pool(test_config(page, page, max_per_class));
         let class_index = pool
-            .inner
-            .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
         let class = &pool.inner.classes[class_index];
@@ -2419,8 +2402,6 @@ mod tests {
             }
 
             let class_index = pool
-                .inner
-                .config
                 .class_index(page)
                 .expect("class exists for page-sized buffer");
             assert!(
@@ -2459,8 +2440,6 @@ mod tests {
         // After thread exit, the buffer should be in the global freelist (not
         // stuck in a dead thread's local cache).
         let class_index = pool
-            .inner
-            .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
         assert_eq!(get_global_len(&pool.inner.classes[class_index]), 1);
@@ -2479,8 +2458,6 @@ mod tests {
         let page = page_size();
         let pool = test_pool(test_config(page, page, 2));
         let class_index = pool
-            .inner
-            .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
         let class = Arc::clone(&pool.inner.classes[class_index]);
