@@ -1,4 +1,20 @@
-//! Bounded ready queues with policy-managed overflow.
+//! Bounded message queue with caller-managed overflow.
+//!
+//! ```text
+//!                          senders
+//!                             |
+//!         +-------------------+--------------------+
+//!         | overflow inactive                      | overflow active
+//!         | and ready has room                     | or ready full
+//!         v                                        v
+//!     +----------+    refill front-to-back     +----------+
+//!     |  ready   |<----------------------------| overflow |
+//!     +----------+    after each ready pop     +----------+
+//!         |
+//!         | pop first
+//!         v
+//!      receiver
+//! ```
 //!
 //! The receiver always pops from the ready queue first. After each ready pop, it
 //! eagerly refills ready from published overflow so senders can return to the
