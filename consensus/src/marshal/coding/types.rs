@@ -297,19 +297,25 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
-    type Cfg = (<B as Read>::Cfg, u32);
+    type Cfg = (<B as Read>::Cfg, Commitment);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        (block_cfg, expected_shards): &Self::Cfg,
+        (block_cfg, expected): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, block_cfg)?;
         let config = CodingConfig::read(buf)?;
 
-        if config.total_shards() != *expected_shards {
+        if config != expected.config() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
-                "shard count mismatch",
+                "config mismatch",
+            ));
+        }
+        if inner.digest() != expected.block() {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "block digest mismatch",
             ));
         }
 
@@ -624,16 +630,17 @@ mod test {
 
         let encoded = coded_block.encode();
         let decoded =
-            CodedBlock::<Block, RS, H>::decode_cfg(encoded, &((), CONFIG.total_shards())).unwrap();
+            CodedBlock::<Block, RS, H>::decode_cfg(encoded, &((), coded_block.commitment()))
+                .unwrap();
 
         assert!(coded_block == decoded);
     }
 
     #[test]
-    fn test_coded_block_decode_rejects_shard_count_mismatch() {
+    fn test_coded_block_decode_rejects_config_mismatch() {
         const EXPECTED_CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(2),
+            extra_shards: NZU16!(3),
         };
         const EMBEDDED_CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(2),
@@ -641,17 +648,17 @@ mod test {
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
+        let expected = CodedBlock::<Block, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
+            .commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
-        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(
-            encoded.as_ref(),
-            &((), EXPECTED_CONFIG.total_shards()),
-        ) else {
-            panic!("shard count mismatch should be rejected");
+        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(encoded.as_ref(), &((), expected))
+        else {
+            panic!("config mismatch should be rejected");
         };
 
         assert!(
-            matches!(err, Error::Invalid("CodedBlock", "shard count mismatch")),
+            matches!(err, Error::Invalid("CodedBlock", "config mismatch")),
             "unexpected error: {err:?}"
         );
     }

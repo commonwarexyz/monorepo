@@ -59,7 +59,7 @@ where
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         commitment: Self::Commitment,
     ) -> <Self::Block as Read>::Cfg {
-        (block_cfg.clone(), commitment.config().total_shards())
+        (block_cfg.clone(), commitment)
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
