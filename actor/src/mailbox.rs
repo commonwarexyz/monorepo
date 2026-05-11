@@ -56,6 +56,11 @@ const OVERFLOW_MUTATION: usize = 2;
 // that sees zero may race with another sender that enters overflow immediately
 // after the load. Those sends are concurrent, and the mailbox does not provide
 // global FIFO ordering across cloned senders.
+//
+// Activity accesses are relaxed because this word does not publish queue
+// contents. The overflow mutex serializes `VecDeque` access, and the ready queue
+// owns its own synchronization. Stale activity observations only decide whether
+// a caller tries a fast path, locks overflow, or waits for a later wake.
 
 /// Overflow behavior for actor messages when an inbox is full.
 pub trait Policy: Sized {
@@ -216,11 +221,11 @@ impl<T> OverflowState<T> {
     }
 
     fn is_active(&self) -> bool {
-        self.activity.load(Ordering::SeqCst) != 0
+        self.activity.load(Ordering::Relaxed) != 0
     }
 
     fn has_refillable_messages(&self) -> bool {
-        self.activity.load(Ordering::SeqCst) == OVERFLOW_HAS_MESSAGES
+        self.activity.load(Ordering::Relaxed) == OVERFLOW_HAS_MESSAGES
     }
 
     fn try_push_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
@@ -317,24 +322,24 @@ struct Mutation<'a> {
 
 impl<'a> Mutation<'a> {
     fn begin(activity: &'a AtomicUsize) -> Self {
-        activity.fetch_add(OVERFLOW_MUTATION, Ordering::SeqCst);
+        activity.fetch_add(OVERFLOW_MUTATION, Ordering::Relaxed);
         Self { activity }
     }
 
     fn publish<T>(&self, queue: &VecDeque<T>) {
         if queue.is_empty() {
             self.activity
-                .fetch_and(!OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
+                .fetch_and(!OVERFLOW_HAS_MESSAGES, Ordering::Relaxed);
         } else {
             self.activity
-                .fetch_or(OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
+                .fetch_or(OVERFLOW_HAS_MESSAGES, Ordering::Relaxed);
         }
     }
 }
 
 impl Drop for Mutation<'_> {
     fn drop(&mut self) {
-        let previous = self.activity.fetch_sub(OVERFLOW_MUTATION, Ordering::SeqCst);
+        let previous = self.activity.fetch_sub(OVERFLOW_MUTATION, Ordering::Relaxed);
         assert!(previous >= OVERFLOW_MUTATION);
     }
 }
@@ -870,6 +875,7 @@ mod tests {
 mod loom_tests {
     use super::*;
     use commonware_utils::NZUsize;
+    use futures::pin_mut;
     use loom::{
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -877,7 +883,10 @@ mod loom_tests {
         },
         thread,
     };
-    use std::task::{RawWaker, RawWakerVTable, Waker};
+    use std::{
+        future::Future,
+        task::{RawWaker, RawWakerVTable, Waker},
+    };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Message {
@@ -1039,20 +1048,20 @@ mod loom_tests {
     }
 
     #[test]
-    fn handled_overflow_enqueue_wakes_registered_receiver() {
+    fn handled_enqueue_wakes_registered_receiver() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
 
-            assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
-            assert_eq!(sender.state.ready.push(Message::Drop(0)), Ok(()));
-            assert_eq!(sender.enqueue(Message::Spill(1)), Feedback::Backoff);
+            let next = receiver.recv();
+            pin_mut!(next);
+            assert!(matches!(next.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
             assert_eq!(wakes.load(Ordering::Acquire), 1);
-            assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
-            assert_eq!(receiver.try_recv(), Ok(Message::Spill(1)));
+            assert_eq!(next.as_mut().poll(&mut cx), Poll::Ready(Some(Message::Spill(0))));
         });
     }
 
@@ -1263,6 +1272,62 @@ mod loom_tests {
             }
 
             assert_eq!(observed, vec![0, 1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn published_overflow_wakes_pending_receiver() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<OrderedMessage>(NZUsize!(1));
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            let gate = Arc::new(AtomicUsize::new(0));
+            let overflow = {
+                let next = receiver.recv();
+                pin_mut!(next);
+                assert!(matches!(next.as_mut().poll(&mut cx), Poll::Pending));
+
+                assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
+                while wakes.load(Ordering::Acquire) == 0 {
+                    thread::yield_now();
+                }
+
+                let overflow_sender = sender.clone();
+                let overflow_gate = gate.clone();
+                let overflow = thread::spawn(move || {
+                    overflow_sender.enqueue(OrderedMessage::Coordinated(1, overflow_gate))
+                });
+
+                while gate.load(Ordering::Acquire) == 0 {
+                    thread::yield_now();
+                }
+
+                assert_eq!(
+                    next.as_mut().poll(&mut cx).map(|message| message.map(value)),
+                    Poll::Ready(Some(0))
+                );
+                overflow
+            };
+
+            {
+                let next = receiver.recv();
+                pin_mut!(next);
+                assert!(matches!(next.as_mut().poll(&mut cx), Poll::Pending));
+                assert_eq!(wakes.load(Ordering::Acquire), 1);
+
+                gate.store(2, Ordering::Release);
+                while wakes.load(Ordering::Acquire) < 2 {
+                    thread::yield_now();
+                }
+
+                assert_eq!(
+                    next.as_mut().poll(&mut cx).map(|message| message.map(value)),
+                    Poll::Ready(Some(1))
+                );
+            }
+            assert_eq!(overflow.join().unwrap(), Feedback::Backoff);
         });
     }
 
