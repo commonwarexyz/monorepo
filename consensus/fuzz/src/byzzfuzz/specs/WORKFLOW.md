@@ -25,6 +25,10 @@ For multi-file domains, read the `README.md` first. It contains purpose, key fil
 
 Read detail files when changing a specific component. Read contracts when touching wiring between the harness, forwarders, injectors, or upstream Simplex components.
 
+### Step 4: Invariants
+
+Read [Invariants](invariants/invariants.md) end to end before starting any task. The catalog is short and groups are cross-cutting; a section-anchored read can miss requirements from adjacent groups. Verify every affected invariant still holds after a change.
+
 ## 3. Document Formats
 
 Every spec follows one of the formats in `META.md`:
@@ -80,47 +84,45 @@ Links between specs are relative from `consensus/fuzz/src/byzzfuzz/specs/`. Sour
 
 ## 6. Workflow for Typical Tasks
 
+The invariants catalog is read once at the start of the workflow (see "Step 4: Invariants" in Section 2). Per-task procedures below do not repeat that step but every change must still preserve every affected invariant.
+
 ### Change fault schedule sampling
 
 1. Read [Fault Scheduling](domains/fault-scheduling.md).
 2. Read [Fault Flow](architecture/fault-flow.md) if the change affects phase behavior.
-3. Read [Invariants](invariants/invariants.md#fault-scheduling).
-4. Update sampling code and any tests.
-5. Verify the fault-scheduling invariants still hold.
-6. Update the fault-scheduling spec and `INDEX.md` if files move.
+3. Update sampling code and any tests.
+4. Verify every affected invariant still holds.
+5. Update the fault-scheduling spec and `INDEX.md` if files move.
 
 ### Change forwarder filtering or interception
 
 1. Read [Network Interception](domains/network-interception/README.md).
 2. Read [Round Tracking](domains/network-interception/round-tracking.md).
 3. Read [Forwarder/Injector Contract](contracts/forwarder-injector.md).
-4. Read [Invariants](invariants/invariants.md#network-interception) and [Round Tracking Invariants](invariants/invariants.md#round-tracking).
-5. Preserve the sync `SplitForwarder` boundary and the async injector handoff unless a new ADR supersedes it.
-6. Verify the affected invariants still hold.
+4. Preserve the sync `SplitForwarder` boundary and the async injector handoff unless a new ADR supersedes it.
+5. Verify every affected invariant still holds.
 
 ### Change vote mutation behavior
 
 1. Read [Process Injection](domains/process-injection/README.md).
 2. Read [Mutator](domains/process-injection/mutator.md).
 3. Read [ADR-002](decisions/002-semantically-mutate-votes-only.md).
-4. Read [Invariants](invariants/invariants.md#process-injection) and [Mutator Invariants](invariants/invariants.md#mutator).
-5. Confirm certificate and resolver behavior remains omit-only or create a superseding ADR.
-6. Verify the affected invariants still hold.
+4. Confirm certificate and resolver behavior remains omit-only or create a superseding ADR.
+5. Verify every affected invariant still holds.
 
 ### Change liveness or GST behavior
 
 1. Read [Runner Liveness](domains/runner-liveness.md).
 2. Read [ADR-005](decisions/005-post-gst-required-container-catch-up.md).
-3. Read [Invariants](invariants/invariants.md#runner-liveness).
-4. Confirm the change still separates network partitions from Byzantine process faults at GST.
-5. Verify the runner-liveness invariants still hold.
+3. Confirm the change still separates network partitions from Byzantine process faults at GST.
+4. Verify every affected invariant still holds.
 
 ### Add a new ByzzFuzz fuzz target
 
 1. Read [ByzzFuzz/Harness Contract](contracts/byzzfuzz-harness.md).
-2. Read [Invariants](invariants/invariants.md#layers).
-3. Add a target that calls `fuzz::<P, Byzzfuzz>(input)`.
-4. Confirm `Byzzfuzz` mode is still installed through `Mode::Byzzfuzz`.
+2. Add a target that calls `fuzz::<P, Byzzfuzz>(input)`.
+3. Confirm `Byzzfuzz` mode is still installed through `Mode::Byzzfuzz`.
+4. Verify every affected invariant still holds.
 
 ## 7. Working with ADRs
 

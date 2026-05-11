@@ -2,99 +2,71 @@
 
 ## Purpose
 
-Fault scheduling defines the sampled ByzzFuzz adversary: network-fault rounds, process-fault rounds, receiver sets, omit flags, and optional message-kind scopes.
+Fault scheduling defines the sampled ByzzFuzz adversary: which views see network partitions, which views see process faults against the fixed byzantine sender, and how those faults are shaped (recipient subsets, omission, optional message-kind scope).
 
 ## Key Files
 
-- `consensus/fuzz/src/byzzfuzz/mod.rs` - public module entry, `run` export, and `BYZANTINE_IDX`.
-- `consensus/fuzz/src/byzzfuzz/fault.rs` - `ProcessFault` and `NetworkFault` data types.
-- `consensus/fuzz/src/byzzfuzz/sampling.rs` - `(c, d, r)` schedule generation.
-- `consensus/fuzz/src/byzzfuzz/scope.rs` - process-fault scope variants and weighted scope sampler.
-- `consensus/fuzz/src/byzzfuzz/runner.rs` - samples `(c, d, r)` bounds and post-GST process-fault views.
+- `consensus/fuzz/src/byzzfuzz/sampling.rs` - schedule generation.
+- `consensus/fuzz/src/byzzfuzz/fault.rs` - process- and network-fault data types.
+- `consensus/fuzz/src/byzzfuzz/scope.rs` - process-fault scope variants and scope sampler.
+- `consensus/fuzz/src/byzzfuzz/runner.rs` - draws schedule bounds and post-GST extension.
+- `consensus/fuzz/src/byzzfuzz/mod.rs` - exposes the fixed byzantine identity.
 
 ## Core Types
 
-```rust
-pub struct ProcessFault<P: PublicKey> {
-    pub view: u64,
-    pub receivers: Vec<P>,
-    pub omit: bool,
-    pub scope: FaultScope,
-}
-
-pub struct NetworkFault {
-    pub view: View,
-    pub partition: SetPartition,
-}
-```
-
-`ProcessFault` targets the byzantine sender at one `rnd(m)` view. `NetworkFault` targets every channel at one sender `rnd(m)` view.
-
-```rust
-pub struct ByzzFuzz {
-    pub c: u64,
-    pub d: u64,
-    pub r: u64,
-}
-```
-
-`c` is the number of process-fault draws, `d` is the number of network-fault draws, and `r` is the total round budget.
-
-```rust
-pub enum FaultScope {
-    Any,
-    Vote(VoteKind),
-    Certificate(CertificateKind),
-}
-```
-
-`FaultScope` narrows process faults by message kind. Resolver process faults currently match only `Any`.
+| Type | Role |
+| ---- | ---- |
+| `ByzzFuzz` | Schedule bounds `(c, d, r)`: process-fault count, network-fault count, total round budget. |
+| `ProcessFault` | One scheduled fault against the byzantine sender at one of its rounds, with a recipient subset, an omit flag, and a scope. |
+| `NetworkFault` | One scheduled partition active at one sender round, applied to every channel. |
+| `FaultScope` | Optional message-kind filter for process faults: any / specific vote kind / specific certificate kind. |
 
 ## Flow
 
 ```
-runner::setup_engines
+runner samples bounds
     |
-    | choose r_bound from required_containers or required_containers * [2, 100]
-    | choose r from [1, r_max]
-    | choose c and d from [0, max(r / FAULT_INJECTION_RATIO, 1)]
-    | force c > 0 or d > 0
+    | choose r within a small bound relative to required_containers
+    | choose c and d such that at least one is non-zero
     v
-ByzzFuzz::new(c, d, r)
+network faults
     |
-    +--> network_faults:
-    |       sample min(d, r) distinct views from [1, r]
-    |       sample non-trivial N4 partition index from [1, 14]
+    | unique rounds within [1, r]
+    | uniform non-trivial 4-node partition at each round
+    v
+process faults
     |
-    +--> process_faults:
-            sample c views with replacement from [1, r]
-            sample non-empty receiver subset from participants[1..]
-            sample omit with probability 1/4
-            sample FaultScope by weights
+    | rounds drawn from [1, r] (with repetition allowed)
+    | non-empty receiver subset from correct participants
+    | small omit probability
+    | scope sampled with a small probability of narrowing to a specific kind
+    v
+runtime extends the process-fault schedule at GST
+    |
+    | drop dormant pre-GST faults at rounds the byzantine never reached
+    | append fresh, any-kind faults for a contiguous range above byzantine_rnd
 ```
-
-At GST, `runner.rs` prunes pre-GST process faults above `byzantine_rnd` and appends fresh `FaultScope::Any` process faults for a future contiguous range of byzantine views.
 
 ## Related Invariants
 
-- [Fault Scheduling](../invariants/invariants.md#fault-scheduling) - sampling and schedule-shape invariants.
+- [Fault Scheduling](../invariants/invariants.md#fault-scheduling) - schedule shape, byzantine-identity exclusion, view sampling rules.
+- [Fault Flow](../invariants/invariants.md#fault-flow) - GST pruning and post-GST extension rules.
 
 ## Configuration
 
 | Parameter | Source | Meaning |
 | --------- | ------ | ------- |
-| `BYZANTINE_IDX` | `mod.rs` | Fixed byzantine participant index, currently `0`. |
-| `FAULT_INJECTION_RATIO` | `consensus/fuzz/src/lib.rs` | Divides `r` to bound per-type fault counts. |
-| `Any` scope weight | `scope.rs` | `50` out of `100`. |
-| `Vote` scope weight | `scope.rs` | `45` out of `100`, uniform over `Notarize`, `Finalize`, `Nullify`. |
-| `Certificate` scope weight | `scope.rs` | `5` out of `100`, uniform over `Notarization`, `Nullification`, `Finalization`. |
-| Process omit probability | `sampling.rs` | `1/4`. |
+| Byzantine identity | `mod.rs` | Fixed participant index treated as byzantine. |
+| Network fault count `d`, process fault count `c`, round budget `r` | `runner.rs` | Drawn per run; at least one of `c`, `d` is non-zero. |
+| Process-fault recipient candidates | `sampling.rs` | Correct participants only (byzantine identity excluded). |
+| Scope distribution | `scope.rs` | Biased toward `Any`; vote- and certificate-kind narrowing are less frequent. |
+| Process omit probability | `sampling.rs` | Small. |
 
 ## Extension Points
 
-- Add a new vote or certificate kind by updating `VOTE_KINDS` or `CERTIFICATE_KINDS` and the kind extractor functions in `scope.rs`.
-- Add resolver-specific scopes by extending `FaultScope`, its sampler, and `make_resolver` scope matching.
-- Change schedule density in `runner.rs`, not inside `ProcessFault` or `NetworkFault` data types.
+- Add a new vote or certificate kind by updating the scope-kind lists in `scope.rs`; the weighted sampler then covers it automatically.
+- Add resolver-specific scopes by extending `FaultScope`, the scope sampler, and the resolver matching predicate.
+- Change schedule density in `runner.rs`, not inside the fault data types.
 
 ## Related Specs
 
