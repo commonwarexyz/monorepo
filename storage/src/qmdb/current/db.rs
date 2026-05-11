@@ -1122,7 +1122,7 @@ pub(super) async fn build_grafted_tree<
     let complete_chunks = bitmap.complete_chunks();
     let graftable_chunks = grafting::graftable_chunks::<F>(*ops_leaves, grafting_height)
         .min(complete_chunks as u64) as usize;
-    debug_assert!(
+    assert!(
         pruned_chunks <= graftable_chunks && graftable_chunks <= complete_chunks,
         "invariant violated: pruned={pruned_chunks} graftable={graftable_chunks} complete={complete_chunks}"
     );
