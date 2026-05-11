@@ -37,7 +37,10 @@ use crate::{
     },
     qmdb::{
         self,
-        current::{db::combine_roots, grafting},
+        current::{
+            db::{combine_roots, pending_chunk},
+            grafting,
+        },
         Error,
     },
 };
@@ -228,9 +231,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             None
         };
 
-        let pending_chunk_digest =
-            crate::qmdb::current::db::pending_chunk::<F, _, N>(status, ops_leaves, grafting_height)
-                .map(|chunk| hasher.digest(&chunk));
+        let pending_chunk_digest = pending_chunk::<F, _, N>(status, ops_leaves, grafting_height)?
+            .map(|chunk| hasher.digest(&chunk));
 
         Ok(Self {
             proof,
@@ -356,8 +358,16 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         // (i.e., `complete - active == 1`); a presence/absence mismatch is a verification failure.
         let active_chunks =
             grafting::ops_active_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
-        let has_pending_chunk = complete_chunks > active_chunks;
-        debug_assert!(complete_chunks - active_chunks <= 1);
+        let pending_chunks = complete_chunks - active_chunks;
+        if pending_chunks > 1 {
+            debug!(
+                ?complete_chunks,
+                ?active_chunks,
+                "verification failed, multiple pending chunks"
+            );
+            return false;
+        }
+        let has_pending_chunk = pending_chunks == 1;
 
         let grafting_verifier = grafting::Verifier::<F, H>::new(
             grafting_height,
@@ -1483,6 +1493,7 @@ mod tests {
                 // OpsRootWitness round-trip
                 let pending_chunk_digest =
                     db::pending_chunk::<F, _, N>(&status, ops_leaves_for_root, grafting_height)
+                        .unwrap()
                         .map(|c| hasher.digest(&c));
                 let partial_digest =
                     db::partial_chunk::<_, N>(&status).map(|(c, nb)| (nb, hasher.digest(&c)));
@@ -1547,12 +1558,53 @@ mod tests {
                     "RangeProof verify failed at k={k}"
                 );
 
-                // Tamper with the pending chunk digest; verification must fail.
+                let pending_loc = mmb::Location::new(3);
+                let pending_proof = RangeProof::new(
+                    &hasher,
+                    &status,
+                    &storage,
+                    Location::new(0),
+                    pending_loc..pending_loc + 1,
+                    ops_root,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    pending_proof.pending_chunk_digest.is_some(),
+                    "expected single-element proof to carry pending chunk digest at k={k}"
+                );
+                let pending_element = hasher.digest(&(*pending_loc).to_be_bytes());
+                assert!(
+                    pending_proof.verify(
+                        &hasher,
+                        pending_loc,
+                        &[pending_element],
+                        &[chunks[0]],
+                        &canonical_root,
+                    ),
+                    "single-element proof inside pending chunk failed at k={k}"
+                );
+
+                // Tamper with the pending chunk digest or its supplied bytes.
                 let mut tampered = proof.clone();
                 tampered.pending_chunk_digest = Some(hasher.digest(b"fake pending"));
                 assert!(
                     !tampered.verify(&hasher, start, &elements, &chunks, &canonical_root),
                     "tampered pending digest accepted at k={k}"
+                );
+
+                let mut tampered = proof.clone();
+                tampered.pending_chunk_digest = None;
+                assert!(
+                    !tampered.verify(&hasher, start, &elements, &chunks, &canonical_root),
+                    "missing pending digest accepted at k={k}"
+                );
+
+                let mut bad_chunks = chunks.clone();
+                bad_chunks[0][0] ^= 1;
+                assert!(
+                    !proof.verify(&hasher, start, &elements, &bad_chunks, &canonical_root),
+                    "tampered pending chunk bytes accepted at k={k}"
                 );
             }
         });
