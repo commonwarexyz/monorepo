@@ -438,11 +438,6 @@ pub struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
-    /// Receive the next message.
-    pub async fn recv(&mut self) -> Option<T> {
-        poll_fn(|cx| self.poll_recv(cx)).await
-    }
-
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
@@ -465,17 +460,6 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Try to receive the next message without waiting.
-    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        if let Some(message) = self.pop() {
-            return Ok(message);
-        }
-        if self.is_disconnected() {
-            return Err(TryRecvError::Disconnected);
-        }
-        Err(TryRecvError::Empty)
-    }
-
     fn pop(&mut self) -> Option<T> {
         if let Some(message) = self.state.ready.pop() {
             if self.state.overflow.has_refillable_messages() {
@@ -493,6 +477,22 @@ impl<T> Receiver<T> {
     fn is_disconnected(&self) -> bool {
         self.state.closed.load(Ordering::Acquire) || self.state.senders.load(Ordering::Acquire) == 0
     }
+
+    /// Receive the next message.
+    pub async fn recv(&mut self) -> Option<T> {
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Try to receive the next message without waiting.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        if let Some(message) = self.pop() {
+            return Ok(message);
+        }
+        if self.is_disconnected() {
+            return Err(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
 }
 
 impl<T> Drop for Receiver<T> {
@@ -501,7 +501,7 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
-/// Create a mailbox with a bounded ready queue and policy-managed overflow.
+/// Create a new bounded mailbox.
 pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let state = Arc::new(State {
         ready: Ready::new(capacity.get()),
