@@ -19,14 +19,14 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = ordered::Operation<F, K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
+pub type Db<F, E, K, V, H, T, S> = super::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -73,7 +73,7 @@ pub mod partitioned {
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
-    use commonware_parallel::{Sequential, Strategy};
+    use commonware_parallel::Strategy;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -84,7 +84,7 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<F, E, K, V, H, T, const P: usize, S = Sequential> = crate::qmdb::any::ordered::Db<
+    pub type Db<F, E, K, V, H, T, const P: usize, S> = crate::qmdb::any::ordered::Db<
         F,
         E,
         Journal<E, Operation<F, K, V>>,
@@ -120,16 +120,14 @@ pub mod partitioned {
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
-        use super::Sequential;
         /// Variable-value DB with 256 partitions.
-        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
-        use super::Sequential;
         /// Variable-value DB with 65,536 partitions.
-        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
     }
 }
 
@@ -163,11 +161,11 @@ pub(crate) mod test {
     const PAGE_CACHE_SIZE: usize = 13;
 
     pub(crate) type VarConfig =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
-        Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+        Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         let page_cache =
@@ -268,7 +266,7 @@ pub(crate) mod test {
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
 
     /// Type alias for a variable db with FixedBytes<4> keys.
-    type VariableDb = Db<mmr::Family, Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    type VariableDb = Db<mmr::Family, Context, FixedBytes<4>, Digest, Sha256, TwoCap, Sequential>;
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
@@ -585,7 +583,7 @@ pub(crate) mod test {
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest>;
+        type TestMmr = Mmr<deterministic::Context, Digest, Sequential>;
 
         impl FromSyncTestable for AnyTest {
             type Merkle = TestMmr;

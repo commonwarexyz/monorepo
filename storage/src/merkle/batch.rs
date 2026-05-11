@@ -107,7 +107,7 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
+pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
     overwrites: BTreeMap<Position<F>, D>,
@@ -392,7 +392,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 /// A speculative batch whose dirty Merkle nodes have been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 #[derive(Debug)]
-pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
+pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
 
@@ -605,7 +605,11 @@ mod tests {
         mem.root(hasher, 0).unwrap()
     }
 
-    fn batch_root<F: Family>(base: &Mem<F, D>, batch: &MerkleizedBatch<F, D>, hasher: &H) -> D {
+    fn batch_root<F: Family>(
+        base: &Mem<F, D>,
+        batch: &MerkleizedBatch<F, D, commonware_parallel::Sequential>,
+        hasher: &H,
+    ) -> D {
         batch.root(base, hasher, 0).unwrap()
     }
 

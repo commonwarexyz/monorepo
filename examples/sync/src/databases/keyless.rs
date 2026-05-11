@@ -27,13 +27,13 @@ use std::num::NonZeroU64;
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher>;
+pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher, Sequential>;
 
 /// Operation type alias.
 pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the keyless variant.
-pub fn create_config(context: &impl BufferPooler) -> fixed::Config {
+pub fn create_config(context: &impl BufferPooler) -> fixed::Config<Sequential> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     keyless::Config {
         merkle: MmrConfig {

@@ -16,7 +16,7 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
@@ -24,7 +24,7 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
+pub type Db<F, E, K, V, H, T, S> = super::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -64,7 +64,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_cryptography::Hasher;
-    use commonware_parallel::{Sequential, Strategy};
+    use commonware_parallel::Strategy;
     use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
@@ -76,7 +76,7 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<F, E, K, V, H, T, const P: usize, S = Sequential> = crate::qmdb::any::ordered::Db<
+    pub type Db<F, E, K, V, H, T, const P: usize, S> = crate::qmdb::any::ordered::Db<
         F,
         E,
         Journal<E, Operation<F, K, V>>,
@@ -107,16 +107,14 @@ pub mod partitioned {
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
-        use super::Sequential;
         /// Fixed-value DB with 256 partitions.
-        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
-        use super::Sequential;
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
     }
 }
 
@@ -148,6 +146,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _, Supervisor as _,
@@ -168,11 +167,13 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Ordered<Digest, FixedEncoding<Digest>>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        Sequential,
     >;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
-        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
@@ -260,11 +261,12 @@ pub(crate) mod test {
         executor.start(|mut context| async move {
             let seed = context.next_u64();
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
-            let mut db = Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap>::init(
-                context, config,
-            )
-            .await
-            .unwrap();
+            let mut db =
+                Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap, Sequential>::init(
+                    context, config,
+                )
+                .await
+                .unwrap();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
             let key2 = FixedBytes::<2>::new([1u8, 3u8]);
             // Create some keys that will not be added to the snapshot.
@@ -843,9 +845,9 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
-                mut db: Db<mmr::Family, Context, Digest, i32, Sha256, T>,
+                mut db: Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential>,
                 rng: &mut StdRng,
-            ) -> Db<mmr::Family, Context, Digest, i32, Sha256, T> {
+            ) -> Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential> {
                 let mut keys = BTreeMap::new();
 
                 // Insert 1000 random keys into both the db and an ordered map.
@@ -917,7 +919,7 @@ pub(crate) mod test {
 
             // Use a OneCap to ensure many collisions.
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
-            let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap>::init(
+            let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap, Sequential>::init(
                 context.child("first"),
                 config,
             )
@@ -928,7 +930,7 @@ pub(crate) mod test {
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
-            let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap>::init(
+            let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap, Sequential>::init(
                 context.child("second"),
                 config,
             )
@@ -942,7 +944,7 @@ pub(crate) mod test {
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
 
     /// Type alias for a fixed db with FixedBytes<4> keys.
-    type FixedDb = Db<mmr::Family, Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    type FixedDb = Db<mmr::Family, Context, FixedBytes<4>, Digest, Sha256, TwoCap, Sequential>;
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
@@ -1648,7 +1650,7 @@ pub(crate) mod test {
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest>;
+        type TestMmr = Mmr<deterministic::Context, Digest, Sequential>;
 
         impl FromSyncTestable for AnyTest {
             type Merkle = TestMmr;

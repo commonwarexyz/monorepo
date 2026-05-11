@@ -866,12 +866,13 @@ pub(crate) mod harnesses {
         sha256::Digest,
         Sha256,
         TwoCap,
+        Sequential,
     >;
 
     fn variable_config(
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
-    ) -> immutable::variable::Config<TwoCap, ((), ())> {
+    ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -1148,6 +1149,9 @@ mod compact_variable_mmr {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
+    type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
+    type SourceConfig = immutable::variable::Config<TwoCap, CodecConfig, Sequential>;
+
     type SourceDb = immutable::variable::Db<
         mmr::Family,
         deterministic::Context,
@@ -1155,6 +1159,7 @@ mod compact_variable_mmr {
         Vec<u8>,
         Sha256,
         TwoCap,
+        Sequential,
     >;
     type ClientDb = immutable::variable::CompactDb<
         mmr::Family,
@@ -1162,13 +1167,11 @@ mod compact_variable_mmr {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        ((), (commonware_codec::RangeCfg<usize>, ())),
+        CodecConfig,
+        Sequential,
     >;
 
-    fn source_config(
-        suffix: &str,
-        pooler: &(impl BufferPooler + Metrics),
-    ) -> immutable::variable::Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    fn source_config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> SourceConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
@@ -1193,7 +1196,8 @@ mod compact_variable_mmr {
 
     fn client_config(
         suffix: &str,
-    ) -> immutable::variable::CompactConfig<((), (commonware_codec::RangeCfg<usize>, ()))> {
+    ) -> immutable::variable::CompactConfig<((), (commonware_codec::RangeCfg<usize>, ())), Sequential>
+    {
         immutable::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
@@ -1621,6 +1625,9 @@ mod compact_variable_mmb {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
+    type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
+    type SourceConfig = immutable::variable::Config<TwoCap, CodecConfig, Sequential>;
+
     type SourceDb = immutable::variable::Db<
         mmb::Family,
         deterministic::Context,
@@ -1628,6 +1635,7 @@ mod compact_variable_mmb {
         Vec<u8>,
         Sha256,
         TwoCap,
+        Sequential,
     >;
     type ClientDb = immutable::variable::CompactDb<
         mmb::Family,
@@ -1635,13 +1643,11 @@ mod compact_variable_mmb {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        ((), (commonware_codec::RangeCfg<usize>, ())),
+        CodecConfig,
+        Sequential,
     >;
 
-    fn source_config(
-        suffix: &str,
-        pooler: &(impl BufferPooler + Metrics),
-    ) -> immutable::variable::Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    fn source_config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> SourceConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
@@ -1666,7 +1672,8 @@ mod compact_variable_mmb {
 
     fn client_config(
         suffix: &str,
-    ) -> immutable::variable::CompactConfig<((), (commonware_codec::RangeCfg<usize>, ()))> {
+    ) -> immutable::variable::CompactConfig<((), (commonware_codec::RangeCfg<usize>, ())), Sequential>
+    {
         immutable::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),

@@ -16,7 +16,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
@@ -24,21 +24,20 @@ use commonware_utils::Array;
 pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
-pub type Db<F, E, K, V, H, T, S = Sequential> =
+pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, S = Sequential> =
-    super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
 
 type Journal<F, E, K, V, H, S> =
     authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
 
 /// Configuration for a fixed-size immutable authenticated db.
-pub type Config<T, S = Sequential> = BaseConfig<T, JournalConfig, S>;
+pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 
 /// Configuration for a fixed-size compact immutable db.
-pub type CompactConfig<S = Sequential> = super::CompactConfig<(), S>;
+pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
 impl<
         F: Family,
@@ -96,7 +95,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle_config: MmrConfig {
@@ -119,14 +118,14 @@ mod tests {
 
     async fn open_db<F: Family>(
         context: deterministic::Context,
-    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
+    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition", &context);
         Db::init(context, cfg).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-immutable-fixed".into(),
@@ -184,8 +183,17 @@ mod tests {
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
-            dyn Future<Output = Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap>>
-                + Send,
+            dyn Future<
+                    Output = Db<
+                        F,
+                        deterministic::Context,
+                        Digest,
+                        Digest,
+                        Sha256,
+                        TwoCap,
+                        Sequential,
+                    >,
+                > + Send,
         >,
     > {
         Box::pin(open_db::<F>(ctx))
@@ -195,7 +203,15 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(
-        db: &mut Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>,
+        db: &mut Db<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Digest,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >,
         key: Digest,
         loc: crate::merkle::mmr::Location,
     ) {
@@ -206,7 +222,10 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
-    fn small_sections_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    fn small_sections_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> Config<TwoCap, Sequential> {
         let mut cfg = config(suffix, pooler);
         cfg.log.items_per_blob = NZU64!(1);
         cfg
@@ -214,7 +233,7 @@ mod tests {
 
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
-    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
+    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = small_sections_config("partition", &context);
         Db::init(context, cfg).await.unwrap()
     }
@@ -224,8 +243,17 @@ mod tests {
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
-            dyn Future<Output = Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap>>
-                + Send,
+            dyn Future<
+                    Output = Db<
+                        F,
+                        deterministic::Context,
+                        Digest,
+                        Digest,
+                        Sha256,
+                        TwoCap,
+                        Sequential,
+                    >,
+                > + Send,
         >,
     > {
         Box::pin(open_small_sections_db::<F>(ctx))

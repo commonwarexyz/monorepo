@@ -20,7 +20,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -30,7 +30,7 @@ pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<F, E, C, K, V, I, H, const N: usize, S = Sequential> =
+pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
     crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.

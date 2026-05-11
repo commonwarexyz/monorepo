@@ -2,10 +2,7 @@
 //!
 //! The impl blocks in this file define shared functionality across all Any QMDB variants.
 
-use super::{
-    operation::{update::Update, Operation},
-    BITMAP_CHUNK_BYTES,
-};
+use super::operation::{update::Update, Operation};
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
@@ -25,7 +22,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
@@ -53,8 +50,7 @@ impl<E: Context> Metrics<E> {
 }
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<F, E, C, H, S = Sequential> =
-    authenticated::Journal<F, E, C, H, S>;
+pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
@@ -89,8 +85,8 @@ pub struct Db<
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Send + Sync,
-    const N: usize = BITMAP_CHUNK_BYTES,
-    S: Strategy = Sequential,
+    const N: usize,
+    S: Strategy,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.

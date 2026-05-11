@@ -31,6 +31,8 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
+const BITMAP_CHUNK_BYTES: usize = 64;
+
 type GenericDb<F> = AnyDb<
     F,
     deterministic::Context,
@@ -38,6 +40,8 @@ type GenericDb<F> = AnyDb<
     Index<EightCap, Location<F>>,
     Sha256,
     Update<Key, FixedEncoding<Value>>,
+    BITMAP_CHUNK_BYTES,
+    Sequential,
 >;
 
 const MAX_OPS: usize = 25;
@@ -114,7 +118,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
             );
-            let cfg = Config::<EightCap> {
+            let cfg = Config::<EightCap, Sequential> {
                 merkle_config: MerkleConfig {
                     journal_partition: format!("test-qmdb-mmr-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
