@@ -17,7 +17,7 @@
 //! ```
 //!
 //! - `ops_root` is the root of the operations tree (MMR or MMB).
-//! - `grafted_root` commits to the activity bitmap's **active** chunks (chunks whose
+//! - `grafted_root` commits to the activity bitmap's **graftable** chunks (chunks whose
 //!   height-G ancestor has been born in the ops tree).
 //! - `pending_chunk_digest` is `H(pending_bytes)` if a chunk is bit-complete in the bitmap
 //!   but its h=G ancestor has not yet been born; absent otherwise.
@@ -38,7 +38,7 @@ use crate::{
     qmdb::{
         self,
         current::{
-            db::{combine_roots, pending_chunk},
+            db::{combine_roots, partial_chunk, pending_chunk},
             grafting,
         },
         Error,
@@ -163,18 +163,13 @@ pub struct RangeProof<F: Family, D: Digest> {
     /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
-    /// Digest of the bitmap chunk that's completed but not yet graftable, if any. The
-    /// pending chunk's bytes ride in the canonical-root trailer alongside the partial
-    /// trailing chunk; this digest is what the verifier checks the supplied chunk
-    /// bytes against.
+    /// Digest of the bitmap chunk that's complete but not yet graftable, if any.
     pub pending_chunk_digest: Option<D>,
 
-    /// Digest of the trailing partial chunk (last chunk filling), if the bitmap is not
-    /// chunk-aligned.
+    /// Digest of the bitmap's trailing partial chunk, if any.
     pub partial_chunk_digest: Option<D>,
 
-    /// The ops-tree root at the time of proof generation.
-    /// Needed by the verifier to reconstruct the canonical root.
+    /// The ops-tree root digest.
     pub ops_root: D,
 }
 
@@ -205,33 +200,28 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         ops_root: D,
     ) -> Result<Self, Error<F>> {
         // Snapshot ops_leaves once and thread through every derivation that needs it so the
-        // pruned <= active <= complete invariant holds across all derivations.
-        let leaves = Location::try_from(storage.size().await)?;
-        let ops_leaves = *leaves;
+        // pruned <= graftable <= complete invariant holds across all derivations.
+        let ops_leaves = Location::try_from(storage.size().await)?;
         let grafting_height = grafting::height::<N>();
-        let inactive_peaks =
-            grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
-        // Every active chunk has a single h=G ancestor, so a standard historical range
-        // proof suffices; no multi-peak grafted reconstruction is needed.
+        let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
+            ops_leaves,
+            inactivity_floor,
+            grafting_height,
+        )?;
+
         let proof = merkle::verification::historical_range_proof(
             hasher,
             storage,
-            leaves,
+            ops_leaves,
             range,
             inactive_peaks,
         )
         .await?;
 
-        let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, meaning it is not yet committed by the grafted bitmap root
-            // and needs to be included in the proof.
-            Some(hasher.digest(&last_chunk))
-        } else {
-            None
-        };
+        let partial_chunk_digest =
+            partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(&chunk));
 
-        let pending_chunk_digest = pending_chunk::<F, _, N>(status, ops_leaves, grafting_height)?
+        let pending_chunk_digest = pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
             .map(|chunk| hasher.digest(&chunk));
 
         Ok(Self {
@@ -353,16 +343,13 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let grafting_height = grafting::height::<N>();
 
-        // Derive `active_chunks` from `leaves` (the proof's authoritative ops_leaves count) and
-        // `grafting_height`. The pending chunk slot is required iff a pending chunk exists
-        // (i.e., `complete - active == 1`); a presence/absence mismatch is a verification failure.
-        let active_chunks =
-            grafting::ops_active_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
-        let pending_chunks = complete_chunks - active_chunks;
+        let graftable_chunks =
+            grafting::graftable_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
+        let pending_chunks = complete_chunks - graftable_chunks;
         if pending_chunks > 1 {
             debug!(
                 ?complete_chunks,
-                ?active_chunks,
+                ?graftable_chunks,
                 "verification failed, multiple pending chunks"
             );
             return false;
@@ -373,7 +360,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             grafting_height,
             start_chunk,
             chunk_vec,
-            active_chunks,
+            graftable_chunks,
             qmdb::ROOT_BAGGING,
         );
 
@@ -409,9 +396,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         // For a pending chunk, validate the supplied chunk bytes against the digest in the proof
         // when the verifier's range includes the pending chunk's index. The pending chunk is at
-        // index `active_chunks` (== `complete_chunks - 1` when present).
+        // index `graftable_chunks` (== `complete_chunks - 1` when present).
         if let Some(pending_digest) = self.pending_chunk_digest {
-            let pending_idx = active_chunks;
+            let pending_idx = graftable_chunks;
             if pending_idx >= start_chunk && pending_idx <= end_chunk {
                 let local = (pending_idx - start_chunk) as usize;
                 // The earlier `chunks.len() == end_chunk - start_chunk + 1` check makes this
@@ -833,15 +820,13 @@ mod tests {
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
             let ops_root = ops.root(&hasher, 0).unwrap();
 
-            // Only active chunks (those with a single h=G ancestor in the ops tree) are
-            // committed by the grafted tree. The pending chunk (if any) rides in the trailer.
-            let active_chunks_for_test = grafting::ops_active_chunks::<F>(
+            let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
                 *Location::<F>::try_from(ops.size()).unwrap(),
                 grafting_height,
             )
             .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
                 as usize;
-            let chunk_inputs: Vec<_> = (0..active_chunks_for_test)
+            let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
                 .map(|chunk_idx| {
                     (
                         chunk_idx,
@@ -872,7 +857,7 @@ mod tests {
             grafted.apply_batch(&merkleized).unwrap();
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
@@ -939,15 +924,13 @@ mod tests {
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
             let ops_root = ops.root(&hasher, 0).unwrap();
 
-            // Only active chunks (those with a single h=G ancestor in the ops tree) are
-            // committed by the grafted tree. The pending chunk (if any) rides in the trailer.
-            let active_chunks_for_test = grafting::ops_active_chunks::<F>(
+            let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
                 *Location::<F>::try_from(ops.size()).unwrap(),
                 grafting_height,
             )
             .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
                 as usize;
-            let chunk_inputs: Vec<_> = (0..active_chunks_for_test)
+            let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
                 .map(|chunk_idx| {
                     (
                         chunk_idx,
@@ -982,7 +965,7 @@ mod tests {
                 let (chunk, next_bit) = status.last_chunk();
                 Some((*chunk, next_bit))
             };
-            let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
@@ -1056,15 +1039,13 @@ mod tests {
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
             let ops_root = ops.root(&hasher, 0).unwrap();
 
-            // Only active chunks (those with a single h=G ancestor in the ops tree) are
-            // committed by the grafted tree. The pending chunk (if any) rides in the trailer.
-            let active_chunks_for_test = grafting::ops_active_chunks::<F>(
+            let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
                 *Location::<F>::try_from(ops.size()).unwrap(),
                 grafting_height,
             )
             .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
                 as usize;
-            let chunk_inputs: Vec<_> = (0..active_chunks_for_test)
+            let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
                 .map(|chunk_idx| {
                     (
                         chunk_idx,
@@ -1099,7 +1080,7 @@ mod tests {
                 let (chunk, next_bit) = status.last_chunk();
                 Some((*chunk, next_bit))
             };
-            let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
@@ -1154,15 +1135,13 @@ mod tests {
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
             let ops_root = ops.root(&hasher, 0).unwrap();
 
-            // Only active chunks (those with a single h=G ancestor in the ops tree) are
-            // committed by the grafted tree. The pending chunk (if any) rides in the trailer.
-            let active_chunks_for_test = grafting::ops_active_chunks::<F>(
+            let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
                 *Location::<F>::try_from(ops.size()).unwrap(),
                 grafting_height,
             )
             .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
                 as usize;
-            let chunk_inputs: Vec<_> = (0..active_chunks_for_test)
+            let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
                 .map(|chunk_idx| {
                     (
                         chunk_idx,
@@ -1193,7 +1172,7 @@ mod tests {
             grafted.apply_batch(&merkleized).unwrap();
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
@@ -1234,9 +1213,9 @@ mod tests {
     /// Active chunks always have a single h=G peak; multi-peak structure can only appear
     /// at the pending-chunk index. This test exhaustively scans MMB sizes that have a
     /// pending chunk (the only configuration where multi-peak chunks ever existed) and
-    /// asserts that every active chunk has exactly one peak.
+    /// asserts that every graftable chunk has exactly one peak.
     #[test_traced]
-    fn test_active_chunks_always_single_peak_at_pending_sizes() {
+    fn test_graftable_chunks_always_single_peak_at_pending_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             type F = mmb::Family;
@@ -1251,21 +1230,21 @@ mod tests {
                 let leaves_loc = mmb::Location::new(leaves);
                 let leaves_count = *leaves_loc;
                 let complete = leaves_count / chunk_bits;
-                let active = grafting::ops_active_chunks::<F>(leaves_count, grafting_height)
+                let graftable = grafting::graftable_chunks::<F>(leaves_count, grafting_height)
                     .min(complete);
-                if active == complete {
+                if graftable == complete {
                     continue; // no pending chunk at this size
                 }
                 found_any_pending = true;
 
-                // Pending chunks (index >= active) are allowed multi-peak; their bytes
-                // ride in the trailer.
+                // Pending chunks (index >= graftable) are allowed multi-peak; their digests
+                // are hashed into the canonical root separately.
                 let size = F::location_to_position(leaves_loc);
-                for chunk_idx in 0..active {
+                for chunk_idx in 0..graftable {
                     let count = F::chunk_peaks(size, chunk_idx, grafting_height).count();
                     assert_eq!(
                         count, 1,
-                        "active chunk {chunk_idx} has {count} peaks (leaves={leaves_count}, active={active}, complete={complete})"
+                        "graftable chunk {chunk_idx} has {count} peaks (leaves={leaves_count}, graftable={graftable}, complete={complete})"
                     );
                 }
             }
@@ -1293,15 +1272,13 @@ mod tests {
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
             let ops_root = ops.root(&hasher, 0).unwrap();
 
-            // Only active chunks (those with a single h=G ancestor in the ops tree) are
-            // committed by the grafted tree. The pending chunk (if any) rides in the trailer.
-            let active_chunks_for_test = grafting::ops_active_chunks::<F>(
+            let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
                 *Location::<F>::try_from(ops.size()).unwrap(),
                 grafting_height,
             )
             .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
                 as usize;
-            let chunk_inputs: Vec<_> = (0..active_chunks_for_test)
+            let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
                 .map(|chunk_idx| {
                     (
                         chunk_idx,
@@ -1332,7 +1309,7 @@ mod tests {
             grafted.apply_batch(&merkleized).unwrap();
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
@@ -1425,7 +1402,7 @@ mod tests {
             assert_eq!(chunk_bits, 8);
 
             // For G=3, chunk 0 is pending while ops_leaves is in [8, 11). Pending+partial
-            // coexistence holds for k in [1, 2] (k=3 transitions chunk 0 to active).
+            // coexistence holds for k in [1, 2] (k=3 transitions chunk 0 to graftable).
             for k in 1u64..=2 {
                 let leaf_count = chunk_bits + k;
                 let mut status = BitMap::<N>::new();
@@ -1436,16 +1413,16 @@ mod tests {
                 let ops_root = ops.root(&hasher, 0).unwrap();
 
                 let complete = <BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64;
-                let active =
-                    grafting::ops_active_chunks::<F>(leaf_count, grafting_height).min(complete);
+                let graftable =
+                    grafting::graftable_chunks::<F>(leaf_count, grafting_height).min(complete);
                 let next_bit = leaf_count % chunk_bits;
                 assert_eq!(complete, 1);
-                assert_eq!(active, 0);
+                assert_eq!(graftable, 0);
                 assert!(next_bit > 0, "expected partial chunk for k={k}");
 
-                // Build a grafted tree from the (zero) active chunks and a Storage covering
+                // Build a grafted tree from the (zero) graftable chunks and a Storage covering
                 // the post-state.
-                let chunk_inputs: Vec<_> = (0..active as usize)
+                let chunk_inputs: Vec<_> = (0..graftable as usize)
                     .map(|chunk_idx| {
                         (
                             chunk_idx,
@@ -1477,7 +1454,7 @@ mod tests {
                 let storage =
                     grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
 
-                let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+                let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
                 let canonical_root = db::compute_db_root::<F, Sha256, _, _, N>(
                     &hasher,
                     &status,
@@ -1611,11 +1588,11 @@ mod tests {
     }
 
     /// Appending one op at the exact birth size of a pending chunk's h=G ancestor causes
-    /// the chunk to transition from pending to active. The canonical root must change, and
-    /// a freshly-rebuilt grafted tree from the post-state must contain the now-active
+    /// the chunk to transition from pending to graftable. The canonical root must change, and
+    /// a freshly-rebuilt grafted tree from the post-state must contain the now-graftable
     /// chunk's leaf.
     #[test_traced]
-    fn test_pending_to_active_transition_at_birth_size() {
+    fn test_pending_to_graftable_transition_at_birth_size() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             type F = mmb::Family;
@@ -1628,15 +1605,16 @@ mod tests {
             // chunk 0's h=G ancestor: birth = 3*2^(G-1) - 1 = 11 for G=3.
             let birth = (3u64 << (grafting_height - 1)) - 1;
             let pre_state_leaves = birth - 1; // = 10: chunk 0 still pending
-            let post_state_leaves = birth; // = 11: chunk 0 just active
+            let post_state_leaves = birth; // = 11: chunk 0 just graftable
 
             assert_eq!(pre_state_leaves, 10);
             assert_eq!(post_state_leaves, 11);
 
-            let active_pre = grafting::ops_active_chunks::<F>(pre_state_leaves, grafting_height);
-            let active_post = grafting::ops_active_chunks::<F>(post_state_leaves, grafting_height);
-            assert_eq!(active_pre, 0);
-            assert_eq!(active_post, 1);
+            let graftable_pre = grafting::graftable_chunks::<F>(pre_state_leaves, grafting_height);
+            let graftable_post =
+                grafting::graftable_chunks::<F>(post_state_leaves, grafting_height);
+            assert_eq!(graftable_pre, 0);
+            assert_eq!(graftable_post, 1);
 
             // Pre-state canonical root: chunk 0 is pending; grafted tree empty.
             let mut status_pre = BitMap::<N>::new();
@@ -1652,7 +1630,7 @@ mod tests {
                 &hasher,
                 &status_pre,
                 &storage_pre,
-                pre_state_leaves,
+                Location::<F>::new(pre_state_leaves),
                 db::partial_chunk::<_, N>(&status_pre),
                 Location::new(0),
                 &ops_root_pre,
@@ -1679,7 +1657,11 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(leaf_digests.len(), 1, "post-state must have 1 active chunk");
+            assert_eq!(
+                leaf_digests.len(),
+                1,
+                "post-state must have 1 graftable chunk"
+            );
             let grafted_hasher =
                 grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
             let mut grafted_post = Mem::<F, sha256::Digest>::new();
@@ -1695,7 +1677,7 @@ mod tests {
                 &hasher,
                 &status_post,
                 &storage_post,
-                post_state_leaves,
+                Location::<F>::new(post_state_leaves),
                 db::partial_chunk::<_, N>(&status_post),
                 Location::new(0),
                 &ops_root_post,
@@ -1705,7 +1687,7 @@ mod tests {
 
             assert_ne!(
                 canonical_pre, canonical_post,
-                "canonical root must change when chunk 0 transitions from pending to active"
+                "canonical root must change when chunk 0 transitions from pending to graftable"
             );
         });
     }
@@ -1745,15 +1727,13 @@ mod tests {
             // the atomic inactive-prefix boundary for the current root.
             let ops_root = ops.root(&hasher, ops_inactive_peaks).unwrap();
 
-            // Only active chunks (those with a single h=G ancestor in the ops tree) are
-            // committed by the grafted tree. The pending chunk (if any) rides in the trailer.
-            let active_chunks_for_test = grafting::ops_active_chunks::<F>(
+            let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
                 *Location::<F>::try_from(ops.size()).unwrap(),
                 grafting_height,
             )
             .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
                 as usize;
-            let chunk_inputs: Vec<_> = (0..active_chunks_for_test)
+            let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
                 .map(|chunk_idx| {
                     (
                         chunk_idx,
@@ -1784,7 +1764,7 @@ mod tests {
             grafted.apply_batch(&merkleized).unwrap();
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let ops_leaves_for_root: u64 = *Location::<F>::try_from(ops.size()).unwrap();
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
