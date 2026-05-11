@@ -55,9 +55,11 @@ impl mailbox::Policy for Message {
                 true
             }
             Policy::Replace => {
-                let result =
-                    overflow.replace_last(message, |pending| pending.policy == Policy::Replace);
-                overflow.replace_or_spill(result);
+                overflow
+                    .replace_last(message, |pending| pending.policy == Policy::Replace)
+                    .unwrap_or_else(|message| {
+                        overflow.spill(message);
+                    });
                 true
             }
         }
@@ -100,6 +102,34 @@ fn bench_try_recv_ready(c: &mut Criterion) {
             },
             |mut receiver| {
                 for _ in 0..MESSAGES {
+                    black_box(receiver.try_recv().unwrap());
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_try_recv_overflow(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("{}::try_recv_overflow", module_path!()));
+    group.throughput(Throughput::Elements((CAPACITY + MESSAGES) as u64));
+
+    group.bench_function(format!("capacity={CAPACITY} overflow={MESSAGES}"), |b| {
+        b.iter_batched(
+            || {
+                let (sender, receiver) = mailbox::new::<Message>(NZUsize!(CAPACITY));
+                for _ in 0..CAPACITY {
+                    assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
+                }
+                for _ in 0..MESSAGES {
+                    assert_eq!(sender.enqueue(Message::spill()), Feedback::Backoff);
+                }
+                receiver
+            },
+            |mut receiver| {
+                for _ in 0..(CAPACITY + MESSAGES) {
                     black_box(receiver.try_recv().unwrap());
                 }
             },
@@ -293,6 +323,7 @@ criterion_group! {
     targets =
         bench_enqueue_ready,
         bench_try_recv_ready,
+        bench_try_recv_overflow,
         bench_round_trip_ready,
         bench_recv_waiting,
         bench_overflow_drop,

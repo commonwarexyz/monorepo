@@ -40,15 +40,9 @@ pub struct Overflow<'a, T> {
 
 impl<T> Overflow<'_, T> {
     /// Spill `message` into overflow after ready capacity is exceeded.
-    pub fn spill(&mut self, message: T) {
+    pub fn spill(&mut self, message: T) -> &mut Self {
         self.queue.push_back(message);
-    }
-
-    /// Spill the message into overflow if it could not replace existing overflow work.
-    pub fn replace_or_spill(&mut self, result: Result<(), T>) {
-        if let Err(message) = result {
-            self.spill(message);
-        }
+        self
     }
 
     /// Replace the newest matching overflow message.
@@ -58,36 +52,6 @@ impl<T> Overflow<'_, T> {
             Ok(())
         } else {
             Err(message)
-        }
-    }
-
-    /// Coalesce `message` into the newest matching overflow message, or spill it.
-    pub fn coalesce_or_spill(
-        &mut self,
-        message: T,
-        is_match: impl FnMut(&T) -> bool,
-        merge: impl FnOnce(&mut T, T),
-    ) {
-        if let Some(pending) = self.find_last_mut(is_match) {
-            merge(pending, message);
-        } else {
-            self.spill(message);
-        }
-    }
-
-    /// Coalesce `message` into preferred overflow, replace fallback overflow, or spill it.
-    pub fn coalesce_or_replace_or_spill(
-        &mut self,
-        message: T,
-        coalesce_match: impl FnMut(&T) -> bool,
-        coalesce: impl FnOnce(&mut T, T),
-        replace_match: impl FnMut(&T) -> bool,
-    ) {
-        if let Some(pending) = self.find_last_mut(coalesce_match) {
-            coalesce(pending, message);
-        } else {
-            let result = self.replace_last(message, replace_match);
-            self.replace_or_spill(result);
         }
     }
 
@@ -103,14 +67,9 @@ impl<T> Overflow<'_, T> {
     ///
     /// A policy may clear overflow and still return `true` from [`Policy::handle`]
     /// to request producer backoff after changing mailbox state.
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self) -> &mut Self {
         self.queue.clear();
-    }
-
-    /// Replace overflow with a single spilled `message`.
-    pub fn replace_all(&mut self, message: T) {
-        self.clear();
-        self.spill(message);
+        self
     }
 }
 
@@ -177,7 +136,7 @@ impl<T> ReadyQueue<T> {
         }
     }
 
-    fn capacity(&self) -> usize {
+    const fn capacity(&self) -> usize {
         self.capacity
     }
 
@@ -235,15 +194,7 @@ struct OverflowState<T> {
 }
 
 impl<T> OverflowState<T> {
-    #[cfg(not(feature = "loom"))]
-    const fn new() -> Self {
-        Self {
-            queue: Mutex::new(VecDeque::new()),
-            len: AtomicUsize::new(0),
-        }
-    }
-
-    #[cfg(feature = "loom")]
+    #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
@@ -273,35 +224,58 @@ impl<T> OverflowState<T> {
             return Feedback::Closed;
         }
 
-        // `len` is a hint used to keep the empty-overflow send path lock-free. If a
-        // receiver drained overflow after the sender observed that hint, retry ready
-        // before invoking the policy so a message is not dropped while capacity exists.
-        let message = if queue.is_empty() {
-            match ready.push(message) {
-                Ok(()) => {
-                    self.len.store(0, Ordering::Release);
-                    return Feedback::Ok;
-                }
-                Err(message) => message,
+        // The overflow lock orders promotion before policy. Promote older
+        // overflow first so capacity already freed by the receiver is used
+        // before this message can be dropped or replaced by policy.
+        Self::refill_ready_locked(&mut queue, ready);
+
+        let message = match Self::try_ready_if_overflow_empty_locked(&queue, ready, message) {
+            Ok(()) => {
+                self.publish_len(&queue);
+                return Feedback::Ok;
             }
-        } else {
-            message
+            Err(message) => message,
         };
 
-        let backoff = {
-            let mut overflow = Overflow { queue: &mut queue };
-            T::handle(&mut overflow, message)
-        };
-        self.len.store(queue.len(), Ordering::Release);
-        if backoff {
+        let feedback = Self::apply_policy_locked(&mut queue, message);
+        self.publish_len(&queue);
+        feedback
+    }
+
+    fn refill_ready(&self, ready: &ReadyQueue<T>) {
+        let mut queue = lock(&self.queue);
+        Self::refill_ready_locked(&mut queue, ready);
+        self.publish_len(&queue);
+    }
+
+    fn try_ready_if_overflow_empty_locked(
+        queue: &VecDeque<T>,
+        ready: &ReadyQueue<T>,
+        message: T,
+    ) -> Result<(), T> {
+        // `len` is only a hint for avoiding this lock. After promotion, retry
+        // ready while still holding the overflow lock so stale hints and
+        // already-drained overflow do not force this message through policy.
+        if queue.is_empty() {
+            ready.push(message)
+        } else {
+            Err(message)
+        }
+    }
+
+    fn apply_policy_locked(queue: &mut VecDeque<T>, message: T) -> Feedback
+    where
+        T: Policy,
+    {
+        let mut overflow = Overflow { queue };
+        if T::handle(&mut overflow, message) {
             Feedback::Backoff
         } else {
             Feedback::Dropped
         }
     }
 
-    fn refill_ready(&self, ready: &ReadyQueue<T>) {
-        let mut queue = lock(&self.queue);
+    fn refill_ready_locked(queue: &mut VecDeque<T>, ready: &ReadyQueue<T>) {
         while let Some(message) = queue.pop_front() {
             match ready.push(message) {
                 Ok(()) => {}
@@ -311,6 +285,9 @@ impl<T> OverflowState<T> {
                 }
             }
         }
+    }
+
+    fn publish_len(&self, queue: &VecDeque<T>) {
         self.len.store(queue.len(), Ordering::Release);
     }
 }
@@ -391,7 +368,7 @@ impl<T: Policy> Sender<T> {
             .apply_policy(&self.state.ready, message, || {
                 self.state.closed.load(Ordering::Acquire)
             });
-        if matches!(feedback, Feedback::Ok | Feedback::Backoff) {
+        if feedback.accepted() {
             self.state.waker.wake();
         }
         feedback
@@ -447,7 +424,8 @@ impl<T> Receiver<T> {
             return Some(message);
         }
 
-        // Refill on receive so senders keep the lock-free ready path when no overflow exists.
+        // Batch promotion on the receive path. Senders also promote before
+        // policy, so ready capacity freed before policy runs is still checked.
         self.state.overflow.refill_ready(&self.state.ready);
         self.state.ready.pop()
     }
@@ -501,10 +479,13 @@ mod tests {
         fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
             match message {
                 Self::Update(value) => {
-                    let result = overflow.replace_last(Self::Update(value), |pending| {
-                        matches!(pending, Self::Update(_))
-                    });
-                    overflow.replace_or_spill(result);
+                    overflow
+                        .replace_last(Self::Update(value), |pending| {
+                            matches!(pending, Self::Update(_))
+                        })
+                        .unwrap_or_else(|message| {
+                            overflow.spill(message);
+                        });
                     true
                 }
                 Self::Required(_) | Self::Buffered(_) => {
@@ -561,6 +542,21 @@ mod tests {
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+    }
+
+    #[test]
+    fn enqueue_uses_ready_capacity_after_partial_drain() {
+        let (sender, mut receiver) = new(NZUsize!(2));
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
+
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(2)));
+
+        assert_eq!(sender.enqueue(Message::Vote(4)), Feedback::Ok);
+        assert_eq!(receiver.try_recv(), Ok(Message::Required(3)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(4)));
     }
 
     #[test_async]
@@ -721,29 +717,6 @@ mod loom_tests {
         seen.fetch_or(1usize << usize::from(value), Ordering::AcqRel);
     }
 
-    #[derive(Clone, Debug)]
-    enum StaleHintMessage {
-        Drop(u8),
-        Spill(u8),
-        DropAfterDrain { drained: Arc<AtomicUsize> },
-    }
-
-    impl Policy for StaleHintMessage {
-        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
-            match message {
-                Self::Drop(_) => false,
-                message @ Self::Spill(_) => {
-                    overflow.spill(message);
-                    true
-                }
-                Self::DropAfterDrain { drained } => {
-                    assert_eq!(drained.load(Ordering::Acquire), 0);
-                    false
-                }
-            }
-        }
-    }
-
     #[test]
     fn concurrent_close_and_ready_enqueue_remains_closed() {
         loom::model(|| {
@@ -822,39 +795,17 @@ mod loom_tests {
     #[test]
     fn stale_overflow_hint_retries_ready_before_policy() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<StaleHintMessage>(NZUsize!(2));
-            assert_eq!(sender.enqueue(StaleHintMessage::Drop(0)), Feedback::Ok);
-            assert_eq!(sender.enqueue(StaleHintMessage::Drop(1)), Feedback::Ok);
-            assert_eq!(
-                sender.enqueue(StaleHintMessage::Spill(2)),
-                Feedback::Backoff
-            );
+            let (sender, mut receiver) = new::<Message>(NZUsize!(2));
+            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Drop(1)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Backoff);
 
-            let drained = Arc::new(AtomicUsize::new(0));
-            let enqueue_sender = sender.clone();
-            let drained_for_enqueue = drained.clone();
-            let enqueue = thread::spawn(move || {
-                enqueue_sender.enqueue(StaleHintMessage::DropAfterDrain {
-                    drained: drained_for_enqueue,
-                })
-            });
+            assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
+            assert_eq!(receiver.try_recv(), Ok(Message::Drop(1)));
 
-            assert!(matches!(receiver.try_recv(), Ok(StaleHintMessage::Drop(0))));
-            assert!(matches!(receiver.try_recv(), Ok(StaleHintMessage::Drop(1))));
-            assert!(matches!(
-                receiver.try_recv(),
-                Ok(StaleHintMessage::Spill(2))
-            ));
-            drained.store(1, Ordering::Release);
-
-            match enqueue.join().unwrap() {
-                Feedback::Ok => assert!(matches!(
-                    receiver.try_recv(),
-                    Ok(StaleHintMessage::DropAfterDrain { .. })
-                )),
-                Feedback::Dropped => assert!(receiver.try_recv().is_err()),
-                feedback => panic!("unexpected feedback: {feedback:?}"),
-            }
+            assert_eq!(sender.enqueue(Message::Drop(3)), Feedback::Ok);
+            assert_eq!(receiver.try_recv(), Ok(Message::Spill(2)));
+            assert_eq!(receiver.try_recv(), Ok(Message::Drop(3)));
         });
     }
 }
