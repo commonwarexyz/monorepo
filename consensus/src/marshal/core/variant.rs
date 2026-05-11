@@ -19,6 +19,9 @@ use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::future::Future;
 
+/// The codec configuration used to decode a [`Variant::ApplicationBlock`].
+pub type BlockReadCfg<V> = <<V as Variant>::ApplicationBlock as Read>::Cfg;
+
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
@@ -37,7 +40,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
         + Clone
-        + Codec<Cfg = <Self::ApplicationBlock as Read>::Cfg>;
+        + Codec<Cfg = BlockReadCfg<Self>>;
 
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
@@ -61,8 +64,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Returns the codec configuration used to decode a resolver-delivered block.
-    fn decode_block_cfg(
-        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+    ///
+    /// The returned configuration may bind `commitment` so that decoding rejects
+    /// blocks that do not match the expected commitment.
+    fn block_read_cfg(
+        block_cfg: &BlockReadCfg<Self>,
         commitment: Self::Commitment,
     ) -> <Self::Block as Read>::Cfg;
 

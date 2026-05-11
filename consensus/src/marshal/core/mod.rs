@@ -47,4 +47,4 @@ mod mailbox;
 pub use mailbox::Mailbox;
 
 mod variant;
-pub use variant::{Buffer, Variant};
+pub use variant::{BlockReadCfg, Buffer, Variant};

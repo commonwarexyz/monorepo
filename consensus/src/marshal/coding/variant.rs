@@ -2,9 +2,9 @@ use crate::{
     marshal::{
         coding::{
             shards,
-            types::{CodedBlock, StoredCodedBlock},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{Buffer, Variant},
+        core::{BlockReadCfg, Buffer, Variant},
     },
     simplex::types::Context,
     types::{coding::Commitment, Round},
@@ -55,11 +55,14 @@ where
         block.context().parent.1
     }
 
-    fn decode_block_cfg(
-        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+    fn block_read_cfg(
+        block_cfg: &BlockReadCfg<Self>,
         commitment: Self::Commitment,
     ) -> <Self::Block as Read>::Cfg {
-        (block_cfg.clone(), commitment)
+        CodedBlockCfg {
+            inner: block_cfg.clone(),
+            expected: commitment,
+        }
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {

@@ -296,23 +296,45 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
     }
 }
 
+/// Codec configuration for decoding a [`CodedBlock`] from the wire.
+///
+/// Pairs the inner block's codec config with the [`Commitment`] that the
+/// decoded block must match. The [`Read`] impl rejects any block whose
+/// recoded form would not produce `expected` without performing the full
+/// re-encoding.
+pub struct CodedBlockCfg<B: Block> {
+    /// Codec configuration for the inner application block.
+    pub inner: <B as Read>::Cfg,
+    /// The commitment the decoded block must match.
+    pub expected: Commitment,
+}
+
+impl<B: Block> Clone for CodedBlockCfg<B> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            expected: self.expected,
+        }
+    }
+}
+
 impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
-    type Cfg = (<B as Read>::Cfg, Commitment);
+    type Cfg = CodedBlockCfg<B>;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        (block_cfg, expected): &Self::Cfg,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let inner = B::read_cfg(buf, block_cfg)?;
+        let inner = B::read_cfg(buf, &cfg.inner)?;
         let config = CodingConfig::read(buf)?;
 
-        if config != expected.config() {
+        if config != cfg.expected.config() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "config mismatch",
             ));
         }
-        if inner.digest() != expected.block() {
+        if inner.digest() != cfg.expected.block() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "block digest mismatch",
@@ -629,9 +651,14 @@ mod test {
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
-        let decoded =
-            CodedBlock::<Block, RS, H>::decode_cfg(encoded, &((), coded_block.commitment()))
-                .unwrap();
+        let decoded = CodedBlock::<Block, RS, H>::decode_cfg(
+            encoded,
+            &CodedBlockCfg {
+                inner: (),
+                expected: coded_block.commitment(),
+            },
+        )
+        .unwrap();
 
         assert!(coded_block == decoded);
     }
@@ -652,8 +679,13 @@ mod test {
             .commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
-        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(encoded.as_ref(), &((), expected))
-        else {
+        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(
+            encoded.as_ref(),
+            &CodedBlockCfg {
+                inner: (),
+                expected,
+            },
+        ) else {
             panic!("config mismatch should be rejected");
         };
 

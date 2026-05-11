@@ -1,7 +1,7 @@
 use super::{
     cache,
     mailbox::{Mailbox, Message},
-    Buffer, Variant,
+    BlockReadCfg, Buffer, Variant,
 };
 use crate::{
     marshal::{
@@ -230,7 +230,7 @@ where
     // Maximum number of blocks to repair at once
     max_repair: NonZeroUsize,
     // Codec configuration for block type
-    block_codec_config: <V::ApplicationBlock as Read>::Cfg,
+    block_codec_config: BlockReadCfg<V>,
     // Strategy for parallel operations
     strategy: T,
 
@@ -947,14 +947,14 @@ where
     async fn handle_deliver(
         &mut self,
         key: Request<V::Commitment>,
-        value: Bytes,
+        mut value: Bytes,
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         match key {
             Request::Block(commitment) => {
-                let block_cfg = V::decode_block_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_read_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return false;
@@ -996,7 +996,6 @@ where
                 };
 
                 let certificate_codec_config = scheme.certificate_codec_config();
-                let mut value = value;
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
@@ -1005,7 +1004,7 @@ where
                 };
 
                 let commitment = finalization.proposal.payload;
-                let block_cfg = V::decode_block_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_read_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
@@ -1037,7 +1036,6 @@ where
                 };
 
                 let certificate_codec_config = scheme.certificate_codec_config();
-                let mut value = value;
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
@@ -1046,7 +1044,7 @@ where
                 };
 
                 let commitment = notarization.proposal.payload;
-                let block_cfg = V::decode_block_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_read_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;

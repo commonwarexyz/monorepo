@@ -4,7 +4,7 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    marshal::core::{Buffer, Variant},
+    marshal::core::{BlockReadCfg, Buffer, Variant},
     types::Round,
     Block,
 };
@@ -44,8 +44,8 @@ where
         block.parent()
     }
 
-    fn decode_block_cfg(
-        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+    fn block_read_cfg(
+        block_cfg: &BlockReadCfg<Self>,
         _commitment: Self::Commitment,
     ) -> <Self::Block as Read>::Cfg {
         block_cfg.clone()
