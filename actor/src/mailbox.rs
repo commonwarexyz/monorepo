@@ -410,6 +410,9 @@ impl<T: Policy> Sender<T> {
 /// Dropping the receiver closes the mailbox but does not drain buffered messages.
 /// Messages already in ready or overflow, or racing through an in-flight enqueue,
 /// remain owned by shared mailbox state until the last sender is dropped.
+///
+/// Dropping the last sender disconnects the mailbox, but the receiver continues
+/// returning buffered messages until ready and overflow are empty.
 pub struct Receiver<T> {
     state: Arc<State<T>>,
 }
@@ -458,11 +461,17 @@ impl<T> Receiver<T> {
     }
 
     /// Receive the next message.
+    ///
+    /// Returns `None` after all senders are dropped and all buffered messages
+    /// have been drained.
     pub async fn recv(&mut self) -> Option<T> {
         poll_fn(|cx| self.poll_recv(cx)).await
     }
 
     /// Try to receive the next message without waiting.
+    ///
+    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
+    /// all buffered messages have been drained.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         if let Some(message) = self.pop() {
             return Ok(message);
