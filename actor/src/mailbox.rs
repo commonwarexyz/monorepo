@@ -28,12 +28,34 @@ use std::{
     task::{Context, Poll},
 };
 
+// `activity` packs the published overflow state and in-flight overflow
+// mutations into one atomic word. The overflow lock serializes actual
+// `VecDeque` changes; this word lets the ready fast path avoid that lock when
+// overflow is inactive.
+//
+// The low bit records whether the most recently published overflow state was
+// non-empty. This is a state bit, not a message count.
 const OVERFLOW_HAS_MESSAGES: usize = 1;
+
+// Each overflow enqueue/refill adds this value while it may mutate or publish
+// overflow state. Since the value is above the low bit, it acts as a mutation
+// count and can coexist with `OVERFLOW_HAS_MESSAGES`.
 const OVERFLOW_MUTATION: usize = 2;
 
-// `activity` tracks both published overflow messages and in-flight overflow
-// mutation. The ready fast path is safe only when activity is zero. Receiver
-// refill is useful only when messages are published and no mutation is active.
+// Useful states:
+// - `activity == 0`: no published overflow and no active overflow mutation, so
+//   senders may try the direct ready fast path.
+// - `activity == OVERFLOW_HAS_MESSAGES`: overflow has published messages and no
+//   active mutation, so the receiver may try to refill ready.
+// - `activity >= OVERFLOW_MUTATION`: at least one overflow mutation is active.
+//   The overflow lock still serializes queue access; this state only keeps
+//   lock-free fast-path/refill decisions from acting on a changing overflow
+//   snapshot.
+//
+// The ready fast path only observes this state; it does not reserve it. A sender
+// that sees zero may race with another sender that enters overflow immediately
+// after the load. Those sends are concurrent, and the mailbox does not provide
+// global FIFO ordering across cloned senders.
 
 /// Overflow behavior for actor messages when an inbox is full.
 pub trait Policy: Sized {
@@ -381,8 +403,11 @@ impl<T: Policy> Sender<T> {
         let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
             self.state.closed.load(Ordering::Acquire)
         });
-        // Policy feedback does not indicate whether overflow retained work, so
-        // wake on any handled enqueue. Spurious wakes are acceptable.
+        // Wake on any handled enqueue rather than interpreting policy feedback:
+        // a policy may retain overflow while reporting `Dropped`, and a
+        // receiver may have skipped refill while this overflow mutation was
+        // active. By the time we wake, the mutation has published its overflow
+        // state. Spurious wakes are acceptable.
         if feedback != Feedback::Closed {
             self.state.waker.wake();
         }
