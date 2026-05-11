@@ -6,8 +6,13 @@ use crate::{
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
+use commonware_actor::{
+    mailbox::{self, Policy},
+    Feedback,
+};
 use commonware_cryptography::{Hasher, PublicKey};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
+use commonware_utils::channel::oneshot;
+use std::collections::VecDeque;
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -88,6 +93,19 @@ where
     },
 }
 
+impl<B, C, H, P> Policy for Message<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        overflow.push_back(message);
+        true
+    }
+}
+
 /// A mailbox for sending messages to the [`Engine`].
 ///
 /// [`Engine`]: super::Engine
@@ -99,9 +117,10 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    pub(super) sender: mpsc::Sender<Message<B, C, H, P>>,
+    pub(super) sender: mailbox::Sender<Message<B, C, H, P>>,
 }
 
+#[allow(clippy::unused_async)]
 impl<B, C, H, P> Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -110,14 +129,28 @@ where
     P: PublicKey,
 {
     /// Create a new [`Mailbox`] with the given sender.
-    pub const fn new(sender: mpsc::Sender<Message<B, C, H, P>>) -> Self {
+    pub const fn new(sender: mailbox::Sender<Message<B, C, H, P>>) -> Self {
         Self { sender }
+    }
+
+    async fn request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Message<B, C, H, P>,
+    ) -> Option<T> {
+        let (response, receiver) = oneshot::channel();
+        if !matches!(
+            self.sender.enqueue(make(response)),
+            Feedback::Ok | Feedback::Backoff
+        ) {
+            return None;
+        }
+        receiver.await.ok()
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
         let msg = Message::Proposed { block, round };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
@@ -127,13 +160,12 @@ where
             leader,
             round,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
     }
 
     /// Request a reconstructed block by its [`Commitment`].
     pub async fn get(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
-        self.sender
-            .request(|tx| Message::GetByCommitment {
+        self.request(|tx| Message::GetByCommitment {
                 commitment,
                 response: tx,
             })
@@ -143,8 +175,7 @@ where
 
     /// Request a reconstructed block by its digest.
     pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
-        self.sender
-            .request(|tx| Message::GetByDigest {
+        self.request(|tx| Message::GetByDigest {
                 digest,
                 response: tx,
             })
@@ -171,7 +202,7 @@ where
             commitment,
             response: responder,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
         receiver
     }
 
@@ -185,7 +216,7 @@ where
             commitment,
             response: responder,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
         receiver
     }
 
@@ -199,13 +230,13 @@ where
             digest,
             response: responder,
         };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
         receiver
     }
 
     /// Request to prune all caches at and below the given commitment.
     pub async fn prune(&self, through: Commitment) {
         let msg = Message::Prune { through };
-        self.sender.send_lossy(msg).await;
+        let _ = self.sender.enqueue(msg);
     }
 }

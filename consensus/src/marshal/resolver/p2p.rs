@@ -1,11 +1,11 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
 use crate::marshal::resolver::handler;
+use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_p2p::{Blocker, Provider, Receiver, Sender};
+use commonware_p2p::{Blocker, MailboxSender, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ pub fn init<E, C, B, D, S, R, P>(
     config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (
-    mpsc::Receiver<handler::Message<D>>,
+    mailbox::Receiver<handler::Message<D>>,
     p2p::Mailbox<handler::Request<D>, P>,
 )
 where
@@ -60,11 +60,11 @@ where
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    S: Sender<PublicKey = P>,
+    S: Sender<PublicKey = P> + MailboxSender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mpsc::channel(config.mailbox_size);
+    let (sender, receiver) = mailbox::new(commonware_utils::NZUsize!(config.mailbox_size));
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context,

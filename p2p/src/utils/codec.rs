@@ -2,6 +2,7 @@
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
@@ -34,6 +35,36 @@ pub struct WrappedSender<S: Sender, V: Codec> {
     pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
+}
+
+/// Wrapper around a [MailboxSender] that encodes messages using a [Codec].
+#[derive(Clone)]
+pub struct WrappedMailboxSender<S: crate::MailboxSender, V: Codec> {
+    pool: BufferPool,
+    sender: S,
+    _phantom_v: std::marker::PhantomData<V>,
+}
+
+impl<S: crate::MailboxSender, V: Codec> WrappedMailboxSender<S, V> {
+    /// Create a new [WrappedMailboxSender] with the given [MailboxSender] and [BufferPool].
+    pub const fn new(pool: BufferPool, sender: S) -> Self {
+        Self {
+            pool,
+            sender,
+            _phantom_v: std::marker::PhantomData,
+        }
+    }
+
+    /// Submit a message to a set of recipients.
+    pub fn send(
+        &self,
+        recipients: Recipients<S::PublicKey>,
+        message: V,
+        priority: bool,
+    ) -> Feedback {
+        let encoded = message.encode_with_pool(&self.pool);
+        self.sender.send(recipients, encoded, priority)
+    }
 }
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {

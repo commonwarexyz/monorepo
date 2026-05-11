@@ -150,7 +150,9 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                         }
 
                         // Communicate success back to sender (if still alive)
-                        let _ = success.send(sent);
+                        if let Some(success) = success {
+                            let _ = success.send(sent);
+                        }
                     }
                     Message::SubscribePeers { response } => {
                         let (mut sender, receiver) = ring::channel::<Vec<P>>(NZUsize!(1));

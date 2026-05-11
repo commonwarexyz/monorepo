@@ -1223,6 +1223,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-coding",
@@ -1504,6 +1505,7 @@ name = "commonware-p2p"
 version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-actor",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
@@ -1588,6 +1590,7 @@ version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-actor",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",

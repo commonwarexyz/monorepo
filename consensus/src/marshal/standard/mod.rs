@@ -79,6 +79,7 @@ mod tests {
         simulated::{self, Network},
         Recipients,
     };
+    use commonware_actor::{mailbox, Feedback};
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
@@ -90,7 +91,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        channel::{fallible::OneshotExt, mpsc, oneshot},
+        channel::{fallible::OneshotExt, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
@@ -1679,11 +1680,11 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingResolver {
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
-        _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
+        _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
     impl RecordingResolver {
-        fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
+        fn holding(sender: mailbox::Sender<handler::Message<D>>) -> Self {
             Self {
                 targeted: Arc::new(Mutex::new(Vec::new())),
                 _keepalive: Some(sender),
@@ -1701,22 +1702,35 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = handler::Request<D>;
+        type Message = ();
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
-        async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
-            self.targeted.lock().push((key, targets));
+        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
         }
-        async fn fetch_all_targeted(
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+            Feedback::Ok
+        }
+        fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Feedback {
+            self.targeted.lock().push((key, targets));
+            Feedback::Ok
+        }
+        fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
+        ) -> Feedback {
             self.targeted.lock().extend(requests);
+            Feedback::Ok
         }
-        async fn cancel(&mut self, _key: Self::Key) {}
-        async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+        fn cancel(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
+        }
+        fn clear(&mut self) -> Feedback {
+            Feedback::Ok
+        }
+        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
+            Feedback::Ok
+        }
     }
 
     /// Poll `cond` on a 10ms tick until it returns true, panicking on timeout.
@@ -1761,19 +1775,17 @@ mod tests {
     impl Reporter for GatedBlockReporter {
         type Activity = Update<B>;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> commonware_actor::Feedback {
             match activity {
                 Update::Block(block, _ack) => {
                     if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
-                    let release = self.release.lock().take();
-                    if let Some(release) = release {
-                        let _ = release.await;
-                    }
+                    let _ = self.release.lock().take();
                 }
                 Update::Tip(_, _, _) => {}
             }
+            commonware_actor::Feedback::Ok
         }
     }
 
@@ -1874,7 +1886,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_tx, resolver_rx) = mpsc::channel(100);
+        let (resolver_tx, resolver_rx) = mailbox::new(commonware_utils::NZUsize!(100));
         let resolver = RecordingResolver::holding(resolver_tx);
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
@@ -1971,7 +1983,7 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
+            let (resolver_tx, resolver_rx) = mailbox::new::<handler::Message<D>>(commonware_utils::NZUsize!(100));
 
             let (actor, _mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -1990,30 +2002,30 @@ mod tests {
             // provider has no verifier, so the marshal cannot decode it and
             // must ack (true) rather than blame the peer (false).
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(matches!(
+                resolver_tx.enqueue(handler::Message::Deliver {
                     key: handler::Request::Finalized {
                         height: Height::new(5),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
-                })
-                .await
-                .unwrap();
+                }),
+                Feedback::Ok | Feedback::Backoff
+            ));
             assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(matches!(
+                resolver_tx.enqueue(handler::Message::Deliver {
                     key: handler::Request::Notarized {
                         round: Round::new(Epoch::zero(), View::new(1)),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
-                })
-                .await
-                .unwrap();
+                }),
+                Feedback::Ok | Feedback::Backoff
+            ));
             assert!(response_rx.await.unwrap());
         });
     }

@@ -1,6 +1,7 @@
 use crate::p2p::wire;
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
+use commonware_p2p::{utils::codec::WrappedMailboxSender, MailboxSender, Recipients};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram::Buckets,
@@ -81,7 +82,7 @@ where
     E: Clock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<PublicKey = P>,
+    NetS: MailboxSender<PublicKey = P>,
 {
     context: E,
 
@@ -153,7 +154,7 @@ where
     E: Clock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<PublicKey = P>,
+    NetS: MailboxSender<PublicKey = P>,
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
@@ -247,7 +248,7 @@ where
     /// - Rate limit expiry time if any peer was rate-limited
     /// - `retry_timeout` if peers exist but all sends failed
     /// - `Duration::MAX` if no eligible peers (wait for external changes)
-    pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
+    pub fn fetch(&mut self, sender: &WrappedMailboxSender<NetS, wire::Message<Key>>) {
         self.waiter = None;
 
         // Collect keys to try (need to clone since we mutate self during iteration)
@@ -258,7 +259,6 @@ where
             .collect();
 
         // Try each pending key until one succeeds
-        let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut found_eligible_peers = false;
         for (key, retry) in pending_keys {
             // Skip keys with no eligible peers
@@ -274,25 +274,14 @@ where
 
             // Try each peer until one succeeds
             for peer in peers {
-                // Check rate limit (consumes a token if not rate-limited)
-                let checked = match sender.check(Recipients::One(peer.clone())).await {
-                    Ok(checked) => checked,
-                    Err(not_until) => {
-                        // Peer is rate-limited, track earliest retry time
-                        earliest_rate_limit =
-                            Some(earliest_rate_limit.map_or(not_until, |t| t.min(not_until)));
-                        continue;
-                    }
-                };
-
                 // Attempt send
                 let id = self.next_id();
                 let message = wire::Message {
                     id,
                     payload: wire::Payload::Request(key.clone()),
                 };
-                match checked.send(message, self.priority_requests).await {
-                    Ok(sent) if !sent.is_empty() => {
+                match sender.send(Recipients::One(peer.clone()), message, self.priority_requests) {
+                    Feedback::Ok | Feedback::Backoff => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -310,16 +299,10 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    Ok(_) => {
+                    result => {
                         // Peer dropped message, try next peer
                         self.requests_sent.inc(Status::Dropped);
-                        debug!(?peer, "send returned empty");
-                        self.update_performance(&peer, self.timeout);
-                    }
-                    Err(err) => {
-                        // Send failed, try next peer
-                        self.requests_sent.inc(Status::Failure);
-                        debug!(?err, ?peer, "send failed");
+                        debug!(?peer, ?result, "send not enqueued");
                         self.update_performance(&peer, self.timeout);
                     }
                 }
@@ -327,10 +310,7 @@ where
         }
 
         // Set waiter for next fetch attempt
-        self.waiter = Some(if let Some(rate_limit_time) = earliest_rate_limit {
-            // Use rate limit expiry time
-            rate_limit_time
-        } else if found_eligible_peers {
+        self.waiter = Some(if found_eligible_peers {
             // Peers exist but all sends failed - use retry timeout
             self.context.current() + self.retry_timeout
         } else {
@@ -569,7 +549,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
+    use commonware_p2p::{LimitedSender, MailboxSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
         BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
@@ -644,6 +624,19 @@ mod tests {
         }
     }
 
+    impl MailboxSender for FailMockSender {
+        type PublicKey = PublicKey;
+
+        fn send(
+            &self,
+            _: Recipients<Self::PublicKey>,
+            _: impl Into<IoBufs> + Send,
+            _: bool,
+        ) -> Feedback {
+            Feedback::Dropped
+        }
+    }
+
     // Mock sender that succeeds
     #[derive(Default, Clone, Debug)]
     struct SuccessMockSenderInner;
@@ -681,6 +674,22 @@ mod tests {
                 sender: &mut self.0,
                 recipients,
             })
+        }
+    }
+
+    impl MailboxSender for SuccessMockSender {
+        type PublicKey = PublicKey;
+
+        fn send(
+            &self,
+            recipients: Recipients<Self::PublicKey>,
+            _: impl Into<IoBufs> + Send,
+            _: bool,
+        ) -> Feedback {
+            match recipients {
+                Recipients::One(_) => Feedback::Ok,
+                _ => unimplemented!(),
+            }
         }
     }
 
@@ -737,7 +746,29 @@ mod tests {
         }
     }
 
-    fn create_test_fetcher<S: Sender<PublicKey = PublicKey>>(
+    impl<E: Clock> MailboxSender for LimitedMockSender<E> {
+        type PublicKey = PublicKey;
+
+        fn send(
+            &self,
+            recipients: Recipients<Self::PublicKey>,
+            _: impl Into<IoBufs> + Send,
+            _: bool,
+        ) -> Feedback {
+            let peer = match &recipients {
+                Recipients::One(p) => p,
+                _ => unimplemented!(),
+            };
+
+            let rate_limiter = self.rate_limiter.write();
+            if rate_limiter.check_key(peer).is_err() {
+                return Feedback::Dropped;
+            }
+            Feedback::Ok
+        }
+    }
+
+    fn create_test_fetcher<S: MailboxSender<PublicKey = PublicKey>>(
         context: Context,
     ) -> Fetcher<Context, PublicKey, MockKey, S> {
         let public_key = PrivateKey::from_seed(0).public_key();
@@ -753,7 +784,7 @@ mod tests {
     }
 
     /// Helper to add an active request directly for testing
-    fn add_test_active<S: Sender<PublicKey = PublicKey>>(
+    fn add_test_active<S: MailboxSender<PublicKey = PublicKey>>(
         fetcher: &mut Fetcher<Context, PublicKey, MockKey, S>,
         id: ID,
         key: MockKey,
@@ -1295,15 +1326,15 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, other_public_key]);
-            let mut sender = WrappedSender::new(
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
 
             // Add a key to pending
             fetcher.add_ready(MockKey(1));
-            fetcher.fetch(&mut sender).await; // won't be delivered, so immediately re-added
-            fetcher.fetch(&mut sender).await; // waiter activated
+            fetcher.fetch(&sender); // won't be delivered, so immediately re-added
+            fetcher.fetch(&sender); // waiter activated
 
             // Check pending deadline
             assert_eq!(fetcher.len_pending(), 1);
@@ -1344,7 +1375,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone()]);
-            let mut sender = WrappedSender::new(
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
@@ -1355,7 +1386,7 @@ mod tests {
             // Add key with targets pointing only to blocked peer
             fetcher.add_ready(MockKey(1));
             fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
 
             // Waiter should be set to far future (no eligible peers at all)
             assert!(fetcher.waiter.is_some());
@@ -1363,7 +1394,7 @@ mod tests {
             assert!(waiter_time > context.current() + Duration::from_secs(1000));
 
             // Add targets should clear the waiter
-            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(1), [peer1]);
             assert!(fetcher.waiter.is_none());
 
             // Pending deadline should now be reasonable
@@ -1372,8 +1403,8 @@ mod tests {
 
             // Set waiter again by targeting blocked peer
             fetcher.clear_targets(&MockKey(1));
-            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
-            fetcher.fetch(&mut sender).await;
+            fetcher.add_targets(MockKey(1), [blocked_peer]);
+            fetcher.fetch(&sender);
             assert!(fetcher.waiter.is_some());
 
             // clear_targets should clear the waiter
@@ -1402,14 +1433,14 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             // Add peers (FailMockSender doesn't rate limit, just fails sends)
             fetcher.reconcile(&[public_key, peer1, peer2]);
-            let mut sender = WrappedSender::new(
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
 
             // Add key and attempt fetch - all sends will fail
             fetcher.add_ready(MockKey(1));
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
 
             // Key should still be pending (send failed)
             assert_eq!(fetcher.len_pending(), 1);
@@ -1430,7 +1461,7 @@ mod tests {
             context.sleep(wait_duration).await;
 
             // Should be able to fetch again (this would hang if waiter was Duration::MAX)
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
         });
     }
 
@@ -1595,17 +1626,17 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
-            let mut sender = WrappedSender::new(
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3]);
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
 
             // Add targets and attempt fetch
-            fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1, peer2]);
             fetcher.add_ready(MockKey(2));
             assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             // Both targets should still be present (not removed on send failure)
             assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             assert!(fetcher.pending.contains(&MockKey(2)));
@@ -1621,7 +1652,7 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let mut sender = WrappedSender::new(
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
             );
@@ -1630,7 +1661,7 @@ mod tests {
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
             fetcher.add_ready(MockKey(1));
             assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             context.sleep(Duration::from_millis(200)).await;
             assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
             // Both targets should still be present after timeout
@@ -1640,7 +1671,7 @@ mod tests {
             // Error response ("no data") does not remove target
             fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_ready(MockKey(2));
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             let id = *fetcher.active.iter().next().unwrap().0;
             assert_eq!(fetcher.pop_by_id(id, &peer1, false), Some(MockKey(2)));
             // Target should still be present after "no data" response
@@ -1651,7 +1682,7 @@ mod tests {
             // (caller must clear targets after data validation)
             fetcher.add_targets(MockKey(3), [peer1.clone()]);
             fetcher.add_ready(MockKey(3));
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             let id = *fetcher.active.iter().next().unwrap().0;
             assert_eq!(fetcher.pop_by_id(id, &peer1, true), Some(MockKey(3)));
             assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
@@ -1679,11 +1710,11 @@ mod tests {
             fetcher.add_ready(MockKey(1));
 
             // Fetch should not fallback to any peer - it should wait for targets
-            let mut sender = WrappedSender::new(
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
             );
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
 
             // Targets should still exist (no fallback cleared them)
             assert!(fetcher.targets.contains_key(&MockKey(1)));
@@ -1745,7 +1776,7 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let quota = Quota::per_second(NZU32!(1));
-            let mut sender = WrappedSender::new(
+            let sender = WrappedMailboxSender::new(
                 context.network_buffer_pool().clone(),
                 LimitedMockSender::new(quota, context.child("rate_limiter")),
             );
@@ -1764,20 +1795,20 @@ mod tests {
             fetcher.add_ready(MockKey(3));
 
             // First fetch: should pick MockKey(1) targeting peer1
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             assert_eq!(fetcher.len_active(), 1);
             assert_eq!(fetcher.len_pending(), 2);
             assert!(!fetcher.pending.contains(&MockKey(1))); // MockKey(1) was fetched
 
             // Second fetch: MockKey(2) is blocked (peer1 rate-limited), should skip to MockKey(3)
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             assert_eq!(fetcher.len_active(), 2);
             assert_eq!(fetcher.len_pending(), 1);
             assert!(fetcher.pending.contains(&MockKey(2))); // MockKey(2) is still pending
             assert!(!fetcher.pending.contains(&MockKey(3))); // MockKey(3) was fetched
 
             // Third fetch: only MockKey(2) remains, but peer1 is still rate-limited
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             assert_eq!(fetcher.len_active(), 2); // No change
             assert_eq!(fetcher.len_pending(), 1); // MockKey(2) still pending
             assert!(fetcher.waiter.is_some()); // Waiter set
@@ -1786,7 +1817,7 @@ mod tests {
             context.sleep(Duration::from_secs(1)).await;
 
             // Now MockKey(2) can be fetched
-            fetcher.fetch(&mut sender).await;
+            fetcher.fetch(&sender);
             assert_eq!(fetcher.len_active(), 3);
             assert_eq!(fetcher.len_pending(), 0);
         });

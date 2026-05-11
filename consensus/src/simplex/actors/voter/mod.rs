@@ -78,6 +78,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
+    use commonware_actor::mailbox;
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
@@ -85,7 +86,7 @@ mod tests {
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
         Runner, Supervisor as _,
     };
-    use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -184,8 +185,8 @@ mod tests {
         timeout_retry: Duration,
     ) -> (
         Mailbox<S, Sha256Digest>,
-        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
-        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
         mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
     )
@@ -220,8 +221,8 @@ mod tests {
         should_certify: mocks::application::Certifier<Sha256Digest>,
     ) -> (
         Mailbox<S, Sha256Digest>,
-        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
-        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
         mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
     )
@@ -272,8 +273,8 @@ mod tests {
         };
         let (voter, mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-        let (resolver_sender, resolver_receiver) = mpsc::channel(8);
-        let (batcher_sender, batcher_receiver) = mpsc::channel(16);
+        let (resolver_sender, resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+        let (batcher_sender, batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(16));
 
         let (vote_sender, _) = oracle
             .control(me.clone())
@@ -305,7 +306,7 @@ mod tests {
     /// Helper to advance to a specific view by sending a finalization for the previous view.
     async fn advance_to_view<S: Scheme<Sha256Digest>>(
         mailbox: &mut Mailbox<S, Sha256Digest>,
-        batcher_receiver: &mut mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        batcher_receiver: &mut mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
         schemes: &[S],
         quorum: u32,
         target: View,
@@ -319,16 +320,14 @@ mod tests {
         );
         let (_, finalization) = build_finalization(schemes, &proposal, quorum);
         mailbox
-            .resolved(Certificate::Finalization(finalization))
-            .await;
+            .resolved(Certificate::Finalization(finalization));
 
         // Wait for target view update
         loop {
             match batcher_receiver.recv().await.unwrap() {
                 batcher::Message::Update {
-                    current, response, ..
+                    current, ..
                 } => {
-                    response.send(None).unwrap();
                     if current < target {
                         continue;
                     }
@@ -418,11 +417,11 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
@@ -447,12 +446,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -466,8 +463,7 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for batcher to be notified
             loop {
@@ -477,12 +473,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -512,8 +506,7 @@ mod tests {
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Send new finalization via voter mailbox (view 300)
             let payload = Sha256::hash(b"test3");
@@ -524,8 +517,7 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for batcher to be notified
             loop {
@@ -535,12 +527,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(301));
                         assert_eq!(finalized, View::new(300));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -651,11 +641,11 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.child("actor"), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(10));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(10);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(10));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
@@ -685,12 +675,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -712,8 +700,7 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for batcher to be notified
             loop {
@@ -723,12 +710,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(51));
                         assert_eq!(finalized, View::new(50));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -757,8 +742,7 @@ mod tests {
             );
             let (_, notarization_for_floor) = build_notarization(&schemes, &proposal_jft, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization_for_floor))
-                .await;
+                .recovered(Certificate::Notarization(notarization_for_floor));
 
             // Wait for resolver to be notified
             let msg = resolver_receiver
@@ -784,8 +768,7 @@ mod tests {
             );
             let (_, notarization_for_bft) = build_notarization(&schemes, &proposal_bft, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization_for_bft))
-                .await;
+                .recovered(Certificate::Notarization(notarization_for_bft));
 
             // Wait for resolver to be notified
             let msg = resolver_receiver
@@ -807,8 +790,7 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for batcher to be notified
             loop {
@@ -818,12 +800,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -902,12 +882,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -923,8 +901,7 @@ mod tests {
 
             // Send finalization certificate via voter mailbox
             mailbox
-                .recovered(Certificate::Finalization(expected_finalization.clone()))
-                .await;
+                .recovered(Certificate::Finalization(expected_finalization.clone()));
 
             // Wait for the actor to report the finalization
             let mut finalized_view = None;
@@ -1023,12 +1000,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1040,7 +1015,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"proposal_a"),
             );
-            mailbox.proposal(proposal_a.clone()).await;
+            mailbox.proposal(proposal_a.clone());
 
             // Give it time to process the proposal
             context.sleep(Duration::from_millis(10)).await;
@@ -1054,8 +1029,7 @@ mod tests {
             let (_, notarization_b) = build_notarization(&schemes, &proposal_b, quorum);
 
             mailbox
-                .recovered(Certificate::Notarization(notarization_b.clone()))
-                .await;
+                .recovered(Certificate::Notarization(notarization_b.clone()));
 
             // Verify the certificate was accepted
             let msg = resolver_receiver
@@ -1094,8 +1068,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(_)) => {
                         panic!("finalize vote should not be broadcast");
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => continue,
                 }
@@ -1155,8 +1128,7 @@ mod tests {
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { response, .. } => {
-                    response.send(None).unwrap();
+                batcher::Message::Update { .. } => {
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1176,8 +1148,7 @@ mod tests {
             // Send certificate for proposal A FIRST
             let (_, notarization_a) = build_notarization(&schemes, &proposal_a, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization_a.clone()))
-                .await;
+                .recovered(Certificate::Notarization(notarization_a.clone()));
 
             // Verify the certificate was accepted
             let msg = resolver_receiver.recv().await.unwrap();
@@ -1213,15 +1184,14 @@ mod tests {
                         );
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
             }
 
             // Now send proposal B from batcher
-            mailbox.proposal(proposal_b.clone()).await;
+            mailbox.proposal(proposal_b.clone());
 
             // Wait for proposal B to be recorded (no issue)
             context.sleep(Duration::from_millis(100)).await;
@@ -1303,9 +1273,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
@@ -1330,8 +1300,7 @@ mod tests {
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { response, .. } => {
-                    response.send(None).unwrap();
+                batcher::Message::Update { .. } => {
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1344,7 +1313,7 @@ mod tests {
             );
 
             // Send proposal from batcher first
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Give it time to start verification (but it won't complete due to slow latency)
             context.sleep(Duration::from_millis(10)).await;
@@ -1352,8 +1321,7 @@ mod tests {
             // Send certificate for the SAME proposal
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization.clone()))
-                .await;
+                .recovered(Certificate::Notarization(notarization.clone()));
 
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
@@ -1386,8 +1354,7 @@ mod tests {
                         assert_eq!(finalize.proposal, proposal);
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
@@ -1492,9 +1459,9 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels
@@ -1524,12 +1491,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1541,8 +1506,7 @@ mod tests {
 
             let (_, finalization) = build_finalization(&schemes, &view1_proposal, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for batcher to be notified
             loop {
@@ -1552,12 +1516,10 @@ mod tests {
                         current,
                         leader: _,
                         finalized,
-                        response,
                         ..
                     } => {
                         assert_eq!(current, View::new(2));
                         assert_eq!(finalized, View::new(1));
-                        response.send(None).unwrap();
                         break;
                     }
                     _ => {
@@ -1575,7 +1537,7 @@ mod tests {
 
             // Send the proposal via mailbox (simulating batcher receiving leader's notarize)
             // This happens AFTER we requested a proposal but BEFORE the automaton responds
-            mailbox.proposal(conflicting_proposal.clone()).await;
+            mailbox.proposal(conflicting_proposal.clone());
 
             // Ensure we construct a notarize for our proposal
             while let Ok(message) = batcher_receiver.try_recv() {
@@ -1595,8 +1557,7 @@ mod tests {
             let (_, conflicting_notarization) =
                 build_notarization(&schemes, &conflicting_proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(conflicting_notarization.clone()))
-                .await;
+                .recovered(Certificate::Notarization(conflicting_notarization.clone()));
 
             // Wait for a finalize vote to be broadcast (we drop our own conflicting proposal rather than marking as replaced)
             loop {
@@ -1606,8 +1567,7 @@ mod tests {
                         assert_eq!(f.proposal, conflicting_proposal);
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => context.sleep(Duration::from_millis(10)).await,
                 }
@@ -1692,9 +1652,9 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
@@ -1725,12 +1685,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1746,8 +1704,7 @@ mod tests {
 
             // Send finalization certificate via voter mailbox
             mailbox
-                .recovered(Certificate::Finalization(expected_finalization.clone()))
-                .await;
+                .recovered(Certificate::Finalization(expected_finalization.clone()));
 
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
@@ -1783,9 +1740,9 @@ mod tests {
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
@@ -1816,12 +1773,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(3));
                     assert_eq!(finalized, View::new(2));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -1925,8 +1880,8 @@ mod tests {
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_initial"), cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(32));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -1945,7 +1900,7 @@ mod tests {
             );
 
             match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                batcher::Message::Update { .. } => {},
                 _ => panic!("expected initial update"),
             }
 
@@ -1963,10 +1918,10 @@ mod tests {
 
             // Restart and inject startup timeout hint from first update.
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
-            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter_restarted"), cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(32));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -1989,15 +1944,14 @@ mod tests {
                 batcher::Message::Update {
                     current,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, target_view);
                     assert_eq!(finalized, target_view.previous().unwrap());
-                    response.send(Some(TimeoutReason::LeaderNullify)).unwrap();
                 }
                 _ => panic!("expected startup update after restart"),
             }
+            mailbox.timeout(target_view, TimeoutReason::LeaderNullify);
 
             // Expect immediate nullify from startup timeout hint despite 10s timeouts.
             loop {
@@ -2008,7 +1962,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -2085,12 +2039,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -2104,8 +2056,7 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization.clone()))
-                .await;
+                .recovered(Certificate::Finalization(finalization.clone()));
 
             // Wait for batcher to be notified of finalization
             loop {
@@ -2186,12 +2137,10 @@ mod tests {
                     current,
                     leader: _,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -2205,8 +2154,7 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Finalization(finalization.clone()))
-                .await;
+                .resolved(Certificate::Finalization(finalization.clone()));
 
             // Wait for batcher to be notified of finalization
             loop {
@@ -2214,14 +2162,11 @@ mod tests {
                 match message {
                     batcher::Message::Update {
                         finalized,
-                        response,
                         ..
                     } if finalized == view => {
-                        response.send(None).unwrap();
                         break;
                     }
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                     }
                     _ => continue,
                 }
@@ -2329,9 +2274,9 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(2));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(16));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
@@ -2357,7 +2302,7 @@ mod tests {
             // Wait for initial batcher update
             let message = batcher_receiver.recv().await.unwrap();
             match message {
-                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                batcher::Message::Update { .. } => {},
                 _ => panic!("expected Update message"),
             }
 
@@ -2374,8 +2319,7 @@ mod tests {
                 // Send finalization to advance to next view
                 let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 // Wait for the view update
                 let (new_view, leader) = loop {
@@ -2383,10 +2327,8 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } => {
-                            response.send(None).unwrap();
                             if current > current_view {
                                 break (current, leader);
                             }
@@ -2429,7 +2371,7 @@ mod tests {
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal).await;
+            mailbox.proposal(proposal);
 
             // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
             // within 1s proves it came from verification failure, not timeout.
@@ -2441,7 +2383,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -2543,9 +2485,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(32));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2571,10 +2513,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -2589,23 +2529,20 @@ mod tests {
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -2613,14 +2550,13 @@ mod tests {
 
             let target_view = current_view;
             mailbox
-                .timeout(target_view, TimeoutReason::LeaderNullify)
-                .await;
+                .timeout(target_view, TimeoutReason::LeaderNullify);
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2639,15 +2575,14 @@ mod tests {
 
             // Send the same expire signal again. Duplicates should not retrigger the fast-path.
             mailbox
-                .timeout(target_view, TimeoutReason::LeaderNullify)
-                .await;
+                .timeout(target_view, TimeoutReason::LeaderNullify);
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             loop {
                 select! {
                     _ = context.sleep_until(duplicate_window) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2749,9 +2684,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(32));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2777,10 +2712,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -2795,23 +2728,20 @@ mod tests {
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -2823,7 +2753,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2923,9 +2853,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(32));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2947,7 +2877,7 @@ mod tests {
 
             // Initial batcher update.
             match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                batcher::Message::Update { .. } => {},
                 _ => panic!("expected initial update"),
             }
 
@@ -2961,18 +2891,15 @@ mod tests {
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 let (new_view, leader) = loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } => {
-                            response.send(None).unwrap();
                             if current > current_view {
                                 break (current, leader);
                             }
@@ -2986,8 +2913,7 @@ mod tests {
                 }
             };
 
-            // Trigger verification in target view. The application drops the verify response,
-            // which should immediately trigger nullify.
+            // Trigger verification in target view. The application drops the verify // which should immediately trigger nullify.
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
@@ -3007,13 +2933,13 @@ mod tests {
             )
                 .encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal).await;
+            mailbox.proposal(proposal);
 
             // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on dropped verify.
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -3105,10 +3031,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -3122,23 +3046,20 @@ mod tests {
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -3156,13 +3077,13 @@ mod tests {
                 invalid_parent,
                 Sha256::hash(b"invalid_parent_before_finalized"),
             );
-            mailbox.proposal(proposal).await;
+            mailbox.proposal(proposal);
 
             // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on invalid ancestry.
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -3280,9 +3201,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(64);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(64));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -3326,10 +3247,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         (current, leader)
                     }
                     _ => panic!("expected initial update"),
@@ -3344,23 +3263,20 @@ mod tests {
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             current_leader = leader;
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -3374,7 +3290,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(ready_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     },
                     message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
@@ -3401,8 +3317,7 @@ mod tests {
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+                    .resolved(Certificate::Finalization(finalization));
 
                 let mut found = None;
                 loop {
@@ -3410,17 +3325,15 @@ mod tests {
                         batcher::Message::Update {
                             current,
                             leader,
-                            response,
                             ..
                         } if current > current_view => {
-                            response.send(None).unwrap();
                             current_view = current;
                             if leader != me_idx {
                                 found = Some((current, participants[usize::from(leader)].clone()));
                             }
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     }
                 }
@@ -3449,7 +3362,7 @@ mod tests {
             )
                 .encode();
             relay.broadcast(&target_leader, (proposal.payload, contents));
-            mailbox.proposal(proposal).await;
+            mailbox.proposal(proposal);
 
             // We should still broadcast for target_view (typically a nullify after timeout).
             let target_deadline = context.current() + Duration::from_secs(1);
@@ -3458,7 +3371,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(target_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         batcher::Message::Constructed(_) => {}
                     },
                     message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
@@ -3575,8 +3488,8 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3596,10 +3509,9 @@ mod tests {
             );
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Step 1: Send finalization for view 2 (certify should NOT be called)
@@ -3611,18 +3523,15 @@ mod tests {
             );
             let (_, finalization) = build_finalization(&schemes, &proposal2, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for finalization
             loop {
                 if let batcher::Message::Update {
                     finalized,
-                    response,
                     ..
                 } = batcher_receiver.recv().await.unwrap()
                 {
-                    response.send(None).unwrap();
                     if finalized >= view2 {
                         break;
                     }
@@ -3643,21 +3552,19 @@ mod tests {
             // Broadcast payload and send proposal
             let contents = (proposal3.round, proposal2.payload, 0u64).encode();
             relay.broadcast(&me, (digest3, contents));
-            mailbox.proposal(proposal3.clone()).await;
+            mailbox.proposal(proposal3.clone());
 
             // Send notarization
             let (_, notarization) = build_notarization(&schemes, &proposal3, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Wait for view advancement (certification complete)
             loop {
                 if let batcher::Message::Update {
-                    current, response, ..
+                    current, ..
                 } = batcher_receiver.recv().await.unwrap()
                 {
-                    response.send(None).unwrap();
                     if current > view3 {
                         break;
                     }
@@ -3713,8 +3620,8 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -3734,10 +3641,9 @@ mod tests {
             );
 
             // Wait for replay to complete
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Give time for any erroneous certification attempts
@@ -3853,8 +3759,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3875,8 +3781,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -3902,7 +3807,7 @@ mod tests {
                     {
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4012,8 +3917,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4034,8 +3939,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4059,7 +3963,7 @@ mod tests {
                     {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             };
@@ -4113,8 +4017,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4138,10 +4042,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
                         break;
@@ -4154,7 +4056,7 @@ mod tests {
             // restart. Any spurious propose/verify for this view would fire on the next
             // run-loop iteration. Then wait for leader_timeout to fire a Nullify,
             // proving the voter ran its full flow without ever advancing.
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -4162,7 +4064,7 @@ mod tests {
                     {
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4282,8 +4184,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4304,8 +4206,7 @@ mod tests {
             // Wait for startup, then advance into the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4393,8 +4294,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4421,10 +4322,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
                         break;
@@ -4453,7 +4352,7 @@ mod tests {
                              still be cached in marshal"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4562,8 +4461,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4586,8 +4485,7 @@ mod tests {
             // parent payload, which we reuse below.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4611,7 +4509,7 @@ mod tests {
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader_pk, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Wait for our local notarize (journaled) so replay has something to restore.
             loop {
@@ -4622,7 +4520,7 @@ mod tests {
                         assert_eq!(notarize.proposal, proposal);
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4676,8 +4574,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4701,10 +4599,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::from_usize(target_leader_idx));
                         break;
@@ -4719,7 +4615,7 @@ mod tests {
             // out (leader_timeout) and construct a Nullify for the view: by that point the
             // run loop has had ample opportunity to request verification, and emitting a
             // Nullify proves the voter reached the timeout path without ever advancing.
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -4727,7 +4623,7 @@ mod tests {
                     {
                         break;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -4842,8 +4738,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4864,8 +4760,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -4889,14 +4784,13 @@ mod tests {
                     {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             };
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // A finalize for the leader-owned view proves the voter certified its
             // own proposal without consulting the automaton.
@@ -4915,7 +4809,7 @@ mod tests {
                             "leader-owned proposal should certify locally instead of nullifying view {target_view}"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -5015,8 +4909,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -5037,8 +4931,7 @@ mod tests {
             // Wait for startup, then advance to the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -5063,7 +4956,7 @@ mod tests {
                     {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             };
@@ -5115,8 +5008,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -5140,10 +5033,8 @@ mod tests {
                     batcher::Message::Update {
                         current,
                         leader,
-                        response,
                         ..
                     } => {
-                        response.send(None).unwrap();
                         assert_eq!(current, target_view);
                         assert_eq!(leader, Participant::new(0));
                         break;
@@ -5156,8 +5047,7 @@ mod tests {
             // restarted voter.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // A finalize for the leader-owned view proves the voter recovered
             // the local certification shortcut after replay.
@@ -5176,7 +5066,7 @@ mod tests {
                             "leader-owned recovered proposal should certify locally instead of nullifying view {target_view}"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -5293,8 +5183,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -5315,8 +5205,7 @@ mod tests {
             // Wait for startup, then advance into the leader-owned view.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
+                    batcher::Message::Update { .. } => {
                         break;
                     }
                     batcher::Message::Constructed(_) => {}
@@ -5347,8 +5236,7 @@ mod tests {
             // with a proposal it never built, producing `is_local=false` on
             // the certification candidate.
             mailbox
-                .resolved(Certificate::Notarization(foreign_notarization))
-                .await;
+                .resolved(Certificate::Notarization(foreign_notarization));
 
             // Wait for a `Finalize` on the leader-owned view. Observing
             // finalize proves the certify callback both fired and resolved
@@ -5372,7 +5260,7 @@ mod tests {
                              view {target_view}"
                         );
                     }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
                 }
             }
@@ -5478,10 +5366,10 @@ mod tests {
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -5498,10 +5386,9 @@ mod tests {
             actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Send a notarization for view 5 to trigger certification
@@ -5515,13 +5402,12 @@ mod tests {
             relay.broadcast(&me, (digest5, contents));
 
             // Send proposal to verify
-            mailbox.proposal(proposal5.clone()).await;
+            mailbox.proposal(proposal5.clone());
 
             // Send notarization
             let (_, notarization) = build_notarization(&schemes, &proposal5, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Wait for certification to start (it will be slow due to latency)
             context.sleep(Duration::from_millis(100)).await;
@@ -5529,18 +5415,15 @@ mod tests {
             // Send finalization for view 5 before certification completes
             let (_, finalization) = build_finalization(&schemes, &proposal5, quorum);
             mailbox
-                .recovered(Certificate::Finalization(finalization))
-                .await;
+                .recovered(Certificate::Finalization(finalization));
 
             // Wait for finalization to be processed
             loop {
                 if let batcher::Message::Update {
                     finalized,
-                    response,
                     ..
                 } = batcher_receiver.recv().await.unwrap()
                 {
-                    response.send(None).unwrap();
                     if finalized >= view5 {
                         break;
                     }
@@ -5671,10 +5554,10 @@ mod tests {
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -5691,10 +5574,9 @@ mod tests {
             actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Send a notarization for view 5 to trigger certification
@@ -5708,11 +5590,10 @@ mod tests {
             relay.broadcast(&me, (digest5, contents));
 
             // Send proposal and notarization
-            mailbox.proposal(proposal5.clone()).await;
+            mailbox.proposal(proposal5.clone());
             let (_, notarization) = build_notarization(&schemes, &proposal5, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Wait for certification to start (it will be slow due to latency)
             context.sleep(Duration::from_millis(100)).await;
@@ -5721,8 +5602,7 @@ mod tests {
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(Epoch::new(333), view5), quorum);
             mailbox
-                .recovered(Certificate::Nullification(nullification))
-                .await;
+                .recovered(Certificate::Nullification(nullification));
 
             // Even after nullification, late certification should still be forwarded to resolver.
             let reported = loop {
@@ -5733,8 +5613,7 @@ mod tests {
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -5824,8 +5703,7 @@ mod tests {
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(Epoch::new(333), target_view), quorum);
             mailbox
-                .resolved(Certificate::Nullification(nullification))
-                .await;
+                .resolved(Certificate::Nullification(nullification));
 
             // Then provide notarization for that same view.
             let proposal = Proposal::new(
@@ -5835,8 +5713,7 @@ mod tests {
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             let certified = loop {
                 select! {
@@ -5847,8 +5724,7 @@ mod tests {
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(6)) => break None,
@@ -5947,7 +5823,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(15)) => {
@@ -5964,18 +5840,16 @@ mod tests {
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Verify view advances
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break true;
                             }
@@ -6071,7 +5945,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Wait for notarize vote
             loop {
@@ -6080,7 +5954,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6099,7 +5973,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -6111,18 +5985,16 @@ mod tests {
             // Send notarization certificate
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Verify view advances
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break true;
                             }
@@ -6226,7 +6098,7 @@ mod tests {
                         {
                             break n.proposal.clone();
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6245,7 +6117,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -6257,18 +6129,16 @@ mod tests {
             // Send notarization certificate (as if other participants formed it)
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // Verify view advances
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break true;
                             }
@@ -6369,13 +6239,12 @@ mod tests {
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
                 .broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Build and send notarization so the voter tries to certify
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // Certification will be cancelled, so the voter should eventually timeout
             // and emit a nullify vote.
@@ -6386,7 +6255,7 @@ mod tests {
                             batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
                                 break;
                             }
-                            batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                            batcher::Message::Update { .. } => {},
                             _ => {}
                         }
                     },
@@ -6517,8 +6386,8 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter_cancel"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -6537,10 +6406,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             let target_view = View::new(3);
@@ -6561,12 +6429,11 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // Give the canceled certification attempt time to run before restart.
             context.sleep(Duration::from_millis(200)).await;
@@ -6575,10 +6442,9 @@ mod tests {
             let advanced_before_restart = select! {
                 msg = batcher_receiver.recv() => {
                     if let batcher::Message::Update {
-                        current, response, ..
+                        current, ..
                     } = msg.unwrap()
                     {
-                        response.send(None).unwrap();
                         current > target_view
                     } else {
                         false
@@ -6630,8 +6496,8 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -6650,10 +6516,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             loop {
@@ -6672,8 +6537,7 @@ mod tests {
                             {
                                 panic!("unexpected immediate nullify for view {target_view} after restart");
                             }
-                            batcher::Message::Update { response, .. } => {
-                                response.send(None).unwrap();
+                            batcher::Message::Update { .. } => {
                             }
                             _ => {}
                         }
@@ -6784,12 +6648,11 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal_4.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal_4.payload, contents));
-            mailbox.proposal(proposal_4.clone()).await;
+            mailbox.proposal(proposal_4.clone());
 
             let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization_4))
-                .await;
+                .resolved(Certificate::Notarization(notarization_4));
 
             // Wait for the first nullify vote (confirms stuck state)
             loop {
@@ -6797,7 +6660,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_4 =>
                             break,
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(10)) => {
@@ -6819,8 +6682,7 @@ mod tests {
 
             // Send the view 5 notarization to the stuck validator
             mailbox
-                .resolved(Certificate::Notarization(notarization_5))
-                .await;
+                .resolved(Certificate::Notarization(notarization_5));
 
             // The stuck validator should still not advance.
             //
@@ -6835,9 +6697,8 @@ mod tests {
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
                             batcher::Message::Update {
-                                current, response, ..
+                                current, ..
                             } => {
-                                response.send(None).unwrap();
                                 if current > view_4 {
                                     break true;
                                 }
@@ -6875,18 +6736,16 @@ mod tests {
             // Let's demonstrate this escape route works (if Byzantine cooperate):
             let (_, finalization_5) = build_finalization(&schemes, &proposal_5, quorum);
             mailbox
-                .resolved(Certificate::Finalization(finalization_5))
-                .await;
+                .resolved(Certificate::Finalization(finalization_5));
 
             // Now the validator SHOULD advance (finalization aborts stuck certification)
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > view_5 {
                                 break true;
                             }
@@ -6993,7 +6852,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Wait for notarize vote first (verification passes)
             loop {
@@ -7002,7 +6861,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7014,8 +6873,7 @@ mod tests {
             // Build and send notarization so the voter tries to certify
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // Certification will fail (returns false), so the voter should emit a nullify vote.
             // This must happen quickly (not after 100s timeout) to prove it's from cert failure.
@@ -7026,7 +6884,7 @@ mod tests {
                             // Successfully voted nullify after having voted notarize
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -7127,7 +6985,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Wait for notarize vote (verification passes).
             loop {
@@ -7138,7 +6996,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7150,8 +7008,7 @@ mod tests {
             // Build and send notarization so the voter tries to certify.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // Certification hangs (sender held alive, receiver pending). The voter
             // must recover via the view timeout and emit a nullify vote.
@@ -7165,7 +7022,7 @@ mod tests {
                             // certification being indefinitely pending.
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(8)) => {
@@ -7255,7 +7112,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Ensure proposal verification path ran.
             loop {
@@ -7264,7 +7121,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7288,7 +7145,7 @@ mod tests {
                                 "received nullify for view {target_view} before certification timeout"
                             );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     }
                 }
@@ -7303,7 +7160,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -7397,8 +7254,7 @@ mod tests {
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .recovered(Certificate::Notarization(notarization))
-                .await;
+                .recovered(Certificate::Notarization(notarization));
 
             // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
             // emit a notarize vote or nullify in this 2s window after certificate handling,
@@ -7420,7 +7276,7 @@ mod tests {
                                 "received nullify for view {target_view} before certification timeout after recovered certificate"
                             );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     }
                 }
@@ -7435,7 +7291,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -7511,9 +7367,8 @@ mod tests {
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update {
-                        current, response, ..
+                        current, ..
                     } => {
-                        response.send(None).unwrap();
                         if current == View::new(1) {
                             break;
                         }
@@ -7531,7 +7386,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7544,8 +7399,7 @@ mod tests {
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(Epoch::new(333), View::new(1)), quorum);
             mailbox
-                .resolved(Certificate::Nullification(nullification))
-                .await;
+                .resolved(Certificate::Nullification(nullification));
 
             loop {
                 select! {
@@ -7558,9 +7412,8 @@ mod tests {
                             );
                         }
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } => {
-                            response.send(None).unwrap();
                             if current == View::new(2) {
                                 break;
                             }
@@ -7587,7 +7440,7 @@ mod tests {
                                 "received nullify for view 2 before its fresh leader timeout elapsed"
                             );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     }
                 }
@@ -7668,12 +7521,10 @@ mod tests {
                 batcher::Message::Update {
                     current,
                     finalized,
-                    response,
                     ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
-                    response.send(None).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
@@ -7689,7 +7540,7 @@ mod tests {
             );
             let contents = (proposal.round, genesis, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // The voter should notarize view 1 and must not nullify it.
             loop {
@@ -7705,7 +7556,7 @@ mod tests {
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7717,8 +7568,7 @@ mod tests {
             // Deliver quorum notarization and ensure we finalize + advance to view 2 without nullify.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             let deadline = context.current() + Duration::from_secs(3);
             let reached_view2 = loop {
@@ -7736,9 +7586,8 @@ mod tests {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } => {
-                            response.send(None).unwrap();
                             if current >= View::new(2) {
                                 break true;
                             }
@@ -7759,9 +7608,8 @@ mod tests {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } => {
-                            response.send(None).unwrap();
                             if current >= View::new(2) {
                                 break true;
                             }
@@ -7874,8 +7722,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -7893,10 +7741,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3 (leader = participant 1).
@@ -7919,13 +7766,12 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Send notarization to trigger certification.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // Wait for certification to complete (view advances past target_view).
             loop {
@@ -7938,8 +7784,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -7951,8 +7796,7 @@ mod tests {
             // Drain any pending batcher messages so the view has advanced.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { response, .. } = msg {
-                    response.send(None).unwrap();
+                if let batcher::Message::Update { .. } = msg {
                 }
             }
 
@@ -8000,8 +7844,8 @@ mod tests {
             };
             let (voter, _mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8033,10 +7877,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break;
                             }
@@ -8144,8 +7987,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8163,10 +8006,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3.
@@ -8189,13 +8031,12 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
 
             // Send notarization to trigger certification.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
             // Wait for failed certification result to be reported to resolver.
             loop {
@@ -8208,8 +8049,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        if let batcher::Message::Update { .. } = msg.unwrap() {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -8221,8 +8061,7 @@ mod tests {
             // Let the journal sync.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { response, .. } = msg {
-                    response.send(None).unwrap();
+                if let batcher::Message::Update { .. } = msg {
                 }
             }
 
@@ -8262,8 +8101,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8295,10 +8134,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             // After replay, should be at target_view (not past it).
                             if current == target_view && replayed_certified {
                                 break;
@@ -8404,8 +8242,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8423,10 +8261,9 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3.
@@ -8449,7 +8286,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -8462,18 +8299,16 @@ mod tests {
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(epoch, target_view), quorum);
             mailbox
-                .resolved(Certificate::Nullification(nullification))
-                .await;
+                .resolved(Certificate::Nullification(nullification));
 
             // Wait for the voter to process the nullification (advances to next view).
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view {
                                 break;
                             }
@@ -8488,8 +8323,7 @@ mod tests {
             // Let journal sync.
             context.sleep(Duration::from_millis(50)).await;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { response, .. } = msg {
-                    response.send(None).unwrap();
+                if let batcher::Message::Update { .. } = msg {
                 }
             }
 
@@ -8530,8 +8364,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8563,10 +8397,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } = msg.unwrap()
                         {
-                            response.send(None).unwrap();
                             if current > target_view && replayed_nullification {
                                 break;
                             }
@@ -8602,11 +8435,8 @@ mod tests {
         nullify_and_nullification_replayed_after_restart(secp256r1::fixture);
     }
 
-    /// Tests that when the batcher signals a timeout reason on view update,
+    /// Tests that when the batcher signals a timeout after a view update,
     /// the voter immediately triggers a timeout for the current view.
-    ///
-    /// This covers the path where `batcher.update()` returns `Some(TimeoutReason)`
-    /// (e.g., because the leader is inactive or has already nullified the view).
     fn batcher_update_triggers_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -8669,10 +8499,10 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(10);
+            let (resolver_sender, _resolver_receiver) = mailbox::new(commonware_utils::NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(commonware_utils::NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -8689,10 +8519,9 @@ mod tests {
             voter.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Consume initial Update.
-            if let batcher::Message::Update { response, .. } =
+            if let batcher::Message::Update { .. } =
                 batcher_receiver.recv().await.unwrap()
             {
-                response.send(None).unwrap();
             }
 
             // Advance to follower view 3 using finalization.
@@ -8715,26 +8544,24 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, Sha256::hash(b"genesis"), 0u64).encode();
             relay.broadcast(&leader, (proposal.payload, contents));
-            mailbox.proposal(proposal.clone()).await;
+            mailbox.proposal(proposal.clone());
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization))
-                .await;
+                .resolved(Certificate::Notarization(notarization));
 
-            // Wait for the Update for view 4 and respond with a timeout reason
-            // to simulate batcher signaling that the leader should be skipped.
+            // Wait for the Update for view 4 and simulate batcher signaling
+            // that the leader should be skipped.
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Update {
-                            current, response, ..
+                            current, ..
                         } if current > target_view => {
                             // Signal leader inactivity to trigger the timeout path.
-                            response.send(Some(TimeoutReason::Inactivity)).unwrap();
+                            mailbox.timeout(current, TimeoutReason::Inactivity);
                             break;
                         }
-                        batcher::Message::Update { response, .. } => {
-                            response.send(None).unwrap();
+                        batcher::Message::Update { .. } => {
                         }
                         _ => {}
                     },
@@ -8756,8 +8583,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { response, .. } => {
-                            response.send(None).unwrap();
+                        batcher::Message::Update { .. } => {
                         }
                         _ => {}
                     },

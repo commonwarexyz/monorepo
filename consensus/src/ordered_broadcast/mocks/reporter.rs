@@ -6,6 +6,7 @@ use crate::{
     types::{Epoch, Height},
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_actor::Feedback;
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
@@ -197,20 +198,15 @@ pub struct Mailbox<C: PublicKey, S: Scheme, D: Digest> {
 impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
     type Activity = Activity<C, S, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        match activity {
-            Activity::Tip(proposal) => {
-                self.sender
-                    .send(Message::Proposal(proposal))
-                    .await
-                    .expect("Failed to send proposal");
-            }
-            Activity::Lock(lock) => {
-                self.sender
-                    .send(Message::Locked(lock))
-                    .await
-                    .expect("Failed to send locked");
-            }
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let message = match activity {
+            Activity::Tip(proposal) => Message::Proposal(proposal),
+            Activity::Lock(lock) => Message::Locked(lock),
+        };
+        match self.sender.try_send(message) {
+            Ok(()) => Feedback::Ok,
+            Err(mpsc::error::TrySendError::Full(_)) => Feedback::Dropped,
+            Err(mpsc::error::TrySendError::Closed(_)) => Feedback::Closed,
         }
     }
 }

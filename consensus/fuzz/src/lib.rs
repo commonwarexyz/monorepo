@@ -353,11 +353,14 @@ fn spawn_honest_validator<
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
 where
     P: simplex::Simplex,
-    PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>
+        + commonware_p2p::MailboxSender<PublicKey = Ed25519PublicKey>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
-    RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>
+        + commonware_p2p::MailboxSender<PublicKey = Ed25519PublicKey>,
     RecoveredReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
-    ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>
+        + commonware_p2p::MailboxSender<PublicKey = Ed25519PublicKey>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
 {
     let elector = P::Elector::default();

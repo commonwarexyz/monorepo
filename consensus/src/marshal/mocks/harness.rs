@@ -1787,14 +1787,14 @@ impl TestHarness for StandardHarness {
         mailbox: &mut Mailbox<S, Self::Variant>,
         finalization: Finalization<S, D>,
     ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
         notarization: Notarization<S, D>,
     ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
     }
 
     fn finalize_timeout() -> Duration {
@@ -2625,14 +2625,14 @@ impl TestHarness for CodingHarness {
         mailbox: &mut Mailbox<S, Self::Variant>,
         finalization: Finalization<S, Commitment>,
     ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
         notarization: Notarization<S, Commitment>,
     ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
     }
 
     fn finalize_timeout() -> Duration {

@@ -7,11 +7,12 @@ use super::{
 };
 use crate::Consumer;
 use bytes::Bytes;
+use commonware_actor::{mailbox, Feedback};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Blocker, Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedMailboxSender, WrappedReceiver},
+    Blocker, MailboxSender, Provider, Receiver, Recipients,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -19,7 +20,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{mpsc, oneshot},
+    channel::oneshot,
     futures::Pool as FuturesPool,
     Span,
 };
@@ -45,7 +46,7 @@ pub struct Engine<
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = P>,
+    NetS: MailboxSender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
@@ -64,7 +65,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key, P>>,
+    mailbox: mailbox::Receiver<Message<Key, P>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -96,7 +97,7 @@ impl<
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes>,
         Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = P>,
+        NetS: MailboxSender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 {
@@ -104,7 +105,7 @@ impl<
     ///
     /// Returns the actor and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(commonware_utils::NZUsize!(cfg.mailbox_size));
 
         let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
@@ -148,12 +149,10 @@ impl<
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap(
-            (),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let sender: WrappedMailboxSender<NetS, wire::Message<Key>> =
+            WrappedMailboxSender::new(self.context.network_buffer_pool().clone(), network.0);
+        let mut receiver: WrappedReceiver<NetR, wire::Message<Key>> =
+            WrappedReceiver::new((), network.1);
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -208,7 +207,7 @@ impl<
             },
             // Handle pending deadline
             _ = deadline_pending => {
-                self.fetcher.fetch(&mut sender).await;
+                self.fetcher.fetch(&sender);
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox.recv() else {
@@ -304,8 +303,7 @@ impl<
                 }
 
                 // Send response to peer
-                self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
-                    .await;
+                self.handle_serve(&sender, peer, id, result, self.priority_responses);
             },
             // Handle network messages
             msg = receiver.recv() => {
@@ -346,9 +344,9 @@ impl<
     }
 
     /// Handles the case where the application responds to a request from an external peer.
-    async fn handle_serve(
+    fn handle_serve(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &WrappedMailboxSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::error::RecvError>,
@@ -362,15 +360,12 @@ impl<
         let msg = wire::Message { id, payload };
 
         // Send message to peer
-        let result = sender
-            .send(Recipients::One(peer.clone()), msg, priority)
-            .await;
+        let result = sender.send(Recipients::One(peer.clone()), msg, priority);
 
         // Log result, but do not handle errors
         match result {
-            Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
-            Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
-            Ok(_) => trace!(?peer, ?id, "serve sent"),
+            Feedback::Ok | Feedback::Backoff => trace!(?peer, ?id, "serve sent"),
+            result => warn!(?peer, ?id, ?result, "serve send failed"),
         };
     }
 

@@ -3,6 +3,7 @@ use crate::{
     utils::limited::{CheckedSender, LimitedSender},
     Channel, Message, Recipients,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Quota};
 use commonware_utils::channel::mpsc;
@@ -40,15 +41,36 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     }
 }
 
+impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Feedback {
+        let message = message.into();
+        if message.len() > self.max_size as usize {
+            return Feedback::Dropped;
+        }
+
+        self.messenger
+            .enqueue_content(recipients, self.channel, message, priority)
+    }
+}
+
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
+    mailbox_sender: UnlimitedSender<P>,
 }
 
 impl<P: PublicKey, C: Clock> Clone for Sender<P, C> {
     fn clone(&self) -> Self {
         Self {
             limited_sender: self.limited_sender.clone(),
+            mailbox_sender: self.mailbox_sender.clone(),
         }
     }
 }
@@ -66,8 +88,29 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
             max_size,
             messenger: messenger.clone(),
         };
-        let limited_sender = LimitedSender::new(master_sender, quota, clock, messenger);
-        Self { limited_sender }
+        let limited_sender = LimitedSender::new(master_sender.clone(), quota, clock, messenger);
+        Self {
+            limited_sender,
+            mailbox_sender: master_sender,
+        }
+    }
+}
+
+impl<P: PublicKey, C: Clock> crate::MailboxSender for Sender<P, C> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Feedback {
+        <UnlimitedSender<P> as crate::MailboxSender>::send(
+            &self.mailbox_sender,
+            recipients,
+            message,
+            priority,
+        )
     }
 }
 

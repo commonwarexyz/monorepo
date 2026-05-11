@@ -8,10 +8,11 @@ use crate::{
     utils::limited::Connected,
     Channel, Recipients,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, oneshot, ring},
+    channel::{fallible::AsyncFallibleExt, mpsc::error::TrySendError, oneshot, ring},
     NZUsize,
 };
 
@@ -31,7 +32,7 @@ pub enum Message<P: PublicKey> {
         recipients: Recipients<P>,
         encoded: EncodedData,
         priority: bool,
-        success: oneshot::Sender<Vec<P>>,
+        success: Option<oneshot::Sender<Vec<P>>>,
     },
     /// Get a subscription to peers known by the router.
     SubscribePeers {
@@ -96,9 +97,30 @@ impl<P: PublicKey> Messenger<P> {
                 recipients,
                 encoded,
                 priority,
-                success,
+                success: Some(success),
             })
             .await
+    }
+
+    /// Submit a message to the router without waiting for delivery feedback.
+    pub fn enqueue_content(
+        &self,
+        recipients: Recipients<P>,
+        channel: Channel,
+        message: IoBufs,
+        priority: bool,
+    ) -> Feedback {
+        let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
+        match self.sender.0.try_send(Message::Content {
+            recipients,
+            encoded,
+            priority,
+            success: None,
+        }) {
+            Ok(()) => Feedback::Ok,
+            Err(TrySendError::Full(_)) => Feedback::Dropped,
+            Err(TrySendError::Closed(_)) => Feedback::Closed,
+        }
     }
 }
 

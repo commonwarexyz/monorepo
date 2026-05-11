@@ -14,6 +14,7 @@ use commonware_macros::{stability_mod, stability_scope};
 stability_mod!(ALPHA, pub mod simulated);
 
 stability_scope!(BETA {
+    use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
@@ -202,6 +203,23 @@ stability_scope!(BETA {
 
     // Blanket implementation of `Sender` for all `LimitedSender`s.
     impl<S: LimitedSender> Sender for S {}
+
+    /// Interface for enqueueing messages to a set of recipients without waiting on p2p delivery.
+    pub trait MailboxSender: Clone + Send + Sync + 'static {
+        /// Public key type used to identify recipients.
+        type PublicKey: PublicKey;
+
+        /// Submit a message to a set of recipients.
+        ///
+        /// This method only reports whether the p2p actor accepted the work. It
+        /// does not report which peers eventually received the message.
+        fn send(
+            &self,
+            recipients: Recipients<Self::PublicKey>,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> Feedback;
+    }
 
     /// Interface for receiving messages from arbitrary recipients.
     pub trait Receiver: Debug + Send + 'static {

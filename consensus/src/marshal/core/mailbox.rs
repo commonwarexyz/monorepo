@@ -8,12 +8,17 @@ use crate::{
     types::{Height, Round},
     Reporter,
 };
+use commonware_actor::{
+    mailbox::{self, Policy},
+    Feedback,
+};
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::oneshot,
     vec::NonEmptyVec,
 };
+use std::collections::VecDeque;
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -163,16 +168,61 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
+impl<S: Scheme, V: Variant> Policy for Message<S, V> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        match message {
+            Self::HintFinalized {
+                height,
+                targets,
+            } => {
+                if let Some(Self::HintFinalized {
+                    targets: pending_targets,
+                    ..
+                }) = overflow.iter_mut().rev().find(|pending| {
+                    matches!(
+                        pending,
+                        Self::HintFinalized {
+                            height: pending_height,
+                            ..
+                        } if *pending_height == height
+                    )
+                }) {
+                    pending_targets.extend(targets);
+                    return true;
+                }
+                overflow.push_back(Self::HintFinalized { height, targets });
+            }
+            message => overflow.push_back(message),
+        }
+        true
+    }
+}
+
 /// A mailbox for sending messages to the marshal [Actor](super::Actor).
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, V: Variant> {
-    sender: mpsc::Sender<Message<S, V>>,
+    sender: mailbox::Sender<Message<S, V>>,
 }
 
+#[allow(clippy::unused_async)]
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: mpsc::Sender<Message<S, V>>) -> Self {
+    pub(crate) const fn new(sender: mailbox::Sender<Message<S, V>>) -> Self {
         Self { sender }
+    }
+
+    async fn request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Message<S, V>,
+    ) -> Option<T> {
+        let (response, receiver) = oneshot::channel();
+        if !matches!(
+            self.sender.enqueue(make(response)),
+            Feedback::Ok | Feedback::Backoff
+        ) {
+            return None;
+        }
+        receiver.await.ok()
     }
 
     /// A request to retrieve the information about the highest finalized block.
@@ -181,8 +231,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
     ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
         let identifier = identifier.into();
-        self.sender
-            .request(|response| Message::GetInfo {
+        self.request(|response| Message::GetInfo {
                 identifier,
                 response,
             })
@@ -197,8 +246,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
     ) -> Option<V::Block> {
         let identifier = identifier.into();
-        self.sender
-            .request(|response| Message::GetBlock {
+        self.request(|response| Message::GetBlock {
                 identifier,
                 response,
             })
@@ -209,8 +257,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
     pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
-        self.sender
-            .request(|response| Message::GetFinalization { height, response })
+        self.request(|response| Message::GetFinalization { height, response })
             .await
             .flatten()
     }
@@ -235,9 +282,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
     pub async fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
-        self.sender
-            .send_lossy(Message::HintFinalized { height, targets })
-            .await;
+        let _ = self
+            .sender
+            .enqueue(Message::HintFinalized { height, targets });
     }
 
     /// Subscribe to a block by its digest.
@@ -255,13 +302,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         digest: <V::Block as Digestible>::Digest,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::SubscribeByDigest {
+        let _ = self.sender.enqueue(Message::SubscribeByDigest {
                 round,
                 digest,
                 response: tx,
-            })
-            .await;
+            });
         rx
     }
 
@@ -280,13 +325,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         commitment: V::Commitment,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::SubscribeByCommitment {
+        let _ = self.sender.enqueue(Message::SubscribeByCommitment {
                 round,
                 commitment,
                 response: tx,
-            })
-            .await;
+            });
         rx
     }
 
@@ -306,8 +349,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Returns the verified block previously persisted for `round`, if any.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
-        self.sender
-            .request(|response| Message::GetVerified { round, response })
+        self.request(|response| Message::GetVerified { round, response })
             .await
             .flatten()
     }
@@ -317,8 +359,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// before returning.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
-        self.sender
-            .request(|ack| Message::Proposed { round, block, ack })
+        self.request(|ack| Message::Proposed { round, block, ack })
             .await
             .is_some()
     }
@@ -327,8 +368,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// confirmation that the block has been durably persisted before returning.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
-        self.sender
-            .request(|ack| Message::Verified { round, block, ack })
+        self.request(|ack| Message::Verified { round, block, ack })
             .await
             .is_some()
     }
@@ -337,8 +377,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// confirmation that the block has been durably persisted before returning.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
-        self.sender
-            .request(|ack| Message::Certified { round, block, ack })
+        self.request(|ack| Message::Certified { round, block, ack })
             .await
             .is_some()
     }
@@ -353,7 +392,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The default floor is 0.
     pub async fn set_floor(&self, height: Height) {
-        self.sender.send_lossy(Message::SetFloor { height }).await;
+        let _ = self.sender.enqueue(Message::SetFloor { height });
     }
 
     /// Prunes finalized blocks and certificates below the given height.
@@ -364,7 +403,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// A `prune` request for a height above marshal's current floor is dropped.
     pub async fn prune(&self, height: Height) {
-        self.sender.send_lossy(Message::Prune { height }).await;
+        let _ = self.sender.enqueue(Message::Prune { height });
     }
 
     /// Forward a block to a set of recipients.
@@ -374,13 +413,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         commitment: V::Commitment,
         recipients: Recipients<S::PublicKey>,
     ) {
-        self.sender
-            .send_lossy(Message::Forward {
+        let _ = self.sender.enqueue(Message::Forward {
                 round,
                 commitment,
                 recipients,
-            })
-            .await;
+            });
     }
 }
 
@@ -396,15 +433,15 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
 impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     type Activity = Activity<S, V::Commitment>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
-                return;
+                return Feedback::Dropped;
             }
         };
-        self.sender.send_lossy(message).await;
+        self.sender.enqueue(message)
     }
 }

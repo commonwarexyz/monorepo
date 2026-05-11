@@ -19,6 +19,7 @@ use crate::{
     types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_codec::Encode;
 use commonware_cryptography::{
     certificate::{Provider, Scheme},
@@ -26,8 +27,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    utils::codec::{WrappedMailboxSender, WrappedReceiver},
+    MailboxSender, Receiver, Recipients,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -260,11 +261,11 @@ impl<
     pub fn start(
         mut self,
         chunk_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         ack_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -275,20 +276,22 @@ impl<
     async fn run(
         mut self,
         chunk_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         ack_network: (
-            impl Sender<PublicKey = C::PublicKey>,
+            impl MailboxSender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
-        let mut node_sender = chunk_network.0;
+        let node_sender = chunk_network.0;
         let mut node_receiver = chunk_network.1;
-        let (mut ack_sender, mut ack_receiver) = wrap(
-            (),
+        let ack_sender = WrappedMailboxSender::<_, Ack<C::PublicKey, P::Scheme, D>>::new(
             self.context.network_buffer_pool().clone(),
             ack_network.0,
+        );
+        let mut ack_receiver = WrappedReceiver::<_, Ack<C::PublicKey, P::Scheme, D>>::new(
+            (),
             ack_network.1,
         );
 
@@ -303,7 +306,7 @@ impl<
         // and attempt to rebroadcast if necessary.
         if let Some(ref signer) = self.sequencer_signer {
             self.journal_prepare(&signer.public_key()).await;
-            if let Err(err) = self.rebroadcast(&mut node_sender).await {
+            if let Err(err) = self.rebroadcast(&node_sender).await {
                 // Rebroadcasting may return a non-critical error, so log the error and continue.
                 info!(?err, "initial rebroadcast failed");
             }
@@ -351,7 +354,7 @@ impl<
             _ = rebroadcast => {
                 if let Some(ref signer) = self.sequencer_signer {
                     debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
-                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                    if let Err(err) = self.rebroadcast(&node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
                     }
@@ -372,7 +375,7 @@ impl<
 
                 // Propose the chunk
                 if let Err(err) = self
-                    .propose(context.clone(), payload, &mut node_sender)
+                    .propose(context.clone(), payload, &node_sender)
                     .await
                 {
                     warn!(?err, ?context, "propose new failed");
@@ -414,12 +417,7 @@ impl<
                 // Handle the parent certificate
                 if let Some(parent_chunk) = result {
                     let parent = node.parent.as_ref().unwrap();
-                    self.handle_certificate(
-                        &parent_chunk,
-                        parent.epoch,
-                        parent.certificate.clone(),
-                    )
-                    .await;
+                    self.handle_certificate(&parent_chunk, parent.epoch, parent.certificate.clone());
                 }
 
                 // Process the node
@@ -453,7 +451,7 @@ impl<
                     debug!(?err, ?sender, "ack validate failed");
                     continue;
                 };
-                if let Err(err) = self.handle_ack(&ack).await {
+                if let Err(err) = self.handle_ack(&ack) {
                     debug!(?err, ?sender, "ack handle failed");
                     guard.set(Status::Failure);
                     continue;
@@ -485,7 +483,7 @@ impl<
                         debug!(?context, "verified");
                         self.metrics.verify.inc(Status::Success);
                         if let Err(err) = self
-                            .handle_app_verified(&context, &payload, &mut ack_sender)
+                            .handle_app_verified(&context, &payload, &ack_sender)
                             .await
                         {
                             debug!(?err, ?context, ?payload, "verified handle failed");
@@ -514,8 +512,8 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<
-            impl Sender<PublicKey = C::PublicKey>,
+        ack_sender: &WrappedMailboxSender<
+            impl MailboxSender<PublicKey = C::PublicKey>,
             Ack<C::PublicKey, P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -539,8 +537,7 @@ impl<
             .report(Activity::Tip(Proposal::new(
                 tip.chunk.clone(),
                 tip.signature.clone(),
-            )))
-            .await;
+            )));
 
         // Get the validator scheme for the current epoch
         let Some(scheme) = self.validators_provider.scoped(self.epoch) else {
@@ -568,13 +565,14 @@ impl<
         };
 
         // Handle the ack internally
-        self.handle_ack(&ack).await?;
+        self.handle_ack(&ack)?;
 
         // Send the ack to the network
-        ack_sender
-            .send(Recipients::Some(recipients), ack, self.priority_acks)
-            .await
-            .map_err(|_| Error::UnableToSendMessage)?;
+        let result = ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
+        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+            warn!(?result, "failed to enqueue ack");
+            return Err(Error::UnableToSendMessage);
+        }
 
         Ok(())
     }
@@ -584,7 +582,7 @@ impl<
     /// The certificate must already be verified.
     /// If the certificate is new, it is stored and the proof is emitted to the committer.
     /// If the certificate is already known, it is ignored.
-    async fn handle_certificate(
+    fn handle_certificate(
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
@@ -611,15 +609,14 @@ impl<
 
         // Emit the activity
         self.reporter
-            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)))
-            .await;
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)));
     }
 
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
+    fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
         let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
@@ -632,8 +629,7 @@ impl<
         {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
-            self.handle_certificate(&ack.chunk, ack.epoch, certificate)
-                .await;
+            self.handle_certificate(&ack.chunk, ack.epoch, certificate);
         }
 
         Ok(())
@@ -723,7 +719,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let signer = self
@@ -796,7 +792,7 @@ impl<
     /// - this instance has not yet collected the certificate for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -841,7 +837,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
-        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
@@ -854,14 +850,15 @@ impl<
         self.relay.broadcast(node.chunk.payload, ()).await;
 
         // Send the node to all validators
-        node_sender
-            .send(
-                Recipients::Some(validators.iter().cloned().collect()),
-                node.encode(),
-                self.priority_proposals,
-            )
-            .await
-            .map_err(|_| Error::BroadcastFailed)?;
+        let result = node_sender.send(
+            Recipients::Some(validators.iter().cloned().collect()),
+            node.encode(),
+            self.priority_proposals,
+        );
+        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+            warn!(?result, "failed to enqueue node");
+            return Err(Error::BroadcastFailed);
+        }
 
         // Set the rebroadcast deadline
         self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);

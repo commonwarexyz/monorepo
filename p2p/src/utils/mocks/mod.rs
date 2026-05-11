@@ -1,6 +1,7 @@
 //! Mock implementations for testing.
 
-use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
+use crate::{CheckedSender, LimitedSender, MailboxSender, Receiver, Recipients};
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{IoBuf, IoBufs};
 use core::future;
@@ -61,6 +62,19 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     }
 }
 
+impl<P: PublicKey> MailboxSender for InertSender<P> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        _: Recipients<Self::PublicKey>,
+        _: impl Into<IoBufs> + Send,
+        _: bool,
+    ) -> Feedback {
+        Feedback::Ok
+    }
+}
+
 impl<P: PublicKey> Receiver for InertReceiver<P> {
     type Error = Infallible;
     type PublicKey = P;
@@ -85,7 +99,6 @@ pub fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, I
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Sender;
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
@@ -101,7 +114,13 @@ mod tests {
         ];
 
         let (mut sender, _) = inert_channel(peers.as_slice());
-        let sent = block_on(sender.send(Recipients::All, b"hello".to_vec(), false)).unwrap();
+        let sent = block_on(crate::Sender::send(
+            &mut sender,
+            Recipients::All,
+            b"hello".to_vec(),
+            false,
+        ))
+        .unwrap();
 
         assert_eq!(sent, peers);
     }

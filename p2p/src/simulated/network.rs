@@ -14,6 +14,7 @@ use crate::{
     },
     Channel, Message, PeerSetUpdate, Recipients, TrackedPeers, UnlimitedSender as _,
 };
+use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -46,7 +47,7 @@ use tracing::{debug, error, trace, warn};
 type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 
 /// Task type representing a message to be sent within the network.
-type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
+type Task<P> = (Channel, P, Recipients<P>, IoBuf, Option<oneshot::Sender<Vec<P>>>);
 
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -687,8 +688,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 reason = "not primary or secondary",
                 "dropping message"
             );
-            if let Err(err) = reply.send(Vec::new()) {
-                error!(?err, "failed to send ack");
+            if let Some(reply) = reply {
+                if let Err(err) = reply.send(Vec::new()) {
+                    error!(?err, "failed to send ack");
+                }
             }
             return;
         }
@@ -767,8 +770,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         // Alert application of sent messages
-        if let Err(err) = reply.send(sent) {
-            error!(?err, "failed to send ack");
+        if let Some(reply) = reply {
+            if let Err(err) = reply.send(sent) {
+                error!(?err, "failed to send ack");
+            }
         }
     }
 
@@ -875,12 +880,44 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         if channel
-            .send((self.channel, self.me.clone(), recipients, message, sender))
+            .send((
+                self.channel,
+                self.me.clone(),
+                recipients,
+                message,
+                Some(sender),
+            ))
             .is_err()
         {
             return Ok(Vec::new());
         }
         Ok(receiver.await.unwrap_or_default())
+    }
+}
+
+impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<P>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Feedback {
+        let message = message.into();
+        if message.len() > self.max_size as usize {
+            return Feedback::Dropped;
+        }
+
+        let message = message.coalesce();
+        let channel = if priority { &self.high } else { &self.low };
+        if channel
+            .send((self.channel, self.me.clone(), recipients, message, None))
+            .is_err()
+        {
+            return Feedback::Closed;
+        }
+        Feedback::Ok
     }
 }
 
@@ -890,12 +927,14 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 /// before sending messages.
 pub struct Sender<P: PublicKey, E: Clock> {
     limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
+    mailbox_sender: UnlimitedSender<P>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
     fn clone(&self) -> Self {
         Self {
             limited_sender: self.limited_sender.clone(),
+            mailbox_sender: self.mailbox_sender.clone(),
         }
     }
 }
@@ -955,9 +994,15 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             low,
         };
         let peer_source = ConnectedPeerProvider::new(oracle_mailbox);
-        let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
+        let limited_sender = LimitedSender::new(unlimited_sender.clone(), quota, clock, peer_source);
 
-        (Self { limited_sender }, processor)
+        (
+            Self {
+                limited_sender,
+                mailbox_sender: unlimited_sender,
+            },
+            processor,
+        )
     }
 
     /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
@@ -976,6 +1021,24 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
                 inner: self,
                 forwarder,
             },
+        )
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::MailboxSender for Sender<P, E> {
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Feedback {
+        <UnlimitedSender<P> as crate::MailboxSender>::send(
+            &self.mailbox_sender,
+            recipients,
+            message,
+            priority,
         )
     }
 }
@@ -1039,6 +1102,28 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 
             _phantom: std::marker::PhantomData,
         })
+    }
+}
+
+impl<P, E, F> crate::MailboxSender for SplitSender<P, E, F>
+where
+    P: PublicKey,
+    E: Clock,
+    F: SplitForwarder<P>,
+{
+    type PublicKey = P;
+
+    fn send(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Feedback {
+        let message = message.into().coalesce();
+        let Some(recipients) = (self.forwarder)(self.replica, &recipients, &message) else {
+            return Feedback::Dropped;
+        };
+        <Sender<P, E> as crate::MailboxSender>::send(&self.inner, recipients, message, priority)
     }
 }
 

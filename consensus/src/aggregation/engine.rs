@@ -11,14 +11,15 @@ use crate::{
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
     Automaton, Monitor, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::{
     certificate::{Provider, Scheme},
     Digest,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Blocker, Receiver, Recipients, Sender,
+    utils::codec::{WrappedMailboxSender, WrappedReceiver},
+    Blocker, MailboxSender, Receiver, Recipients,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -215,7 +216,7 @@ impl<
     pub fn start(
         mut self,
         network: (
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -226,14 +227,16 @@ impl<
     async fn run(
         mut self,
         network: (
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) {
-        let (mut sender, mut receiver) = wrap(
-            (),
+        let sender = WrappedMailboxSender::<_, TipAck<P::Scheme, D>>::new(
             self.context.network_buffer_pool().clone(),
             network.0,
+        );
+        let mut receiver = WrappedReceiver::<_, TipAck<P::Scheme, D>>::new(
+            (),
             network.1,
         );
 
@@ -341,7 +344,7 @@ impl<
                     }
                     Ok(digest) => {
                         timer.observe(self.context.as_ref());
-                        if let Err(err) = self.handle_digest(height, digest, &mut sender).await {
+                        if let Err(err) = self.handle_digest(height, digest, &sender).await {
                             debug!(?err, %height, "handle_digest failed");
                             continue;
                         }
@@ -412,7 +415,7 @@ impl<
                     .pop()
                     .expect("no rebroadcast deadline");
                 trace!(%height, "rebroadcasting");
-                if let Err(err) = self.handle_rebroadcast(height, &mut sender).await {
+                if let Err(err) = self.handle_rebroadcast(height, &sender).await {
                     warn!(?err, %height, "rebroadcast failed");
                 };
             },
@@ -434,8 +437,8 @@ impl<
         &mut self,
         height: Height,
         digest: D,
-        sender: &mut WrappedSender<
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        sender: &WrappedMailboxSender<
+            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -481,7 +484,7 @@ impl<
         let _ = self.handle_ack(&ack).await;
 
         // Send ack over the network.
-        self.broadcast(ack, sender).await?;
+        self.broadcast(ack, sender)?;
 
         Ok(())
     }
@@ -549,7 +552,7 @@ impl<
         let certified = Activity::Certified(certificate);
         self.record(certified.clone()).await;
         self.sync(height).await;
-        self.reporter.report(certified).await;
+        self.reporter.report(certified);
 
         // Increase the tip if needed
         if height == self.tip {
@@ -570,8 +573,8 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         height: Height,
-        sender: &mut WrappedSender<
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        sender: &WrappedMailboxSender<
+            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -598,7 +601,7 @@ impl<
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
-        self.broadcast(ack, sender).await
+        self.broadcast(ack, sender)
     }
 
     // ---------- Validation ----------
@@ -721,25 +724,23 @@ impl<
     /// Broadcasts an ack to all peers with the appropriate priority.
     ///
     /// Returns an error if the sender returns an error.
-    async fn broadcast(
+    fn broadcast(
         &mut self,
         ack: Ack<P::Scheme, D>,
-        sender: &mut WrappedSender<
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        sender: &WrappedMailboxSender<
+            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
-        sender
-            .send(
-                Recipients::All,
-                TipAck { ack, tip: self.tip },
-                self.priority_acks,
-            )
-            .await
-            .map_err(|err| {
-                warn!(?err, "failed to send ack");
-                Error::UnableToSendMessage
-            })?;
+        let result = sender.send(
+            Recipients::All,
+            TipAck { ack, tip: self.tip },
+            self.priority_acks,
+        );
+        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+            warn!(?result, "failed to enqueue ack");
+            return Err(Error::UnableToSendMessage);
+        }
         Ok(())
     }
 
@@ -777,7 +778,7 @@ impl<
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
-        self.reporter.report(Activity::Tip(tip)).await;
+        self.reporter.report(Activity::Tip(tip));
 
         // Prune journal with buffer, ignoring errors
         let section = self.get_journal_section(activity_threshold);
@@ -811,15 +812,15 @@ impl<
             match activity {
                 Activity::Tip(height) => {
                     tip = max(tip, height);
-                    self.reporter.report(Activity::Tip(height)).await;
+                    self.reporter.report(Activity::Tip(height));
                 }
                 Activity::Certified(certificate) => {
                     certified.push(certificate.clone());
-                    self.reporter.report(Activity::Certified(certificate)).await;
+                    self.reporter.report(Activity::Certified(certificate));
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack.clone());
-                    self.reporter.report(Activity::Ack(ack)).await;
+                    self.reporter.report(Activity::Ack(ack));
                 }
             }
         }

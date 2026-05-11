@@ -1,10 +1,11 @@
 use crate::Resolver;
-use commonware_cryptography::PublicKey;
-use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc},
-    vec::NonEmptyVec,
-    Span,
+use commonware_actor::{
+    mailbox::{self, Policy},
+    Feedback,
 };
+use commonware_cryptography::PublicKey;
+use commonware_utils::{vec::NonEmptyVec, Span};
+use std::collections::VecDeque;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
@@ -34,22 +35,101 @@ pub enum Message<K, P> {
     Retain { predicate: Predicate<K> },
 }
 
-/// A way to send messages to the peer actor.
-#[derive(Clone)]
-pub struct Mailbox<K, P> {
-    /// The channel that delivers messages to the peer actor.
-    sender: mpsc::Sender<Message<K, P>>,
+fn merge_targets<P: PartialEq>(
+    existing: &mut Option<NonEmptyVec<P>>,
+    incoming: Option<NonEmptyVec<P>>,
+) {
+    match (existing, incoming) {
+        (existing @ Some(_), None) => *existing = None,
+        (Some(existing), Some(incoming)) => {
+            for peer in incoming.into_vec() {
+                if !existing.contains(&peer) {
+                    existing.push(peer);
+                }
+            }
+        }
+        (None, _) => {}
+    }
 }
 
-impl<K, P> Mailbox<K, P> {
+fn merge_fetches<K: Eq, P: PartialEq>(
+    pending: &mut Vec<FetchRequest<K, P>>,
+    incoming: Vec<FetchRequest<K, P>>,
+) {
+    for request in incoming {
+        match pending.iter_mut().find(|pending| pending.key == request.key) {
+            Some(pending) => merge_targets(&mut pending.targets, request.targets),
+            None => pending.push(request),
+        }
+    }
+}
+
+impl<K: Span, P: PublicKey> Policy for Message<K, P> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        match message {
+            Self::Fetch(requests) => {
+                if requests.is_empty() {
+                    return false;
+                }
+                if let Some(Self::Fetch(existing)) = overflow
+                    .iter_mut()
+                    .rev()
+                    .find(|pending| matches!(pending, Self::Fetch(_)))
+                {
+                    merge_fetches(existing, requests);
+                } else {
+                    overflow.push_back(Self::Fetch(requests));
+                }
+                true
+            }
+            Self::Cancel { key } => {
+                if let Some(pending) = overflow.iter_mut().rev().find(|pending| {
+                    matches!(pending, Self::Cancel { key: pending } if pending == &key)
+                }) {
+                    *pending = Self::Cancel { key };
+                } else {
+                    overflow.push_back(Self::Cancel { key });
+                }
+                true
+            }
+            Self::Clear => {
+                overflow.clear();
+                overflow.push_back(Self::Clear);
+                true
+            }
+            Self::Retain { predicate } => {
+                if let Some(pending) = overflow
+                    .iter_mut()
+                    .rev()
+                    .find(|pending| matches!(pending, Self::Retain { .. }))
+                {
+                    *pending = Self::Retain { predicate };
+                } else {
+                    overflow.push_back(Self::Retain { predicate });
+                }
+                true
+            }
+        }
+    }
+}
+
+/// A way to send messages to the peer actor.
+#[derive(Clone)]
+pub struct Mailbox<K: Span, P: PublicKey> {
+    /// The channel that delivers messages to the peer actor.
+    sender: mailbox::Sender<Message<K, P>>,
+}
+
+impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Create a new mailbox.
-    pub(super) const fn new(sender: mpsc::Sender<Message<K, P>>) -> Self {
+    pub(super) const fn new(sender: mailbox::Sender<Message<K, P>>) -> Self {
         Self { sender }
     }
 }
 
 impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     type Key = K;
+    type Message = self::Message<K, P>;
     type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
@@ -58,10 +138,9 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch(&mut self, key: Self::Key) {
+    fn fetch(&mut self, key: Self::Key) -> Feedback {
         self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest { key, targets: None }]))
-            .await;
+            .enqueue(Message::Fetch(vec![FetchRequest { key, targets: None }]))
     }
 
     /// Send a fetch request to the peer actor for a batch of keys.
@@ -70,70 +149,75 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
-        self.sender
-            .send_lossy(Message::Fetch(
-                keys.into_iter()
-                    .map(|key| FetchRequest { key, targets: None })
-                    .collect(),
-            ))
-            .await;
+    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Feedback {
+        let requests: Vec<_> = keys
+            .into_iter()
+            .map(|key| FetchRequest { key, targets: None })
+            .collect();
+        if requests.is_empty() {
+            return Feedback::Dropped;
+        }
+        self.sender.enqueue(Message::Fetch(requests))
     }
 
     /// Send a targeted fetch request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
+    fn fetch_targeted(
+        &mut self,
+        key: Self::Key,
+        targets: NonEmptyVec<Self::PublicKey>,
+    ) -> Feedback {
         self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest {
+            .enqueue(Message::Fetch(vec![FetchRequest {
                 key,
                 targets: Some(targets),
             }]))
-            .await;
     }
 
     /// Send targeted fetch requests to the peer actor for a batch of keys.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all_targeted(
+    fn fetch_all_targeted(
         &mut self,
         requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-    ) {
-        self.sender
-            .send_lossy(Message::Fetch(
-                requests
-                    .into_iter()
-                    .map(|(key, targets)| FetchRequest {
-                        key,
-                        targets: Some(targets),
-                    })
-                    .collect(),
-            ))
-            .await;
+    ) -> Feedback {
+        let requests: Vec<_> = requests
+            .into_iter()
+            .map(|(key, targets)| FetchRequest {
+                key,
+                targets: Some(targets),
+            })
+            .collect();
+        if requests.is_empty() {
+            return Feedback::Dropped;
+        }
+        self.sender.enqueue(Message::Fetch(requests))
     }
 
     /// Send a cancel request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn cancel(&mut self, key: Self::Key) {
-        self.sender.send_lossy(Message::Cancel { key }).await;
+    fn cancel(&mut self, key: Self::Key) -> Feedback {
+        self.sender.enqueue(Message::Cancel { key })
     }
 
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
-        self.sender
-            .send_lossy(Message::Retain {
-                predicate: Box::new(predicate),
-            })
-            .await;
+    fn retain(
+        &mut self,
+        predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Retain {
+            predicate: Box::new(predicate),
+        })
     }
 
     /// Send a clear request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn clear(&mut self) {
-        self.sender.send_lossy(Message::Clear).await;
+    fn clear(&mut self) -> Feedback {
+        self.sender.enqueue(Message::Clear)
     }
 }

@@ -1,7 +1,7 @@
 //! Reporter implementations for various standard types.
 
 use crate::Reporter;
-use futures::join;
+use commonware_actor::Feedback;
 use std::marker::PhantomData;
 
 /// An implementation of [Reporter] for an optional [Reporter].
@@ -11,11 +11,11 @@ use std::marker::PhantomData;
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Some(reporter) = self else {
-            return;
+            return Feedback::Dropped;
         };
-        reporter.report(activity).await;
+        reporter.report(activity)
     }
 }
 
@@ -36,14 +36,22 @@ where
 {
     type Activity = A;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        // This approach avoids cloning activity, if possible.
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match (&mut self.r1, &mut self.r2) {
-            (Some(r1), Some(r2)) => join!(r1.report(activity.clone()), r2.report(activity)),
-            (Some(r1), None) => (r1.report(activity).await, ()),
-            (None, Some(r2)) => ((), r2.report(activity).await),
-            (None, None) => ((), ()),
-        };
+            (Some(r1), Some(r2)) => combine(r1.report(activity.clone()), r2.report(activity)),
+            (Some(r1), None) => r1.report(activity),
+            (None, Some(r2)) => r2.report(activity),
+            (None, None) => Feedback::Dropped,
+        }
+    }
+}
+
+const fn combine(left: Feedback, right: Feedback) -> Feedback {
+    match (left, right) {
+        (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
+        (Feedback::Dropped, _) | (_, Feedback::Dropped) => Feedback::Dropped,
+        (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
+        (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
     }
 }
 
@@ -100,8 +108,9 @@ mod tests {
     impl crate::Reporter for SimpleAcknowledger {
         type Activity = Exact;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
             activity.acknowledge();
+            Feedback::Ok
         }
     }
 
@@ -113,7 +122,7 @@ mod tests {
         ));
 
         let (ack, waiter) = Exact::handle();
-        reporters.report(ack).await;
+        assert_eq!(reporters.report(ack), Feedback::Ok);
 
         assert!(
             waiter.now_or_never().unwrap().is_ok(),
