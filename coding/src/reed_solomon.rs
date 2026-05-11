@@ -476,7 +476,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
     shards.extend(encoding.recovery_iter());
 
-    // Build Merkle tree from the canonical codeword.
+    // Build Merkle tree from the canonical codeword
     let mut builder = Builder::<H>::new(n);
     let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
         hasher.update(shard);
