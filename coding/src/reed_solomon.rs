@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn minifuzz_decode_unique_commitment() {
         minifuzz::Builder::default()
-            .with_search_limit(1024)
+            .with_search_limit(2048)
             .test(|u| {
                 fuzz_arbitrary_codeword(u)?;
                 fuzz_mixed_codeword(u)?;
@@ -1213,6 +1213,43 @@ mod tests {
         let root = tree.root();
 
         let pieces = (0u16..=3u16)
+            .into_iter()
+            .map(|i| {
+                let proof = tree.proof(i as u32).unwrap();
+                checked(
+                    root,
+                    Chunk::new(shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_reconstructed_original_with_extra_non_canonical_recovery_rejected() {
+        let data = b"canonical reconstructed originals with bad extra recovery";
+        let total = 6u16;
+        let min = 3u16;
+
+        let (_root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        let mut shards = chunks
+            .iter()
+            .map(|chunk| chunk.shard.to_vec())
+            .collect::<Vec<_>>();
+        shards[4][0] ^= 0xFF;
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        let pieces = [0u16, 1u16, 3u16, 4u16]
             .into_iter()
             .map(|i| {
                 let proof = tree.proof(i as u32).unwrap();
