@@ -156,7 +156,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certification with `false`.
         ///
         /// Closing the channel is also terminal for this request and should be reserved for cases
-        /// where certification can no longer produce a verdict (for example, shutdown).
+        /// where certification can no longer produce a verdict (for example, shutdown), not for temporary
+        /// inability to decide.
         ///
         /// # Determinism Requirement
         ///
