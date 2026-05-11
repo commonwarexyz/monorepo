@@ -193,7 +193,6 @@ impl<T> ReadyQueue<T> {
 
 struct OverflowState<T> {
     queue: Mutex<VecDeque<T>>,
-    len: AtomicUsize,
     activity: AtomicUsize,
 }
 
@@ -202,13 +201,8 @@ impl<T> OverflowState<T> {
     fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
-            len: AtomicUsize::new(0),
             activity: AtomicUsize::new(0),
         }
-    }
-
-    fn len(&self) -> usize {
-        self.len.load(Ordering::Acquire)
     }
 
     fn is_active(&self) -> bool {
@@ -229,20 +223,20 @@ impl<T> OverflowState<T> {
         let _mutation = self.begin_mutation();
         let mut queue = lock(&self.queue);
         if is_closed() {
-            self.publish_len(&queue);
+            self.publish_activity(&queue);
             return Feedback::Closed;
         }
 
         let message = match Self::try_ready_if_overflow_empty_locked(&queue, ready, message) {
             Ok(()) => {
-                self.publish_len(&queue);
+                self.publish_activity(&queue);
                 return Feedback::Ok;
             }
             Err(message) => message,
         };
 
         let feedback = Self::apply_policy_locked(&mut queue, message);
-        self.publish_len(&queue);
+        self.publish_activity(&queue);
         feedback
     }
 
@@ -254,7 +248,7 @@ impl<T> OverflowState<T> {
         let _mutation = self.begin_mutation();
         let mut queue = lock(&self.queue);
         Self::refill_ready_locked(&mut queue, ready);
-        self.publish_len(&queue);
+        self.publish_activity(&queue);
     }
 
     fn begin_mutation(&self) -> Mutation<'_> {
@@ -302,10 +296,8 @@ impl<T> OverflowState<T> {
         }
     }
 
-    fn publish_len(&self, queue: &VecDeque<T>) {
-        let len = queue.len();
-        self.len.store(len, Ordering::Release);
-        if len == 0 {
+    fn publish_activity(&self, queue: &VecDeque<T>) {
+        if queue.is_empty() {
             self.activity
                 .fetch_and(!OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
         } else {
@@ -361,7 +353,6 @@ impl<T: Policy> Drop for Sender<T> {
 impl<T: Policy> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sender")
-            .field("len", &self.len())
             .field("capacity", &self.state.ready.capacity())
             .field("closed", &self.state.closed.load(Ordering::Acquire))
             .finish()
@@ -395,10 +386,6 @@ impl<T: Policy> Sender<T> {
             self.state.waker.wake();
         }
         feedback
-    }
-
-    fn len(&self) -> usize {
-        self.state.ready.len() + self.state.overflow.len()
     }
 }
 
@@ -558,7 +545,6 @@ mod tests {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
-        assert_eq!(sender.len(), 2);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Buffered(2)));
@@ -594,7 +580,6 @@ mod tests {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
-        assert_eq!(sender.len(), 2);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(2)));
@@ -619,7 +604,6 @@ mod tests {
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
-        assert_eq!(sender.len(), 3);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(2)));
@@ -730,6 +714,12 @@ mod loom_tests {
         Coordinated(u8, Arc<AtomicUsize>),
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ReplacingMessage {
+        FillReady,
+        Replace(u8),
+    }
+
     impl Policy for Message {
         fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
             match message {
@@ -759,6 +749,24 @@ mod loom_tests {
         }
     }
 
+    impl Policy for ReplacingMessage {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
+            match message {
+                Self::FillReady => false,
+                Self::Replace(_) => {
+                    overflow
+                        .replace_last(message, |pending| {
+                            matches!(pending, Self::Replace(_))
+                        })
+                        .unwrap_or_else(|message| {
+                            overflow.spill(message);
+                        });
+                    true
+                }
+            }
+        }
+    }
+
     fn record(seen: &AtomicUsize, message: Message) {
         let value = match message {
             Message::Drop(value) | Message::Spill(value) => value,
@@ -769,6 +777,13 @@ mod loom_tests {
     fn value(message: OrderedMessage) -> u8 {
         match message {
             OrderedMessage::Item(value) | OrderedMessage::Coordinated(value, _) => value,
+        }
+    }
+
+    const fn replacement_value(message: ReplacingMessage) -> Option<u8> {
+        match message {
+            ReplacingMessage::FillReady => None,
+            ReplacingMessage::Replace(value) => Some(value),
         }
     }
 
@@ -847,6 +862,55 @@ mod loom_tests {
     }
 
     #[test]
+    fn concurrent_spill_senders_preserve_messages() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let idle_sender = sender.clone();
+            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+
+            let sender_1 = sender.clone();
+            let enqueue_1 = thread::spawn(move || sender_1.enqueue(Message::Spill(1)));
+            let enqueue_2 = thread::spawn(move || sender.enqueue(Message::Spill(2)));
+
+            let seen = Arc::new(AtomicUsize::new(0));
+
+            assert!(enqueue_1.join().unwrap().accepted());
+            assert!(enqueue_2.join().unwrap().accepted());
+
+            while let Ok(message) = receiver.try_recv() {
+                record(&seen, message);
+            }
+            assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+            drop(idle_sender);
+            assert_eq!(seen.load(Ordering::Acquire), 0b111);
+        });
+    }
+
+    #[test]
+    fn concurrent_replace_keeps_one_overflow_message() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<ReplacingMessage>(NZUsize!(1));
+            let idle_sender = sender.clone();
+            assert_eq!(sender.enqueue(ReplacingMessage::FillReady), Feedback::Ok);
+            assert_eq!(sender.enqueue(ReplacingMessage::Replace(1)), Feedback::Backoff);
+
+            let sender_1 = sender.clone();
+            let replace_1 =
+                thread::spawn(move || sender_1.enqueue(ReplacingMessage::Replace(2)));
+            let replace_2 = thread::spawn(move || sender.enqueue(ReplacingMessage::Replace(3)));
+
+            assert_eq!(replace_1.join().unwrap(), Feedback::Backoff);
+            assert_eq!(replace_2.join().unwrap(), Feedback::Backoff);
+            assert_eq!(receiver.try_recv(), Ok(ReplacingMessage::FillReady));
+
+            let retained = replacement_value(receiver.try_recv().unwrap()).unwrap();
+            assert!(retained == 2 || retained == 3);
+            assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+            drop(idle_sender);
+        });
+    }
+
+    #[test]
     fn stale_overflow_hint_retries_ready_before_policy() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(2));
@@ -905,8 +969,7 @@ mod loom_tests {
             assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
             assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Backoff);
 
-            let enqueue_sender = sender.clone();
-            let enqueue = thread::spawn(move || enqueue_sender.enqueue(OrderedMessage::Item(2)));
+            let enqueue = thread::spawn(move || sender.enqueue(OrderedMessage::Item(2)));
             let receive = thread::spawn(move || {
                 assert_eq!(receiver.try_recv().map(value), Ok(0));
                 receiver
