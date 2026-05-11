@@ -294,9 +294,10 @@ impl BufferPoolConfig {
     ///
     /// # Panics
     ///
-    /// Panics if size-class bounds violate the invariants checked by `validate`.
-    ///
-    /// Panics if the derived per-class capacity does not fit in `u32`.
+    /// - `min_size` is not a power of two
+    /// - `max_size` is not a power of two
+    /// - `max_size < min_size`
+    /// - the derived per-class capacity does not fit in `u32`.
     pub fn with_budget_bytes(mut self, budget_bytes: NonZeroUsize) -> Self {
         self.validate_size_class_bounds();
 
