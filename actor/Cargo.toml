@@ -17,7 +17,7 @@ workspace = true
 cfg-if.workspace = true
 commonware-macros.workspace = true
 crossbeam-queue.workspace = true
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
+futures-util.workspace = true
 loom = { workspace = true, optional = true }
 parking_lot.workspace = true
 

@@ -17,7 +17,7 @@
 
 use crate::Feedback;
 #[cfg(not(feature = "loom"))]
-use futures::task::AtomicWaker;
+use futures_util::task::AtomicWaker;
 use std::{
     collections::VecDeque,
     fmt,

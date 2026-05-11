@@ -1014,6 +1014,7 @@ dependencies = [
  "criterion",
  "crossbeam-queue",
  "futures",
+ "futures-util",
  "loom",
  "parking_lot",
 ]
