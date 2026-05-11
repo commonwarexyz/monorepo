@@ -573,38 +573,38 @@ where
         BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
-    // sees this many ops). Thread it through `active_chunks` derivation and root computation.
-    let overlay_ops_leaves = *inner.new_last_commit_loc + 1;
+    // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
+    let overlay_ops_leaves = Location::<F>::new(inner.bounds.total_size);
 
     // Distinguish three counters:
     //   - new_complete_chunks: chunks with all bits filled in the post-batch bitmap
-    //   - active_overlay:      chunks committed by the grafted tree (have a single h=G ancestor)
-    //   - active_parent:       grafted-tree leaf count from the parent (structural source of truth)
+    //   - graftable_overlay:      chunks committed by the grafted tree (have a single h=G ancestor)
+    //   - graftable_parent:       grafted-tree leaf count from the parent (structural source of truth)
     //
-    // The pending chunk (if any) sits at index `active_overlay` and is excluded from the
-    // grafted tree — its bytes ride in the trailer.
+    // The pending chunk (if any) sits at index `graftable_overlay` and is excluded from the
+    // grafted tree; its digest is hashed directly into the canonical root.
     let new_complete_chunks = overlay.complete_chunks();
-    let active_overlay = grafting::ops_active_chunks::<F>(overlay_ops_leaves, grafting_height)
+    let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
         .min(new_complete_chunks as u64) as usize;
-    let active_parent = *grafted_parent.leaves() as usize;
+    let graftable_parent = *grafted_parent.leaves() as usize;
     let pruned_chunks = bitmap_parent.pruned_chunks();
     debug_assert!(
-        pruned_chunks <= active_parent && active_parent <= active_overlay && active_overlay <= new_complete_chunks,
-        "invariant violated: pruned={pruned_chunks} active_parent={active_parent} active_overlay={active_overlay} new_complete={new_complete_chunks}"
+        pruned_chunks <= graftable_parent && graftable_parent <= graftable_overlay && graftable_overlay <= new_complete_chunks,
+        "invariant violated: pruned={pruned_chunks} graftable_parent={graftable_parent} graftable_overlay={graftable_overlay} new_complete={new_complete_chunks}"
     );
 
     // Build the set of chunk indices whose grafted-leaf needs (re)computing:
-    //   1) Dirty chunks (bits changed in this batch) within the active range.
-    //   2) Pending → active transitions: chunks newly graftable because the ops tree built
+    //   1) Dirty chunks (bits changed in this batch) within the graftable range.
+    //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
-    //      became active via ops growth alone) but they need a grafted-leaf entry now.
+    //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
     let mut chunk_indices_to_update: BTreeSet<usize> = overlay
         .chunks
         .iter()
-        .filter(|(&idx, _)| idx < active_overlay && idx >= pruned_chunks)
+        .filter(|(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
-    for idx in active_parent..active_overlay {
+    for idx in graftable_parent..graftable_overlay {
         chunk_indices_to_update.insert(idx);
     }
     let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
@@ -661,7 +661,7 @@ where
         grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) — distinct
-    // from `active_overlay` (the grafted-tree boundary). At G >= 3, partial and pending can
+    // from `graftable_overlay` (the grafted-tree boundary). At G >= 3, partial and pending can
     // coexist; this branch only handles partial. The pending chunk (when present) is read
     // from the bitmap inside `compute_db_root` via `pending_chunk()`.
     let partial = {
