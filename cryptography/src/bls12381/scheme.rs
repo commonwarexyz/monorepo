@@ -39,7 +39,7 @@ use commonware_codec::{
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -394,8 +394,8 @@ impl BatchVerifier for Batch {
         true
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
-        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, &Sequential).is_ok()
+    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, strategy).is_ok()
     }
 }
 
@@ -405,6 +405,7 @@ mod tests {
     use crate::{bls12381, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
 
     #[test]
@@ -484,7 +485,7 @@ mod tests {
     #[test]
     fn batch_verify_empty() {
         let batch = Batch::new();
-        assert!(batch.verify(&mut test_rng()));
+        assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]
