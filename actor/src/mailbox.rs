@@ -339,7 +339,9 @@ impl<'a> Mutation<'a> {
 
 impl Drop for Mutation<'_> {
     fn drop(&mut self) {
-        let previous = self.activity.fetch_sub(OVERFLOW_MUTATION, Ordering::Relaxed);
+        let previous = self
+            .activity
+            .fetch_sub(OVERFLOW_MUTATION, Ordering::Relaxed);
         assert!(previous >= OVERFLOW_MUTATION);
     }
 }
@@ -1061,7 +1063,10 @@ mod loom_tests {
             assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
             assert_eq!(wakes.load(Ordering::Acquire), 1);
-            assert_eq!(next.as_mut().poll(&mut cx), Poll::Ready(Some(Message::Spill(0))));
+            assert_eq!(
+                next.as_mut().poll(&mut cx),
+                Poll::Ready(Some(Message::Spill(0)))
+            );
         });
     }
 
@@ -1305,7 +1310,9 @@ mod loom_tests {
                 }
 
                 assert_eq!(
-                    next.as_mut().poll(&mut cx).map(|message| message.map(value)),
+                    next.as_mut()
+                        .poll(&mut cx)
+                        .map(|message| message.map(value)),
                     Poll::Ready(Some(0))
                 );
                 overflow
@@ -1323,7 +1330,9 @@ mod loom_tests {
                 }
 
                 assert_eq!(
-                    next.as_mut().poll(&mut cx).map(|message| message.map(value)),
+                    next.as_mut()
+                        .poll(&mut cx)
+                        .map(|message| message.map(value)),
                     Poll::Ready(Some(1))
                 );
             }
