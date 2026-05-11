@@ -52,16 +52,14 @@ use std::{
 
 // `activity` packs the published overflow state and in-flight overflow
 // mutations into one atomic word. The overflow lock serializes actual
-// `VecDeque` changes; this word lets the ready fast path avoid that lock when
-// overflow is inactive.
+// `VecDeque` changes (this word lets the ready fast path avoid that lock when
+// overflow is inactive).
 //
 // The low bit records whether the most recently published overflow state was
 // non-empty. The higher bits count active overflow mutations. Each mutation
 // adds `OVERFLOW_MUTATION` while it may mutate or publish overflow state, so
 // the count and the state bit coexist in the same word.
-const OVERFLOW_HAS_MESSAGES: usize = 1;
-const OVERFLOW_MUTATION: usize = 2;
-
+//
 // Useful states:
 // - `activity == 0`: no published overflow and no active overflow mutation, so
 //   senders may try the direct ready fast path.
@@ -76,6 +74,8 @@ const OVERFLOW_MUTATION: usize = 2;
 // contents. The overflow mutex serializes `VecDeque` access, and the ready queue
 // owns its own synchronization. Stale activity observations only decide whether
 // a caller tries a fast path, locks overflow, or waits for a later wake.
+const OVERFLOW_HAS_MESSAGES: usize = 1;
+const OVERFLOW_MUTATION: usize = 2;
 
 /// Overflow behavior for actor messages when an inbox is full.
 pub trait Policy: Sized {
