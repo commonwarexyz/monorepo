@@ -244,7 +244,7 @@ impl<T> Overflow<T> {
 
     fn try_ready(&self, ready: &Ready<T>, message: T) -> Result<(), T> {
         // If a racing sender begins overflow mutation after this load, both sends
-        // are concurrent and may be observed in either order.
+        // are concurrent and may be observed in either order
         if self.is_active() {
             return Err(message);
         }
@@ -469,7 +469,7 @@ impl<T> Receiver<T> {
         }
 
         // Empty ready may race with stale activity, so let `refill`
-        // decide whether overflow is worth locking.
+        // decide whether overflow is worth locking
         self.state.overflow.refill(&self.state.ready);
         self.state.ready.pop()
     }
