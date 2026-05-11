@@ -1213,7 +1213,6 @@ mod tests {
         let root = tree.root();
 
         let pieces = (0u16..=3u16)
-            .into_iter()
             .map(|i| {
                 let proof = tree.proof(i as u32).unwrap();
                 checked(
