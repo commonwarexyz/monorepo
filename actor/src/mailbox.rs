@@ -28,6 +28,9 @@ cfg_if::cfg_if! {
     }
 }
 
+const OVERFLOW_HAS_MESSAGES: usize = 1;
+const OVERFLOW_MUTATION: usize = 2;
+
 /// Policy-managed overflow behind the bounded ready queue.
 ///
 /// Mailbox capacity only bounds the ready queue. Overflow is controlled by
@@ -191,6 +194,7 @@ impl<T> ReadyQueue<T> {
 struct OverflowState<T> {
     queue: Mutex<VecDeque<T>>,
     len: AtomicUsize,
+    activity: AtomicUsize,
 }
 
 impl<T> OverflowState<T> {
@@ -199,6 +203,7 @@ impl<T> OverflowState<T> {
         Self {
             queue: Mutex::new(VecDeque::new()),
             len: AtomicUsize::new(0),
+            activity: AtomicUsize::new(0),
         }
     }
 
@@ -207,27 +212,26 @@ impl<T> OverflowState<T> {
     }
 
     fn is_active(&self) -> bool {
-        self.len() > 0
+        self.activity.load(Ordering::SeqCst) != 0
     }
 
-    fn apply_policy(
-        &self,
-        ready: &ReadyQueue<T>,
-        message: T,
-        is_closed: impl Fn() -> bool,
-    ) -> Feedback
+    fn try_push_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
+        if self.is_active() {
+            return Err(message);
+        }
+        ready.push(message)
+    }
+
+    fn enqueue(&self, ready: &ReadyQueue<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
     where
         T: Policy,
     {
+        let _mutation = self.begin_mutation();
         let mut queue = lock(&self.queue);
         if is_closed() {
+            self.publish_len(&queue);
             return Feedback::Closed;
         }
-
-        // The overflow lock orders promotion before policy. Promote older
-        // overflow first so capacity already freed by the receiver is used
-        // before this message can be dropped or replaced by policy.
-        Self::refill_ready_locked(&mut queue, ready);
 
         let message = match Self::try_ready_if_overflow_empty_locked(&queue, ready, message) {
             Ok(()) => {
@@ -243,9 +247,21 @@ impl<T> OverflowState<T> {
     }
 
     fn refill_ready(&self, ready: &ReadyQueue<T>) {
+        if !self.is_active() {
+            return;
+        }
+
+        let _mutation = self.begin_mutation();
         let mut queue = lock(&self.queue);
         Self::refill_ready_locked(&mut queue, ready);
         self.publish_len(&queue);
+    }
+
+    fn begin_mutation(&self) -> Mutation<'_> {
+        self.activity.fetch_add(OVERFLOW_MUTATION, Ordering::SeqCst);
+        Mutation {
+            activity: &self.activity,
+        }
     }
 
     fn try_ready_if_overflow_empty_locked(
@@ -253,9 +269,8 @@ impl<T> OverflowState<T> {
         ready: &ReadyQueue<T>,
         message: T,
     ) -> Result<(), T> {
-        // `len` is only a hint for avoiding this lock. After promotion, retry
-        // ready while still holding the overflow lock so stale hints and
-        // already-drained overflow do not force this message through policy.
+        // The overflow lock is the ordering point for senders. A message may
+        // enter ready directly only when no older overflow exists.
         if queue.is_empty() {
             ready.push(message)
         } else {
@@ -288,7 +303,26 @@ impl<T> OverflowState<T> {
     }
 
     fn publish_len(&self, queue: &VecDeque<T>) {
-        self.len.store(queue.len(), Ordering::Release);
+        let len = queue.len();
+        self.len.store(len, Ordering::Release);
+        if len == 0 {
+            self.activity
+                .fetch_and(!OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
+        } else {
+            self.activity
+                .fetch_or(OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
+        }
+    }
+}
+
+struct Mutation<'a> {
+    activity: &'a AtomicUsize,
+}
+
+impl Drop for Mutation<'_> {
+    fn drop(&mut self) {
+        let previous = self.activity.fetch_sub(OVERFLOW_MUTATION, Ordering::SeqCst);
+        assert!(previous >= OVERFLOW_MUTATION);
     }
 }
 
@@ -342,36 +376,29 @@ impl<T: Policy> Sender<T> {
             return Feedback::Closed;
         }
 
-        let message = if self.state.overflow.is_active() {
-            message
-        } else {
-            match self.state.ready.push(message) {
-                Ok(()) => {
-                    self.state.waker.wake();
-                    return Feedback::Ok;
-                }
-                Err(message) => message,
-            }
-        };
-
-        self.backpressure_overflow(message)
-    }
-
-    fn len(&self) -> usize {
-        self.state.ready.len() + self.state.overflow.len()
-    }
-
-    fn backpressure_overflow(&self, message: T) -> Feedback {
-        let feedback = self
+        let message = match self
             .state
             .overflow
-            .apply_policy(&self.state.ready, message, || {
-                self.state.closed.load(Ordering::Acquire)
-            });
+            .try_push_ready(&self.state.ready, message)
+        {
+            Ok(()) => {
+                self.state.waker.wake();
+                return Feedback::Ok;
+            }
+            Err(message) => message,
+        };
+
+        let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
+            self.state.closed.load(Ordering::Acquire)
+        });
         if feedback.accepted() {
             self.state.waker.wake();
         }
         feedback
+    }
+
+    fn len(&self) -> usize {
+        self.state.ready.len() + self.state.overflow.len()
     }
 }
 
@@ -421,11 +448,14 @@ impl<T> Receiver<T> {
 
     fn pop(&mut self) -> Option<T> {
         if let Some(message) = self.state.ready.pop() {
+            if self.state.overflow.is_active() && self.state.ready.len() == 0 {
+                self.state.overflow.refill_ready(&self.state.ready);
+            }
             return Some(message);
         }
 
-        // Batch promotion on the receive path. Senders also promote before
-        // policy, so ready capacity freed before policy runs is still checked.
+        // Empty ready may race with stale activity, so let `refill_ready`
+        // decide whether overflow is worth locking.
         self.state.overflow.refill_ready(&self.state.ready);
         self.state.ready.pop()
     }
