@@ -50,6 +50,20 @@ use std::{
     task::{Context, Poll},
 };
 
+/// Overflow behavior for actor messages when an inbox is full.
+pub trait Policy: Sized {
+    /// Handle `message` when it cannot enter the bounded ready queue immediately.
+    ///
+    /// Messages already in the ready queue are not provided here. Policy changes only apply to
+    /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
+    /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
+    ///
+    /// The returned value is feedback for this enqueue attempt after the policy has made any
+    /// overflow changes. Return `true` to report [`Feedback::Backoff`] or `false` to report
+    /// [`Feedback::Dropped`].
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
+}
+
 // `activity` packs the published overflow state and in-flight overflow
 // mutations into one atomic word. The overflow lock serializes actual
 // `VecDeque` changes (this word lets the ready fast path avoid that lock when
@@ -76,24 +90,6 @@ use std::{
 // a caller tries a fast path, locks overflow, or waits for a later wake.
 const OVERFLOW_HAS_MESSAGES: usize = 1;
 const OVERFLOW_MUTATION: usize = 2;
-
-/// Overflow behavior for actor messages when an inbox is full.
-pub trait Policy: Sized {
-    /// Handle `message` when it cannot enter the bounded ready queue immediately.
-    ///
-    /// Messages already in the ready queue are not provided here. Policy changes only apply to
-    /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
-    /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
-    ///
-    /// The receiver eagerly refills ready from overflow after ready pops so producer enqueue can
-    /// return to the ready fast path as soon as capacity opens.
-    ///
-    /// The returned value is feedback for this enqueue attempt after the policy has made any
-    /// overflow changes. It does not guarantee that `message` or any existing overflow item was
-    /// retained. Return `true` to report [`Feedback::Backoff`] or `false` to report
-    /// [`Feedback::Dropped`].
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
-}
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
