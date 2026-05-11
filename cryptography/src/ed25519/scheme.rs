@@ -365,8 +365,8 @@ impl BatchVerifier for Batch {
         self.add_inner(Some(namespace), message, public_key, signature)
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R, _strategy: &impl Strategy) -> bool {
-        self.verifier.verify(rng).is_ok()
+    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+        self.verifier.verify(rng, strategy).is_ok()
     }
 }
 

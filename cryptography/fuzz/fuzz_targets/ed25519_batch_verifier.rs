@@ -5,6 +5,7 @@ use commonware_cryptography::{
     ed25519::{self, Batch as Ed25519Batch},
     BatchVerifier, Signer, Verifier,
 };
+use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -101,7 +102,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             BatchOperation::VerifyEd25519 => {
-                let result = ed25519_batch.verify(&mut rng);
+                let result = ed25519_batch.verify(&mut rng, &Sequential);
                 assert_eq!(
                     result, expected_ed25519_result,
                     "Ed25519 batch verification result mismatch: expected {expected_ed25519_result}, got {result}",
@@ -115,7 +116,7 @@ fn fuzz(input: FuzzInput) {
     }
 
     // Final verification of any remaining items
-    let ed25519_result = ed25519_batch.verify(&mut rng);
+    let ed25519_result = ed25519_batch.verify(&mut rng, &Sequential);
     assert_eq!(
         ed25519_result, expected_ed25519_result,
         "Final Ed25519 batch verification failed"

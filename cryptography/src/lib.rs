@@ -10,8 +10,6 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-use commonware_parallel::Strategy;
-
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
@@ -50,6 +48,7 @@ commonware_macros::stability_scope!(ALPHA {
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Strategy;
     use commonware_utils::Array;
     use rand::SeedableRng as _;
     use rand_chacha::ChaCha20Rng;

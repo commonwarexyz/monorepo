@@ -37,11 +37,14 @@
 use super::{Error, Signature, VerificationKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap as Map, vec::Vec};
+use commonware_parallel::Strategy;
 use curve25519_dalek::{
     edwards::{CompressedEdwardsY, EdwardsPoint},
     scalar::Scalar,
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore};
 use sha2::{digest::Update, Sha512};
 #[cfg(feature = "std")]
@@ -120,73 +123,108 @@ impl Verifier {
     /// as individual verification, which may reject some signatures this method
     /// accepts.
     #[allow(non_snake_case)]
-    pub fn verify<R: RngCore + CryptoRng>(self, mut rng: R) -> Result<(), Error> {
-        // The batch verification equation is
-        //
-        // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
-        //
-        // where for each signature i,
-        // - A_i is the verification key;
-        // - R_i is the signature's R value;
-        // - s_i is the signature's s value;
-        // - k_i is the hash of the message and other data;
-        // - z_i is a random 128-bit Scalar.
-        //
-        // Normally n signatures would require a multiscalar multiplication of
-        // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
-        // and R_i). However, because we store batch entries in a map
-        // indexed by the verification key, we can "coalesce" all z_i * k_i
-        // terms for each distinct verification key into a single coefficient.
-        //
-        // For n signatures from m verification keys, this approach instead
-        // requires a multiscalar multiplication of size n + m + 1 together with
-        // only n point decompressions because verification keys are decompressed
-        // before they are queued. When m = n, so all signatures are from
-        // distinct verification keys, this saves n decompressions relative to
-        // the usual method. However, when m = 1 and all signatures are from a
-        // single verification key, this is nearly twice as fast.
-
-        let m = self.signatures.len();
-
-        let mut A_coeffs = Vec::with_capacity(m);
-        let mut As = Vec::with_capacity(m);
-        let mut R_coeffs = Vec::with_capacity(self.batch_size);
-        let mut Rs = Vec::with_capacity(self.batch_size);
-        let mut B_coeff = Scalar::ZERO;
-
-        for (vk, sigs) in self.signatures.iter() {
-            let A = -vk.minus_A;
-            let mut A_coeff = Scalar::ZERO;
-
-            for (k, sig) in sigs.iter() {
-                let R = CompressedEdwardsY(sig.R_bytes)
-                    .decompress()
-                    .ok_or(Error::InvalidSignature)?;
-                let s = Scalar::from_canonical_bytes(sig.s_bytes)
-                    .into_option()
-                    .ok_or(Error::InvalidSignature)?;
-                let z = Scalar::from(gen_u128(&mut rng));
-                B_coeff -= z * s;
-                Rs.push(R);
-                R_coeffs.push(z);
-                A_coeff += z * k;
-            }
-
-            As.push(A);
-            A_coeffs.push(A_coeff);
+    pub fn verify<R: RngCore + CryptoRng>(
+        self,
+        mut rng: R,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if self.batch_size == 0 {
+            return Ok(());
         }
 
-        use core::iter::once;
-        use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as B;
-        let check = EdwardsPoint::vartime_multiscalar_mul(
-            once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
-            once(&B).chain(As.iter()).chain(Rs.iter()),
-        );
-
-        if check.mul_by_cofactor().is_identity() {
-            Ok(())
-        } else {
-            Err(Error::InvalidSignature)
+        let groups: Vec<_> = self.signatures.into_iter().collect();
+        let shard_count = strategy.parallelism_hint().max(1).min(groups.len());
+        let shard_size = groups.len().div_ceil(shard_count);
+        let mut shards = Vec::with_capacity(shard_count);
+        for shard in groups.chunks(shard_size) {
+            let mut seed = [0u8; 32];
+            rng.fill_bytes(&mut seed);
+            shards.push((shard, seed));
         }
+
+        strategy.fold(
+            shards,
+            || Ok(()),
+            |result, (shard, seed)| {
+                result?;
+                let mut rng = ChaCha20Rng::from_seed(seed);
+
+                // The batch verification equation is
+                //
+                // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
+                //
+                // where for each signature i,
+                // - A_i is the verification key;
+                // - R_i is the signature's R value;
+                // - s_i is the signature's s value;
+                // - k_i is the hash of the message and other data;
+                // - z_i is a random 128-bit Scalar.
+                //
+                // Normally n signatures would require a multiscalar multiplication of
+                // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
+                // and R_i). However, because we store batch entries in a map
+                // indexed by the verification key, we can "coalesce" all z_i * k_i
+                // terms for each distinct verification key into a single coefficient.
+                //
+                // For n signatures from m verification keys, this approach instead
+                // requires a multiscalar multiplication of size n + m + 1 together with
+                // only n point decompressions because verification keys are decompressed
+                // before they are queued. When m = n, so all signatures are from
+                // distinct verification keys, this saves n decompressions relative to
+                // the usual method. However, when m = 1 and all signatures are from a
+                // single verification key, this is nearly twice as fast.
+
+                let m = shard.len();
+                let batch_size = shard.iter().map(|(_, sigs)| sigs.len()).sum();
+
+                let mut A_coeffs = Vec::with_capacity(m);
+                let mut As = Vec::with_capacity(m);
+                let mut R_coeffs = Vec::with_capacity(batch_size);
+                let mut Rs = Vec::with_capacity(batch_size);
+                let mut B_coeff = Scalar::ZERO;
+
+                for (vk, sigs) in shard {
+                    let A = -vk.minus_A;
+                    let mut A_coeff = Scalar::ZERO;
+
+                    for (k, sig) in sigs.iter() {
+                        let R = CompressedEdwardsY(sig.R_bytes)
+                            .decompress()
+                            .ok_or(Error::InvalidSignature)?;
+                        let s = Scalar::from_canonical_bytes(sig.s_bytes)
+                            .into_option()
+                            .ok_or(Error::InvalidSignature)?;
+                        let z = Scalar::from(gen_u128(&mut rng));
+                        B_coeff -= z * s;
+                        Rs.push(R);
+                        R_coeffs.push(z);
+                        A_coeff += z * k;
+                    }
+
+                    As.push(A);
+                    A_coeffs.push(A_coeff);
+                }
+
+                use core::iter::once;
+                use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as B;
+                let check = EdwardsPoint::vartime_multiscalar_mul(
+                    once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
+                    once(&B).chain(As.iter()).chain(Rs.iter()),
+                );
+
+                if check.mul_by_cofactor().is_identity() {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidSignature)
+                }
+            },
+            |left, right| {
+                if left.is_err() {
+                    left
+                } else {
+                    right
+                }
+            },
+        )
     }
 }
