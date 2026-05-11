@@ -35,22 +35,26 @@
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
 use super::{Error, Signature, VerificationKey};
+use crate::transcript::{Summary, Transcript};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap as Map, vec::Vec};
+use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
+use core::iter::once;
 use curve25519_dalek::{
+    constants::ED25519_BASEPOINT_POINT as B,
     edwards::{CompressedEdwardsY, EdwardsPoint},
     scalar::Scalar,
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore};
 use sha2::{digest::Update, Sha512};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
 type Map<K, V> = HashMap<K, V>;
+
+const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
 // Shim to generate a u128 without importing `rand`.
 fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
@@ -128,20 +132,15 @@ impl Verifier {
         mut rng: R,
         strategy: &impl Strategy,
     ) -> Result<(), Error> {
-        if self.batch_size == 0 {
-            return Ok(());
-        }
-
         // Split all signatures into shards for parallel processing. Each shard is roughly
         // `n_signatures / cores` in size. Random seeds are generated for each shard, derived
         // from the provided RNG, to compute a random scalar for each signature in the shard.
         let groups: Vec<_> = self.signatures.into_iter().collect();
-        let shard_count = strategy.parallelism_hint().max(1).min(groups.len());
-        let shard_size = groups.len().div_ceil(shard_count);
+        let shard_count = strategy.parallelism_hint().max(1).min(groups.len().max(1));
+        let shard_size = groups.len().div_ceil(shard_count).max(1);
         let mut shards = Vec::with_capacity(shard_count);
         for shard in groups.chunks(shard_size) {
-            let mut seed = [0u8; 32];
-            rng.fill_bytes(&mut seed);
+            let seed = Summary::random(&mut rng);
             shards.push((shard, seed));
         }
 
@@ -150,7 +149,7 @@ impl Verifier {
             || Ok(()),
             |result, (shard, seed)| {
                 result?;
-                let mut rng = ChaCha20Rng::from_seed(seed);
+                let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
 
                 // The batch verification equation is
                 //
@@ -208,8 +207,6 @@ impl Verifier {
                     A_coeffs.push(A_coeff);
                 }
 
-                use core::iter::once;
-                use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as B;
                 let check = EdwardsPoint::vartime_multiscalar_mul(
                     once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
                     once(&B).chain(As.iter()).chain(Rs.iter()),
@@ -221,13 +218,7 @@ impl Verifier {
                     Err(Error::InvalidSignature)
                 }
             },
-            |left, right| {
-                if left.is_err() {
-                    left
-                } else {
-                    right
-                }
-            },
+            |left, right| left.and(right),
         )
     }
 }
