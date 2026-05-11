@@ -44,7 +44,14 @@ members = [
     "storage/fuzz",
     "utils/fuzz"
 ]
+exclude = [
+    ".github/dylints/borrowed_child_context",
+    ".github/dylints/child_attribute_name_conflict",
+]
 resolver = "2"
+
+[workspace.metadata.dylint]
+libraries = [{ path = ".github/dylints/*" }]
 
 [workspace.package]
 version = "2026.4.0"

@@ -648,7 +648,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             codec_config: config.codec_config,
         };
         let mut oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
+            Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -1160,7 +1160,8 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Metrics, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
+        Supervisor as _,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
@@ -1211,7 +1212,7 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -1267,12 +1268,10 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.with_label("first"),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
                 freezer.put(test_key("key0"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
@@ -1296,7 +1295,7 @@ mod tests {
             // read_latest_entry would then see two "valid" entries with epoch=0 and
             // panic on unreachable!().
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.with_label("second"),
+                context.child("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )

@@ -123,11 +123,11 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
-            self,
-            mmr::{self, Location, StandardHasher},
+            mmr::{self, Location},
             Location as GenericLocation,
         },
         qmdb::{
+            self,
             any::{
                 test::fixed_db_config,
                 unordered::{fixed::Operation, Update},
@@ -141,7 +141,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics, Runner as _,
+        Metrics as _, Runner as _, Supervisor as _,
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
@@ -252,10 +252,56 @@ pub(crate) mod test {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
+    #[test_traced("INFO")]
+    fn test_any_unordered_fixed_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db_generic::<mmr::Family>(ctx.child("db")).await;
+            let k = key(1);
+            let v = val(1);
+            let batch = db
+                .new_batch()
+                .write(k, Some(v))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&k).await.unwrap(), Some(v));
+            assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(Location::new(0)).await.unwrap();
+
+            let metrics = ctx.encode();
+            for expected in [
+                "db_size 4",
+                "db_pruning_boundary 0",
+                "db_retained 4",
+                "db_inactivity_floor 2",
+                "db_last_commit 3",
+                "db_get_calls_total 1",
+                "db_get_many_calls_total 1",
+                "db_keys_requested_total 2",
+                "db_apply_batch_calls_total 1",
+                "db_operations_applied_total 3",
+                "db_commit_calls_total 1",
+                "db_sync_calls_total 1",
+                "db_prune_calls_total 1",
+                "db_get_duration_count 1",
+                "db_get_many_duration_count 1",
+                "db_apply_batch_duration_count 1",
+                "db_commit_duration_count 1",
+                "db_sync_duration_count 1",
+                "db_prune_duration_count 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
+    }
+
     // -- Generic inner functions for parameterized batch tests --
 
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
         let root_before = db.root();
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
@@ -270,7 +316,7 @@ pub(crate) mod test {
     }
 
     async fn batch_metadata_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
         let metadata = val(42);
 
         commit_writes_generic(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
@@ -284,7 +330,7 @@ pub(crate) mod test {
     }
 
     async fn batch_get_read_through_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let va = val(0);
@@ -312,7 +358,7 @@ pub(crate) mod test {
     }
 
     async fn batch_get_on_merkleized_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let kb = key(1);
@@ -341,7 +387,7 @@ pub(crate) mod test {
     }
 
     async fn batch_stacked_get_inner<F: Family>(context: deterministic::Context) {
-        let db = open_db_generic::<F>(context.with_label("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let kb = key(1);
@@ -371,7 +417,7 @@ pub(crate) mod test {
     }
 
     async fn batch_stacked_delete_recreate_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
         let ka = key(0);
 
         commit_writes_generic(&mut db, [(ka, Some(val(0)))], None).await;
@@ -399,7 +445,7 @@ pub(crate) mod test {
     }
 
     async fn batch_apply_returns_range_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
 
         let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
         let range1 = commit_writes_generic(&mut db, writes, None).await;
@@ -415,7 +461,7 @@ pub(crate) mod test {
     }
 
     async fn batch_speculative_root_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let mut db = open_db_generic::<F>(context.child("db")).await;
 
         let mut batch = db.new_batch();
         for i in 0..10 {
@@ -431,8 +477,8 @@ pub(crate) mod test {
     }
 
     async fn log_replay_inner<F: Family>(context: deterministic::Context) {
-        let db_context = context.with_label("db");
-        let mut db = open_db_generic::<F>(db_context.clone()).await;
+        let db_context = context.child("db");
+        let mut db = open_db_generic::<F>(db_context.child("db")).await;
 
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
@@ -449,7 +495,7 @@ pub(crate) mod test {
 
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
         drop(db);
-        let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.with_label("reopened")).await;
+        let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
         let iter = db.snapshot.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
@@ -575,7 +621,7 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
+            let mut db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
             let root_hash = db.root();
@@ -592,7 +638,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             assert!(verify_proof(
                 &hasher,
                 &historical_proof,
@@ -640,9 +686,9 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
 
-            let mut db = create_test_db(context.with_label("first")).await;
+            let mut db = create_test_db(context.child("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
             // after each batch is a commit-boundary historical size.
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
@@ -708,12 +754,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let hasher = StandardHasher::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+            let hasher = qmdb::hasher::<Sha256>();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 
             // Build checkpoints only at commit points and record reference proofs/roots there.
-            let mut db = create_test_db(context.with_label("main")).await;
+            let mut db = create_test_db(context.child("main")).await;
             let mut offset = 0usize;
             let mut checkpoints = Vec::new();
             for chunk in [20usize, 15, 25, 30, 10] {

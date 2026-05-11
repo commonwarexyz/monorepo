@@ -3,11 +3,11 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{self, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
@@ -78,7 +78,7 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let hasher = merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {
@@ -108,7 +108,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             };
 
             let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.clone(), cfg)
+                commonware_storage::qmdb::any::init(context.child("storage"), cfg)
                     .await
                     .expect("init qmdb");
 

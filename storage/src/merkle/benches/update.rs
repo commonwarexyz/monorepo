@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::merkle::{self, mem::Mem, Family, Location};
+use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -50,7 +50,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_locations = Vec::with_capacity(leaves);
-                            let h = StandardHasher::<Sha256>::new();
+                            let h = StandardHasher::<Sha256>::new(ForwardFold);
 
                             let mut mem = Mem::<F, _>::new();
                             let batch = {

@@ -50,7 +50,12 @@ use crate::{
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, Error},
+    qmdb::{
+        any::value::ValueEncoding,
+        batch_chain,
+        metrics::{LocationReadMetrics, OperationMetrics, StateMetrics},
+        Error,
+    },
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -58,6 +63,28 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::{Sequential, Strategy};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
+
+/// Metrics for Keyless QMDBs.
+pub(crate) struct Metrics<E: Context> {
+    /// State gauges.
+    pub state: StateMetrics,
+    /// Write and durability metrics.
+    pub operations: OperationMetrics<E>,
+    /// Location read metrics.
+    pub reads: LocationReadMetrics<E>,
+}
+
+impl<E: Context> Metrics<E> {
+    /// Create and register metrics.
+    pub fn new(context: E) -> Self {
+        let context = Arc::new(context);
+        Self {
+            state: StateMetrics::new(context.as_ref()),
+            operations: OperationMetrics::new(context.clone()),
+            reads: LocationReadMetrics::new(context),
+        }
+    }
+}
 
 pub mod batch;
 mod compact;
@@ -104,6 +131,9 @@ where
     /// The inactivity floor declared by the last committed batch. Operations at locations below
     /// this value are considered inactive by the application and may be pruned.
     inactivity_floor_loc: Location<F>,
+
+    /// Metrics for this database.
+    metrics: Metrics<E>,
 }
 
 impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
@@ -118,7 +148,9 @@ where
 {
     pub(crate) async fn init_from_journal(
         mut journal: authenticated::Journal<F, E, C, H, S>,
+        context: E,
     ) -> Result<Self, Error<F>> {
+        let metrics = Metrics::new(context);
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
             journal
@@ -127,17 +159,20 @@ where
             journal.sync().await?;
         }
 
-        let last_commit_loc = journal
-            .size()
-            .await
-            .checked_sub(1)
-            .expect("at least one commit should exist");
-
-        let inactivity_floor_loc = {
+        let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.reader().await;
+            let bounds = reader.bounds();
+            let last_commit_loc = Location::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .expect("at least one commit should exist"),
+            );
             let op = reader.read(*last_commit_loc).await?;
-            op.has_floor()
-                .expect("last operation should be a commit with floor")
+            let inactivity_floor_loc = op
+                .has_floor()
+                .expect("last operation should be a commit with floor");
+            (last_commit_loc, inactivity_floor_loc)
         };
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(*last_commit_loc + 1)),
@@ -145,12 +180,15 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
-        Ok(Self {
+        let db = Self {
             journal,
             root,
             last_commit_loc,
             inactivity_floor_loc,
-        })
+            metrics,
+        };
+        db.update_metrics().await;
+        Ok(db)
     }
 
     /// Get the value at location `loc` in the database.
@@ -160,6 +198,9 @@ where
     /// Returns [`Error::LocationOutOfBounds`] if `loc` >=
     /// `self.bounds().await.end`.
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
+        let _timer = self.metrics.reads.get_timer();
+        self.metrics.reads.get_calls.inc();
+        self.metrics.reads.locations_requested.inc();
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;
         if loc >= op_count {
@@ -167,12 +208,13 @@ where
         }
         let op = reader.read(*loc).await?;
 
-        Ok(op.into_value())
+        let result = op.into_value();
+        Ok(result)
     }
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be sorted in ascending order.
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as the input locations.
     ///
     /// # Errors
@@ -182,9 +224,16 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
+
+        let _timer = self.metrics.reads.get_many_timer();
+        self.metrics.reads.get_many_calls.inc();
+        self.metrics
+            .reads
+            .locations_requested
+            .inc_by(locs.len() as u64);
         debug_assert!(
-            locs.is_sorted(),
-            "locations must be sorted in ascending order"
+            locs.windows(2).all(|w| w[0] < w[1]),
+            "locations must be strictly increasing"
         );
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;
@@ -195,7 +244,8 @@ where
         }
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = reader.read_many(&positions).await?;
-        Ok(ops.into_iter().map(|op| op.into_value()).collect())
+        let result = ops.into_iter().map(|op| op.into_value()).collect();
+        Ok(result)
     }
 
     /// Returns the location of the last commit.
@@ -213,6 +263,17 @@ where
     pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Update state gauges from the current database state.
+    async fn update_metrics(&self) {
+        let bounds = self.journal.reader().await.bounds();
+        self.metrics.state.set(
+            bounds.end,
+            bounds.start,
+            *self.inactivity_floor_loc,
+            *self.last_commit_loc,
+        );
     }
 
     /// Return the most recent location from which this database can safely be synced, and the
@@ -304,19 +365,11 @@ where
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        if !loc.is_valid() {
-            return Err(crate::merkle::Error::LocationOverflow(loc).into());
-        }
-        let futs: Vec<_> = F::nodes_to_pin(loc)
-            .map(|p| async move {
-                self.journal
-                    .merkle
-                    .get_node(p)
-                    .await?
-                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
-            })
-            .collect();
-        futures::future::try_join_all(futs).await
+        self.journal
+            .merkle
+            .pinned_nodes_at(loc)
+            .await
+            .map_err(Into::into)
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
@@ -326,6 +379,8 @@ where
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
     ///   the last committed batch.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.operations.prune_timer();
+        self.metrics.operations.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
@@ -333,7 +388,7 @@ where
             ));
         }
         self.journal.prune(loc).await?;
-
+        self.update_metrics().await;
         Ok(())
     }
 
@@ -392,6 +447,7 @@ where
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
+        self.update_metrics().await;
         Ok(())
     }
 
@@ -399,12 +455,18 @@ where
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        self.journal.sync().await.map_err(Into::into)
+        let _timer = self.metrics.operations.sync_timer();
+        self.metrics.operations.sync_calls.inc();
+        self.journal.sync().await?;
+        Ok(())
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
     pub async fn commit(&self) -> Result<(), Error<F>> {
-        self.journal.commit().await.map_err(Into::into)
+        let _timer = self.metrics.operations.commit_timer();
+        self.metrics.operations.commit_calls.inc();
+        self.journal.commit().await?;
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.
@@ -425,12 +487,13 @@ where
             journal_batch: self.journal.to_merkleized_batch(),
             root: self.root,
             parent: None,
-            base_size: journal_size,
-            total_size: journal_size,
-            db_size: journal_size,
-            ancestor_batch_ends: Vec::new(),
-            ancestor_new_inactivity_floor_locs: Vec::new(),
-            new_inactivity_floor_loc: self.inactivity_floor_loc,
+            bounds: batch_chain::Bounds {
+                base_size: journal_size,
+                db_size: journal_size,
+                total_size: journal_size,
+                ancestors: Vec::new(),
+                inactivity_floor: self.inactivity_floor_loc,
+            },
         })
     }
 
@@ -463,63 +526,28 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
+        let _timer = self.metrics.operations.apply_batch_timer();
+        self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_batch_ends.contains(&db_size);
-        if !valid {
-            return Err(Error::StaleBatch {
-                db_size,
-                batch_db_size: batch.db_size,
-                batch_base_size: batch.base_size,
-            });
-        }
-        // Validate every unapplied commit's floor (each ancestor in the chain, then the tip)
-        // before mutating the journal. The invariant is per-commit:
-        //   - floors are monotonically non-decreasing across the chain, and
-        //   - each floor is at most its own commit location (= total_size - 1 at that point).
-        // Ancestors are stored newest-first, so walk in reverse to get oldest-first.
-        let mut prev_floor = self.inactivity_floor_loc;
-        for i in (0..batch.ancestor_batch_ends.len()).rev() {
-            let ancestor_end = batch.ancestor_batch_ends[i];
-            if ancestor_end <= db_size {
-                // Already on disk — its floor was validated when it was first applied.
-                continue;
-            }
-            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
-            let ancestor_commit_loc = Location::new(ancestor_end - 1);
-            if ancestor_floor < prev_floor {
-                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
-            }
-            if ancestor_floor > ancestor_commit_loc {
-                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
-            }
-            prev_floor = ancestor_floor;
-        }
-        // Tip checks chain off the last validated ancestor floor.
-        if batch.new_inactivity_floor_loc < prev_floor {
-            return Err(Error::FloorRegressed(
-                batch.new_inactivity_floor_loc,
-                prev_floor,
-            ));
-        }
-        let tip_commit_loc = Location::new(batch.total_size - 1);
-        if batch.new_inactivity_floor_loc > tip_commit_loc {
-            return Err(Error::FloorBeyondSize(
-                batch.new_inactivity_floor_loc,
-                tip_commit_loc,
-            ));
-        }
+        batch
+            .bounds
+            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
         let start_loc = self.last_commit_loc + 1;
 
         self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = Location::new(batch.total_size - 1);
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
+        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root;
-        let end_loc = Location::new(batch.total_size);
+        let end_loc = Location::new(batch.bounds.total_size);
         debug!(size = ?end_loc, "applied batch");
-        Ok(start_loc..end_loc)
+        let range = start_loc..end_loc;
+        self.update_metrics().await;
+        self.metrics
+            .operations
+            .operations_applied
+            .inc_by(*range.end - *range.start);
+        Ok(range)
     }
 }
 
@@ -528,12 +556,11 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle,
-        qmdb::verify_proof,
+        qmdb::{self, verify_proof},
         Persistable,
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, Metrics};
+    use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
     use std::{future::Future, pin::Pin};
 
@@ -581,7 +608,7 @@ pub(crate) mod tests {
         }
         drop(db);
 
-        let mut db = reopen(context.with_label("db2")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.bounds().await.end, 1);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -602,7 +629,7 @@ pub(crate) mod tests {
         let root = db.root();
 
         // Commit op should remain after reopen even without clean shutdown.
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(db.bounds().await.end, 2); // commit op should remain after re-open.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
@@ -646,7 +673,7 @@ pub(crate) mod tests {
         db.sync().await.unwrap();
         drop(db);
 
-        let db = reopen(context.with_label("db2")).await;
+        let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().await.end, 4);
         assert_eq!(db.root(), root);
         assert_eq!(db.get(Location::new(1)).await.unwrap().unwrap(), v1);
@@ -654,7 +681,7 @@ pub(crate) mod tests {
 
         // Make sure commit operation remains after drop/reopen.
         drop(db);
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(db.bounds().await.end, 4);
         assert_eq!(db.root(), root);
 
@@ -684,7 +711,7 @@ pub(crate) mod tests {
         }
         drop(db);
         // Should rollback to the previous root.
-        let mut db = reopen(context.with_label("db2")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(root, db.root());
 
         // Apply the updates and commit them this time.
@@ -710,7 +737,7 @@ pub(crate) mod tests {
         }
         drop(db);
         // Should rollback to the previous root.
-        let mut db = reopen(context.with_label("db3")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(root, db.root());
 
         // Apply the updates and commit them this time.
@@ -728,7 +755,7 @@ pub(crate) mod tests {
 
         // Make sure we can reopen and get back to the same state.
         drop(db);
-        let db = reopen(context.with_label("db4")).await;
+        let db = reopen(context.child("db").with_attribute("index", 4)).await;
         assert_eq!(db.bounds().await.end, 2 * ELEMENTS + 3);
         assert_eq!(db.root(), root);
 
@@ -742,8 +769,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         const ELEMENTS: u64 = 50;
 
         {
@@ -866,7 +892,7 @@ pub(crate) mod tests {
         const ELEMENTS: u64 = 200;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
-        let db = reopen(context.with_label("db2")).await;
+        let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
 
@@ -879,7 +905,7 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
 
@@ -892,7 +918,7 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = reopen(context.with_label("db4")).await;
+        let db = reopen(context.child("db").with_attribute("index", 4)).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
 
@@ -905,7 +931,7 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let mut db = reopen(context.with_label("db5")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 5)).await;
         assert_eq!(db.bounds().await.end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
         assert_eq!(db.last_commit_loc(), Location::new(0));
@@ -921,7 +947,7 @@ pub(crate) mod tests {
                 .unwrap();
         }
         db.commit().await.unwrap();
-        let db = reopen(context.with_label("db6")).await;
+        let db = reopen(context.child("db").with_attribute("index", 6)).await;
         assert!(db.bounds().await.end > 1);
         assert_ne!(db.root(), root);
 
@@ -960,7 +986,7 @@ pub(crate) mod tests {
         drop(db);
 
         // Reopen and verify correct recovery.
-        let mut db = reopen(context.with_label("db2")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(
             db.bounds().await.end,
             committed_size,
@@ -1005,7 +1031,7 @@ pub(crate) mod tests {
         drop(db);
 
         // Reopen and verify correct recovery.
-        let db = reopen(context.with_label("db3")).await;
+        let db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(
             db.bounds().await.end,
             new_committed_size,
@@ -1233,14 +1259,14 @@ pub(crate) mod tests {
         let op_count = db.bounds().await.end;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
-        let db = reopen(context.with_label("db2")).await;
+        let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         assert_eq!(db.last_commit_loc(), op_count - 1);
         drop(db);
 
         // Insert many operations without commit, then simulate failure.
-        let db = reopen(context.with_label("recovery_a")).await;
+        let db = reopen(context.child("recovery_a")).await;
         {
             let mut batch = db.new_batch();
             for i in 0..ELEMENTS {
@@ -1249,20 +1275,20 @@ pub(crate) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = reopen(context.with_label("recovery_b")).await;
+        let db = reopen(context.child("recovery_b")).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         drop(db);
 
         // Repeat after pruning to the last commit.
-        let mut db = reopen(context.with_label("db3")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 3)).await;
         db.prune(db.last_commit_loc()).await.unwrap();
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         db.sync().await.unwrap();
         drop(db);
 
-        let db = reopen(context.with_label("recovery_c")).await;
+        let db = reopen(context.child("recovery_c")).await;
         {
             let mut batch = db.new_batch();
             for i in 0..ELEMENTS {
@@ -1270,13 +1296,13 @@ pub(crate) mod tests {
             }
         }
         drop(db);
-        let db = reopen(context.with_label("recovery_d")).await;
+        let db = reopen(context.child("recovery_d")).await;
         assert_eq!(db.bounds().await.end, op_count);
         assert_eq!(db.root(), root);
         drop(db);
 
         // Apply the ops one last time but fully commit them this time, then clean up.
-        let mut db = reopen(context.with_label("db4")).await;
+        let mut db = reopen(context.child("db").with_attribute("index", 4)).await;
         {
             let mut batch = db.new_batch();
             for i in 0..ELEMENTS {
@@ -1287,7 +1313,7 @@ pub(crate) mod tests {
                 .unwrap();
         }
         db.commit().await.unwrap();
-        let db = reopen(context.with_label("db5")).await;
+        let db = reopen(context.child("db").with_attribute("index", 5)).await;
         let bounds = db.bounds().await;
         assert!(bounds.end > op_count);
         assert_ne!(db.root(), root);
@@ -1303,8 +1329,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         // Build a db with some values.
         const ELEMENTS: u64 = 100;
@@ -1380,8 +1405,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         const ELEMENTS: u64 = 100;
         {
@@ -1655,8 +1679,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
 
         const BATCHES: u64 = 20;
         const APPENDS_PER_BATCH: u64 = 5;
@@ -1766,8 +1789,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let hasher =
-            merkle::hasher::Standard::<Sha256>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<Sha256>();
         const N: u64 = 500;
         let mut values = Vec::new();
         let mut locs = Vec::new();
@@ -1995,7 +2017,7 @@ pub(crate) mod tests {
 
         db.commit().await.unwrap();
         drop(db);
-        let mut db = reopen(context.with_label("reopen")).await;
+        let mut db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().await.end, size_before);
         assert_eq!(db.last_commit_loc(), commit_before);
@@ -2024,7 +2046,7 @@ pub(crate) mod tests {
 
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen(context.with_label("reopen_initial_boundary")).await;
+        let db = reopen(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.bounds().await.end, initial_size);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -2112,7 +2134,7 @@ pub(crate) mod tests {
 
         // Reopen: floor should survive restart (it's part of the last commit operation).
         drop(db);
-        let mut db = reopen(context.with_label("reopen")).await;
+        let mut db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 
         // Floor may stay the same across a commit (monotonic non-decreasing).
@@ -2355,7 +2377,7 @@ pub(crate) mod tests {
 
         // Drop & reopen to simulate a crash after both commits were durable.
         drop(db);
-        let mut db = reopen(context.with_label("reopen")).await;
+        let mut db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_b);
 
         // Rewind to the first commit; floor should restore to floor_a.
@@ -2366,7 +2388,7 @@ pub(crate) mod tests {
         // Commit the rewind so it's durable, then reopen and confirm the floor again.
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen(context.with_label("reopen2")).await;
+        let db = reopen(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 
         db.destroy().await.unwrap();
@@ -2511,7 +2533,7 @@ pub(crate) mod tests {
         // the last commit op.
         db.sync().await.unwrap();
         drop(db);
-        let mut db = reopen(context.with_label("reopened")).await;
+        let mut db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds().await;
         assert_eq!(reopened_bounds.end, Location::new(*commit_loc + 1));
         assert_eq!(db.last_commit_loc(), commit_loc);

@@ -325,7 +325,7 @@ pub fn dial_end<P: PublicKey>(
 /// Processes the first handshake message as the listener.
 /// Verifies the dialer's message and returns state and response.
 pub fn listen_start<S: Signer, P: PublicKey>(
-    rng: &mut impl CryptoRngCore,
+    rng: impl CryptoRngCore,
     ctx: Context<S, P>,
     msg: Syn<<P as Verifier>::Signature>,
 ) -> Result<(ListenState, SynAck<<S as Signer>::Signature>), Error> {

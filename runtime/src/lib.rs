@@ -44,8 +44,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
+    /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
+    pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    /// Re-export of [governor::Quota] for rate limiting configuration.
+    pub use governor::Quota;
     use iobuf::PoolError;
     use rayon::ThreadPoolBuildError;
     use std::{
@@ -55,14 +59,8 @@ stability_scope!(BETA {
         num::NonZeroUsize,
         time::{Duration, SystemTime},
     };
-    use thiserror::Error;
-
     pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
-
-    /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
-    pub use bytes::{Buf, BufMut};
-    /// Re-export of [governor::Quota] for rate limiting configuration.
-    pub use governor::Quota;
+    use thiserror::Error;
 
     pub mod iobuf;
     pub use iobuf::{
@@ -140,10 +138,6 @@ stability_scope!(BETA {
     /// running tasks.
     pub trait Runner {
         /// Context defines the environment available to tasks.
-        /// Example of possible services provided by the context include:
-        /// - [Clock] for time-based operations
-        /// - [Network] for network operations
-        /// - [Storage] for storage operations
         type Context;
 
         /// Start running a root task.
@@ -157,9 +151,103 @@ stability_scope!(BETA {
             Fut: Future;
     }
 
+    /// The full identity of a [`Supervisor`] handle.
+    #[derive(Clone, Debug, Default)]
+    pub struct Name {
+        /// Label prefix built by successive [`Supervisor::child`] calls.
+        pub label: String,
+        /// Attributes attached via [`Supervisor::with_attribute`].
+        pub attributes: Vec<(String, String)>,
+    }
+
+    /// Interface to track task hierarchy and identity.
+    pub trait Supervisor: Send + Sync + 'static {
+        /// Return the current label prefix and attributes.
+        fn name(&self) -> Name;
+
+        /// Create a named child context with a new supervision-tree node.
+        ///
+        /// This appends `label` to the current metric prefix and creates a
+        /// child in the supervision tree. Use static role names like
+        /// `"engine"`, `"worker"`, or `"resolver"`. Dynamic values belong in
+        /// [`Supervisor::with_attribute`] so metric names remain bounded.
+        ///
+        /// Labels must start with `[a-zA-Z]` and contain only
+        /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
+        #[must_use]
+        fn child(&self, label: &'static str) -> Self;
+
+        /// Add a key-value attribute to this context's identity.
+        ///
+        /// Attributes are attached to metrics registered in this context and
+        /// any child contexts. Unlike [`Supervisor::child`], attributes do not
+        /// affect metric names and do not create a supervision-tree edge. This
+        /// makes them the right place for dynamic values like epochs, rounds,
+        /// shards, or peer identifiers.
+        ///
+        /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+        /// Values can be any string. If the key already exists, its value is
+        /// replaced.
+        ///
+        /// ```text
+        /// context
+        ///   |-- child("orchestrator")
+        ///         |-- with_attribute("epoch", "5")
+        ///               |-- counter: votes      -> orchestrator_votes{epoch="5"}
+        ///               |-- counter: proposals  -> orchestrator_proposals{epoch="5"}
+        ///               |-- child("engine")
+        ///                     |-- gauge: height -> orchestrator_engine_height{epoch="5"}
+        /// ```
+        ///
+        /// This pattern avoids wrapping every metric in a `Family` and avoids
+        /// putting dynamic values in metric names like
+        /// `orchestrator_epoch_5_votes`.
+        ///
+        /// Attributes do not reduce cardinality. N epochs still means N time
+        /// series. They just make metrics easier to query, filter, and
+        /// aggregate.
+        ///
+        /// # Family Label Conflicts
+        ///
+        /// When using `Family` metrics, avoid attribute keys that match the
+        /// family's label field names. A conflict produces duplicate labels in
+        /// the encoded output, which is invalid Prometheus format.
+        ///
+        /// ```ignore
+        /// #[derive(EncodeLabelSet)]
+        /// struct Labels { env: String }
+        ///
+        /// // Bad: attribute "env" conflicts with Family field "env".
+        /// let ctx = context.child("api").with_attribute("env", "prod");
+        /// let family: Family<Labels, Counter> = Family::default();
+        /// ctx.register("requests", "help", family);
+        ///
+        /// // Good: use distinct names.
+        /// let ctx = context.child("api").with_attribute("region", "us_east");
+        /// ```
+        ///
+        /// # Querying The Latest Attribute
+        ///
+        /// To query the latest attribute value dynamically, create a gauge to
+        /// track the current value:
+        ///
+        /// ```ignore
+        /// let latest_epoch = context
+        ///     .child("orchestrator")
+        ///     .register("latest_epoch", "current epoch", Gauge::default());
+        /// latest_epoch.set(current_epoch);
+        /// ```
+        ///
+        /// A dashboard can then query `max(orchestrator_latest_epoch)` and use
+        /// the result as a variable in queries such as
+        /// `consensus_engine_votes_total{epoch="$latest_epoch"}`.
+        #[must_use]
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
+    }
+
     /// Interface that any task scheduler must implement to spawn tasks.
-    pub trait Spawner: Clone + Send + Sync + 'static {
-        /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
+    pub trait Spawner: Supervisor {
+        /// Return a [`Spawner`] that schedules the next task onto the runtime's shared executor.
         ///
         /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
         /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
@@ -167,14 +255,16 @@ stability_scope!(BETA {
         /// [`Spawner::dedicated`] instead.
         ///
         /// The shared executor with `blocking == false` is the default spawn mode.
+        #[must_use]
         fn shared(self, blocking: bool) -> Self;
 
-        /// Return a [`Spawner`] that runs tasks on a dedicated thread when the runtime supports it.
+        /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
         ///
         /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
         /// shared executor.
         ///
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
+        #[must_use]
         fn dedicated(self) -> Self;
 
         /// Spawn a task with the current context.
@@ -186,13 +276,13 @@ stability_scope!(BETA {
         ///
         /// All tasks are supervised. When a parent task finishes or is aborted, all its descendants are aborted.
         ///
-        /// Spawn consumes the current task and provides a new child context to the spawned task. Likewise, cloning
-        /// a context (either via [`Clone::clone`] or [`Metrics::with_label`]) returns a child context.
+        /// Spawn consumes the current context and runs the task at a new child node. Additional supervised
+        /// children are created explicitly with [`Supervisor::child`].
         ///
         /// ```txt
         /// ctx_a
         ///   |
-        ///   +-- clone() ---> ctx_c
+        ///   +-- child("worker") ---> ctx_c
         ///   |                  |
         ///   |                  +-- spawn() ---> Task C (ctx_d)
         ///   |
@@ -205,13 +295,15 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// When a context is cloned (either via [`Clone::clone`] or [`Metrics::with_label`]) or provided via
-        /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`] or [`Spawner::shared`] is reset.
+        /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
+        /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
+        /// both start child task contexts from a clean spawn configuration.
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
+            Self: Sized,
             F: FnOnce(Self) -> Fut + Send + 'static,
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
@@ -252,7 +344,7 @@ stability_scope!(BETA {
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
     /// placed on dedicated threads via [Spawner].
-    pub trait ThreadPooler: Spawner + Metrics {
+    pub trait ThreadPooler: Spawner {
         /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
         ///
         /// # Arguments
@@ -282,151 +374,44 @@ stability_scope!(BETA {
         }
     }
 
-    /// Interface to register and encode metrics.
-    ///
-    /// # Mental Model: Metrics vs Tracing
-    ///
-    /// A context carries multiple pieces of observability state, each
-    /// applied via a different builder. They compose freely, but they do
-    /// not all feed into the same sinks:
-    ///
-    /// - `name` (set by [`Metrics::with_label`]): prefix applied to metrics
-    ///   you [`register`](Metrics::register) on this context. It also populates
-    ///   the `name` field of runtime-internal task metrics
-    ///   (`runtime_tasks_spawned`, `runtime_tasks_running`).
-    /// - `attributes` (set by [`Metrics::with_attribute`]): Prometheus label
-    ///   dimensions on metrics you `register` on this context. They are also
-    ///   emitted as OpenTelemetry attributes on the per-task tracing span when,
-    ///   and only when, [`Metrics::with_span`] is set on the spawn. Runtime
-    ///   task metrics intentionally ignore attributes to keep their
-    ///   cardinality bounded.
-    /// - `span` (set by [`Metrics::with_span`]): wraps the next spawned task
-    ///   in a `tracing` span populated from the current `name` and `attributes`.
-    ///   It never touches metrics. The flag is consumed by the next `spawn` and
-    ///   is not inherited by child contexts.
-    ///
-    /// | Builder                 | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span                     |
-    /// | ----------------------- | :--------------------: | :----------------------: | :------------------: | :------------------------------: |
-    /// | `with_label`            | prefix                 | -                        | `name`               | `name` field when `with_span`    |
-    /// | `with_attribute`        | -                      | label dimension          | -                    | OTel attribute when `with_span`  |
-    /// | `with_span`             | -                      | -                        | -                    | enables span creation            |
-    pub trait Metrics: Clone + Send + Sync + 'static {
-        /// Get the current label of the context.
-        fn label(&self) -> String;
-
-        /// Create a new instance of `Metrics` with the given label appended to the end
-        /// of the current `Metrics` label.
+    /// Interface to register task traces.
+    pub trait Tracing: Supervisor {
+        /// Return a context that wraps the next spawned task in a `tracing` span.
         ///
-        /// This is commonly used to create a nested context for `register`.
+        /// The span's `name` field and OpenTelemetry attributes are derived from
+        /// [`Supervisor::name`]. The flag is consumed by the next
+        /// [`Spawner::spawn`] call on the returned context.
         ///
-        /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is not permitted for
-        /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
-        fn with_label(&self, label: &str) -> Self;
-
-        /// Create a new instance of `Metrics` with an additional attribute (key-value pair) applied
-        /// to all metrics registered in this context and any child contexts.
+        /// [`Supervisor::child`] creates a new child context and does not inherit
+        /// the span flag. [`Supervisor::with_attribute`], [`Spawner::shared`],
+        /// and [`Spawner::dedicated`] keep operating on the same handle, so they
+        /// can be chained before the spawn:
         ///
-        /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
-        /// a key-value pair that appears as a separate dimension in the metric output. This is
-        /// useful for instrumenting n-ary data structures in a way that is easy to manage downstream.
-        ///
-        /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
-        ///
-        /// # Labeling Children
-        ///
-        /// Attributes apply to the entire subtree of contexts. When you call `with_attribute`, the
-        /// label is automatically added to all metrics registered in that context and any child
-        /// contexts created via `with_label`:
-        ///
-        /// ```text
+        /// ```ignore
         /// context
-        ///   |-- with_label("orchestrator")
-        ///         |-- with_attribute("epoch", "5")
-        ///               |-- counter: votes        -> orchestrator_votes{epoch="5"}
-        ///               |-- counter: proposals    -> orchestrator_proposals{epoch="5"}
-        ///               |-- with_label("engine")
-        ///                     |-- gauge: height   -> orchestrator_engine_height{epoch="5"}
+        ///     .child("verify")
+        ///     .with_attribute("round", round)
+        ///     .with_span()
+        ///     .dedicated()
+        ///     .spawn(|context| async move {
+        ///         // work
+        ///     });
         /// ```
         ///
-        /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
-        /// names with dynamic values like `orchestrator_epoch_5_votes`.
-        ///
-        /// _Using attributes does not reduce cardinality (N epochs still means N time series).
-        /// Attributes just make metrics easier to query, filter, and aggregate._
-        ///
-        /// # Family Label Conflicts
-        ///
-        /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
-        /// If a conflict occurs, the encoded output will contain duplicate labels (e.g., `{env="prod",env="staging"}`),
-        /// which is invalid Prometheus format and may cause scraping issues.
-        ///
-        /// ```ignore
-        /// #[derive(EncodeLabelSet)]
-        /// struct Labels { env: String }
-        ///
-        /// // BAD: attribute "env" conflicts with Family field "env"
-        /// let ctx = context.with_attribute("env", "prod");
-        /// let family: Family<Labels, Counter> = Family::default();
-        /// ctx.register("requests", "help", family);
-        /// // Produces invalid: requests_total{env="prod",env="staging"}
-        ///
-        /// // GOOD: use distinct names
-        /// let ctx = context.with_attribute("region", "us_east");
-        /// // Produces valid: requests_total{region="us_east",env="staging"}
-        /// ```
-        ///
-        /// # Example
-        ///
-        /// ```ignore
-        /// // Instead of creating epoch-specific metric names:
-        /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
-        /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
-        ///
-        /// // Use attributes to add epoch as a label dimension:
-        /// let ctx = context.with_label("consensus_engine").with_attribute("epoch", epoch);
-        /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
-        /// ```
-        ///
-        /// Multiple attributes can be chained:
-        /// ```ignore
-        /// let ctx = context
-        ///     .with_label("engine")
-        ///     .with_attribute("region", "us_east")
-        ///     .with_attribute("instance", "i1");
-        /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
-        /// ```
-        ///
-        /// # Querying The Latest Attribute
-        ///
-        /// To query the latest attribute value dynamically, create a gauge to track the current value:
-        /// ```ignore
-        /// // Create a gauge to track the current epoch. Hold the handle on `self`.
-        /// let latest_epoch = context.with_label("orchestrator").gauge("latest_epoch", "current epoch");
-        /// latest_epoch.set(current_epoch);
-        /// // Produces: orchestrator_latest_epoch 5
-        /// ```
-        ///
-        /// Then create a dashboard variable `$latest_epoch` with query `max(orchestrator_latest_epoch)`
-        /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
-        fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
+        /// Enabling the span only affects tracing. It does not change which
+        /// metrics are registered, nor does it widen the cardinality of runtime
+        /// task metrics.
+        #[must_use]
+        fn with_span(self) -> Self;
+    }
 
-        /// Return a new context that wraps the next task spawned from it in a `tracing`
-        /// span whose `name` field and OpenTelemetry attributes are derived from the
-        /// context's label and attributes.
-        ///
-        /// The flag is consumed by the next [`Spawner::spawn`] call on the returned
-        /// context (and on any clone of it). It is not inherited by child contexts
-        /// produced via [`Metrics::with_label`], [`Metrics::with_attribute`],
-        /// or any of the `Spawner` builders: each such builder
-        /// resets the flag so the caller must opt in again for the next spawn.
-        ///
-        /// Enabling the span only affects tracing. It does not change which metrics
-        /// are registered, nor does it widen the cardinality of runtime task metrics.
-        fn with_span(&self) -> Self;
-
+    /// Interface to register and encode metrics.
+    pub trait Metrics: Supervisor {
         /// Register a metric with the runtime.
         ///
-        /// Any registered metric will include (as a prefix) the label of the current context.
+        /// Any registered metric includes the current context label as its name
+        /// prefix and the current context attributes as Prometheus labels. See
+        /// [`Supervisor`] for the identity model and examples.
         ///
         /// The returned [`telemetry::metrics::Registered`] value must be retained for as long as the
         /// metric should remain exposed. Dropping the returned handle unregisters
@@ -448,6 +433,31 @@ stability_scope!(BETA {
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }
+
+    /// Interface for both [`Tracing`] and [`Metrics`].
+    ///
+    /// A context carries multiple pieces of observability state. They compose
+    /// freely, but they do not all feed into the same sinks:
+    ///
+    /// - `label` (set by [`Supervisor::child`]): prefix applied to metrics
+    ///   registered with [`Metrics::register`]. It also populates the `name`
+    ///   field of runtime-internal task metrics (`runtime_tasks_spawned`,
+    ///   `runtime_tasks_running`).
+    /// - `attributes` (set by [`Supervisor::with_attribute`]): Prometheus label
+    ///   dimensions on metrics registered with [`Metrics::register`]. They are
+    ///   also emitted as OpenTelemetry attributes on the per-task tracing span
+    ///   when [`Tracing::with_span`] is enabled. Runtime task metrics ignore
+    ///   attributes to keep their cardinality bounded.
+    /// - `span` (set by [`Tracing::with_span`]): wraps the next spawned task in
+    ///   a `tracing` span populated from the current `label` and `attributes`.
+    ///   It never touches metrics.
+    ///
+    /// | Builder | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span |
+    /// | --- | :---: | :---: | :---: | :---: |
+    /// | `child` | prefix | - | `name` | `name` field when `with_span` is set |
+    /// | `with_attribute` | - | label dimension | - | OTel attribute when `with_span` is set |
+    /// | `with_span` | - | - | - | enables span creation |
+    pub trait Observer: Tracing + Metrics {}
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
     ///
@@ -481,7 +491,6 @@ stability_scope!(BETA {
     pub trait Clock:
         governor::clock::Clock<Instant = SystemTime>
         + governor::clock::ReasonablyRealtime
-        + Clone
         + Send
         + Sync
         + 'static
@@ -544,7 +553,7 @@ stability_scope!(BETA {
 
     /// Interface that any runtime must implement to create
     /// network connections.
-    pub trait Network: Clone + Send + Sync + 'static {
+    pub trait Network: Send + Sync + 'static {
         /// The type of [Listener] that's returned when binding to a socket.
         /// Accepting a connection returns a [Sink] and [Stream] which are defined
         /// by the [Listener] and used to send and receive data over the connection.
@@ -564,7 +573,7 @@ stability_scope!(BETA {
     }
 
     /// Interface for DNS resolution.
-    pub trait Resolver: Clone + Send + Sync + 'static {
+    pub trait Resolver: Send + Sync + 'static {
         /// Resolve a hostname to IP addresses.
         ///
         /// Returns a list of IP addresses that the hostname resolves to.
@@ -651,7 +660,7 @@ stability_scope!(BETA {
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
     /// characters (e.g., `/`, `.`, spaces) will return an error.
-    pub trait Storage: Clone + Send + Sync + 'static {
+    pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
 
@@ -775,7 +784,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
-    pub trait BufferPooler: Clone + Send + Sync + 'static {
+    pub trait BufferPooler: Send + Sync + 'static {
         /// Returns the network [BufferPool].
         fn network_buffer_pool(&self) -> &BufferPool;
 
@@ -785,7 +794,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
-    pub trait Pacer: Clock + Clone + Send + Sync + 'static {
+    pub trait Pacer: Clock + Send + Sync + 'static {
         /// Defer completion of a future until a specified `latency` has elapsed. If the future is
         /// not yet ready at the desired time of completion, the runtime will block until the future
         /// is ready.
@@ -971,11 +980,11 @@ mod tests {
     fn test_spawn_after_abort<R>(runner: R)
     where
         R: Runner,
-        R::Context: Spawner + Clone,
+        R::Context: Spawner,
     {
         runner.start(|context| async move {
             // Create a child context
-            let child = context.clone();
+            let child = context.child("child");
 
             // Spawn parent and abort
             let parent_handle = context.spawn(move |_| async move {
@@ -1025,7 +1034,7 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            context.clone().spawn(|_| async move {
+            context.child("panic").spawn(|_| async move {
                 panic!("blah");
             });
 
@@ -1041,7 +1050,7 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
-            let result = context.clone().spawn(|_| async move {
+            let result = context.child("panic").spawn(|_| async move {
                 panic!("blah");
             });
             result.await
@@ -1054,13 +1063,13 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            context.clone().spawn(|_| async move {
+            context.child("panic").spawn(|_| async move {
                 panic!("boom 1");
             });
-            context.clone().spawn(|_| async move {
+            context.child("panic").spawn(|_| async move {
                 panic!("boom 2");
             });
-            context.clone().spawn(|_| async move {
+            context.child("panic").spawn(|_| async move {
                 panic!("boom 3");
             });
 
@@ -1076,13 +1085,13 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         let (res1, res2, res3) = runner.start(|context| async move {
-            let handle1 = context.clone().spawn(|_| async move {
+            let handle1 = context.child("panic").spawn(|_| async move {
                 panic!("boom 1");
             });
-            let handle2 = context.clone().spawn(|_| async move {
+            let handle2 = context.child("panic").spawn(|_| async move {
                 panic!("boom 2");
             });
-            let handle3 = context.clone().spawn(|_| async move {
+            let handle3 = context.child("panic").spawn(|_| async move {
                 panic!("boom 3");
             });
 
@@ -1460,7 +1469,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Read data from the blob in clone
-            let check1 = context.with_label("check1").spawn({
+            let check1 = context.child("check1").spawn({
                 let blob = blob.clone();
                 let data_len = data.len();
                 move |_| async move {
@@ -1471,7 +1480,7 @@ mod tests {
                     assert_eq!(read.coalesce(), data);
                 }
             });
-            let check2 = context.with_label("check2").spawn({
+            let check2 = context.child("check2").spawn({
                 let blob = blob.clone();
                 let data_len = data.len();
                 move |_| async move {
@@ -1511,27 +1520,23 @@ mod tests {
         let kill = 9;
         runner.start(|context| async move {
             // Spawn a task that waits for signal
-            let before = context
-                .with_label("before")
-                .spawn(move |context| async move {
-                    let mut signal = context.stopped();
-                    let value = (&mut signal).await.unwrap();
-                    assert_eq!(value, kill);
-                    drop(signal);
-                });
+            let before = context.child("before").spawn(move |context| async move {
+                let mut signal = context.stopped();
+                let value = (&mut signal).await.unwrap();
+                assert_eq!(value, kill);
+                drop(signal);
+            });
 
             // Signal the tasks and wait for them to stop
-            let result = context.clone().stop(kill, None).await;
+            let result = context.child("stop").stop(kill, None).await;
             assert!(result.is_ok());
 
             // Spawn a task after stop is called
-            let after = context
-                .with_label("after")
-                .spawn(move |context| async move {
-                    // A call to `stopped()` after `stop()` resolves immediately
-                    let value = context.stopped().await.unwrap();
-                    assert_eq!(value, kill);
-                });
+            let after = context.child("after").spawn(move |context| async move {
+                // A call to `stopped()` after `stop()` resolves immediately
+                let value = context.stopped().await.unwrap();
+                assert_eq!(value, kill);
+            });
 
             // Ensure both tasks complete
             let result = join!(before, after);
@@ -1551,8 +1556,7 @@ mod tests {
 
             // Spawn 3 tasks that do cleanup work after receiving stop signal
             // and increment a shared counter
-            let task = |cleanup_duration: Duration| {
-                let context = context.clone();
+            let task = |context: R::Context, cleanup_duration: Duration| {
                 let counter = counter.clone();
                 let started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
@@ -1571,9 +1575,9 @@ mod tests {
                 })
             };
 
-            let task1 = task(Duration::from_millis(10));
-            let task2 = task(Duration::from_millis(20));
-            let task3 = task(Duration::from_millis(30));
+            let task1 = task(context.child("cleanup"), Duration::from_millis(10));
+            let task2 = task(context.child("cleanup"), Duration::from_millis(20));
+            let task3 = task(context.child("cleanup"), Duration::from_millis(30));
 
             // Give tasks time to start
             for _ in 0..3 {
@@ -1602,7 +1606,7 @@ mod tests {
             let (started_tx, started_rx) = oneshot::channel();
 
             // Spawn a task that never completes its cleanup
-            context.clone().spawn(move |context| async move {
+            context.child("signal").spawn(move |context| async move {
                 let signal = context.stopped();
                 started_tx.send(()).unwrap();
                 pending::<()>().await;
@@ -1630,7 +1634,7 @@ mod tests {
             let counter = Arc::new(AtomicU32::new(0));
 
             // Spawn a task that delays completion to test timing
-            let task = context.with_label("blocking_task").spawn({
+            let task = context.child("blocking_task").spawn({
                 let counter = counter.clone();
                 move |context| async move {
                     // Wait for signal to be acquired
@@ -1653,9 +1657,9 @@ mod tests {
 
             // Issue two separate stop calls
             // The second stop call uses a different stop value that should be ignored
-            let stop_task1 = context.clone().stop(kill1, None);
+            let stop_task1 = context.child("stop").stop(kill1, None);
             pin_mut!(stop_task1);
-            let stop_task2 = context.clone().stop(kill2, None);
+            let stop_task2 = context.child("stop").stop(kill2, None);
             pin_mut!(stop_task2);
 
             // Both of them should be awaiting completion
@@ -1686,16 +1690,14 @@ mod tests {
     {
         runner.start(|context| async move {
             // Spawn a task that waits for signal
-            context
-                .with_label("before")
-                .spawn(move |context| async move {
-                    let mut signal = context.stopped();
-                    let value = (&mut signal).await.unwrap();
+            context.child("before").spawn(move |context| async move {
+                let mut signal = context.stopped();
+                let value = (&mut signal).await.unwrap();
 
-                    // We should never reach this point
-                    assert_eq!(value, 42);
-                    drop(signal);
-                });
+                // We should never reach this point
+                assert_eq!(value, 42);
+                drop(signal);
+            });
 
             // Ensure waker is registered
             reschedule().await;
@@ -1831,15 +1833,15 @@ mod tests {
             //   c0      c1      c2
             //  /  \    /  \    /  \
             // g0  g1  g2  g3  g4  g5
-            let c0 = context.clone();
-            let g0 = c0.clone();
-            let g1 = c0.clone();
-            let c1 = context.clone();
-            let g2 = c1.clone();
-            let g3 = c1.clone();
-            let c2 = context.clone();
-            let g4 = c2.clone();
-            let g5 = c2.clone();
+            let c0 = context.child("c0");
+            let g0 = c0.child("g0");
+            let g1 = c0.child("g1");
+            let c1 = context.child("c1");
+            let g2 = c1.child("g2");
+            let g3 = c1.child("g3");
+            let c2 = context.child("c2");
+            let g4 = c2.child("g4");
+            let g5 = c2.child("g5");
 
             // Spawn tasks
             let handles = Arc::new(Mutex::new(Vec::new()));
@@ -1907,7 +1909,7 @@ mod tests {
 
             let parent = context.spawn(move |context| async move {
                 // Spawn a child task
-                let child_handle = context.clone().spawn(|_| async move {
+                let child_handle = context.child("child").spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
@@ -1918,7 +1920,7 @@ mod tests {
                 );
 
                 // Spawn an independent sibling task
-                let sibling_handle = context.clone().spawn(move |_| async move {
+                let sibling_handle = context.child("sibling").spawn(move |_| async move {
                     sibling_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     sibling_complete_rx.await.unwrap();
@@ -1961,11 +1963,11 @@ mod tests {
             let (child_handle_tx, child_handle_rx) = oneshot::channel();
             let (grandchild_handle_tx, grandchild_handle_rx) = oneshot::channel();
 
-            let parent = context.clone().spawn({
+            let parent = context.child("parent").spawn({
                 move |context| async move {
-                    let child = context.clone().spawn({
+                    let child = context.child("child").spawn({
                         move |context| async move {
-                            let grandchild = context.clone().spawn({
+                            let grandchild = context.child("grandchild").spawn({
                                 move |_| async move {
                                     grandchild_started_tx.send(()).unwrap();
                                     pending::<()>().await;
@@ -2011,13 +2013,13 @@ mod tests {
             let (leaf_started_tx, leaf_started_rx) = oneshot::channel();
             let (leaf_handle_tx, leaf_handle_rx) = oneshot::channel();
 
-            let parent = context.clone().spawn({
+            let parent = context.child("parent").spawn({
                 move |context| async move {
-                    let clone1 = context.clone();
-                    let clone2 = clone1.clone();
-                    let clone3 = clone2.clone();
+                    let clone1 = context.child("clone1");
+                    let clone2 = clone1.child("clone2");
+                    let clone3 = clone2.child("clone3");
 
-                    let leaf = clone3.clone().spawn({
+                    let leaf = clone3.spawn({
                         move |_| async move {
                             leaf_started_tx.send(()).unwrap();
                             pending::<()>().await;
@@ -2062,15 +2064,18 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            let context = if dedicated {
-                context.dedicated()
+            if dedicated {
+                context.child("blocking").dedicated().spawn(|_| async move {
+                    panic!("blocking task panicked");
+                });
             } else {
-                context.shared(true)
-            };
-
-            context.clone().spawn(|_| async move {
-                panic!("blocking task panicked");
-            });
+                context
+                    .child("blocking")
+                    .shared(true)
+                    .spawn(|_| async move {
+                        panic!("blocking task panicked");
+                    });
+            }
 
             // Loop until panic
             loop {
@@ -2084,15 +2089,18 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
-            let context = if dedicated {
-                context.dedicated()
+            let handle = if dedicated {
+                context.child("blocking").dedicated().spawn(|_| async move {
+                    panic!("blocking task panicked");
+                })
             } else {
-                context.shared(true)
+                context
+                    .child("blocking")
+                    .shared(true)
+                    .spawn(|_| async move {
+                        panic!("blocking task panicked");
+                    })
             };
-
-            let handle = context.clone().spawn(|_| async move {
-                panic!("blocking task panicked");
-            });
             handle.await
         });
         assert!(matches!(result, Err(Error::Exited)));
@@ -2112,7 +2120,7 @@ mod tests {
                     let (tx2, mut rx2) = mpsc::unbounded_channel::<()>();
 
                     // Task 1 holds tx2 and waits on rx1
-                    context.with_label("task1").spawn({
+                    context.child("task1").spawn({
                         let setup_tx = setup_tx.clone();
                         let dropper = dropper.clone();
                         move |_| async move {
@@ -2129,7 +2137,7 @@ mod tests {
                     });
 
                     // Task 2 holds tx1 and waits on rx2
-                    context.with_label("task2").spawn(move |_| async move {
+                    context.child("task2").spawn(move |_| async move {
                         // Setup deadlock and mark ready
                         tx1.send(()).unwrap();
                         rx2.recv().await.unwrap();
@@ -2192,15 +2200,13 @@ mod tests {
             let (tx, rx) = oneshot::channel::<Waker>();
 
             // Spawn a task that registers its waker and then stays pending.
-            context
-                .with_label("capture_waker")
-                .spawn(move |_| async move {
-                    CaptureWaker {
-                        tx: Some(tx),
-                        sent: false,
-                    }
-                    .await;
-                });
+            context.child("capture_waker").spawn(move |_| async move {
+                CaptureWaker {
+                    tx: Some(tx),
+                    sent: false,
+                }
+                .await;
+            });
 
             // Ensure the spawned task runs and registers its waker.
             utils::reschedule().await;
@@ -2223,7 +2229,7 @@ mod tests {
     {
         runner.start(|context| async move {
             // Assert label
-            assert_eq!(context.label(), "");
+            assert_eq!(context.name().label, "");
 
             // Register a metric
             let counter = Counter::<u64>::default();
@@ -2237,7 +2243,7 @@ mod tests {
             assert!(buffer.contains("test_total 1"));
 
             // Nested context
-            let context = context.with_label("nested");
+            let context = context.child("nested");
             let nested_counter = Counter::<u64>::default();
             let _nested_registered = context.register("test", "test", nested_counter.clone());
 
@@ -2257,9 +2263,7 @@ mod tests {
     {
         runner.start(|context| async move {
             // Create context with a attribute
-            let ctx_epoch5 = context
-                .with_label("consensus")
-                .with_attribute("epoch", "e5");
+            let ctx_epoch5 = context.child("consensus").with_attribute("epoch", "e5");
 
             // Register a metric with the attribute
             let counter = Counter::<u64>::default();
@@ -2275,9 +2279,7 @@ mod tests {
             );
 
             // Create context with different epoch attribute (same metric name)
-            let ctx_epoch6 = context
-                .with_label("consensus")
-                .with_attribute("epoch", "e6");
+            let ctx_epoch6 = context.child("consensus").with_attribute("epoch", "e6");
             let counter2 = Counter::<u64>::default();
             let _epoch6 = ctx_epoch6.register("votes", "vote count", counter2.clone());
             counter2.inc();
@@ -2312,7 +2314,7 @@ mod tests {
 
             // Multiple attributes
             let ctx_multi = context
-                .with_label("engine")
+                .child("engine")
                 .with_attribute("region", "us")
                 .with_attribute("instance", "i1");
             let counter3 = Counter::<u64>::default();
@@ -2347,9 +2349,9 @@ mod tests {
         runner.start(|context| async move {
             // Create context with attribute, then nest a label
             let ctx = context
-                .with_label("orchestrator")
+                .child("orchestrator")
                 .with_attribute("epoch", "e5")
-                .with_label("engine");
+                .child("engine");
 
             // Register a metric
             let counter = Counter::<u64>::default();
@@ -2366,11 +2368,11 @@ mod tests {
 
             // Multiple levels of nesting with attributes at different levels
             let ctx2 = context
-                .with_label("outer")
+                .child("outer")
                 .with_attribute("region", "us")
-                .with_label("middle")
+                .child("middle")
                 .with_attribute("az", "east")
-                .with_label("inner");
+                .child("inner");
 
             let counter2 = Counter::<u64>::default();
             let _registered2 = ctx2.register("requests", "request count", counter2.clone());
@@ -2404,8 +2406,8 @@ mod tests {
     {
         runner.start(|context| async move {
             // Create two separate sub-contexts, each with their own attribute
-            let ctx_a = context.with_label("component_a").with_attribute("epoch", 1);
-            let ctx_b = context.with_label("component_b").with_attribute("epoch", 2);
+            let ctx_a = context.child("component_a").with_attribute("epoch", 1);
+            let ctx_b = context.child("component_b").with_attribute("epoch", 2);
 
             // Register metrics in ctx_a
             let c1 = Counter::<u64>::default();
@@ -2475,7 +2477,7 @@ mod tests {
             let mut handles = Vec::with_capacity(ROUNDS as usize);
             for round in 0..ROUNDS {
                 let handle = context
-                    .with_label("deferred_verify")
+                    .child("deferred_verify")
                     .with_attribute("round", round)
                     .spawn(move |_| async move { round });
                 handles.push(handle);
@@ -2563,12 +2565,12 @@ mod tests {
         runner.start(|context| async move {
             // Create two contexts with same attributes but different order
             let ctx_ab = context
-                .with_label("service")
+                .child("service")
                 .with_attribute("region", "us")
                 .with_attribute("env", "prod");
 
             let ctx_ba = context
-                .with_label("service")
+                .child("service")
                 .with_attribute("env", "prod")
                 .with_attribute("region", "us");
 
@@ -2621,25 +2623,25 @@ mod tests {
     {
         runner.start(|context| async move {
             // Service A: plain, no nested labels
-            let svc_a = context.with_label("service_a");
+            let svc_a = context.child("service_a");
 
             // Service A with attribute (same top-level label, different context)
-            let svc_a_v2 = context.with_label("service_a").with_attribute("version", 2);
+            let svc_a_v2 = context.child("service_a").with_attribute("version", 2);
 
             // Service B with nested label: service_b_worker
-            let svc_b_worker = context.with_label("service_b").with_label("worker");
+            let svc_b_worker = context.child("service_b").child("worker");
 
             // Service B with nested label AND attribute
             let svc_b_worker_shard = context
-                .with_label("service_b")
-                .with_label("worker")
+                .child("service_b")
+                .child("worker")
                 .with_attribute("shard", 99);
 
             // Service B different nested label: service_b_manager
-            let svc_b_manager = context.with_label("service_b").with_label("manager");
+            let svc_b_manager = context.child("service_b").child("manager");
 
             // Service C: plain, proves no cross-service contamination
-            let svc_c = context.with_label("service_c");
+            let svc_c = context.child("service_c");
 
             // Register metrics in all contexts
             let c1 = Counter::<u64>::default();
@@ -2743,7 +2745,7 @@ mod tests {
 
             // Create context with attribute
             let ctx = context
-                .with_label("api")
+                .child("api")
                 .with_attribute("region", "us_east")
                 .with_attribute("env", "prod");
 
@@ -2796,7 +2798,7 @@ mod tests {
             );
 
             // Create another context WITHOUT attributes to verify isolation
-            let ctx_plain = context.with_label("api_plain");
+            let ctx_plain = context.child("api_plain");
             let plain_requests: Family<RequestLabels, Counter<u64>> = Family::default();
             let _plain_requests =
                 ctx_plain.register("requests", "HTTP requests", plain_requests.clone());
@@ -2843,11 +2845,10 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let counter = context.with_label("engine").register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let counter =
+                context
+                    .child("engine")
+                    .register("votes", "vote count", Counter::<u64>::default());
             counter.inc();
 
             let buffer = context.encode();
@@ -2875,18 +2876,17 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let permanent = context.with_label("permanent").register(
+            let permanent = context.child("permanent").register(
                 "counter",
                 "permanent counter",
                 Counter::<u64>::default(),
             );
             permanent.inc();
 
-            let counter = context.with_label("engine").register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let counter =
+                context
+                    .child("engine")
+                    .register("votes", "vote count", Counter::<u64>::default());
             counter.inc();
 
             let buffer = context.encode();
@@ -2924,16 +2924,18 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let epoch1 = context
-                .with_label("engine")
-                .with_attribute("epoch", 1)
-                .register("votes", "vote count", Counter::<u64>::default());
+            let epoch1 = context.child("engine").with_attribute("epoch", 1).register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             epoch1.inc();
 
-            let epoch2 = context
-                .with_label("engine")
-                .with_attribute("epoch", 2)
-                .register("votes", "vote count", Counter::<u64>::default());
+            let epoch2 = context.child("engine").with_attribute("epoch", 2).register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             epoch2.inc();
             epoch2.inc();
 
@@ -2986,16 +2988,18 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let votes = context
-                .with_label("engine")
-                .with_attribute("epoch", 1)
-                .register("votes", "vote count", Counter::<u64>::default());
+            let votes = context.child("engine").with_attribute("epoch", 1).register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             drop(votes);
 
-            let replacement = context
-                .with_label("engine")
-                .with_attribute("epoch", 1)
-                .register("votes", "vote count", Counter::<u64>::default());
+            let replacement = context.child("engine").with_attribute("epoch", 1).register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             drop(replacement);
         });
     }
@@ -3017,11 +3021,10 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let registered = context.with_label("engine").register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let registered =
+                context
+                    .child("engine")
+                    .register("votes", "vote count", Counter::<u64>::default());
             registered.inc();
             let clone = registered.clone();
 
@@ -3067,11 +3070,10 @@ mod tests {
             let root_counter = context.register("root", "root metric", Counter::<u64>::default());
             root_counter.inc();
 
-            let child = context.with_label("engine").register(
-                "ops",
-                "child metric",
-                Counter::<u64>::default(),
-            );
+            let child =
+                context
+                    .child("engine")
+                    .register("ops", "child metric", Counter::<u64>::default());
             child.inc();
 
             let buffer = context.encode();
@@ -3128,7 +3130,7 @@ mod tests {
 
         runner.start(|context| async move {
             let family = context
-                .with_label("batcher")
+                .child("batcher")
                 .with_attribute("epoch", 1)
                 .register(
                     "votes",
@@ -3448,13 +3450,13 @@ mod tests {
         let executor = deterministic::Runner::new(deterministic::Config::default());
         executor.start(|context| async move {
             context
-                .with_label("test")
+                .child("test")
                 .with_span()
                 .spawn(|context| async move {
                     tracing::info!(field = "test field", "test log");
 
                     context
-                        .with_label("inner")
+                        .child("inner")
                         .with_span()
                         .spawn(|_| async move {
                             tracing::info!("inner log");
@@ -3832,7 +3834,7 @@ mod tests {
 
             // Configure telemetry
             tokio::telemetry::init(
-                context.with_label("metrics"),
+                context.child("metrics"),
                 tokio::telemetry::Logging {
                     level: Level::INFO,
                     json: false,
@@ -3889,43 +3891,41 @@ mod tests {
             }
 
             // Simulate a client connecting to the server
-            let client_handle = context
-                .with_label("client")
-                .spawn(move |context| async move {
-                    let (mut sink, mut stream) = loop {
-                        match context.dial(address).await {
-                            Ok((sink, stream)) => break (sink, stream),
-                            Err(e) => {
-                                // The client may be polled before the server is ready, that's alright!
-                                error!(err =?e, "failed to connect");
-                                context.sleep(Duration::from_millis(10)).await;
-                            }
+            let client_handle = context.child("client").spawn(move |context| async move {
+                let (mut sink, mut stream) = loop {
+                    match context.dial(address).await {
+                        Ok((sink, stream)) => break (sink, stream),
+                        Err(e) => {
+                            // The client may be polled before the server is ready, that's alright!
+                            error!(err =?e, "failed to connect");
+                            context.sleep(Duration::from_millis(10)).await;
                         }
-                    };
+                    }
+                };
 
-                    // Send a GET request to the server
-                    let request = format!(
-                        "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-                    );
-                    sink.send(Bytes::from(request)).await.unwrap();
+                // Send a GET request to the server
+                let request = format!(
+                    "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+                );
+                sink.send(Bytes::from(request)).await.unwrap();
 
-                    // Read and verify the HTTP status line
-                    let status_line = read_line(&mut stream).await.unwrap();
-                    assert_eq!(status_line, "HTTP/1.1 200 OK");
+                // Read and verify the HTTP status line
+                let status_line = read_line(&mut stream).await.unwrap();
+                assert_eq!(status_line, "HTTP/1.1 200 OK");
 
-                    // Read and parse headers
-                    let headers = read_headers(&mut stream).await.unwrap();
-                    println!("Headers: {headers:?}");
-                    let content_length = headers
-                        .get("content-length")
-                        .unwrap()
-                        .parse::<usize>()
-                        .unwrap();
+                // Read and parse headers
+                let headers = read_headers(&mut stream).await.unwrap();
+                println!("Headers: {headers:?}");
+                let content_length = headers
+                    .get("content-length")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
 
-                    // Read and verify the body
-                    let body = read_body(&mut stream, content_length).await.unwrap();
-                    assert!(body.contains("test_counter_total 1"));
-                });
+                // Read and verify the body
+                let body = read_body(&mut stream, content_length).await.unwrap();
+                assert!(body.contains("test_counter_total 1"));
+            });
 
             // Wait for the client task to complete
             client_handle.await.unwrap();
@@ -3953,7 +3953,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
             let pool = context
-                .with_label("pool")
+                .child("pool")
                 .create_thread_pool(NZUsize!(4))
                 .unwrap();
 
@@ -3973,7 +3973,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
             let pool = context
-                .with_label("pool")
+                .child("pool")
                 .create_thread_pool(NZUsize!(4))
                 .unwrap();
 

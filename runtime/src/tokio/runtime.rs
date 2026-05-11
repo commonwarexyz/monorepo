@@ -14,12 +14,12 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::{
-        add_attribute, raw, task::Label, CounterFamily, GaugeFamily, Metric, Register, Registered,
-        Registry,
+        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
+        Register, Registered, Registry,
     },
     utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
+    StreamOf, Supervisor as _, METRICS_PREFIX,
 };
 #[cfg(feature = "iouring-network")]
 use crate::{
@@ -396,8 +396,7 @@ impl crate::Runner for Runner {
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let mut iouring_registry =
-                    runtime_registry.sub_registry("iouring_storage");
+                let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(
                         IoUringConfig {
@@ -427,8 +426,7 @@ impl crate::Runner for Runner {
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let mut iouring_registry =
-                    runtime_registry.sub_registry("iouring_network");
+                let mut iouring_registry = runtime_registry.sub_registry("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
@@ -530,24 +528,6 @@ pub struct Context {
     tree: Arc<Tree>,
     execution: Execution,
     traced: bool,
-}
-
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        let (child, _) = Tree::child(&self.tree);
-        Self {
-            name: self.name.clone(),
-            attributes: self.attributes.clone(),
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
-            tree: child,
-            execution: Execution::default(),
-            traced: false,
-        }
-    }
 }
 
 impl Context {
@@ -671,7 +651,7 @@ impl crate::ThreadPooler for Context {
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
                 // task and thus should be provisioned as a dedicated thread.
-                self.with_label("rayon_thread")
+                self.child("rayon_thread")
                     .dedicated()
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
@@ -681,34 +661,48 @@ impl crate::ThreadPooler for Context {
     }
 }
 
-impl crate::Metrics for Context {
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn with_label(&self, label: &str) -> Self {
+impl crate::Supervisor for Context {
+    fn child(&self, label: &'static str) -> Self {
+        let (tree, _) = Tree::child(&self.tree);
         Self {
             name: child_label(&self.name, label),
-            ..self.clone()
+            attributes: self.attributes.clone(),
+            executor: self.executor.clone(),
+            storage: self.storage.clone(),
+            network: self.network.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
+            tree,
+            execution: Execution::default(),
+            traced: false,
         }
     }
 
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        let mut attributes = self.attributes.clone();
-        add_attribute(&mut attributes, key, value);
-        Self {
-            attributes,
-            ..self.clone()
-        }
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(key);
+
+        // Add the attribute to the list of attributes
+        add_attribute(&mut self.attributes, key, value);
+        self
     }
 
-    fn with_span(&self) -> Self {
-        Self {
-            traced: true,
-            ..self.clone()
+    fn name(&self) -> Name {
+        Name {
+            label: self.name.clone(),
+            attributes: self.attributes.clone(),
         }
     }
+}
 
+impl crate::Tracing for Context {
+    fn with_span(mut self) -> Self {
+        self.traced = true;
+        self
+    }
+}
+
+impl crate::Metrics for Context {
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
         name: N,

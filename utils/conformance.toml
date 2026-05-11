@@ -2,6 +2,34 @@
 n_cases = 65536
 hash = "c49f13e5df245eb2343e64a24eaa4dc9d9b6f698dcc50622953216a44302dc86"
 
+["commonware_utils::bitmap::roaring::container::array::tests::conformance::CodecConformance<super::Array>"]
+n_cases = 65536
+hash = "f410c27c5869db16d42bcdcd0dce82b0469472e933b6de4664bcc044b36b7cd4"
+
+["commonware_utils::bitmap::roaring::container::bitmap::tests::conformance::CodecConformance<super::Bitmap>"]
+n_cases = 65536
+hash = "7d87b05d0ab380d749c40e20b3f77e5f6c605837771e92c59c8513390e78357d"
+
+["commonware_utils::bitmap::roaring::container::run::tests::conformance::CodecConformance<super::Run>"]
+n_cases = 65536
+hash = "ff9e014856a66d9261cc56e6ce19a00dd5d3fe4233dca825563246d70d8bf650"
+
+["commonware_utils::bitmap::roaring::container::tests::conformance::CodecConformance<super::Container>"]
+n_cases = 65536
+hash = "b0ff198985fd2700d73c9f803b57f00df4db35d0d4daaeb548b2c035fd908be6"
+
+["commonware_utils::bitmap::roaring::container::tests::conformance::ContainerTransitionsConformance"]
+n_cases = 1024
+hash = "bada4ef8a7eb22bba8e2f95c169aae79e64dae1e09fce3eae9dc5bf297d5b030"
+
+["commonware_utils::bitmap::roaring::prunable::tests::conformance::CodecConformance<super::Prunable>"]
+n_cases = 65536
+hash = "a31d02a003e0fa69c856b59e27e237e75dd4f58e6cc82e09cc3a998eaabd99ce"
+
+["commonware_utils::bitmap::roaring::tests::conformance::CodecConformance<super::Bitmap>"]
+n_cases = 65536
+hash = "1b7dca3f2a33ea4e1b199c02a8b1e0874e8eedf2c1c99b110ef9bde24cd53aa0"
+
 ["commonware_utils::bitmap::tests::conformance::CodecConformance<BitMap>"]
 n_cases = 65536
 hash = "07161626ba27702dd0c4699ac8bc20bf0d2c8fb6e378644b7899af0d4a060dbd"

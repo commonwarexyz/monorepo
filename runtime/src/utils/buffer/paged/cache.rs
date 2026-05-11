@@ -617,6 +617,7 @@ mod tests {
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, BufferPool,
         BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        Supervisor as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -1034,7 +1035,7 @@ mod tests {
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_first = cache_ref.clone();
             let blob_for_first = blob.clone();
-            let first = context.clone().spawn(move |_| async move {
+            let first = context.child("first").spawn(move |_| async move {
                 let _ = cache_ref_for_first
                     .read(&blob_for_first, blob_id, &mut first_buf, 0)
                     .await;
@@ -1045,7 +1046,7 @@ mod tests {
             let mut second_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_second = cache_ref.clone();
             let blob_for_second = blob.clone();
-            let second = context.clone().spawn(move |_| async move {
+            let second = context.child("second").spawn(move |_| async move {
                 cache_ref_for_second
                     .read(&blob_for_second, blob_id, &mut second_buf, 0)
                     .await
@@ -1078,7 +1079,7 @@ mod tests {
             let mut third_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_third = cache_ref.clone();
             let blob_for_third = blob.clone();
-            let third = context.clone().spawn(move |_| async move {
+            let third = context.child("third").spawn(move |_| async move {
                 cache_ref_for_third
                     .read(&blob_for_third, blob_id, &mut third_buf, 0)
                     .await
@@ -1161,7 +1162,7 @@ mod tests {
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_first = cache_ref.clone();
             let blob_for_first = blob.clone();
-            let first = context.clone().spawn(move |_| async move {
+            let first = context.child("first").spawn(move |_| async move {
                 cache_ref_for_first
                     .read(&blob_for_first, blob_id, &mut first_buf, 0)
                     .await
@@ -1172,7 +1173,7 @@ mod tests {
             let mut second_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_second = cache_ref.clone();
             let blob_for_second = blob.clone();
-            let second = context.clone().spawn(move |_| async move {
+            let second = context.child("second").spawn(move |_| async move {
                 cache_ref_for_second
                     .read(&blob_for_second, blob_id, &mut second_buf, 0)
                     .await

@@ -109,47 +109,43 @@ impl<
                         let mut router = router.clone();
 
                         // Spawn peer
-                        self.context
-                            .with_label("peer")
-                            .spawn(move |context| async move {
-                                // Create peer
-                                debug!(?peer, "peer started");
-                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                    context,
-                                    peer::Config {
-                                        ping_frequency: self.ping_frequency,
-                                        sent_messages,
-                                        received_messages,
-                                        dropped_messages,
-                                        rate_limited,
-                                        mailbox_size: self.mailbox_size,
-                                        send_batch_size: self.send_batch_size,
-                                    },
-                                );
+                        self.context.child("peer").spawn(move |context| async move {
+                            // Create peer
+                            debug!(?peer, "peer started");
+                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                context,
+                                peer::Config {
+                                    ping_frequency: self.ping_frequency,
+                                    sent_messages,
+                                    received_messages,
+                                    dropped_messages,
+                                    rate_limited,
+                                    mailbox_size: self.mailbox_size,
+                                    send_batch_size: self.send_batch_size,
+                                },
+                            );
 
-                                // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
-                                else {
-                                    debug!(?peer, "router shut down during peer setup");
-                                    return;
-                                };
+                            // Register peer with the router (may fail during shutdown)
+                            let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                debug!(?peer, "router shut down during peer setup");
+                                return;
+                            };
 
-                                // Register peer with tracker
-                                tracker.connect(peer.clone(), peer_mailbox);
+                            // Register peer with tracker
+                            tracker.connect(peer.clone(), peer_mailbox);
 
-                                // Run peer
-                                let result =
-                                    peer_actor.run(peer.clone(), connection, channels).await;
+                            // Run peer
+                            let result = peer_actor.run(peer.clone(), connection, channels).await;
 
-                                // Let the router know the peer has exited
-                                match result {
-                                    Ok(()) => debug!(?peer, "peer shutdown gracefully"),
-                                    Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
-                                }
-                                router.release(peer).await;
-                                // Release the reservation
-                                drop(reservation)
-                            });
+                            // Let the router know the peer has exited
+                            match result {
+                                Ok(()) => debug!(?peer, "peer shutdown gracefully"),
+                                Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
+                            }
+                            router.release(peer).await;
+                            // Release the reservation
+                            drop(reservation)
+                        });
                     }
                 }
             },

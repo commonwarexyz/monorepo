@@ -89,7 +89,7 @@ mod tests {
     use super::*;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics as _, Runner, Storage, Supervisor as _};
     use commonware_utils::sequence::U64;
     use rand::{Rng, RngCore};
 
@@ -103,7 +103,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg)
                 .await
                 .unwrap();
 
@@ -147,7 +147,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -184,7 +184,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg)
                 .await
                 .unwrap();
 
@@ -218,7 +218,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -240,7 +240,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg)
                 .await
                 .unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -314,7 +314,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("third"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("third"), cfg)
                 .await
                 .unwrap();
 
@@ -344,7 +344,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg)
                 .await
                 .unwrap();
 
@@ -377,7 +377,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -399,7 +399,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg)
                 .await
                 .unwrap();
 
@@ -435,7 +435,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -463,9 +463,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.with_label("first"), cfg)
-                .await
-                .unwrap();
+            let mut metadata = Metadata::init(context.child("first"), cfg).await.unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -496,7 +494,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -518,9 +516,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.with_label("first"), cfg)
-                .await
-                .unwrap();
+            let mut metadata = Metadata::init(context.child("first"), cfg).await.unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -551,7 +547,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -576,9 +572,7 @@ mod tests {
                     partition: "test".into(),
                     codec_config: ((0..).into(), ()),
                 };
-                let mut metadata = Metadata::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+                let mut metadata = Metadata::init(context.child("first"), cfg).await.unwrap();
 
                 // Put a key
                 metadata.put(key.clone(), hello.clone());
@@ -591,7 +585,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -620,7 +614,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.child("storage"), cfg).await.unwrap();
 
             // Create a value that exceeds u32::MAX bytes
             let value = vec![0u8; (u32::MAX as usize) + 1];
@@ -641,7 +635,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.child("storage"), cfg).await.unwrap();
 
             // Put initial keys
             for i in 0..100 {
@@ -746,7 +740,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -786,7 +780,7 @@ mod tests {
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -809,7 +803,7 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -830,7 +824,7 @@ mod tests {
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -856,7 +850,7 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -876,7 +870,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -945,7 +939,7 @@ mod tests {
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -979,7 +973,7 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -1006,7 +1000,7 @@ mod tests {
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -1025,7 +1019,7 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 
@@ -1055,9 +1049,10 @@ mod tests {
                 partition: "test-determinism".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Perform a series of deterministic operations
             for i in 0..num_operations {
@@ -1125,7 +1120,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1190,7 +1185,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg)
                 .await
                 .unwrap();
 
@@ -1229,7 +1224,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
 

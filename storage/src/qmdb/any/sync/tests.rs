@@ -23,7 +23,9 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_runtime::{deterministic, BufferPooler, Clock, Metrics, Runner as _};
+use commonware_runtime::{
+    deterministic, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
+};
 use commonware_utils::{
     channel::{mpsc, oneshot},
     non_empty_range,
@@ -140,7 +142,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Init target_db to satisfy engine configuration bounds
-        let target_db = H::init_db(context.with_label("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
 
         // Use an arbitrary target
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -151,7 +153,7 @@ where
                 root: Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(0), Location::new(10)),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: Arc::new(target_db),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -190,7 +192,7 @@ where
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let engine_config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             target: Target {
                 root: target_root,
                 range: non_empty_range!(Location::new(0), Location::new(5)),
@@ -221,7 +223,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(target_db_ops);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -239,7 +241,7 @@ where
         // Configure sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let target_db = Arc::new(target_db);
-        let client_context = context.with_label("client");
+        let client_context = context.child("client");
         let config = Config {
             db_config: db_config.clone(),
             fetch_batch_size,
@@ -247,7 +249,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, target_op_count),
             },
-            context: client_context.clone(),
+            context: client_context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -275,8 +277,7 @@ where
 
         // Reopen and verify state persisted
         drop(synced_db);
-        let reopened_db =
-            H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
+        let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
         assert_eq!(reopened_db.bounds().await.end, final_op_count);
         assert_eq!(
             reopened_db.inactivity_floor_loc().await,
@@ -303,7 +304,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(target_db_ops);
 
         // Apply all but the last operation
@@ -330,7 +331,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: Arc::new(target_db),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -371,16 +372,20 @@ where
     executor.start(|mut context| async move {
         let original_ops_data = H::create_ops(original_ops);
 
-        // Create two databases
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        // Heap-pin large sub-futures so their state machines don't inflate this test's outer
+        // state machine and overflow the test thread stack.
+        let mut target_db = Box::pin(H::init_db(context.child("target"))).await;
         let sync_db_config = H::config(&context.next_u64().to_string(), &context);
-        let client_context = context.with_label("client");
-        let mut sync_db: H::Db =
-            H::init_db_with_config(client_context.clone(), sync_db_config.clone()).await;
+        let client_context = context.child("client");
+        let mut sync_db: H::Db = Box::pin(H::init_db_with_config(
+            client_context.child("client"),
+            sync_db_config.clone(),
+        ))
+        .await;
 
         // Apply the same operations to both databases
-        target_db = H::apply_ops(target_db, original_ops_data.clone()).await;
-        sync_db = H::apply_ops(sync_db, original_ops_data.clone()).await;
+        target_db = Box::pin(H::apply_ops(target_db, original_ops_data.clone())).await;
+        sync_db = Box::pin(H::apply_ops(sync_db, original_ops_data.clone())).await;
         // commit already done in apply_ops
         // commit already done in apply_ops
 
@@ -389,7 +394,7 @@ where
         // Add more operations and commit the target database
         // (use different seed to avoid key collisions)
         let more_ops = H::create_ops_seeded(1, 1);
-        target_db = H::apply_ops(target_db, more_ops.clone()).await;
+        target_db = Box::pin(H::apply_ops(target_db, more_ops.clone())).await;
         // commit already done in apply_ops
 
         let sync_root = H::sync_target_root(&target_db);
@@ -406,7 +411,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: client_context.with_label("sync"),
+            context: client_context.child("sync"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -415,7 +420,10 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: H::Db = sync::sync(config).await.unwrap();
+        // Heap-pin the sync future so its (large, monomorphized-per-variant) state
+        // machine doesn't inflate this test's outer state machine and overflow the
+        // test thread stack.
+        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
 
         // Verify database state
         let bounds = synced_db.bounds().await;
@@ -468,11 +476,11 @@ where
 
         // Create two databases with their own configs
         let target_config = H::config(&context.next_u64().to_string(), &context);
-        let mut target_db =
-            H::init_db_with_config(context.with_label("target"), target_config).await;
+        let mut target_db = H::init_db_with_config(context.child("target"), target_config).await;
         let sync_config = H::config(&context.next_u64().to_string(), &context);
-        let client_context = context.with_label("client");
-        let mut sync_db = H::init_db_with_config(client_context.clone(), sync_config.clone()).await;
+        let client_context = context.child("client");
+        let mut sync_db =
+            H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         // Apply the same operations to both databases
         target_db = H::apply_ops(target_db, target_ops.clone()).await;
@@ -506,7 +514,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: client_context.with_label("sync"),
+            context: client_context.child("sync"),
             resolver,
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -550,7 +558,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(50);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -570,7 +578,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -625,7 +633,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(50);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -639,7 +647,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -694,7 +702,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(100);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -722,7 +730,7 @@ where
 
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: H::config(&context.next_u64().to_string(), &context),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
@@ -779,7 +787,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(10);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -794,7 +802,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(20),
             target: Target {
@@ -847,7 +855,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(50)).await;
 
         let initial_lower_bound = target_db.inactivity_floor_loc().await;
@@ -861,7 +869,7 @@ where
         let (update_sender, update_receiver) = mpsc::channel(2);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -914,7 +922,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
@@ -938,7 +946,7 @@ where
         let (reached_sender, mut reached_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(10),
             target: initial_target.clone(),
@@ -951,8 +959,10 @@ where
             max_retained_roots: 0,
         };
 
-        let sync_handle = sync::sync(config);
-        pin_mut!(sync_handle);
+        // Heap-pin the sync future so its (large, monomorphized-per-variant) state
+        // machine doesn't inflate this test's outer state machine and overflow the
+        // test thread stack.
+        let mut sync_handle = Box::pin(sync::sync(config));
 
         select! {
             _ = sync_handle.as_mut() => {
@@ -1013,8 +1023,8 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     target: &Target<F, Digest>,
 ) {
     let target_end = *target.range.end();
-    let journal_size = format!("client_journal_size {target_end}");
-    let target_end = format!("client_target_end {target_end}");
+    let journal_size = format!("client_sync_journal_size {target_end}");
+    let target_end = format!("client_sync_target_end {target_end}");
     loop {
         let metrics = context.encode();
         if metrics.contains(&journal_size) && metrics.contains(&target_end) {
@@ -1035,7 +1045,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
 
         target_db = H::apply_ops(target_db, H::create_ops(8)).await;
         let initial_target = Target {
@@ -1069,7 +1079,7 @@ where
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(2),
             target: initial_target.clone(),
@@ -1089,7 +1099,7 @@ where
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal");
             },
-            _ = wait_for_reached_progress(context.clone(), &initial_target) => {},
+            _ = wait_for_reached_progress(context.child("storage"), &initial_target) => {},
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),
@@ -1104,7 +1114,7 @@ where
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal after first update");
             },
-            _ = wait_for_reached_progress(context.clone(), &first_update) => {},
+            _ = wait_for_reached_progress(context.child("storage"), &first_update) => {},
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),
@@ -1119,7 +1129,7 @@ where
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal after second update");
             },
-            _ = wait_for_reached_progress(context.clone(), &second_update) => {},
+            _ = wait_for_reached_progress(context.child("storage"), &second_update) => {},
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),
@@ -1156,7 +1166,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(30)).await;
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
@@ -1175,7 +1185,7 @@ where
 
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(3),
             target: target.clone(),
@@ -1219,7 +1229,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
@@ -1229,7 +1239,7 @@ where
 
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -1268,7 +1278,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
@@ -1279,7 +1289,7 @@ where
 
         let target_db = Arc::new(target_db);
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
@@ -1323,7 +1333,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database with initial operations
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(initial_ops);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -1341,7 +1351,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         // Step the client to process a batch
         let client = {
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: H::config(&context.next_u64().to_string(), &context),
                 target: Target {
                     root: initial_sync_root,
@@ -1434,7 +1444,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate a simple target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(10);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
@@ -1447,7 +1457,7 @@ where
 
         // Perform sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
-        let client_context = context.with_label("client");
+        let client_context = context.child("client");
         let target_db = Arc::new(target_db);
         let config = Config {
             db_config: db_config.clone(),
@@ -1456,7 +1466,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: client_context.clone(),
+            context: client_context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -1477,8 +1487,7 @@ where
 
         // Re-open the database
         drop(synced_db);
-        let reopened_db =
-            H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
+        let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
 
         // Verify the state is unchanged
         assert_eq!(reopened_db.root(), expected_root);
@@ -1507,7 +1516,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(50);
         target_db = H::apply_ops(target_db, target_ops).await;
 
@@ -1524,7 +1533,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -1564,7 +1573,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let db_config = H::config(&context.next_u64().to_string(), &context);
-        let mut db = H::init_db_with_config(context.with_label("source"), db_config.clone()).await;
+        let mut db = H::init_db_with_config(context.child("source"), db_config.clone()).await;
         let ops = H::create_ops(100);
         db = H::apply_ops(db, ops).await;
         // commit already done in apply_ops
@@ -1579,7 +1588,7 @@ where
         let (_, journal) = db.into_log_components();
 
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
-            context.with_label("synced"),
+            context.child("synced"),
             db_config,
             journal,
             Some(pinned_nodes),
@@ -1613,11 +1622,11 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate two databases.
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let sync_db_config = H::config(&context.next_u64().to_string(), &context);
-        let client_context = context.with_label("client");
+        let client_context = context.child("client");
         let mut sync_db =
-            H::init_db_with_config(client_context.clone(), sync_db_config.clone()).await;
+            H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
         let original_ops = H::create_ops(NUM_OPS);
         target_db = H::apply_ops(target_db, original_ops.clone()).await;
         // commit already done in apply_ops
@@ -1652,7 +1661,7 @@ where
 
         // Re-open `sync_db` using from_sync_result
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
-            client_context.with_label("synced"),
+            client_context.child("synced"),
             sync_db_config,
             journal,
             Some(pinned_nodes),
@@ -1690,7 +1699,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate a source database
-        let mut source_db = H::init_db(context.with_label("source")).await;
+        let mut source_db = H::init_db(context.child("source")).await;
         let ops = H::create_ops(NUM_OPS);
         source_db = H::apply_ops(source_db, ops).await;
         // commit already done in apply_ops
@@ -1714,7 +1723,7 @@ where
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
-            context.with_label("synced"),
+            context.child("synced"),
             new_db_config,
             journal,
             Some(pinned_nodes),
@@ -1747,7 +1756,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create an empty database (initialized with a single CommitFloor operation)
-        let source_db = H::init_db(context.with_label("source")).await;
+        let source_db = H::init_db(context.child("source")).await;
 
         // An empty database has exactly 1 operation (the initial CommitFloor)
         assert_eq!(source_db.bounds().await.end, Location::new(1));
@@ -1759,7 +1768,7 @@ where
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
-            context.with_label("synced"),
+            context.child("synced"),
             new_db_config,
             journal,
             None,
@@ -1848,7 +1857,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Build a target database with some operations and prune so that pinned nodes are needed.
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
         let ops = H::create_ops(20);
         target_db = H::apply_ops(target_db, ops).await;
         target_db
@@ -1874,7 +1883,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            context: context.with_label("client"),
+            context: context.child("client"),
             resolver,
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -1984,7 +1993,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let mut target_db = H::init_db(context.with_label("target")).await;
+        let mut target_db = H::init_db(context.child("target")).await;
 
         let mut seed = 0;
         loop {
@@ -2040,7 +2049,7 @@ where
         let (reached_sender, mut reached_receiver) = mpsc::channel(1);
 
         let config = Config {
-            context: context.with_label("client"),
+            context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(1),
             target: old_target.clone(),

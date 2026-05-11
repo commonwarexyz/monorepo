@@ -65,7 +65,7 @@
 //! # Example (MMR)
 //!
 //! ```ignore
-//! let hasher = StandardHasher::<Sha256>::new();
+//! let hasher = StandardHasher::<Sha256>::new(ForwardFold);
 //! let mut mmr = Mmr::new();
 //!
 //! // Fork two independent speculative chains from the same base.
@@ -594,7 +594,7 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, mem::Mem};
+    use crate::merkle::{hasher::Standard, mem::Mem, Bagging::ForwardFold};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
@@ -626,7 +626,7 @@ mod tests {
     fn consistency_with_reference<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             for &n in &[1u64, 2, 10, 100, 199] {
                 let reference = build_reference::<F>(&hasher, n);
                 let base = Mem::<F, D>::new();
@@ -650,7 +650,7 @@ mod tests {
     fn lifecycle<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let base_root = mem_root(&base, &hasher);
             let mut batch = base.new_batch();
@@ -679,7 +679,7 @@ mod tests {
     fn apply_batch<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut base = build_reference::<F>(&hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..75 {
@@ -698,7 +698,7 @@ mod tests {
     fn multiple_forks<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let base_root = mem_root(&base, &hasher);
             let mut ba = base.new_batch();
@@ -725,7 +725,7 @@ mod tests {
     fn fork_of_fork_reads<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let mut ba = base.new_batch();
             for i in 50u64..60 {
@@ -765,7 +765,7 @@ mod tests {
     fn update_leaf_digest_roundtrip<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 100);
             let base_root = mem_root(&base, &hasher);
             let updated = Sha256::fill(0xFF);
@@ -789,7 +789,7 @@ mod tests {
     fn update_and_add<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let base_root = mem_root(&base, &hasher);
             let updated = Sha256::fill(0xAA);
@@ -811,7 +811,7 @@ mod tests {
     fn update_leaf_batched_roundtrip<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 100);
             let base_root = mem_root(&base, &hasher);
             let updated = Sha256::fill(0xBB);
@@ -843,7 +843,7 @@ mod tests {
     fn proof_verification<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..60 {
@@ -880,7 +880,7 @@ mod tests {
     fn empty_batch<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let base_root = mem_root(&base, &hasher);
             let m = base.new_batch().merkleize(&base, &hasher);
@@ -891,7 +891,7 @@ mod tests {
     fn batch_roundtrip<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..55 {
@@ -915,7 +915,7 @@ mod tests {
     fn sequential_apply_batch<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut base = build_reference::<F>(&hasher, 50);
             let mut b1 = base.new_batch();
             for i in 50u64..60 {
@@ -939,7 +939,7 @@ mod tests {
     fn batch_on_pruned_base<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut base = build_reference::<F>(&hasher, 100);
             base.prune(Location::new(27)).unwrap();
             let mut batch = base.new_batch();
@@ -966,7 +966,7 @@ mod tests {
     fn three_deep_stacking<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut base = build_reference::<F>(&hasher, 100);
             let da = Sha256::fill(0xDD);
             let db = Sha256::fill(0xEE);
@@ -995,7 +995,7 @@ mod tests {
     fn overwrite_collision<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let mut base = build_reference::<F>(&hasher, 100);
             let dx = Sha256::fill(0xAA);
             let dy = Sha256::fill(0xBB);
@@ -1020,7 +1020,7 @@ mod tests {
     fn update_appended_leaf<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..60 {
@@ -1051,7 +1051,7 @@ mod tests {
     fn update_leaf_element<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let base_root = mem_root(&base, &hasher);
             let element = b"updated-element";
@@ -1075,7 +1075,7 @@ mod tests {
     fn update_out_of_bounds<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: H = Standard::new();
+            let hasher: H = Standard::new(ForwardFold);
             let base = build_reference::<F>(&hasher, 50);
             let r1 = base
                 .new_batch()

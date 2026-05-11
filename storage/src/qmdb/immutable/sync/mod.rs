@@ -6,15 +6,15 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self,
         full::{self, Merkle},
         Family, Location,
     },
     qmdb::{
+        self,
         any::ValueEncoding,
-        build_snapshot_from_log, compact_witness,
-        immutable::{self, CompactDb, Operation},
-        operation::{Key, Operation as _},
+        build_snapshot_from_log,
+        immutable::{self, CompactDb, Metrics, Operation},
+        operation::Key,
         sync::{self},
         Error,
     },
@@ -49,8 +49,6 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
-
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
     /// # Behavior
@@ -75,11 +73,11 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
-        let hasher = merkle::hasher::Standard::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
 
         // Initialize Merkle structure for sync
         let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),
                 range: range.clone(),
@@ -97,19 +95,23 @@ where
         .await?;
 
         let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+            Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let last_commit_loc =
-                Location::<F>::new(bounds.end.checked_sub(1).expect("commit should exist"));
-
-            // Read the floor from the last commit operation.
-            let last_op = reader.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
+            let last_commit_loc = Location::<F>::new(
+                bounds
+                    .end
+                    .checked_sub(1)
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+            );
+            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
+                &reader,
+                Location::new(bounds.end),
+                |op| op.has_floor(),
+            )
+            .await?;
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
@@ -128,13 +130,16 @@ where
         );
         let root = journal.root(inactive_peaks)?;
 
+        let metrics = Metrics::new(context);
         let db = Self {
             journal,
             root,
             snapshot,
             last_commit_loc,
             inactivity_floor_loc,
+            metrics,
         };
+        db.update_metrics().await;
 
         db.sync().await?;
         Ok(db)
@@ -164,8 +169,6 @@ where
     type Context = E;
     type Hasher = H;
 
-    const ROOT_BAGGING: merkle::Bagging = merkle::Bagging::BackwardFold;
-
     async fn from_compact_state(
         context: Self::Context,
         config: Self::Config,
@@ -182,13 +185,13 @@ where
             return Err(Error::UnexpectedData(last_commit_loc));
         };
         let commit_codec_config = config.commit_codec_config.clone();
-        let commit_op_bytes =
+        let last_commit_op_bytes =
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let hasher = merkle::hasher::Standard::<H>::with_bagging(merkle::Bagging::BackwardFold);
+        let hasher = qmdb::hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.with_label("merkle"),
+            context.child("merkle"),
             config.merkle,
             leaf_count,
             pinned_nodes.clone(),
@@ -205,7 +208,7 @@ where
             last_commit_metadata,
             inactivity_floor_loc,
             root,
-            commit_op_bytes,
+            last_commit_op_bytes,
             last_commit_proof,
             pinned_nodes,
         )
@@ -216,7 +219,7 @@ where
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_cached_serve_state(self).await
+        self.persist_cached_witness().await
     }
 }
 

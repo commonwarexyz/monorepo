@@ -47,7 +47,9 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 - **storage**: Persist and retrieve data from an abstract store.
 - **stream**: Exchange messages over arbitrary transport.
 
-_More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
+Supporting crates include **formatting**, **invariants**, **macros**, **math**, **parallel**, and **utils**.
+
+_All workspace crates can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
 
 ### Examples
 
@@ -57,6 +59,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 - **estimator** (`examples/estimator`): Simulate mechanism performance under realistic network conditions.
 - **flood** (`examples/flood`): Spam peers deployed to AWS EC2 with random messages.
 - **log** (`examples/log`): Commit to a secret log and agree to its hash.
+- **reshare** (`examples/reshare`): Reshare threshold cryptographic material across participants.
 - **sync** (`examples/sync`): Synchronize state between a server and client.
 
 ### Key Design Principles
@@ -65,7 +68,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic.rs`) commonly in the repository to drive tests.
 3. **Performance Sensitive**: All primitives are optimized for high throughput/low latency.
 4. **Adversarial Safety**: All primitives are designed to operate robustly in adversarial environments.
-5. **Abstract Runtime**: All code outside the `runtime` primitive must be runtime-agnostic (never import `tokio` directly outside of `runtime/`). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
+5. **Abstract Runtime**: Protocol primitives should stay runtime-agnostic. Do not introduce direct `tokio` usage unless the crate already owns a runtime integration or command-line runtime path (for example `runtime`, `deployer`, runtime utilities, benches, or tests). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
 6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
 7. **Own Core Mechanisms**: If a primitive relies heavily on some core mechanism/algorithm, we should implement it rather than relying on external crates.
 
@@ -108,6 +111,10 @@ Extensive technical writing in `docs/blogs/` provides deep insights into design 
 - **commonware-cryptography.html**: Cryptographic primitives and safety guarantees
 - **commonware-broadcast.html**: Reliable broadcast protocol implementation
 - **commonware-deployer.html**: Infrastructure deployment automation
+- **conformance.html**: Conformance testing infrastructure
+- **coding.html** / **zoda.html**: Erasure coding primitives and implementation details
+- **qmdb.html**: Authenticated database design and performance
+- **reshare.html**: Threshold cryptography resharing
 
 ### Algorithms & Data Structures
 
@@ -116,6 +123,7 @@ Extensive technical writing in `docs/blogs/` provides deep insights into design 
 - **minimmit.html**: Minimal commit protocol
 - **buffered-signatures.html**: Efficient signature aggregation
 - **threshold-simplex.html**: Threshold consensus mechanism
+- **batch-pari.html** / **bte.html**: Batch and threshold encryption constructions
 
 ## CI/CD Pipeline
 
@@ -291,8 +299,8 @@ Exclusively use the deterministic runtime (`runtime/src/deterministic.rs`) for r
 fn test_async_behavior() {
     let executor = deterministic::Runner::seeded(42); // Use seed for reproducibility
     executor.start(|context| async move {
-        // Spawn actors with labels for debugging
-        let handle = context.with_label("worker").spawn(|context| async move {
+        // Spawn actors with child contexts for metrics and debugging
+        let handle = context.child("worker").spawn(|context| async move {
             // Actor logic here
             context.sleep(Duration::from_secs(1)).await;
         });
@@ -328,16 +336,18 @@ let executor = deterministic::Runner::timed(Duration::from_secs(30));
 
 ```rust
 // Test unclean shutdowns and recovery
-let mut prev_ctx = None;
+let mut checkpoint = None;
 loop {
-    let (complete, context) = if let Some(prev_ctx) = prev_ctx {
-        deterministic::Runner::from(prev_ctx) // Resume from previous state
+    let runner = if let Some(checkpoint) = checkpoint.take() {
+        deterministic::Runner::from(checkpoint) // Resume from previous state
     } else {
         deterministic::Runner::timed(Duration::from_secs(30))
-    }.start(f);
+    };
+
+    let (complete, next_checkpoint) = runner.start_and_recover(f);
 
     if complete { break; }
-    prev_ctx = Some(context.recover()); // Save state for next iteration
+    checkpoint = Some(next_checkpoint); // Save state for next iteration
 }
 ```
 
@@ -364,8 +374,12 @@ Exceptions: fuzz tests deriving seed from input, or loops testing multiple seeds
 To simulate network operations, use the simulated network (`p2p/src/simulated`):
 ```rust
 let (network, mut oracle) = Network::new(
-    context.with_label("network"),
-    Config { max_size: 1024 * 1024 }
+    context.child("network"),
+    Config {
+        max_size: 1024 * 1024,
+        disconnect_on_block: true,
+        tracked_peer_sets: NZUsize!(1),
+    },
 );
 network.start();
 
@@ -453,13 +467,13 @@ assert_eq!(state1, state2); // Must be deterministic with same seed
 ### Key Testing Patterns
 
 - **Determinism First**: Always verify tests are deterministic with `context.auditor().state()`
-- **Label Everything**: Use `context.with_label()` for all actors and spawned tasks
+- **Label Everything**: Use `context.child("role")` for all actors and spawned tasks; use `with_attribute()` for dynamic dimensions
 - **Multi-Channel Testing**: Register multiple channels per peer for different message types
 - **Progressive Degradation**: Start with ideal conditions, then introduce failures
 - **Byzantine Simulation**: Replace honest nodes with Byzantine actors to test fault tolerance
 - **State Recovery**: Test crash recovery by saving and restoring context state
 - **Network Partitions**: Simulate split-brain scenarios with selective link removal
-- **Metric Verification**: Use supervisors or monitors to verify distributed properties
+- **Metric Verification**: Use supervisors, monitors, or metric output to verify distributed properties. For task shutdown checks, assert the selected task prefix is non-zero before shutdown, then assert the same prefix is zero after shutdown.
 
 ## Storage Testing via Runtime
 
@@ -502,7 +516,7 @@ fn test_crash_recovery() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Initialize journal/storage
-        let mut journal = Journal::init(context.with_label("journal"), cfg)
+        let mut journal = Journal::init(context.child("journal"), cfg)
             .await
             .expect("Failed to init");
 
@@ -514,7 +528,7 @@ fn test_crash_recovery() {
         drop(journal);
 
         // Re-initialize to simulate restart
-        let journal = Journal::init(context.with_label("journal"), cfg)
+        let journal = Journal::init(context.child("journal"), cfg)
             .await
             .expect("Failed to re-init");
 
@@ -533,7 +547,7 @@ fn test_corruption_recovery() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Write valid data
-        let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+        let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
         journal.append(1, valid_data).await.unwrap();
         journal.sync(1).await.unwrap();
         drop(journal);
@@ -549,7 +563,7 @@ fn test_corruption_recovery() {
         blob.sync().await.unwrap();
 
         // Re-initialize and verify recovery
-        let journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+        let journal = Journal::init(context.child("journal"), cfg).await.unwrap();
 
         // Replay should handle corruption gracefully
         let stream = journal.replay(buffer_size).await.unwrap();
@@ -600,7 +614,7 @@ fn test_storage_conformance() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Write known data
-        let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+        let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
         for i in 0..100 {
             journal.append(1, i).await.unwrap();
         }
@@ -714,11 +728,12 @@ Run `just test-conformance` to generate the initial hash values. The test framew
 
 ### Runtime Isolation Rule
 
-**CRITICAL**: All code outside the `runtime` primitive must be runtime-agnostic:
-- Never import or use `tokio` directly outside of `runtime/`
-- Always use `futures` for async operations
-- Use capabilities exported by `runtime` traits for I/O operations
-- This ensures all primitives remain portable across different runtime implementations
+**CRITICAL**: Protocol primitives should remain runtime-agnostic:
+- Do not introduce direct `tokio` usage in protocol crates unless the module is explicitly runtime-specific, a benchmark, or a test.
+- Existing runtime-owning crates and paths such as `runtime`, `deployer`'s AWS feature, `commonware-macros`, and `commonware-utils::sync` may use `tokio` where that is already part of their contract.
+- Prefer `futures` for async operations in runtime-agnostic code.
+- Use capabilities exported by `runtime` traits for I/O operations.
+- This keeps primitives portable across different runtime implementations.
 
 ### Error Handling
 
@@ -744,7 +759,7 @@ pub enum Error {
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
 - Place explanatory comments above the logical code block they describe; do not split a single consecutive sequence with inline comments between adjacent lines.
-- Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
+- Only use characters that can be easily typed. For example, don't use em dashes or arrows.
 - Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 - Do not write comments that sound unnatural, out of place, or overly verbose outside the context of the changes being made. For example, if you edit a function to call foo() instead of bar(), don't add a comment "// Used to call bar() here".
 

@@ -51,6 +51,14 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     pub const fn is_commit(&self) -> bool {
         matches!(self, Self::Commit(_, _))
     }
+
+    /// Returns the inactivity floor location if this is a commit operation.
+    pub const fn has_floor(&self) -> Option<Location<F>> {
+        match self {
+            Self::Commit(_, loc) => Some(*loc),
+            Self::Set(_, _) => None,
+        }
+    }
 }
 
 impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, V> {
@@ -70,10 +78,7 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, 
     }
 
     fn has_floor(&self) -> Option<Location<F>> {
-        match self {
-            Self::Commit(_, loc) => Some(*loc),
-            _ => None,
-        }
+        self.has_floor()
     }
 }
 

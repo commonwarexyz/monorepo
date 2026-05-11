@@ -195,7 +195,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Initialize a new `Merkle` instance, rebuilding in-memory state from the last sync.
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.with_label("compact_metadata"),
+            context.child("compact_metadata"),
             MConfig {
                 partition: cfg.partition,
                 codec_config: ((0..).into(), ()),
@@ -250,7 +250,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.with_label("compact_metadata"),
+            context.child("compact_metadata"),
             MConfig {
                 partition: cfg.partition,
                 codec_config: ((0..).into(), ()),
@@ -354,11 +354,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// unexpectedly heavy work. In practice this closure is where callers capture a last-leaf
     /// proof or other small authenticated snapshot that would be impossible to reconstruct once the
     /// tree is pruned back to peaks.
-    pub(crate) async fn sync_with_witness<W: Clone>(
+    pub(crate) async fn sync_with_witness<W, R>(
         &self,
         build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
-        update: impl FnOnce(&mut Metadata<E, U64, Vec<u8>>, u8, W) -> Result<(), Error<F>>,
-    ) -> Result<W, Error<F>> {
+        update: impl FnOnce(&mut Metadata<E, U64, Vec<u8>>, u8, W) -> Result<R, Error<F>>,
+    ) -> Result<R, Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
 
         let current_slot = *self.active_slot.read();
@@ -374,8 +374,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             (leaves, pinned_nodes, witness)
         };
 
-        let cached_witness = witness.clone();
-        {
+        let result = {
             let mut metadata = self.metadata.lock().await;
             let old_target_leaves =
                 Self::read_slot_size(&metadata, target_slot)?.unwrap_or(Location::new(0));
@@ -390,14 +389,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                     digest.to_vec(),
                 );
             }
-            update(&mut metadata, target_slot, witness)?;
+            let result = update(&mut metadata, target_slot, witness)?;
             metadata.put(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot]);
             metadata.sync().await?;
-        }
+            result
+        };
 
         *self.active_slot.write() = target_slot;
         self.inner.write().prune_all();
-        Ok(cached_witness)
+        Ok(result)
     }
 
     /// Restore the state as of the sync before the most recent one.
@@ -483,11 +483,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 mod tests {
     use super::*;
     use crate::{
-        merkle::{hasher::Standard as StandardHasher, mmb, mmr},
+        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     type TestMerkle<F> =
         Merkle<F, deterministic::Context, <Sha256 as commonware_cryptography::Hasher>::Digest>;
@@ -505,7 +505,7 @@ mod tests {
     }
 
     async fn append_and_sync<F: Family>(merkle: &mut TestMerkle<F>, values: &[&[u8]]) {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let batch = {
             let mut b = merkle.new_batch();
             for v in values {
@@ -521,13 +521,13 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let cfg = Config {
             partition: partition.into(),
             strategy: Sequential,
         };
 
-        let mut merkle = TestMerkle::<F>::init(context.with_label("first"), cfg.clone())
+        let mut merkle = TestMerkle::<F>::init(context.child("first"), cfg.clone())
             .await
             .unwrap();
         let batch = {
@@ -540,7 +540,7 @@ mod tests {
         merkle.sync().await.unwrap();
         drop(merkle);
 
-        let mut reopened = TestMerkle::<F>::init(context.with_label("second"), cfg)
+        let mut reopened = TestMerkle::<F>::init(context.child("second"), cfg)
             .await
             .unwrap();
         assert_eq!(reopened.root(&hasher, 0).unwrap(), root_before);
@@ -572,7 +572,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) {
-        let hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut merkle = open::<F>(context, partition).await;
 
         append_and_sync(&mut merkle, &[b"a", b"b"]).await;
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn test_rewind_discards_uncommitted() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut merkle = open::<mmr::Family>(context, "rewind-uncommitted").await;
 
             append_and_sync(&mut merkle, &[b"a"]).await;
@@ -655,14 +655,14 @@ mod tests {
     #[test]
     fn test_rewind_persists_across_reopen() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let partition = "rewind-reopen";
             let cfg = Config {
                 partition: partition.into(),
                 strategy: Sequential,
             };
 
-            let mut merkle = open::<mmr::Family>(context.with_label("first"), partition).await;
+            let mut merkle = open::<mmr::Family>(context.child("first"), partition).await;
             append_and_sync(&mut merkle, &[b"a"]).await;
             let root_after_first = merkle.root(&hasher, 0).unwrap();
             append_and_sync(&mut merkle, &[b"b"]).await;
@@ -670,7 +670,7 @@ mod tests {
             drop(merkle);
 
             let reopened: TestMerkle<mmr::Family> =
-                Merkle::<mmr::Family, _, _>::init(context.with_label("second"), cfg)
+                Merkle::<mmr::Family, _, _>::init(context.child("second"), cfg)
                     .await
                     .unwrap();
             assert_eq!(reopened.root(&hasher, 0).unwrap(), root_after_first);
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn test_rewind_then_sync_then_rewind() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut merkle = open::<mmr::Family>(context, "rewind-resumable").await;
 
             append_and_sync(&mut merkle, &[b"a"]).await;
@@ -725,16 +725,15 @@ mod tests {
                 strategy: Sequential,
             };
 
-            let mut merkle =
-                TestMerkle::<mmr::Family>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+            let mut merkle = TestMerkle::<mmr::Family>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
             append_and_sync(&mut merkle, &[b"a"]).await;
             let slot = merkle.active_slot();
             drop(merkle);
 
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-                context.with_label("tamper"),
+                context.child("tamper"),
                 MConfig {
                     partition: partition.into(),
                     codec_config: ((0..).into(), ()),
@@ -750,7 +749,7 @@ mod tests {
             );
             metadata.sync().await.unwrap();
 
-            let reopened = TestMerkle::<mmr::Family>::init(context.with_label("second"), cfg).await;
+            let reopened = TestMerkle::<mmr::Family>::init(context.child("second"), cfg).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"))

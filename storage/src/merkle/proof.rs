@@ -592,6 +592,66 @@ impl<F: Family, D: Digest> Proof<F, D> {
             )
             .ok_or(ReconstructionError::InvalidProof)
     }
+
+    /// Authenticate the proven range without reconstructing the full generic Merkle root.
+    ///
+    /// This consumes only the sibling digests needed to rebuild the proven range peaks, then returns
+    /// those peak digests in `collected`. It deliberately does not consume peak-bagging witnesses
+    /// such as prefix peaks, after peaks, or backward-fold suffix accumulators.
+    ///
+    /// Current QMDB grafted proofs use this path because their final root is rebuilt by the wrapper
+    /// from the collected range peaks plus grafted prefix/suffix witnesses. Including generic
+    /// peak-bagging witnesses here would create proof bytes that the wrapper root ignores, making
+    /// those bytes malleable.
+    #[cfg(feature = "std")]
+    pub(crate) fn reconstruct_range_collecting<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        collected: &mut Vec<(Position<F>, D)>,
+    ) -> Result<(), ReconstructionError>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        if elements.is_empty() {
+            return Err(ReconstructionError::MissingElements);
+        }
+        if !start_loc.is_valid_index() {
+            return Err(ReconstructionError::InvalidStartLoc);
+        }
+        let end_loc = start_loc
+            .checked_add(elements.len() as u64)
+            .ok_or(ReconstructionError::InvalidEndLoc)?;
+        if end_loc > self.leaves {
+            return Err(ReconstructionError::InvalidEndLoc);
+        }
+
+        let range = start_loc..end_loc;
+        let peaks = range_peaks(self.leaves, self.inactive_peaks, &range)
+            .map_err(|_| ReconstructionError::InvalidSize)?;
+
+        let mut sibling_cursor = 0usize;
+        let mut elements_iter = elements.iter();
+        for peak in &peaks {
+            let peak_digest = peak.reconstruct_digest(
+                hasher,
+                &range,
+                &mut elements_iter,
+                &self.digests,
+                &mut sibling_cursor,
+                None,
+            )?;
+            collected.push((peak.pos, peak_digest));
+        }
+
+        if elements_iter.next().is_some() || sibling_cursor != self.digests.len() {
+            return Err(ReconstructionError::ExtraDigests);
+        }
+
+        Ok(())
+    }
 }
 
 /// A perfect binary subtree within a peak, identified by its root position, height,
@@ -619,6 +679,11 @@ impl<F: Family> Subtree<F> {
         self.is_before(range) || self.leaf_start >= range.end
     }
 
+    /// True if this subtree's leaves lie wholly inside `range`.
+    fn is_inside(&self, range: &Range<Location<F>>) -> bool {
+        self.leaf_start >= range.start && self.leaf_end() <= range.end
+    }
+
     fn children(&self) -> (Self, Self) {
         let (left_pos, right_pos) = F::children(self.pos, self.height);
         let child_height = self.height - 1;
@@ -640,11 +705,14 @@ impl<F: Family> Subtree<F> {
     /// Collect sibling positions needed to reconstruct this subtree digest from a range of
     /// elements, in left-first DFS order.
     ///
-    /// At each node: if the subtree is entirely outside the range, its root position is emitted. If
-    /// it's a leaf in the range, nothing is emitted. Otherwise, recurse into children.
+    /// Emits outside subtrees and skips fully covered subtrees.
     fn collect_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Position<F>>) {
         if self.is_outside(range) {
             out.push(self.pos);
+            return;
+        }
+
+        if self.is_inside(range) {
             return;
         }
 
@@ -658,10 +726,7 @@ impl<F: Family> Subtree<F> {
     /// Collect sibling subtrees that lie wholly before the proven range, in the same
     /// left-first DFS order as [`collect_siblings`](Self::collect_siblings).
     ///
-    /// Only `range.start` is consulted: the `range.end` side doesn't matter for prefix
-    /// siblings. Pruning on `range.start` also keeps the traversal O(height) per peak:
-    /// pruning only by `range.end` would recurse into both children whenever a subtree
-    /// sits entirely inside the proven range, costing O(2^height) per such peak.
+    /// Only `range.start` is consulted because the `range.end` side cannot affect prefix siblings.
     fn collect_prefix_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Self>) {
         if self.is_before(range) {
             out.push(*self);
@@ -776,6 +841,26 @@ impl<F: Family> Subtree<F> {
 
         Ok(hasher.node_digest(self.pos, &left_d, &right_d))
     }
+}
+
+/// Return the peaks of a tree of `leaves` that overlap `range`, validating both the range and the
+/// declared `inactive_peaks` boundary.
+///
+/// The returned subtrees are bagging-independent: `Blueprint::new`'s prefix/suffix accumulator
+/// layout depends on bagging, but the per-peak partition of the proven range does not.
+///
+/// # Errors
+///
+/// See [`Blueprint::new`].
+#[cfg(feature = "std")]
+pub(crate) fn range_peaks<F: Family>(
+    leaves: Location<F>,
+    inactive_peaks: usize,
+    range: &Range<Location<F>>,
+) -> Result<Vec<Subtree<F>>, super::Error<F>> {
+    // Bagging only affects `Blueprint`'s prefix/suffix bucketing; `range_peaks` is independent.
+    Blueprint::new(leaves, inactive_peaks, Bagging::ForwardFold, range.clone())
+        .map(|bp| bp.range_peaks)
 }
 
 /// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
@@ -1066,6 +1151,55 @@ where
     )
 }
 
+/// Return the node positions needed by [`build_range_collection_proof`].
+#[cfg(feature = "std")]
+pub(crate) fn range_collection_nodes<F: Family>(
+    leaves: Location<F>,
+    inactive_peaks: usize,
+    range: Range<Location<F>>,
+) -> Result<Vec<Position<F>>, super::Error<F>> {
+    let peaks = range_peaks(leaves, inactive_peaks, &range)?;
+    let mut fetch_nodes = Vec::new();
+    for peak in &peaks {
+        peak.collect_siblings(&range, &mut fetch_nodes);
+    }
+    Ok(fetch_nodes)
+}
+
+/// Build a proof containing only the sibling digests needed to authenticate the requested range.
+///
+/// `fetch_nodes` must be the slice returned by [`range_collection_nodes`] for the same `leaves` and
+/// `inactive_peaks`; the caller passes it in so the Blueprint traversal isn't repeated when the
+/// positions are already known (e.g., to drive concurrent fetching).
+///
+/// The resulting proof cannot reconstruct a complete generic Merkle root on its own. It is intended
+/// for wrappers that rebuild a custom root from separately supplied peak witnesses, such as current
+/// QMDB grafted proofs.
+#[cfg(feature = "std")]
+pub(crate) fn build_range_collection_proof<F, D, E>(
+    leaves: Location<F>,
+    inactive_peaks: usize,
+    fetch_nodes: &[Position<F>],
+    get_node: impl Fn(Position<F>) -> Option<D>,
+    element_pruned: impl Fn(Position<F>) -> E,
+) -> Result<Proof<F, D>, E>
+where
+    F: Family,
+    D: Digest,
+    E: From<super::Error<F>>,
+{
+    let mut digests = Vec::with_capacity(fetch_nodes.len());
+    for &pos in fetch_nodes {
+        digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
+    }
+
+    Ok(Proof {
+        leaves,
+        inactive_peaks,
+        digests,
+    })
+}
+
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
 /// inclusion of the elements at the specified `locations`, using the provided root bagging.
 #[cfg(any(feature = "std", test))]
@@ -1114,6 +1248,7 @@ mod tests {
         mem::Mem,
         mmb, mmr,
         proof::{nodes_required_for_multi_proof, Blueprint, Proof},
+        Bagging::{BackwardFold, ForwardFold},
         Family, Location, LocationRangeExt as _,
     };
     use alloc::vec;
@@ -1162,13 +1297,13 @@ mod tests {
     }
 
     fn split_root<F: Family>(mem: &Mem<F, D>, inactive_peaks: usize) -> D {
-        let backward_hasher: H = Standard::backward();
+        let backward_hasher: H = Standard::new(BackwardFold);
         mem.root(&backward_hasher, inactive_peaks).unwrap()
     }
 
     /// Hasher tuned for `bagging` so callers can mix forward/backward and full/split policies.
     fn hasher_for_bagging(bagging: Bagging) -> H {
-        Standard::with_bagging(bagging)
+        Standard::new(bagging)
     }
 
     fn push_unique_shape(shapes: &mut Vec<(Bagging, usize)>, shape: (Bagging, usize)) {
@@ -1211,7 +1346,7 @@ mod tests {
     }
 
     fn range_proofs_verify_for_supported_root_shapes<F: Family>() {
-        let mem = build_raw::<F>(&H::new(), 123);
+        let mem = build_raw::<F>(&H::new(ForwardFold), 123);
         let leaves = mem.leaves();
 
         for (bagging, inactive_peaks) in supported_root_shapes::<F>(leaves) {
@@ -1258,7 +1393,7 @@ mod tests {
     }
 
     fn multi_proofs_verify_for_supported_root_shapes<F: Family>() {
-        let mem = build_raw::<F>(&H::new(), 123);
+        let mem = build_raw::<F>(&H::new(ForwardFold), 123);
         let leaves = mem.leaves();
 
         for (bagging, inactive_peaks) in supported_root_shapes::<F>(leaves) {
@@ -1305,7 +1440,7 @@ mod tests {
     }
 
     fn backward_fold_proof_optimization_inner(inactive_peaks: usize) {
-        let hasher: H = Standard::backward();
+        let hasher: H = Standard::new(BackwardFold);
         let mem = build_inactive_prefix::<mmb::Family>(&hasher, 123, inactive_peaks);
         let leaves = mem.leaves();
         let root = split_root(&mem, inactive_peaks);
@@ -1359,7 +1494,7 @@ mod tests {
 
     #[test]
     fn full_backward_root_proves_like_split_zero() {
-        let hasher: H = Standard::backward();
+        let hasher: H = Standard::new(BackwardFold);
         let mem = build_raw::<mmb::Family>(&hasher, 123);
         let range = Location::new(2)..Location::new(3);
 
@@ -1425,7 +1560,7 @@ mod tests {
 
     fn empty_proof<F: Family>() {
         // Test that an empty proof authenticates an empty structure.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mem = Mem::<F, D>::new();
         let root = plain_root(&mem, &hasher);
         let proof: Proof<F, D> = Proof::default();
@@ -1462,7 +1597,7 @@ mod tests {
     fn verify_element<F: Family>() {
         // Create an 11 element structure and test single-element inclusion proofs.
         let element = D::from(*b"01234567012345670123456701234567");
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let batch = {
             let mut batch = mem.new_batch();
@@ -1551,7 +1686,7 @@ mod tests {
 
     fn verify_range<F: Family>() {
         // Create a structure and add 49 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -1666,7 +1801,7 @@ mod tests {
 
     fn retained_nodes_provable_after_pruning<F: Family>() {
         // Create a structure and add 49 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -1704,7 +1839,7 @@ mod tests {
 
     fn ranges_provable_after_pruning<F: Family>() {
         // Create a structure and add 49 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
         let batch = {
@@ -1772,7 +1907,7 @@ mod tests {
 
     fn proof_serialization<F: Family>() {
         // Create a structure and add 25 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..25).map(test_digest).collect();
         let batch = {
@@ -1839,7 +1974,7 @@ mod tests {
 
     fn multi_proof_generation_and_verify<F: Family>() {
         // Create a structure with 20 elements.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..20).map(test_digest).collect();
         let batch = {
@@ -1985,7 +2120,7 @@ mod tests {
         ));
 
         // Empty multi-proof.
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let empty_mem = Mem::<F, D>::new();
         let empty_root = plain_root(&empty_mem, &hasher);
         let empty_proof: Proof<F, D> = Proof::default();
@@ -2002,7 +2137,7 @@ mod tests {
     }
 
     fn multi_proof_deduplication<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
         let elements: Vec<_> = (0..30).map(test_digest).collect();
         let batch = {
@@ -2050,7 +2185,7 @@ mod tests {
     }
 
     fn proof_leaves_malleability<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
 
         // 252 leaves. Leaf 240 sits in a peak preceded by prefix peaks.
@@ -2135,7 +2270,7 @@ mod tests {
 
     fn single_element_proof_reconstruction<F: Family>() {
         for n in 1u64..=64 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2157,7 +2292,7 @@ mod tests {
 
     fn range_proof_reconstruction<F: Family>() {
         for n in 2u64..=32 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2194,7 +2329,7 @@ mod tests {
 
     fn verify_element_inclusion<F: Family>() {
         for n in 1u64..=32 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2223,7 +2358,7 @@ mod tests {
 
     fn full_range<F: Family>() {
         for n in 1u64..=32 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2246,7 +2381,7 @@ mod tests {
     }
 
     fn empty_proof_verifies_empty_tree<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mem = Mem::<F, D>::new();
         let root = plain_root(&mem, &hasher);
         let proof = Proof::<F, D>::default();
@@ -2274,7 +2409,7 @@ mod tests {
 
     fn every_element_contributes_to_root<F: Family>() {
         for n in [8u64, 13, 20, 32] {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2304,7 +2439,7 @@ mod tests {
     }
 
     fn multi_proof_generation_and_verify_raw<F: Family>() {
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         let mem = build_raw::<F>(&hasher, 20);
         let root = plain_root(&mem, &hasher);
 
@@ -2368,7 +2503,7 @@ mod tests {
         ));
 
         // Empty multi-proof on empty tree.
-        let hasher2 = H::new();
+        let hasher2 = H::new(ForwardFold);
         let empty_mem = Mem::<F, D>::new();
         let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
@@ -2392,7 +2527,7 @@ mod tests {
 
     fn tampered_proof_digests_rejected<F: Family>() {
         for n in [8u64, 13, 20, 32] {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
 
@@ -2418,7 +2553,7 @@ mod tests {
     fn no_duplicate_positions<F: Family>() {
         use alloc::collections::BTreeSet;
         for n in 1u64..=64 {
-            let hasher = H::new();
+            let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
             let leaves = mem.leaves();
             for loc in 0..n {
@@ -2436,6 +2571,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn full_peak_range_blueprint_does_not_descend<F: Family>() {
+        let leaves = Location::new(1u64 << 40);
+        let range = Location::new(0)..leaves;
+
+        let bp = Blueprint::<F>::new(leaves, 0, Bagging::ForwardFold, range).unwrap();
+
+        assert!(
+            bp.range_peaks.iter().any(|peak| peak.height >= 39),
+            "test must include a large fully covered peak"
+        );
+        assert!(
+            bp.fetch_nodes.is_empty(),
+            "full-range proofs should not fetch per-peak siblings"
+        );
     }
 
     /// `verify_proof_and_pinned_nodes` must accept pinned nodes at
@@ -2466,7 +2617,7 @@ mod tests {
             (2000, 500),
         ];
 
-        let hasher = H::new();
+        let hasher = H::new(ForwardFold);
         for &(n, start) in cases {
             let mem = build_raw::<F>(&hasher, n);
             let root = plain_root(&mem, &hasher);
@@ -2585,6 +2736,10 @@ mod tests {
         no_duplicate_positions::<mmr::Family>();
     }
     #[test]
+    fn mmr_full_peak_range_blueprint_does_not_descend() {
+        full_peak_range_blueprint_does_not_descend::<mmr::Family>();
+    }
+    #[test]
     fn mmr_verify_proof_and_pinned_nodes_across_sizes() {
         verify_proof_and_pinned_nodes_across_sizes::<mmr::Family>();
     }
@@ -2684,6 +2839,10 @@ mod tests {
     #[test]
     fn mmb_no_duplicate_positions() {
         no_duplicate_positions::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_full_peak_range_blueprint_does_not_descend() {
+        full_peak_range_blueprint_does_not_descend::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_proof_and_pinned_nodes_across_sizes() {

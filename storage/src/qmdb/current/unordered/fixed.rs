@@ -112,7 +112,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
@@ -121,6 +121,42 @@ pub mod test {
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
         CurrentTest::init(context, cfg).await.unwrap()
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_current_unordered_fixed_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db(ctx.child("current"), "metrics".to_string()).await;
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(2u8);
+            let batch = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.sync().await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            let metrics = ctx.encode();
+            for expected in [
+                "current_apply_batch_calls_total 1",
+                "current_sync_calls_total 1",
+                "current_prune_calls_total 1",
+                "current_pruned_chunks 0",
+                "current_sync_boundary 0",
+                "current_apply_batch_duration_count 1",
+                "current_sync_duration_count 1",
+                "current_prune_duration_count 1",
+                "current_any_get_calls_total 1",
+                "current_any_apply_batch_calls_total 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+            assert!(!metrics.contains("current_get_calls_total"));
+        });
     }
 
     #[test_traced("DEBUG")]
