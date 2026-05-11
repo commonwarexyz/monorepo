@@ -1,9 +1,9 @@
 use crate::{
-    marshal::core::{BlockReadCfg, Variant},
+    marshal::core::Variant,
     simplex::types::{Finalization, Notarization},
     types::{Epoch, Round, View},
 };
-use commonware_codec::CodecShared;
+use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
@@ -96,7 +96,7 @@ where
     cfg: Config,
 
     /// Codec configuration for block type
-    block_codec_config: BlockReadCfg<V>,
+    block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
@@ -113,7 +113,11 @@ where
     S: Scheme,
 {
     /// Initialize the cache manager and its metadata store.
-    pub(crate) async fn init(context: R, cfg: Config, block_codec_config: BlockReadCfg<V>) -> Self {
+    pub(crate) async fn init(
+        context: R,
+        cfg: Config,
+        block_codec_config: <V::ApplicationBlock as Read>::Cfg,
+    ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
             context.child("metadata"),

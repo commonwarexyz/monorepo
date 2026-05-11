@@ -4,7 +4,7 @@ use crate::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{BlockReadCfg, Buffer, Variant},
+        core::{Buffer, Variant},
     },
     simplex::types::Context,
     types::{coding::Commitment, Round},
@@ -55,13 +55,13 @@ where
         block.context().parent.1
     }
 
-    fn block_read_cfg(
-        block_cfg: &BlockReadCfg<Self>,
-        commitment: Self::Commitment,
+    fn block_cfg(
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        expected: Self::Commitment,
     ) -> <Self::Block as Read>::Cfg {
         CodedBlockCfg {
             inner: block_cfg.clone(),
-            expected: commitment,
+            expected,
         }
     }
 

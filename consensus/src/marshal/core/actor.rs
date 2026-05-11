@@ -1,7 +1,7 @@
 use super::{
     cache,
     mailbox::{Mailbox, Message},
-    BlockReadCfg, Buffer, Variant,
+    Buffer, Variant,
 };
 use crate::{
     marshal::{
@@ -230,7 +230,7 @@ where
     // Maximum number of blocks to repair at once
     max_repair: NonZeroUsize,
     // Codec configuration for block type
-    block_codec_config: BlockReadCfg<V>,
+    block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     // Strategy for parallel operations
     strategy: T,
 
@@ -954,7 +954,7 @@ where
     ) -> bool {
         match key {
             Request::Block(commitment) => {
-                let block_cfg = V::block_read_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return false;
@@ -1004,7 +1004,7 @@ where
                 };
 
                 let commitment = finalization.proposal.payload;
-                let block_cfg = V::block_read_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
@@ -1044,7 +1044,7 @@ where
                 };
 
                 let commitment = notarization.proposal.payload;
-                let block_cfg = V::block_read_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
