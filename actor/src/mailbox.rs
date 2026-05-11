@@ -1,6 +1,8 @@
 //! Bounded message queue with caller-managed overflow.
 //!
-//! Internally, the mailbox is split into two queues: a bounded `ready` queue
+//! # Architecture
+//!
+//! The mailbox is split into two queues: a bounded `ready` queue
 //! that producers push to and the receiver pops from, and an unbounded
 //! `overflow` queue that holds messages displaced when ready is full. A
 //! [`Policy`] decides what enters overflow and what is retained or dropped
@@ -28,17 +30,15 @@
 //! refilled from front to back, but policies decide which overflow messages are
 //! retained and in what order.
 //!
-//! Concurrent enqueue calls, including calls from cloned senders, are not
-//! globally ordered and may be observed in any interleaving. The ready fast path
-//! does not reserve the inactive overflow state. Preserving a global order
-//! between racing producers would add synchronization to the common no-overflow
-//! path.
-//!
 //! Eager refill favors keeping producer enqueue on the ready fast path over
 //! batching receiver refill work. It may take the overflow lock more often under
 //! sustained overflow, but avoids leaving ready slots empty while overflow
-//! remains populated. Overflow is expected to be exceptional. If benchmarks show
-//! refill lock attempts dominate, this can be revisited.
+//! remains populated. Overflow is expected to be exceptional.
+//!
+//! # Ordering
+//!
+//! Enqueue calls from the same sender will be delivered in order. Concurrent enqueue calls,
+//! however, are not globally ordered and may be observed in any interleaving.
 
 use crate::Feedback;
 use std::{
